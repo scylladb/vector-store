@@ -12,6 +12,7 @@ mod modify_indexes;
 mod monitor_indexes;
 mod monitor_items;
 mod monitor_queries;
+mod rpcserver;
 mod supervisor;
 
 use {
@@ -346,6 +347,7 @@ struct Embeddings(Vec<f32>);
 
 #[derive(
     Clone,
+    Debug,
     serde::Serialize,
     serde::Deserialize,
     derive_more::Display,
@@ -357,6 +359,9 @@ struct Limit(usize);
 
 #[derive(derive_more::From)]
 struct HttpServerAddr(SocketAddr);
+
+#[derive(derive_more::From)]
+struct RpcServerAddr(SocketAddr);
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
@@ -371,6 +376,14 @@ async fn main() -> anyhow::Result<()> {
         .next()
         .ok_or(anyhow!(
             "Unable to parse SCYLLA_USEARCH_URI env (host:port)"
+        ))?
+        .into();
+    let scylla_usearch_rpc_addr = dotenvy::var("SCYLLA_USEARCH_RPC_URI")
+        .unwrap_or("127.0.0.1:6081".to_string())
+        .to_socket_addrs()?
+        .next()
+        .ok_or(anyhow!(
+            "Unable to parse SCYLLA_USEARCH_RPC_URI env (host:port)"
         ))?
         .into();
     let scylladb_uri = dotenvy::var("SCYLLADB_URI")
@@ -389,7 +402,10 @@ async fn main() -> anyhow::Result<()> {
     supervisor_actor
         .attach(engine_actor.clone(), engine_task)
         .await;
-    let (server_actor, server_task) = httpserver::new(scylla_usearch_addr, engine_actor).await?;
+    let (server_actor, server_task) =
+        httpserver::new(scylla_usearch_addr, engine_actor.clone()).await?;
+    supervisor_actor.attach(server_actor, server_task).await;
+    let (server_actor, server_task) = rpcserver::new(scylla_usearch_rpc_addr, engine_actor).await?;
     supervisor_actor.attach(server_actor, server_task).await;
     wait_for_shutdown().await;
     supervisor_actor.actor_stop().await;

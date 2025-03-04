@@ -4,11 +4,12 @@
 [package]
 name = "scylla-usearch"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 anyhow = "*"
 axum = { version = "*", features = ["macros"] }
+bytes = "*"
 derive_more = { version = "*", features = ["full"] }
 dotenvy = "*"
 futures = "*"
@@ -17,7 +18,9 @@ rayon = "*"
 #scylla = "*"
 scylla = { git = "https://github.com/smoczy123/scylla-rust-driver.git", branch = "vector-type" }
 scylla-cdc = { git = "https://github.com/abastian/scylla-cdc-rust.git", branch = "feature/scylla-0.15.1" }
+seastar-rpc = { path = "../seastar-rpc" }
 serde = { version = "*", features = ["derive"] }
+serde_json = "*"
 tokio = { version = "*", features = ["full"] }
 tower-http = { version = "*", features = ["full"] }
 tracing = "*"
