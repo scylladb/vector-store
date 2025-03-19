@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use crate::db;
 use crate::IndexId;
 use crate::IndexItemsCount;
 use anyhow::Context;
@@ -44,7 +45,10 @@ impl ModifyIndexesExt for Sender<ModifyIndexes> {
     }
 }
 
-pub(crate) async fn new(db_session: Arc<Session>) -> anyhow::Result<Sender<ModifyIndexes>> {
+pub(crate) async fn new(
+    db_session: Arc<Session>,
+    _db_actor: Sender<db::Db>,
+) -> anyhow::Result<Sender<ModifyIndexes>> {
     let db = Db::new(db_session).await?;
 
     // The value was taken from initial benchmarks

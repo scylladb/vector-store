@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Proprietary
  */
 
+mod db;
 mod engine;
 mod httproutes;
 mod httpserver;
@@ -313,7 +314,8 @@ pub async fn run(
             .build_global()?;
     }
     let db_session = new_db_session(scylladb_uri).await?;
-    let engine_actor = engine::new(db_session).await?;
+    let db_actor = db::new(Arc::clone(&db_session)).await?;
+    let engine_actor = engine::new(db_session, db_actor).await?;
     httpserver::new(addr, engine_actor).await
 }
 

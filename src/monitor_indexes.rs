@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use crate::db;
 use crate::engine::Engine;
 use crate::engine::EngineExt;
 use crate::ColumnName;
@@ -37,6 +38,7 @@ pub(crate) enum MonitorIndexes {}
 
 pub(crate) async fn new(
     db_session: Arc<Session>,
+    _db_actor: Sender<db::Db>,
     engine: Sender<Engine>,
 ) -> anyhow::Result<Sender<MonitorIndexes>> {
     let db = Db::new(db_session).await?;
