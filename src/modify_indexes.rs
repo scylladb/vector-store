@@ -1,6 +1,6 @@
 /*
  * Copyright 2025-present ScyllaDB
- * SPDX-License-Identifier: Proprietary
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 use crate::IndexId;
