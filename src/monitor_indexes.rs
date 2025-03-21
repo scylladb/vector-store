@@ -5,7 +5,6 @@
 
 use {
     crate::{
-        actor::{ActorHandle, MessageStop},
         engine::{Engine, EngineExt},
         Connectivity, Dimensions, ExpansionAdd, ExpansionSearch, IndexId, ScyllaDbUri,
     },
@@ -23,24 +22,16 @@ use {
     tracing::warn,
 };
 
-pub(crate) enum MonitorIndexes {
-    Stop,
-}
-
-impl MessageStop for MonitorIndexes {
-    fn message_stop() -> Self {
-        MonitorIndexes::Stop
-    }
-}
+pub(crate) enum MonitorIndexes {}
 
 pub(crate) async fn new(
     uri: ScyllaDbUri,
     engine: Sender<Engine>,
-) -> anyhow::Result<(Sender<MonitorIndexes>, ActorHandle)> {
+) -> anyhow::Result<Sender<MonitorIndexes>> {
     let db = Db::new(uri).await?;
     let mut known = HashSet::new();
     let (tx, mut rx) = mpsc::channel(10);
-    let task = tokio::spawn(async move {
+    tokio::spawn(async move {
         let mut interval = time::interval(time::Duration::from_secs(1));
         while !rx.is_closed() {
             tokio::select! {
@@ -67,15 +58,11 @@ pub(crate) async fn new(
                         .filter(|id| !cancelled.contains(id))
                         .collect();
                 }
-                Some(msg) = rx.recv() => {
-                    match msg {
-                        MonitorIndexes::Stop => rx.close(),
-                    }
-                }
+                _ = rx.recv() => { }
             }
         }
     });
-    Ok((tx, task))
+    Ok(tx)
 }
 
 struct Db {

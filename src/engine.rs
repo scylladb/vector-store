@@ -5,12 +5,10 @@
 
 use {
     crate::{
-        actor::{ActorHandle, ActorStop, MessageStop},
         index::{self, Index},
         modify_indexes::{self, ModifyIndexesExt},
-        monitor_indexes, monitor_items,
-        supervisor::{Supervisor, SupervisorExt},
-        ColumnName, Connectivity, Dimensions, ExpansionAdd, ExpansionSearch, IndexId, ScyllaDbUri,
+        monitor_indexes, monitor_items, ColumnName, Connectivity, Dimensions, ExpansionAdd,
+        ExpansionSearch, IndexId, ScyllaDbUri,
     },
     std::{collections::HashMap, future::Future},
     tokio::sync::{mpsc, oneshot},
@@ -37,13 +35,6 @@ pub(crate) enum Engine {
         id: IndexId,
         tx: oneshot::Sender<Option<mpsc::Sender<Index>>>,
     },
-    Stop,
-}
-
-impl MessageStop for Engine {
-    fn message_stop() -> Self {
-        Engine::Stop
-    }
 }
 
 pub(crate) trait EngineExt {
@@ -112,18 +103,11 @@ impl EngineExt for mpsc::Sender<Engine> {
     }
 }
 
-pub(crate) async fn new(
-    uri: ScyllaDbUri,
-    supervisor_actor: mpsc::Sender<Supervisor>,
-) -> anyhow::Result<(mpsc::Sender<Engine>, ActorHandle)> {
+pub(crate) async fn new(uri: ScyllaDbUri) -> anyhow::Result<mpsc::Sender<Engine>> {
     let (tx, mut rx) = mpsc::channel(10);
-    let (monitor_actor, monitor_task) = monitor_indexes::new(uri.clone(), tx.clone()).await?;
-    supervisor_actor.attach(monitor_actor, monitor_task).await;
-    let (modify_actor, modify_task) = modify_indexes::new(uri.clone()).await?;
-    supervisor_actor
-        .attach(modify_actor.clone(), modify_task)
-        .await;
-    let task = tokio::spawn(async move {
+    let monitor_actor = monitor_indexes::new(uri.clone(), tx.clone()).await?;
+    let modify_actor = modify_indexes::new(uri.clone()).await?;
+    tokio::spawn(async move {
         let mut indexes = HashMap::new();
         let mut monitors = HashMap::new();
         while let Some(msg) = rx.recv().await {
@@ -146,7 +130,7 @@ pub(crate) async fn new(
                     if indexes.contains_key(&id) {
                         continue;
                     }
-                    if let Ok((index_actor, index_task)) = index::new(
+                    if let Ok(index_actor) = index::new(
                         id.clone(),
                         modify_actor.clone(),
                         dimensions,
@@ -154,7 +138,7 @@ pub(crate) async fn new(
                         expansion_add,
                         expansion_search,
                     ) {
-                        if let Ok((monitor_actor, monitor_task)) = monitor_items::new(
+                        if let Ok(monitor_actor) = monitor_items::new(
                             uri.clone(),
                             id.clone().0.into(),
                             col_id.clone(),
@@ -163,29 +147,16 @@ pub(crate) async fn new(
                         )
                         .await.inspect_err(|err| error!("unable to create monitor items with uri {uri}, table {id}, col_id {col_id}, col_emb {col_emb}: {err}"))
                         {
-                            supervisor_actor
-                                .attach(index_actor.clone(), index_task)
-                                .await;
-                            supervisor_actor
-                                .attach(monitor_actor.clone(), monitor_task)
-                                .await;
                             indexes.insert(id.clone(), index_actor);
                             monitors.insert(id, monitor_actor);
-                        } else {
-                            index_actor.actor_stop().await;
-                            index_task.await.unwrap_or_else(|err| warn!("engine::Engine::AddIndex: issue while stopping index actor: {err}"));
                         }
                     } else {
                         error!("unable to create index with dimensions {dimensions}");
                     }
                 }
                 Engine::DelIndex { id } => {
-                    if let Some(index) = indexes.remove(&id) {
-                        index.actor_stop().await;
-                    }
-                    if let Some(monitor) = monitors.remove(&id) {
-                        monitor.actor_stop().await;
-                    }
+                    indexes.remove(&id);
+                    monitors.remove(&id);
                     modify_actor.del(id).await;
                 }
                 Engine::GetIndex { id, tx } => {
@@ -193,9 +164,9 @@ pub(crate) async fn new(
                         warn!("engine::Engine::GetIndex: unable to send response")
                     });
                 }
-                Engine::Stop => rx.close(),
             }
         }
+        drop(monitor_actor);
     });
-    Ok((tx, task))
+    Ok(tx)
 }

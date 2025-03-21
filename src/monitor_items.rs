@@ -5,7 +5,6 @@
 
 use {
     crate::{
-        actor::{ActorHandle, MessageStop},
         index::{Index, IndexExt},
         ColumnName, Embeddings, Key, ScyllaDbUri, TableName,
     },
@@ -24,15 +23,7 @@ use {
     tracing::{debug, info, info_span, warn, Instrument},
 };
 
-pub(crate) enum MonitorItems {
-    Stop,
-}
-
-impl MessageStop for MonitorItems {
-    fn message_stop() -> Self {
-        MonitorItems::Stop
-    }
-}
+pub(crate) enum MonitorItems {}
 
 pub(crate) async fn new(
     uri: ScyllaDbUri,
@@ -40,10 +31,10 @@ pub(crate) async fn new(
     col_id: ColumnName,
     col_emb: ColumnName,
     index: Sender<Index>,
-) -> anyhow::Result<(Sender<MonitorItems>, ActorHandle)> {
+) -> anyhow::Result<Sender<MonitorItems>> {
     let db = Arc::new(Db::new(uri, table, col_id, col_emb).await?);
     let (tx, mut rx) = mpsc::channel(10);
-    let task = tokio::spawn(async move {
+    tokio::spawn(async move {
         info!("resetting items");
         let mut state = State::Reset;
         let mut interval = time::interval(time::Duration::from_secs(1));
@@ -78,15 +69,12 @@ pub(crate) async fn new(
                         }
                     }
                 }
-                Some(msg) = rx.recv() => {
-                    match msg {
-                        MonitorItems::Stop => rx.close(),
-                    }
-                }
+
+                _ = rx.recv() => { }
             }
         }
     }.instrument(info_span!("monitor items")));
-    Ok((tx, task))
+    Ok(tx)
 }
 
 enum State {
