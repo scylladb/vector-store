@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use crate::db;
+use crate::db_index::DbIndex;
 use crate::index::Index;
 use crate::index::IndexExt;
 use crate::Embeddings;
@@ -31,7 +31,7 @@ pub(crate) enum MonitorItems {}
 
 pub(crate) async fn new(
     db_session: Arc<Session>,
-    _db_actor: Sender<db::Db>,
+    _db_index: Sender<DbIndex>,
     metadata: IndexMetadata,
     index: Sender<Index>,
 ) -> anyhow::Result<Sender<MonitorItems>> {

@@ -4,6 +4,7 @@
  */
 
 mod db;
+mod db_index;
 mod engine;
 mod httproutes;
 mod httpserver;

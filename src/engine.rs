@@ -4,6 +4,7 @@
  */
 
 use crate::db::Db;
+use crate::db::DbExt;
 use crate::index;
 use crate::index::Index;
 use crate::modify_indexes;
@@ -119,9 +120,15 @@ pub(crate) async fn new(
                         continue;
                     };
 
+                    let Ok(db_index) = db.get_index_db(metadata.clone()).await.inspect_err(|err| {
+                        error!("unable to create db_index from {metadata:?}: {err}")
+                    }) else {
+                        continue;
+                    };
+
                     let Ok(monitor_actor) = monitor_items::new(
                         Arc::clone(&db_session),
-                        db.clone(),
+                        db_index.clone(),
                         metadata.clone(),
                         index_actor.clone(),
                     )
