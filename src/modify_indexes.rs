@@ -5,11 +5,10 @@
 
 use crate::IndexId;
 use crate::IndexItemsCount;
-use crate::ScyllaDbUri;
 use anyhow::Context;
 use scylla::client::session::Session;
-use scylla::client::session_builder::SessionBuilder;
 use scylla::statement::prepared::PreparedStatement;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tracing::warn;
@@ -45,8 +44,8 @@ impl ModifyIndexesExt for Sender<ModifyIndexes> {
     }
 }
 
-pub(crate) async fn new(uri: ScyllaDbUri) -> anyhow::Result<Sender<ModifyIndexes>> {
-    let db = Db::new(uri).await?;
+pub(crate) async fn new(db_session: Arc<Session>) -> anyhow::Result<Sender<ModifyIndexes>> {
+    let db = Db::new(db_session).await?;
     let (tx, mut rx) = mpsc::channel(10);
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
@@ -67,17 +66,13 @@ pub(crate) async fn new(uri: ScyllaDbUri) -> anyhow::Result<Sender<ModifyIndexes
 }
 
 struct Db {
-    session: Session,
+    session: Arc<Session>,
     st_update_items_count: PreparedStatement,
     st_remove_index: PreparedStatement,
 }
 
 impl Db {
-    async fn new(uri: ScyllaDbUri) -> anyhow::Result<Self> {
-        let session = SessionBuilder::new()
-            .known_node(uri.0.as_str())
-            .build()
-            .await?;
+    async fn new(session: Arc<Session>) -> anyhow::Result<Self> {
         Ok(Self {
             st_update_items_count: session
                 .prepare(Self::UPDATE_ITEMS_COUNT)

@@ -15,8 +15,9 @@ use crate::Dimensions;
 use crate::ExpansionAdd;
 use crate::ExpansionSearch;
 use crate::IndexId;
-use crate::ScyllaDbUri;
+use scylla::client::session::Session;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tracing::error;
@@ -110,11 +111,11 @@ impl EngineExt for mpsc::Sender<Engine> {
     }
 }
 
-pub(crate) async fn new(uri: ScyllaDbUri) -> anyhow::Result<mpsc::Sender<Engine>> {
+pub(crate) async fn new(db_session: Arc<Session>) -> anyhow::Result<mpsc::Sender<Engine>> {
     let (tx, mut rx) = mpsc::channel(10);
 
-    let monitor_actor = monitor_indexes::new(uri.clone(), tx.clone()).await?;
-    let modify_actor = modify_indexes::new(uri.clone()).await?;
+    let monitor_actor = monitor_indexes::new(Arc::clone(&db_session), tx.clone()).await?;
+    let modify_actor = modify_indexes::new(Arc::clone(&db_session)).await?;
 
     tokio::spawn(async move {
         let mut indexes = HashMap::new();
@@ -149,13 +150,13 @@ pub(crate) async fn new(uri: ScyllaDbUri) -> anyhow::Result<mpsc::Sender<Engine>
                         expansion_search,
                     ) {
                         if let Ok(monitor_actor) = monitor_items::new(
-                            uri.clone(),
+                            Arc::clone(&db_session),
                             id.clone().0.into(),
                             col_id.clone(),
                             col_emb.clone(),
                             index_actor.clone(),
                         )
-                        .await.inspect_err(|err| error!("unable to create monitor items with uri {uri}, table {id}, col_id {col_id}, col_emb {col_emb}: {err}"))
+                        .await.inspect_err(|err| error!("unable to create monitor items with table {id}, col_id {col_id}, col_emb {col_emb}: {err}"))
                         {
                             indexes.insert(id.clone(), index_actor);
                             monitors.insert(id, monitor_actor);

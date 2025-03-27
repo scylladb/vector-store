@@ -11,6 +11,8 @@ mod modify_indexes;
 mod monitor_indexes;
 mod monitor_items;
 
+use scylla::client::session::Session;
+use scylla::client::session_builder::SessionBuilder;
 use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
 use scylla::serialize::value::SerializeValue;
@@ -20,6 +22,7 @@ use scylla::serialize::SerializationError;
 use std::borrow::Cow;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 use tokio::signal;
 use utoipa::openapi::schema::Type;
 use utoipa::openapi::KnownFormat;
@@ -326,8 +329,18 @@ pub async fn run(
             .num_threads(background_threads)
             .build_global()?;
     }
-    let engine_actor = engine::new(scylladb_uri).await?;
+    let db_session = new_db_session(scylladb_uri).await?;
+    let engine_actor = engine::new(db_session).await?;
     httpserver::new(addr, engine_actor).await
+}
+
+async fn new_db_session(uri: ScyllaDbUri) -> anyhow::Result<Arc<Session>> {
+    Ok(Arc::new(
+        SessionBuilder::new()
+            .known_node(uri.0.as_str())
+            .build()
+            .await?,
+    ))
 }
 
 pub async fn wait_for_shutdown() {
