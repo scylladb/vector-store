@@ -1,27 +1,31 @@
 # Copyright 2025-present ScyllaDB
 # SPDX-License-Identifier: Proprietary
 
+# TODO: review and limit dependencies and features
+
 [package]
 name = "vector-store"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-anyhow = "*"
-axum = { version = "*", features = ["macros"] }
-derive_more = { version = "*", features = ["full"] }
-dotenvy = "*"
-futures = "*"
-itertools = "*"
-rayon = "*"
-scylla = { git = "https://github.com/smoczy123/scylla-rust-driver.git", branch = "vector-type" }
-scylla-cdc = { git = "https://github.com/abastian/scylla-cdc-rust.git", branch = "feature/scylla-0.15.1" }
-serde = { version = "*", features = ["derive"] }
-tokio = { version = "*", features = ["full"] }
-tower-http = { version = "*", features = ["full"] }
-tracing = "*"
-tracing-subscriber = { version = "*", features = ["env-filter"] }
-usearch = { git = "https://github.com/unum-cloud/usearch.git" }
-utoipa = { version = "*", features = ["axum_extras"] }
-utoipa-axum = "*"
-utoipa-swagger-ui = { version = "*", features = ["axum"] }
+anyhow = "1.0.97"
+axum = { version = "0.8.1", features = ["macros"] }
+derive_more = { version = "2.0.1", features = ["full"] }
+dotenvy = "0.15.7"
+futures = "0.3.31"
+itertools = "0.14.0"
+rayon = "1.10.0"
+regex = "1.11.1"
+scylla = { git = "https://github.com/smoczy123/scylla-rust-driver.git", rev = "b5721711df8e237d485a7a2bb9a925869e5a6941" }
+scylla-cdc = { git = "https://github.com/abastian/scylla-cdc-rust.git", rev = "fdf53f3cab58855fc92ff052d8f95ff61c7764f9" }
+serde = { version = "1.0.219", features = ["derive"] }
+tokio = { version = "1.44.1", features = ["full"] }
+tower-http = { version = "0.6.2", features = ["full"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+usearch = { git = "https://github.com/unum-cloud/usearch.git", rev = "306d6646"}
+utoipa = { version = "5.3.1", features = ["axum_extras"] }
+utoipa-axum = "0.2.0"
+utoipa-swagger-ui = { version = "9.0.0", features = ["axum"] }
+uuid = "1.16.0"

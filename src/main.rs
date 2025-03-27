@@ -17,7 +17,7 @@ use {
     crate::{actor::ActorStop, supervisor::SupervisorExt},
     anyhow::anyhow,
     scylla::{
-        frame::response::result::ColumnType,
+        cluster::metadata::{ColumnType, NativeType},
         serialize::{
             value::SerializeValue,
             writers::{CellWriter, WrittenCellProof},
@@ -63,18 +63,20 @@ impl SerializeValue for IndexId {
         };
 
         match typ {
-            ColumnType::Text => writer.set_value(self.0.as_bytes()).map_err(|_| {
-                SerializationError::new(BuiltinSerializationError {
-                    rust_name: any::type_name::<Self>(),
-                    got: typ.clone().into_owned(),
-                    kind: BuiltinSerializationErrorKind::ValueOverflow,
+            ColumnType::Native(NativeType::Text) => {
+                writer.set_value(self.0.as_bytes()).map_err(|_| {
+                    SerializationError::new(BuiltinSerializationError {
+                        rust_name: any::type_name::<Self>(),
+                        got: typ.clone().into_owned(),
+                        kind: BuiltinSerializationErrorKind::ValueOverflow,
+                    })
                 })
-            }),
+            }
             _ => Err(SerializationError::new(BuiltinTypeCheckError {
                 rust_name: any::type_name::<Self>(),
                 got: typ.clone().into_owned(),
                 kind: BuiltinTypeCheckErrorKind::MismatchedType {
-                    expected: &[ColumnType::Text],
+                    expected: &[ColumnType::Native(NativeType::Text)],
                 },
             })),
         }
@@ -130,7 +132,7 @@ impl SerializeValue for Key {
         };
 
         match typ {
-            ColumnType::BigInt => writer
+            ColumnType::Native(NativeType::BigInt) => writer
                 .set_value(self.0.to_be_bytes().as_slice())
                 .map_err(|_| {
                     SerializationError::new(BuiltinSerializationError {
@@ -143,7 +145,7 @@ impl SerializeValue for Key {
                 rust_name: any::type_name::<Self>(),
                 got: typ.clone().into_owned(),
                 kind: BuiltinTypeCheckErrorKind::MismatchedType {
-                    expected: &[ColumnType::BigInt],
+                    expected: &[ColumnType::Native(NativeType::BigInt)],
                 },
             })),
         }
@@ -171,7 +173,7 @@ impl SerializeValue for Distance {
         };
 
         match typ {
-            ColumnType::Float => writer
+            ColumnType::Native(NativeType::Float) => writer
                 .set_value(self.0.to_be_bytes().as_slice())
                 .map_err(|_| {
                     SerializationError::new(BuiltinSerializationError {
@@ -184,7 +186,7 @@ impl SerializeValue for Distance {
                 rust_name: any::type_name::<Self>(),
                 got: typ.clone().into_owned(),
                 kind: BuiltinTypeCheckErrorKind::MismatchedType {
-                    expected: &[ColumnType::Float],
+                    expected: &[ColumnType::Native(NativeType::Float)],
                 },
             })),
         }
@@ -211,7 +213,7 @@ impl SerializeValue for IndexItemsCount {
         };
 
         match typ {
-            ColumnType::Int => writer
+            ColumnType::Native(NativeType::Int) => writer
                 .set_value(self.0.to_be_bytes().as_slice())
                 .map_err(|_| {
                     SerializationError::new(BuiltinSerializationError {
@@ -224,7 +226,7 @@ impl SerializeValue for IndexItemsCount {
                 rust_name: any::type_name::<Self>(),
                 got: typ.clone().into_owned(),
                 kind: BuiltinTypeCheckErrorKind::MismatchedType {
-                    expected: &[ColumnType::Int],
+                    expected: &[ColumnType::Native(NativeType::Int)],
                 },
             })),
         }
