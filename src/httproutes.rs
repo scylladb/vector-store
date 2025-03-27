@@ -58,7 +58,7 @@ pub(crate) fn new(engine: Sender<Engine>) -> Router {
     )
 )]
 async fn get_indexes(State(engine): State<Sender<Engine>>) -> response::Json<Vec<IndexId>> {
-    response::Json(engine.get_indexes().await)
+    response::Json(engine.get_index_ids().await)
 }
 
 #[derive(serde::Deserialize, utoipa::ToSchema)]

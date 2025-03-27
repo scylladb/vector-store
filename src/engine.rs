@@ -23,7 +23,7 @@ use tracing::error;
 use tracing::warn;
 
 pub(crate) enum Engine {
-    GetIndexes {
+    GetIndexIds {
         tx: oneshot::Sender<Vec<IndexId>>,
     },
     AddIndex {
@@ -45,7 +45,7 @@ pub(crate) enum Engine {
 }
 
 pub(crate) trait EngineExt {
-    async fn get_indexes(&self) -> Vec<IndexId>;
+    async fn get_index_ids(&self) -> Vec<IndexId>;
     #[allow(clippy::too_many_arguments)] // TODO: support for table params is experimental
     async fn add_index(
         &self,
@@ -62,9 +62,9 @@ pub(crate) trait EngineExt {
 }
 
 impl EngineExt for mpsc::Sender<Engine> {
-    async fn get_indexes(&self) -> Vec<IndexId> {
+    async fn get_index_ids(&self) -> Vec<IndexId> {
         let (tx, rx) = oneshot::channel();
-        if self.send(Engine::GetIndexes { tx }).await.is_ok() {
+        if self.send(Engine::GetIndexIds { tx }).await.is_ok() {
             rx.await.unwrap_or(Vec::new())
         } else {
             Vec::new()
@@ -119,10 +119,10 @@ pub(crate) async fn new(uri: ScyllaDbUri) -> anyhow::Result<mpsc::Sender<Engine>
         let mut monitors = HashMap::new();
         while let Some(msg) = rx.recv().await {
             match msg {
-                Engine::GetIndexes { tx } => {
+                Engine::GetIndexIds { tx } => {
                     tx.send(indexes.keys().cloned().collect())
                         .unwrap_or_else(|_| {
-                            warn!("engine::Engine::GetIndexes: unable to send response")
+                            warn!("engine::Engine::GetIndexIds: unable to send response")
                         });
                 }
                 Engine::AddIndex {
