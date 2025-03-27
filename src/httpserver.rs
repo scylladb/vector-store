@@ -4,11 +4,7 @@
  */
 
 use {
-    crate::{
-        actor::{ActorHandle, MessageStop},
-        engine::Engine,
-        httproutes, HttpServerAddr,
-    },
+    crate::{engine::Engine, httproutes, HttpServerAddr},
     std::sync::Arc,
     tokio::{
         net::TcpListener,
@@ -19,34 +15,20 @@ use {
     },
 };
 
-pub(crate) enum HttpServer {
-    Stop,
-}
-
-impl MessageStop for HttpServer {
-    fn message_stop() -> Self {
-        HttpServer::Stop
-    }
-}
+pub(crate) enum HttpServer {}
 
 pub(crate) async fn new(
     addr: HttpServerAddr,
     engine: Sender<Engine>,
-) -> anyhow::Result<(Sender<HttpServer>, ActorHandle)> {
+) -> anyhow::Result<Sender<HttpServer>> {
     let listener = TcpListener::bind(addr.0).await?;
     tracing::info!("listening on {}", listener.local_addr()?);
     let (tx, mut rx) = mpsc::channel(10);
     let notify = Arc::new(Notify::new());
-    let task = tokio::spawn({
+    tokio::spawn({
         let notify = Arc::clone(&notify);
         async move {
-            while let Some(msg) = rx.recv().await {
-                match msg {
-                    HttpServer::Stop => {
-                        rx.close();
-                    }
-                }
-            }
+            while rx.recv().await.is_some() {}
             notify.notify_one();
         }
     });
@@ -58,5 +40,5 @@ pub(crate) async fn new(
             .await
             .expect("failed to run web server");
     });
-    Ok((tx, task))
+    Ok(tx)
 }

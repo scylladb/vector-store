@@ -4,10 +4,7 @@
  */
 
 use {
-    crate::{
-        actor::{ActorHandle, MessageStop},
-        IndexId, IndexItemsCount, ScyllaDbUri,
-    },
+    crate::{IndexId, IndexItemsCount, ScyllaDbUri},
     anyhow::Context,
     scylla::{
         client::{session::Session, session_builder::SessionBuilder},
@@ -25,13 +22,6 @@ pub(crate) enum ModifyIndexes {
     Del {
         id: IndexId,
     },
-    Stop,
-}
-
-impl MessageStop for ModifyIndexes {
-    fn message_stop() -> Self {
-        ModifyIndexes::Stop
-    }
 }
 
 pub(crate) trait ModifyIndexesExt {
@@ -55,10 +45,10 @@ impl ModifyIndexesExt for Sender<ModifyIndexes> {
     }
 }
 
-pub(crate) async fn new(uri: ScyllaDbUri) -> anyhow::Result<(Sender<ModifyIndexes>, ActorHandle)> {
+pub(crate) async fn new(uri: ScyllaDbUri) -> anyhow::Result<Sender<ModifyIndexes>> {
     let db = Db::new(uri).await?;
     let (tx, mut rx) = mpsc::channel(10);
-    let task = tokio::spawn(async move {
+    tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             match msg {
                 ModifyIndexes::UpdateItemsCount { id, items_count } => db
@@ -70,11 +60,10 @@ pub(crate) async fn new(uri: ScyllaDbUri) -> anyhow::Result<(Sender<ModifyIndexe
                 ModifyIndexes::Del { id } => db.remove_index(id).await.unwrap_or_else(|err| {
                     warn!("modify_indexes: unable to remove index from db: {err}")
                 }),
-                ModifyIndexes::Stop => rx.close(),
             }
         }
     });
-    Ok((tx, task))
+    Ok(tx)
 }
 
 struct Db {

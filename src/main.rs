@@ -3,7 +3,6 @@
  * SPDX-License-Identifier: Proprietary
  */
 
-mod actor;
 mod engine;
 mod httproutes;
 mod httpserver;
@@ -11,10 +10,8 @@ mod index;
 mod modify_indexes;
 mod monitor_indexes;
 mod monitor_items;
-mod supervisor;
 
 use {
-    crate::{actor::ActorStop, supervisor::SupervisorExt},
     anyhow::anyhow,
     scylla::{
         cluster::metadata::{ColumnType, NativeType},
@@ -336,16 +333,9 @@ async fn main() -> anyhow::Result<()> {
             .num_threads(background_threads)
             .build_global()?;
     }
-    let (supervisor_actor, supervisor_handle) = supervisor::new();
-    let (engine_actor, engine_task) = engine::new(scylladb_uri, supervisor_actor.clone()).await?;
-    supervisor_actor
-        .attach(engine_actor.clone(), engine_task)
-        .await;
-    let (server_actor, server_task) = httpserver::new(scylla_usearch_addr, engine_actor).await?;
-    supervisor_actor.attach(server_actor, server_task).await;
+    let engine_actor = engine::new(scylladb_uri).await?;
+    let _server_actor = httpserver::new(scylla_usearch_addr, engine_actor).await?;
     wait_for_shutdown().await;
-    supervisor_actor.actor_stop().await;
-    supervisor_handle.await?;
     Ok(())
 }
 
