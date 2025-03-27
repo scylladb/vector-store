@@ -112,8 +112,10 @@ impl EngineExt for mpsc::Sender<Engine> {
 
 pub(crate) async fn new(uri: ScyllaDbUri) -> anyhow::Result<mpsc::Sender<Engine>> {
     let (tx, mut rx) = mpsc::channel(10);
+
     let monitor_actor = monitor_indexes::new(uri.clone(), tx.clone()).await?;
     let modify_actor = modify_indexes::new(uri.clone()).await?;
+
     tokio::spawn(async move {
         let mut indexes = HashMap::new();
         let mut monitors = HashMap::new();
@@ -125,6 +127,7 @@ pub(crate) async fn new(uri: ScyllaDbUri) -> anyhow::Result<mpsc::Sender<Engine>
                             warn!("engine::Engine::GetIndexIds: unable to send response")
                         });
                 }
+
                 Engine::AddIndex {
                     id,
                     col_id,
@@ -161,11 +164,13 @@ pub(crate) async fn new(uri: ScyllaDbUri) -> anyhow::Result<mpsc::Sender<Engine>
                         error!("unable to create index with dimensions {dimensions}");
                     }
                 }
+
                 Engine::DelIndex { id } => {
                     indexes.remove(&id);
                     monitors.remove(&id);
                     modify_actor.del(id).await;
                 }
+
                 Engine::GetIndex { id, tx } => {
                     tx.send(indexes.get(&id).cloned()).unwrap_or_else(|_| {
                         warn!("engine::Engine::GetIndex: unable to send response")
@@ -175,5 +180,6 @@ pub(crate) async fn new(uri: ScyllaDbUri) -> anyhow::Result<mpsc::Sender<Engine>
         }
         drop(monitor_actor);
     });
+
     Ok(tx)
 }

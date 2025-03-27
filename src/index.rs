@@ -96,10 +96,12 @@ pub(crate) fn new(
         quantization: ScalarKind::F32,
         ..Default::default()
     };
+
     info!("Creating new index with id: {id}");
     let idx = Arc::new(usearch::Index::new(&options)?);
     idx.reserve(RESERVE_INCREMENT)?;
     let (tx, mut rx) = mpsc::channel(100000);
+
     tokio::spawn(
         {
             let id = id.clone();
@@ -113,6 +115,7 @@ pub(crate) fn new(
                 let idx_lock = Arc::new(RwLock::new(()));
                 let counter_add = Arc::new(AtomicUsize::new(0));
                 let counter_ann = Arc::new(AtomicUsize::new(0));
+
                 while !rx.is_closed() {
                     tokio::select! {
                         _ = housekeeping_interval.tick() => {
@@ -162,6 +165,7 @@ pub(crate) fn new(
         }
         .instrument(debug_span!("index", "{}", id.0)),
     );
+
     Ok(tx)
 }
 
