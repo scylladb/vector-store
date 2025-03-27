@@ -289,6 +289,12 @@ struct Embeddings(Vec<f32>);
 /// Limit the number of search result
 struct Limit(usize);
 
+impl Default for Limit {
+    fn default() -> Self {
+        Self(1)
+    }
+}
+
 #[derive(derive_more::From)]
 pub struct HttpServerAddr(SocketAddr);
 

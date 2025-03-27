@@ -64,12 +64,8 @@ async fn get_indexes(State(engine): State<Sender<Engine>>) -> response::Json<Vec
 #[derive(serde::Deserialize, utoipa::ToSchema)]
 struct PostIndexAnnRequest {
     embeddings: Embeddings,
-    #[serde(default = "default_limit")]
+    #[serde(default)]
     limit: Limit,
-}
-
-fn default_limit() -> Limit {
-    Limit(1)
 }
 
 #[derive(serde::Serialize, utoipa::ToSchema)]
