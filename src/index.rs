@@ -256,18 +256,20 @@ async fn ann(
         let idx = Arc::clone(&idx);
         move || {
             counter.fetch_add(1, Ordering::Relaxed);
-            tx.send(if let Ok(results) = idx.search(&embeddings.0, limit.0) {
-                Ok((
-                    results.keys.into_iter().map(|key| key.into()).collect(),
-                    results
-                        .distances
-                        .into_iter()
-                        .map(|value| value.into())
-                        .collect(),
-                ))
-            } else {
-                Err(anyhow!("index ann query: search failed"))
-            })
+            tx.send(
+                idx.search(&embeddings.0, limit.0)
+                    .map(|results| {
+                        (
+                            results.keys.into_iter().map(|key| key.into()).collect(),
+                            results
+                                .distances
+                                .into_iter()
+                                .map(|value| value.into())
+                                .collect(),
+                        )
+                    })
+                    .map_err(|err| anyhow!("index ann query: search failed: {err}")),
+            )
             .unwrap_or_else(|_| warn!("index::new: Index::Ann: unable to send response"));
             counter.fetch_sub(1, Ordering::Relaxed);
         }
