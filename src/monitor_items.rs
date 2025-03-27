@@ -3,25 +3,32 @@
  * SPDX-License-Identifier: Proprietary
  */
 
-use {
-    crate::{
-        index::{Index, IndexExt},
-        ColumnName, Embeddings, Key, ScyllaDbUri, TableName,
-    },
-    anyhow::Context,
-    futures::{Stream, TryStreamExt},
-    scylla::{
-        client::{session::Session, session_builder::SessionBuilder},
-        errors::NextRowError,
-        statement::prepared::PreparedStatement,
-    },
-    std::{mem, sync::Arc},
-    tokio::{
-        sync::mpsc::{self, Sender},
-        time,
-    },
-    tracing::{debug, info, info_span, warn, Instrument},
-};
+use crate::index::Index;
+use crate::index::IndexExt;
+use crate::ColumnName;
+use crate::Embeddings;
+use crate::Key;
+use crate::ScyllaDbUri;
+use crate::TableName;
+use anyhow::Context;
+use futures::Stream;
+use futures::TryStreamExt;
+use scylla::client::session::Session;
+use scylla::client::session_builder::SessionBuilder;
+use scylla::errors::NextRowError;
+use scylla::statement::prepared::PreparedStatement;
+use std::mem;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::Sender;
+use tokio::time;
+use tracing::debug;
+use tracing::info;
+use tracing::info_span;
+use tracing::warn;
+use tracing::Instrument;
 
 pub(crate) enum MonitorItems {}
 
@@ -214,11 +221,6 @@ async fn reset_items(db: &Arc<Db>) -> anyhow::Result<bool> {
 }
 
 async fn table_to_index(db: &Arc<Db>, index: &Sender<Index>) -> anyhow::Result<bool> {
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    };
-
     let mut rows = db.get_items().await?;
     let counter_before = Arc::new(AtomicUsize::new(0));
     let counter_after = Arc::new(AtomicUsize::new(0));

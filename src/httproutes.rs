@@ -3,24 +3,28 @@
  * SPDX-License-Identifier: Proprietary
  */
 
-use {
-    crate::{
-        engine::{Engine, EngineExt},
-        index::IndexExt,
-        Distance, Embeddings, IndexId, Key, Limit,
-    },
-    axum::{
-        extract::{self, Path, State},
-        http::StatusCode,
-        response::{self, IntoResponse, Response},
-        Router,
-    },
-    tokio::sync::mpsc::Sender,
-    tower_http::trace::TraceLayer,
-    utoipa::OpenApi,
-    utoipa_axum::{router::OpenApiRouter, routes},
-    utoipa_swagger_ui::SwaggerUi,
-};
+use crate::engine::Engine;
+use crate::engine::EngineExt;
+use crate::index::IndexExt;
+use crate::Distance;
+use crate::Embeddings;
+use crate::IndexId;
+use crate::Key;
+use crate::Limit;
+use axum::extract;
+use axum::extract::Path;
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response;
+use axum::response::IntoResponse;
+use axum::response::Response;
+use axum::Router;
+use tokio::sync::mpsc::Sender;
+use tower_http::trace::TraceLayer;
+use utoipa::OpenApi;
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
+use utoipa_swagger_ui::SwaggerUi;
 
 #[derive(OpenApi)]
 #[openapi(

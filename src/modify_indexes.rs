@@ -3,16 +3,16 @@
  * SPDX-License-Identifier: Proprietary
  */
 
-use {
-    crate::{IndexId, IndexItemsCount, ScyllaDbUri},
-    anyhow::Context,
-    scylla::{
-        client::{session::Session, session_builder::SessionBuilder},
-        statement::prepared::PreparedStatement,
-    },
-    tokio::sync::mpsc::{self, Sender},
-    tracing::warn,
-};
+use crate::IndexId;
+use crate::IndexItemsCount;
+use crate::ScyllaDbUri;
+use anyhow::Context;
+use scylla::client::session::Session;
+use scylla::client::session_builder::SessionBuilder;
+use scylla::statement::prepared::PreparedStatement;
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::Sender;
+use tracing::warn;
 
 pub(crate) enum ModifyIndexes {
     UpdateItemsCount {
