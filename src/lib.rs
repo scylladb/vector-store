@@ -37,24 +37,33 @@ use utoipa::ToSchema;
 pub struct ScyllaDbUri(String);
 
 #[derive(
-    Clone,
-    Hash,
-    Eq,
-    PartialEq,
-    Debug,
-    serde::Serialize,
-    serde::Deserialize,
-    derive_more::From,
-    derive_more::Display,
-    utoipa::ToSchema,
+    Clone, Hash, Eq, PartialEq, Debug, serde::Serialize, derive_more::Display, utoipa::ToSchema,
 )]
 /// DB's absolute index/table name (with keyspace) for which index should be build
 #[schema(example = "vector_benchmark.vector_items")]
 struct IndexId(String);
 
 impl IndexId {
-    fn new(keyspace: &KeyspaceName, index: &TableName) -> Self {
-        format!("{}.{}", keyspace.0, index.0).into()
+    fn new(keyspace: &KeyspaceName, table: &TableName) -> Self {
+        Self(format!("{}.{}", keyspace.0, table.0))
+    }
+
+    fn keyspace_name(&self) -> KeyspaceName {
+        self.0
+            .split_once('.')
+            .expect("IndexId must be created by new!")
+            .0
+            .to_string()
+            .into()
+    }
+
+    fn table_name(&self) -> TableName {
+        self.0
+            .split_once('.')
+            .expect("IndexId must be created by new!")
+            .1
+            .to_string()
+            .into()
     }
 }
 
@@ -100,6 +109,10 @@ struct KeyspaceName(String);
 
 #[derive(
     Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
     derive_more::From,
     serde::Serialize,
     serde::Deserialize,
@@ -108,7 +121,17 @@ struct KeyspaceName(String);
 )]
 struct TableName(String);
 
-#[derive(Clone, derive_more::From, serde::Serialize, serde::Deserialize, derive_more::Display)]
+#[derive(
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    derive_more::From,
+    serde::Serialize,
+    serde::Deserialize,
+    derive_more::Display,
+)]
 /// Name of the column in a db table
 struct ColumnName(String);
 
@@ -245,6 +268,9 @@ impl SerializeValue for IndexItemsCount {
     Copy,
     Clone,
     Debug,
+    PartialEq,
+    Eq,
+    Hash,
     serde::Serialize,
     serde::Deserialize,
     derive_more::From,
@@ -257,6 +283,9 @@ struct Dimensions(NonZeroUsize);
     Copy,
     Clone,
     Debug,
+    PartialEq,
+    Eq,
+    Hash,
     serde::Serialize,
     serde::Deserialize,
     derive_more::From,
@@ -269,6 +298,9 @@ struct Connectivity(usize);
     Copy,
     Clone,
     Debug,
+    PartialEq,
+    Eq,
+    Hash,
     serde::Serialize,
     serde::Deserialize,
     derive_more::From,
@@ -282,6 +314,9 @@ struct ExpansionAdd(usize);
     Copy,
     Clone,
     Debug,
+    PartialEq,
+    Eq,
+    Hash,
     serde::Serialize,
     serde::Deserialize,
     derive_more::From,
@@ -324,6 +359,25 @@ impl PartialSchema for Limit {
 impl Default for Limit {
     fn default() -> Self {
         Self(NonZeroUsize::new(1).unwrap())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+/// Information about an index
+struct IndexMetadata {
+    keyspace_name: KeyspaceName,
+    table_name: TableName,
+    target_name: ColumnName,
+    key_name: ColumnName,
+    dimensions: Dimensions,
+    connectivity: Connectivity,
+    expansion_add: ExpansionAdd,
+    expansion_search: ExpansionSearch,
+}
+
+impl IndexMetadata {
+    fn id(&self) -> IndexId {
+        IndexId::new(&self.keyspace_name, &self.table_name)
     }
 }
 

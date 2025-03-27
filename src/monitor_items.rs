@@ -5,10 +5,9 @@
 
 use crate::index::Index;
 use crate::index::IndexExt;
-use crate::ColumnName;
 use crate::Embeddings;
+use crate::IndexMetadata;
 use crate::Key;
-use crate::TableName;
 use anyhow::Context;
 use futures::Stream;
 use futures::TryStreamExt;
@@ -31,12 +30,10 @@ pub(crate) enum MonitorItems {}
 
 pub(crate) async fn new(
     db_session: Arc<Session>,
-    table: TableName,
-    col_id: ColumnName,
-    col_emb: ColumnName,
+    metadata: IndexMetadata,
     index: Sender<Index>,
 ) -> anyhow::Result<Sender<MonitorItems>> {
-    let db = Arc::new(Db::new(db_session, table, col_id, col_emb).await?);
+    let db = Arc::new(Db::new(db_session, metadata).await?);
 
     // The value was taken from initial benchmarks
     const CHANNEL_SIZE: usize = 10;
@@ -102,41 +99,37 @@ struct Db {
 }
 
 impl Db {
-    async fn new(
-        session: Arc<Session>,
-        table: TableName,
-        col_id: ColumnName,
-        col_emb: ColumnName,
-    ) -> anyhow::Result<Self> {
+    async fn new(session: Arc<Session>, metadata: IndexMetadata) -> anyhow::Result<Self> {
         Ok(Self {
             st_get_processed_ids: session
-                .prepare(Self::get_processed_ids_query(&table, &col_id))
+                .prepare(Self::get_processed_ids_query(&metadata))
                 .await
                 .context("get_processed_ids_query")?,
             st_get_items: session
-                .prepare(Self::get_items_query(&table, &col_id, &col_emb))
+                .prepare(Self::get_items_query(&metadata))
                 .await
                 .context("get_items_query")?,
             st_reset_items: session
-                .prepare(Self::reset_items_query(&table))
+                .prepare(Self::reset_items_query(&metadata))
                 .await
                 .context("reset_items_query")?,
             st_update_items: session
-                .prepare(Self::update_items_query(&table))
+                .prepare(Self::update_items_query(&metadata))
                 .await
                 .context("update_items_query")?,
             session,
         })
     }
 
-    fn get_processed_ids_query(table: &TableName, col_id: &ColumnName) -> String {
+    fn get_processed_ids_query(metadata: &IndexMetadata) -> String {
         format!(
             "
-            SELECT {col_id}
-            FROM {table}
+            SELECT {}
+            FROM {}.{}
             WHERE processed = TRUE
             LIMIT 1000
-            "
+            ",
+            metadata.key_name.0, metadata.keyspace_name.0, metadata.table_name.0
         )
     }
     async fn get_processed_ids(
@@ -150,13 +143,17 @@ impl Db {
             .map_ok(|(key,)| (key as u64).into()))
     }
 
-    fn get_items_query(table: &TableName, col_id: &ColumnName, col_emb: &ColumnName) -> String {
+    fn get_items_query(metadata: &IndexMetadata) -> String {
         format!(
             "
-            SELECT {col_id}, {col_emb}
-            FROM {table}
+            SELECT {}, {}
+            FROM {}.{}
             WHERE processed = FALSE
-            "
+            ",
+            metadata.key_name.0,
+            metadata.target_name.0,
+            metadata.keyspace_name.0,
+            metadata.table_name.0
         )
     }
     async fn get_items(
@@ -170,13 +167,14 @@ impl Db {
             .map_ok(|(key, embeddings)| ((key as u64).into(), embeddings.into())))
     }
 
-    fn reset_items_query(table: &TableName) -> String {
+    fn reset_items_query(metadata: &IndexMetadata) -> String {
         format!(
             "
-            UPDATE {table}
+            UPDATE {}.{}
                 SET processed = False
                 WHERE id IN ?
-            "
+            ",
+            metadata.keyspace_name.0, metadata.table_name.0
         )
     }
     async fn reset_items(&self, keys: &[Key]) -> anyhow::Result<()> {
@@ -186,13 +184,14 @@ impl Db {
         Ok(())
     }
 
-    fn update_items_query(table: &TableName) -> String {
+    fn update_items_query(metadata: &IndexMetadata) -> String {
         format!(
             "
-            UPDATE {table}
+            UPDATE {}.{}
                 SET processed = True
                 WHERE id IN ?
-            "
+            ",
+            metadata.keyspace_name.0, metadata.table_name.0
         )
     }
     async fn update_items(&self, keys: &[Key]) -> anyhow::Result<()> {

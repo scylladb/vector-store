@@ -78,10 +78,11 @@ struct PostIndexAnnResponse {
 
 #[utoipa::path(
     post,
-    path = "/api/v1/indexes/{keyspace}/{index}/ann",
+    path = "/api/v1/indexes/{keyspace}/{table}/ann",
     description = "Ann search in the index",
     params(
-        ("id" = IndexId, Path, description = "Index id to search")
+        ("keyspace" = KeyspaceName, Path, description = "Keyspace name for the table to search"),
+        ("table" = TableName, Path, description = "Table to search")
     ),
     request_body = PostIndexAnnRequest,
     responses(
@@ -92,10 +93,10 @@ struct PostIndexAnnResponse {
 #[axum::debug_handler]
 async fn post_index_ann(
     State(engine): State<Sender<Engine>>,
-    Path((keyspace, index_name)): Path<(KeyspaceName, TableName)>,
+    Path((keyspace, table_name)): Path<(KeyspaceName, TableName)>,
     extract::Json(request): extract::Json<PostIndexAnnRequest>,
 ) -> Response {
-    let Some(index) = engine.get_index(IndexId::new(&keyspace, &index_name)).await else {
+    let Some(index) = engine.get_index(IndexId::new(&keyspace, &table_name)).await else {
         return (StatusCode::NOT_FOUND, "").into_response();
     };
     match index.ann(request.embeddings, request.limit).await {
