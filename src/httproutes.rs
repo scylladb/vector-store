@@ -7,14 +7,12 @@ use {
     crate::{
         engine::{Engine, EngineExt},
         index::IndexExt,
-        ColumnName, Connectivity, Dimensions, Distance, Embeddings, ExpansionAdd, ExpansionSearch,
-        IndexId, Key, Limit,
+        Distance, Embeddings, IndexId, Key, Limit,
     },
     axum::{
         extract::{self, Path, State},
         http::StatusCode,
         response::{self, IntoResponse, Response},
-        routing::get,
         Router,
     },
     tokio::sync::mpsc::Sender,
@@ -38,9 +36,7 @@ pub(crate) fn new(engine: Sender<Engine>) -> Router {
         .merge(
             OpenApiRouter::new()
                 .routes(routes!(get_indexes))
-                .routes(routes!(put_index, del_index))
                 .routes(routes!(post_index_ann))
-                .route("/indexes/{id}/status", get(get_index_status))
                 .layer(TraceLayer::new_for_http())
                 .with_state(engine),
         )
@@ -59,61 +55,6 @@ pub(crate) fn new(engine: Sender<Engine>) -> Router {
 )]
 async fn get_indexes(State(engine): State<Sender<Engine>>) -> response::Json<Vec<IndexId>> {
     response::Json(engine.get_indexes().await)
-}
-
-#[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
-struct PutIndexPayload {
-    col_id: ColumnName,
-    col_emb: ColumnName,
-    dimensions: Dimensions,
-    connectivity: Connectivity,
-    expansion_add: ExpansionAdd,
-    expansion_search: ExpansionSearch,
-}
-
-#[utoipa::path(
-    put,
-    path = "/api/v1/indexes/{id}",
-    description = "Create a new index",
-    params(
-        ("id" = IndexId, Path, description = "Index id to create")
-    ),
-    request_body = PutIndexPayload,
-    responses(
-        (status = 200, description = "Index created")
-    )
-)]
-async fn put_index(
-    State(engine): State<Sender<Engine>>,
-    Path(id): Path<IndexId>,
-    extract::Json(payload): extract::Json<PutIndexPayload>,
-) {
-    engine
-        .add_index(
-            id,
-            payload.col_id,
-            payload.col_emb,
-            payload.dimensions,
-            payload.connectivity,
-            payload.expansion_add,
-            payload.expansion_search,
-        )
-        .await;
-}
-
-#[utoipa::path(
-    delete,
-    path = "/api/v1/indexes/{id}",
-    description = "Delete an index",
-    params(
-        ("id" = IndexId, Path, description = "Index id to delete")
-    ),
-    responses(
-        (status = 200, description = "Index deleted")
-    )
-)]
-async fn del_index(State(engine): State<Sender<Engine>>, Path(id): Path<IndexId>) {
-    engine.del_index(id).await;
 }
 
 #[derive(serde::Deserialize, utoipa::ToSchema)]
@@ -162,14 +103,4 @@ async fn post_index_ann(
         )
             .into_response(),
     }
-}
-
-async fn get_index_status(
-    State(engine): State<Sender<Engine>>,
-    Path(id): Path<IndexId>,
-) -> Response {
-    let Some(_index) = engine.get_index(id).await else {
-        return (StatusCode::NOT_FOUND, "").into_response();
-    };
-    (StatusCode::OK, "Not implemented index status").into_response()
 }
