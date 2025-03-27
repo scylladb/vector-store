@@ -173,9 +173,9 @@ async fn housekeeping(
     modify_actor: &mpsc::Sender<ModifyIndexes>,
     id: IndexId,
     items_count_db: &mut IndexItemsCount,
-    items_count: &Arc<AtomicU32>,
-    counter_add: &Arc<AtomicUsize>,
-    counter_ann: &Arc<AtomicUsize>,
+    items_count: &AtomicU32,
+    counter_add: &AtomicUsize,
+    counter_ann: &AtomicUsize,
     channel_len: usize,
 ) {
     {
