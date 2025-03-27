@@ -44,8 +44,8 @@ pub struct ScyllaDbUri(String);
 struct IndexId(String);
 
 impl IndexId {
-    fn new(keyspace: &KeyspaceName, table: &TableName) -> Self {
-        Self(format!("{}.{}", keyspace.0, table.0))
+    fn new(keyspace: &KeyspaceName, index: &TableName) -> Self {
+        Self(format!("{}.{}", keyspace.0, index.0))
     }
 }
 
