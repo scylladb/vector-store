@@ -10,14 +10,13 @@ use crate::Dimensions;
 use crate::ExpansionAdd;
 use crate::ExpansionSearch;
 use crate::IndexId;
-use crate::ScyllaDbUri;
 use anyhow::Context;
 use itertools::Itertools;
 use scylla::client::session::Session;
-use scylla::client::session_builder::SessionBuilder;
 use scylla::statement::prepared::PreparedStatement;
 use std::collections::HashSet;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio::time;
@@ -26,10 +25,10 @@ use tracing::warn;
 pub(crate) enum MonitorIndexes {}
 
 pub(crate) async fn new(
-    uri: ScyllaDbUri,
+    db_session: Arc<Session>,
     engine: Sender<Engine>,
 ) -> anyhow::Result<Sender<MonitorIndexes>> {
-    let db = Db::new(uri).await?;
+    let db = Db::new(db_session).await?;
     let mut known = HashSet::new();
     let (tx, mut rx) = mpsc::channel(10);
     tokio::spawn(async move {
@@ -67,18 +66,14 @@ pub(crate) async fn new(
 }
 
 struct Db {
-    session: Session,
+    session: Arc<Session>,
     st_not_cancelled_indexes: PreparedStatement,
     st_cancelled_indexes: PreparedStatement,
     st_get_index_params: PreparedStatement,
 }
 
 impl Db {
-    async fn new(uri: ScyllaDbUri) -> anyhow::Result<Self> {
-        let session = SessionBuilder::new()
-            .known_node(uri.0.as_str())
-            .build()
-            .await?;
+    async fn new(session: Arc<Session>) -> anyhow::Result<Self> {
         Ok(Self {
             st_not_cancelled_indexes: session
                 .prepare(Self::NOT_CANCELLED_INDEXES)

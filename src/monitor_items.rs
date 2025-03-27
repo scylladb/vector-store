@@ -8,13 +8,11 @@ use crate::index::IndexExt;
 use crate::ColumnName;
 use crate::Embeddings;
 use crate::Key;
-use crate::ScyllaDbUri;
 use crate::TableName;
 use anyhow::Context;
 use futures::Stream;
 use futures::TryStreamExt;
 use scylla::client::session::Session;
-use scylla::client::session_builder::SessionBuilder;
 use scylla::errors::NextRowError;
 use scylla::statement::prepared::PreparedStatement;
 use std::mem;
@@ -33,13 +31,13 @@ use tracing::Instrument;
 pub(crate) enum MonitorItems {}
 
 pub(crate) async fn new(
-    uri: ScyllaDbUri,
+    db_session: Arc<Session>,
     table: TableName,
     col_id: ColumnName,
     col_emb: ColumnName,
     index: Sender<Index>,
 ) -> anyhow::Result<Sender<MonitorItems>> {
-    let db = Arc::new(Db::new(uri, table, col_id, col_emb).await?);
+    let db = Arc::new(Db::new(db_session, table, col_id, col_emb).await?);
     let (tx, mut rx) = mpsc::channel(10);
     tokio::spawn(async move {
         info!("resetting items");
@@ -90,7 +88,7 @@ enum State {
 }
 
 struct Db {
-    session: Session,
+    session: Arc<Session>,
     st_get_processed_ids: PreparedStatement,
     st_get_items: PreparedStatement,
     st_reset_items: PreparedStatement,
@@ -99,15 +97,11 @@ struct Db {
 
 impl Db {
     async fn new(
-        uri: ScyllaDbUri,
+        session: Arc<Session>,
         table: TableName,
         col_id: ColumnName,
         col_emb: ColumnName,
     ) -> anyhow::Result<Self> {
-        let session = SessionBuilder::new()
-            .known_node(uri.0.as_str())
-            .build()
-            .await?;
         Ok(Self {
             st_get_processed_ids: session
                 .prepare(Self::get_processed_ids_query(&table, &col_id))
