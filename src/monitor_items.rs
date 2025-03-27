@@ -13,8 +13,8 @@ use {
     futures::{Stream, TryStreamExt},
     scylla::{
         client::{session::Session, session_builder::SessionBuilder},
-        errors::QueryError,
-        prepared_statement::PreparedStatement,
+        errors::NextRowError,
+        statement::prepared::PreparedStatement,
     },
     std::{mem, sync::Arc},
     tokio::{
@@ -146,7 +146,7 @@ impl Db {
     }
     async fn get_processed_ids(
         &self,
-    ) -> anyhow::Result<impl Stream<Item = Result<Key, QueryError>>> {
+    ) -> anyhow::Result<impl Stream<Item = Result<Key, NextRowError>>> {
         Ok(self
             .session
             .execute_iter(self.st_get_processed_ids.clone(), ())
@@ -166,7 +166,7 @@ impl Db {
     }
     async fn get_items(
         &self,
-    ) -> anyhow::Result<impl Stream<Item = Result<(Key, Embeddings), QueryError>>> {
+    ) -> anyhow::Result<impl Stream<Item = Result<(Key, Embeddings), NextRowError>>> {
         Ok(self
             .session
             .execute_iter(self.st_get_items.clone(), ())

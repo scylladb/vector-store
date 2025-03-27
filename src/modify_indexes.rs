@@ -11,7 +11,7 @@ use {
     anyhow::Context,
     scylla::{
         client::{session::Session, session_builder::SessionBuilder},
-        prepared_statement::PreparedStatement,
+        statement::prepared::PreparedStatement,
     },
     tokio::sync::mpsc::{self, Sender},
     tracing::warn,
