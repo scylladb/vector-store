@@ -3,24 +3,24 @@
  * SPDX-License-Identifier: Proprietary
  */
 
-use {
-    crate::{
-        engine::{Engine, EngineExt},
-        Connectivity, Dimensions, ExpansionAdd, ExpansionSearch, IndexId, ScyllaDbUri,
-    },
-    anyhow::Context,
-    itertools::Itertools,
-    scylla::{
-        client::{session::Session, session_builder::SessionBuilder},
-        statement::prepared::PreparedStatement,
-    },
-    std::collections::HashSet,
-    tokio::{
-        sync::mpsc::{self, Sender},
-        time,
-    },
-    tracing::warn,
-};
+use crate::engine::Engine;
+use crate::engine::EngineExt;
+use crate::Connectivity;
+use crate::Dimensions;
+use crate::ExpansionAdd;
+use crate::ExpansionSearch;
+use crate::IndexId;
+use crate::ScyllaDbUri;
+use anyhow::Context;
+use itertools::Itertools;
+use scylla::client::session::Session;
+use scylla::client::session_builder::SessionBuilder;
+use scylla::statement::prepared::PreparedStatement;
+use std::collections::HashSet;
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::Sender;
+use tokio::time;
+use tracing::warn;
 
 pub(crate) enum MonitorIndexes {}
 

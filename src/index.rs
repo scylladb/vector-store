@@ -3,24 +3,35 @@
  * SPDX-License-Identifier: Proprietary
  */
 
-use {
-    crate::{
-        modify_indexes::{ModifyIndexes, ModifyIndexesExt},
-        Connectivity, Dimensions, Distance, Embeddings, ExpansionAdd, ExpansionSearch, IndexId,
-        IndexItemsCount, Key, Limit,
-    },
-    anyhow::anyhow,
-    std::sync::{
-        atomic::{AtomicU32, AtomicUsize, Ordering},
-        Arc, RwLock,
-    },
-    tokio::{
-        sync::{mpsc, oneshot},
-        time,
-    },
-    tracing::{debug, debug_span, error, info, warn, Instrument},
-    usearch::{IndexOptions, ScalarKind},
-};
+use crate::modify_indexes::ModifyIndexes;
+use crate::modify_indexes::ModifyIndexesExt;
+use crate::Connectivity;
+use crate::Dimensions;
+use crate::Distance;
+use crate::Embeddings;
+use crate::ExpansionAdd;
+use crate::ExpansionSearch;
+use crate::IndexId;
+use crate::IndexItemsCount;
+use crate::Key;
+use crate::Limit;
+use anyhow::anyhow;
+use std::sync::atomic::AtomicU32;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::RwLock;
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
+use tokio::time;
+use tracing::debug;
+use tracing::debug_span;
+use tracing::error;
+use tracing::info;
+use tracing::warn;
+use tracing::Instrument;
+use usearch::IndexOptions;
+use usearch::ScalarKind;
 
 const RESERVE_INCREMENT: usize = 1000000;
 const RESERVE_THRESHOLD: usize = RESERVE_INCREMENT / 3;
