@@ -34,7 +34,12 @@ use tracing::Instrument;
 use usearch::IndexOptions;
 use usearch::ScalarKind;
 
+// Initial and incremental number for the index vectors reservation.
+// The value was taken for initial benchmarks (size similar to benchmark size)
 const RESERVE_INCREMENT: usize = 1000000;
+
+// When free space for index vectors drops below this, will reserve more space
+// The ratio was taken for initial benchmarks
 const RESERVE_THRESHOLD: usize = RESERVE_INCREMENT / 3;
 
 pub(crate) enum Index {
@@ -101,7 +106,10 @@ pub(crate) fn new(
     info!("Creating new index with id: {id}");
     let idx = Arc::new(usearch::Index::new(&options)?);
     idx.reserve(RESERVE_INCREMENT)?;
-    let (tx, mut rx) = mpsc::channel(100000);
+
+    // TODO: The value of channel size was taken from initial benchmarks. Needs more testing
+    const CHANNEL_SIZE: usize = 100000;
+    let (tx, mut rx) = mpsc::channel(CHANNEL_SIZE);
 
     tokio::spawn(
         {
@@ -204,8 +212,10 @@ async fn add(
 ) {
     rayon::spawn(move || {
         counter.fetch_add(1, Ordering::Relaxed);
+
         let capacity = idx.capacity();
         if capacity - idx.size() < RESERVE_THRESHOLD {
+            // free space below threshold, reserve more space
             let _lock = idx_lock.write().unwrap();
             let capacity = capacity + RESERVE_INCREMENT;
             debug!("index::add: trying to reserve {capacity}");

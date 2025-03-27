@@ -46,7 +46,11 @@ impl ModifyIndexesExt for Sender<ModifyIndexes> {
 
 pub(crate) async fn new(db_session: Arc<Session>) -> anyhow::Result<Sender<ModifyIndexes>> {
     let db = Db::new(db_session).await?;
-    let (tx, mut rx) = mpsc::channel(10);
+
+    // The value was taken from initial benchmarks
+    const CHANNEL_SIZE: usize = 10;
+    let (tx, mut rx) = mpsc::channel(CHANNEL_SIZE);
+
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             match msg {

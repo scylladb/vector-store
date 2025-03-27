@@ -16,9 +16,8 @@ use scylla::client::session::Session;
 use scylla::errors::NextRowError;
 use scylla::statement::prepared::PreparedStatement;
 use std::mem;
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio::time;
@@ -38,11 +37,18 @@ pub(crate) async fn new(
     index: Sender<Index>,
 ) -> anyhow::Result<Sender<MonitorItems>> {
     let db = Arc::new(Db::new(db_session, table, col_id, col_emb).await?);
-    let (tx, mut rx) = mpsc::channel(10);
+
+    // The value was taken from initial benchmarks
+    const CHANNEL_SIZE: usize = 10;
+    let (tx, mut rx) = mpsc::channel(CHANNEL_SIZE);
+
     tokio::spawn(async move {
         info!("resetting items");
         let mut state = State::Reset;
-        let mut interval = time::interval(time::Duration::from_secs(1));
+
+        const INTERVAL: Duration = Duration::from_secs(1);
+        let mut interval = time::interval(INTERVAL);
+
         while !rx.is_closed() {
             tokio::select! {
                 _ = interval.tick() => {
@@ -198,7 +204,10 @@ impl Db {
 }
 
 async fn reset_items(db: &Arc<Db>) -> anyhow::Result<bool> {
-    let mut keys_chunks = db.get_processed_ids().await?.try_chunks(100);
+    // The value was taken from initial benchmarks
+    const CHUNK_SIZE: usize = 100;
+    let mut keys_chunks = db.get_processed_ids().await?.try_chunks(CHUNK_SIZE);
+
     let mut resetting = Vec::new();
     while let Some(keys) = keys_chunks.try_next().await? {
         let db = Arc::clone(db);
@@ -214,19 +223,25 @@ async fn reset_items(db: &Arc<Db>) -> anyhow::Result<bool> {
     Ok(count > 0)
 }
 
+/// Get new embeddings from db and add to the index. Then mark embeddings in db as processed
 async fn table_to_index(db: &Arc<Db>, index: &Sender<Index>) -> anyhow::Result<bool> {
     let mut rows = db.get_items().await?;
-    let counter_before = Arc::new(AtomicUsize::new(0));
-    let counter_after = Arc::new(AtomicUsize::new(0));
+
+    // The value was taken from initial benchmarks
+    const PROCESSED_CHUNK_SIZE: usize = 100;
+
+    // The container for processed keys
     let mut processed = Vec::new();
+    // The accumulator for number of processed embeddings
     let mut count = 0;
 
     while let Some((key, embeddings)) = rows.try_next().await? {
-        counter_before.fetch_add(1, Ordering::Relaxed);
         processed.push(key);
         count += 1;
 
-        if processed.len() == 100 {
+        if processed.len() == PROCESSED_CHUNK_SIZE {
+            // A new chunk of processed keys is prepared. Mark them as processed in db in the
+            // background.
             let processed: Vec<_> = mem::take(&mut processed);
             let db = Arc::clone(db);
             tokio::spawn(async move {
@@ -236,12 +251,11 @@ async fn table_to_index(db: &Arc<Db>, index: &Sender<Index>) -> anyhow::Result<b
             });
         }
 
+        // Add the embeddings in the background
         tokio::spawn({
             let index = index.clone();
-            let counter_after = Arc::clone(&counter_after);
             async move {
                 index.add(key, embeddings).await;
-                counter_after.fetch_add(1, Ordering::Relaxed);
             }
         });
     }
@@ -250,13 +264,6 @@ async fn table_to_index(db: &Arc<Db>, index: &Sender<Index>) -> anyhow::Result<b
         db.update_items(&processed).await?;
     }
 
-    {
-        let before = counter_before.load(Ordering::Relaxed);
-        let after = counter_after.load(Ordering::Relaxed);
-        if before != 0 || after != 0 {
-            debug!("table_to_index: before = {before}, after = {after}",);
-        }
-    }
     if count > 0 {
         debug!("table_to_index: processed {count} items",);
     }

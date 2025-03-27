@@ -20,7 +20,11 @@ pub(crate) async fn new(
 ) -> anyhow::Result<Sender<HttpServer>> {
     let listener = TcpListener::bind(addr.0).await?;
     tracing::info!("listening on {}", listener.local_addr()?);
-    let (tx, mut rx) = mpsc::channel(10);
+
+    // minimal size as channel is used as a lifetime guard
+    const CHANNEL_SIZE: usize = 1;
+    let (tx, mut rx) = mpsc::channel(CHANNEL_SIZE);
+
     let notify = Arc::new(Notify::new());
 
     tokio::spawn({

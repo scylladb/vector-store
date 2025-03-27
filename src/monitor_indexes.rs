@@ -17,6 +17,7 @@ use scylla::statement::prepared::PreparedStatement;
 use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio::time;
@@ -32,7 +33,9 @@ pub(crate) async fn new(
     let mut known = HashSet::new();
     let (tx, mut rx) = mpsc::channel(10);
     tokio::spawn(async move {
-        let mut interval = time::interval(time::Duration::from_secs(1));
+        const INTERVAL: Duration = Duration::from_secs(1);
+        let mut interval = time::interval(INTERVAL);
+
         while !rx.is_closed() {
             tokio::select! {
                 _ = interval.tick() => {
