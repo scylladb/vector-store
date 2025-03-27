@@ -52,6 +52,12 @@ pub struct ScyllaDbUri(String);
 #[schema(example = "vector_benchmark.vector_items")]
 struct IndexId(String);
 
+impl IndexId {
+    fn new(keyspace: &KeyspaceName, index: &TableName) -> Self {
+        format!("{}.{}", keyspace.0, index.0).into()
+    }
+}
+
 impl SerializeValue for IndexId {
     fn serialize<'b>(
         &self,
@@ -86,6 +92,11 @@ impl SerializeValue for IndexId {
         }
     }
 }
+
+#[derive(
+    Clone, Debug, Eq, Hash, PartialEq, derive_more::From, serde::Deserialize, utoipa::ToSchema,
+)]
+struct KeyspaceName(String);
 
 #[derive(
     Clone,

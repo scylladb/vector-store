@@ -10,7 +10,9 @@ use crate::Distance;
 use crate::Embeddings;
 use crate::IndexId;
 use crate::Key;
+use crate::KeyspaceName;
 use crate::Limit;
+use crate::TableName;
 use axum::extract;
 use axum::extract::Path;
 use axum::extract::State;
@@ -76,7 +78,7 @@ struct PostIndexAnnResponse {
 
 #[utoipa::path(
     post,
-    path = "/api/v1/indexes/{id}/ann",
+    path = "/api/v1/indexes/{keyspace}/{index}/ann",
     description = "Ann search in the index",
     params(
         ("id" = IndexId, Path, description = "Index id to search")
@@ -87,12 +89,13 @@ struct PostIndexAnnResponse {
         (status = 404, description = "Index not found")
     )
 )]
+#[axum::debug_handler]
 async fn post_index_ann(
     State(engine): State<Sender<Engine>>,
-    Path(id): Path<IndexId>,
+    Path((keyspace, index_name)): Path<(KeyspaceName, TableName)>,
     extract::Json(request): extract::Json<PostIndexAnnRequest>,
 ) -> Response {
-    let Some(index) = engine.get_index(id).await else {
+    let Some(index) = engine.get_index(IndexId::new(&keyspace, &index_name)).await else {
         return (StatusCode::NOT_FOUND, "").into_response();
     };
     match index.ann(request.embeddings, request.limit).await {
