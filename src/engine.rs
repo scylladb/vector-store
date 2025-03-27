@@ -17,7 +17,6 @@ use crate::ExpansionSearch;
 use crate::IndexId;
 use crate::ScyllaDbUri;
 use std::collections::HashMap;
-use std::future::Future;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tracing::error;
@@ -59,7 +58,7 @@ pub(crate) trait EngineExt {
         expansion_search: ExpansionSearch,
     );
     async fn del_index(&self, id: IndexId);
-    fn get_index(&self, id: IndexId) -> impl Future<Output = Option<mpsc::Sender<Index>>> + Send;
+    async fn get_index(&self, id: IndexId) -> Option<mpsc::Sender<Index>>;
 }
 
 impl EngineExt for mpsc::Sender<Engine> {
