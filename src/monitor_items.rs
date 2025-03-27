@@ -226,10 +226,12 @@ async fn table_to_index(db: &Arc<Db>, index: &Sender<Index>) -> anyhow::Result<b
     let counter_after = Arc::new(AtomicUsize::new(0));
     let mut processed = Vec::new();
     let mut count = 0;
+
     while let Some((key, embeddings)) = rows.try_next().await? {
         counter_before.fetch_add(1, Ordering::Relaxed);
         processed.push(key);
         count += 1;
+
         if processed.len() == 100 {
             let processed: Vec<_> = mem::take(&mut processed);
             let db = Arc::clone(db);
@@ -239,6 +241,7 @@ async fn table_to_index(db: &Arc<Db>, index: &Sender<Index>) -> anyhow::Result<b
                 });
             });
         }
+
         tokio::spawn({
             let index = index.clone();
             let counter_after = Arc::clone(&counter_after);
@@ -248,9 +251,11 @@ async fn table_to_index(db: &Arc<Db>, index: &Sender<Index>) -> anyhow::Result<b
             }
         });
     }
+
     if !processed.is_empty() {
         db.update_items(&processed).await?;
     }
+
     {
         let before = counter_before.load(Ordering::Relaxed);
         let after = counter_after.load(Ordering::Relaxed);
@@ -261,5 +266,6 @@ async fn table_to_index(db: &Arc<Db>, index: &Sender<Index>) -> anyhow::Result<b
     if count > 0 {
         debug!("table_to_index: processed {count} items",);
     }
+
     Ok(count > 0)
 }

@@ -22,6 +22,7 @@ pub(crate) async fn new(
     tracing::info!("listening on {}", listener.local_addr()?);
     let (tx, mut rx) = mpsc::channel(10);
     let notify = Arc::new(Notify::new());
+
     tokio::spawn({
         let notify = Arc::clone(&notify);
         async move {
@@ -29,6 +30,7 @@ pub(crate) async fn new(
             notify.notify_one();
         }
     });
+
     tokio::spawn(async move {
         axum::serve(listener, httproutes::new(engine))
             .with_graceful_shutdown(async move {
@@ -37,5 +39,6 @@ pub(crate) async fn new(
             .await
             .expect("failed to run web server");
     });
+
     Ok(tx)
 }

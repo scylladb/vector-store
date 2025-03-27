@@ -173,6 +173,7 @@ async fn add_indexes(db: &Db, engine: &Sender<Engine>, ids: impl Iterator<Item =
         else {
             continue;
         };
+
         engine
             .add_index(
                 id.clone(),
