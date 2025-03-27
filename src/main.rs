@@ -96,7 +96,6 @@ struct TableName(String);
     serde::Serialize,
     serde::Deserialize,
     derive_more::Display,
-    utoipa::ToSchema,
 )]
 /// Name of the column in a db table
 struct ColumnName(String);
@@ -238,7 +237,6 @@ impl SerializeValue for IndexItemsCount {
     serde::Deserialize,
     derive_more::From,
     derive_more::Display,
-    utoipa::ToSchema,
 )]
 /// Dimensions of embeddings
 struct Dimensions(usize);
@@ -251,7 +249,6 @@ struct Dimensions(usize);
     serde::Deserialize,
     derive_more::From,
     derive_more::Display,
-    utoipa::ToSchema,
 )]
 /// Limit number of neighbors per graph node
 struct Connectivity(usize);
