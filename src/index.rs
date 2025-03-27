@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use crate::db::Db;
 use crate::modify_indexes::ModifyIndexes;
 use crate::modify_indexes::ModifyIndexesExt;
 use crate::Connectivity;
@@ -89,6 +90,7 @@ impl IndexExt for mpsc::Sender<Index> {
 pub(crate) fn new(
     id: IndexId,
     modify_actor: mpsc::Sender<ModifyIndexes>,
+    _db: mpsc::Sender<Db>,
     dimensions: Dimensions,
     connectivity: Connectivity,
     expansion_add: ExpansionAdd,

@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use crate::db::Db;
 use crate::index;
 use crate::index::Index;
 use crate::modify_indexes;
@@ -74,11 +75,15 @@ impl EngineExt for mpsc::Sender<Engine> {
     }
 }
 
-pub(crate) async fn new(db_session: Arc<Session>) -> anyhow::Result<mpsc::Sender<Engine>> {
+pub(crate) async fn new(
+    db_session: Arc<Session>,
+    db: mpsc::Sender<Db>,
+) -> anyhow::Result<mpsc::Sender<Engine>> {
     let (tx, mut rx) = mpsc::channel(10);
 
-    let monitor_actor = monitor_indexes::new(Arc::clone(&db_session), tx.clone()).await?;
-    let modify_actor = modify_indexes::new(Arc::clone(&db_session)).await?;
+    let monitor_actor =
+        monitor_indexes::new(Arc::clone(&db_session), db.clone(), tx.clone()).await?;
+    let modify_actor = modify_indexes::new(Arc::clone(&db_session), db.clone()).await?;
 
     tokio::spawn(async move {
         let mut indexes = HashMap::new();
@@ -102,6 +107,7 @@ pub(crate) async fn new(db_session: Arc<Session>) -> anyhow::Result<mpsc::Sender
                     let Ok(index_actor) = index::new(
                         id.clone(),
                         modify_actor.clone(),
+                        db.clone(),
                         metadata.dimensions,
                         metadata.connectivity,
                         metadata.expansion_add,
@@ -115,6 +121,7 @@ pub(crate) async fn new(db_session: Arc<Session>) -> anyhow::Result<mpsc::Sender
 
                     let Ok(monitor_actor) = monitor_items::new(
                         Arc::clone(&db_session),
+                        db.clone(),
                         metadata.clone(),
                         index_actor.clone(),
                     )
