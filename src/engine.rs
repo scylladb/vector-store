@@ -9,12 +9,8 @@ use crate::modify_indexes;
 use crate::modify_indexes::ModifyIndexesExt;
 use crate::monitor_indexes;
 use crate::monitor_items;
-use crate::ColumnName;
-use crate::Connectivity;
-use crate::Dimensions;
-use crate::ExpansionAdd;
-use crate::ExpansionSearch;
 use crate::IndexId;
+use crate::IndexMetadata;
 use scylla::client::session::Session;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -28,13 +24,7 @@ pub(crate) enum Engine {
         tx: oneshot::Sender<Vec<IndexId>>,
     },
     AddIndex {
-        id: IndexId,
-        col_id: ColumnName,
-        col_emb: ColumnName,
-        dimensions: Dimensions,
-        connectivity: Connectivity,
-        expansion_add: ExpansionAdd,
-        expansion_search: ExpansionSearch,
+        metadata: IndexMetadata,
     },
     DelIndex {
         id: IndexId,
@@ -47,17 +37,7 @@ pub(crate) enum Engine {
 
 pub(crate) trait EngineExt {
     async fn get_index_ids(&self) -> Vec<IndexId>;
-    #[allow(clippy::too_many_arguments)] // TODO: support for table params is experimental
-    async fn add_index(
-        &self,
-        id: IndexId,
-        col_id: ColumnName,
-        col_emb: ColumnName,
-        dimensions: Dimensions,
-        connectivity: Connectivity,
-        expansion_add: ExpansionAdd,
-        expansion_search: ExpansionSearch,
-    );
+    async fn add_index(&self, metadata: IndexMetadata);
     async fn del_index(&self, id: IndexId);
     async fn get_index(&self, id: IndexId) -> Option<mpsc::Sender<Index>>;
 }
@@ -72,27 +52,10 @@ impl EngineExt for mpsc::Sender<Engine> {
         }
     }
 
-    async fn add_index(
-        &self,
-        id: IndexId,
-        col_id: ColumnName,
-        col_emb: ColumnName,
-        dimensions: Dimensions,
-        connectivity: Connectivity,
-        expansion_add: ExpansionAdd,
-        expansion_search: ExpansionSearch,
-    ) {
-        self.send(Engine::AddIndex {
-            id,
-            col_id,
-            col_emb,
-            dimensions,
-            connectivity,
-            expansion_add,
-            expansion_search,
-        })
-        .await
-        .unwrap_or_else(|err| warn!("EngineExt::add_index: unable to send request: {err}"));
+    async fn add_index(&self, metadata: IndexMetadata) {
+        self.send(Engine::AddIndex { metadata })
+            .await
+            .unwrap_or_else(|err| warn!("EngineExt::add_index: unable to send request: {err}"));
     }
 
     async fn del_index(&self, id: IndexId) {
@@ -129,41 +92,41 @@ pub(crate) async fn new(db_session: Arc<Session>) -> anyhow::Result<mpsc::Sender
                         });
                 }
 
-                Engine::AddIndex {
-                    id,
-                    col_id,
-                    col_emb,
-                    dimensions,
-                    connectivity,
-                    expansion_add,
-                    expansion_search,
-                } => {
+                Engine::AddIndex { metadata } => {
+                    let id = metadata.id();
                     if indexes.contains_key(&id) {
+                        warn!("engine::Engine::AddIndex: trying to replace index with id {id}");
                         continue;
                     }
-                    if let Ok(index_actor) = index::new(
+
+                    let Ok(index_actor) = index::new(
                         id.clone(),
                         modify_actor.clone(),
-                        dimensions,
-                        connectivity,
-                        expansion_add,
-                        expansion_search,
-                    ) {
-                        if let Ok(monitor_actor) = monitor_items::new(
-                            Arc::clone(&db_session),
-                            id.clone().0.into(),
-                            col_id.clone(),
-                            col_emb.clone(),
-                            index_actor.clone(),
-                        )
-                        .await.inspect_err(|err| error!("unable to create monitor items with table {id}, col_id {col_id}, col_emb {col_emb}: {err}"))
-                        {
-                            indexes.insert(id.clone(), index_actor);
-                            monitors.insert(id, monitor_actor);
-                        }
-                    } else {
-                        error!("unable to create index with dimensions {dimensions}");
-                    }
+                        metadata.dimensions,
+                        metadata.connectivity,
+                        metadata.expansion_add,
+                        metadata.expansion_search,
+                    )
+                    .inspect_err(|err| {
+                        error!("unable to create index with metadata {metadata:?}: {err}")
+                    }) else {
+                        continue;
+                    };
+
+                    let Ok(monitor_actor) = monitor_items::new(
+                        Arc::clone(&db_session),
+                        metadata.clone(),
+                        index_actor.clone(),
+                    )
+                    .await
+                    .inspect_err(|err| {
+                        error!("unable to create monitor items with metadata {metadata:?}: {err}")
+                    }) else {
+                        continue;
+                    };
+
+                    indexes.insert(id.clone(), index_actor);
+                    monitors.insert(id, monitor_actor);
                 }
 
                 Engine::DelIndex { id } => {

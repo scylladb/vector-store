@@ -10,6 +10,7 @@ use crate::Dimensions;
 use crate::ExpansionAdd;
 use crate::ExpansionSearch;
 use crate::IndexId;
+use crate::IndexMetadata;
 use anyhow::Context;
 use itertools::Itertools;
 use scylla::client::session::Session;
@@ -107,7 +108,11 @@ impl Db {
             .await?
             .into_rows_result()?
             .rows::<(String,)>()?
-            .map_ok(|(id,)| id.into())
+            .filter_map_ok(|(id,)| {
+                id.split_once('.').map(|(keyspace, table)| {
+                    IndexId::new(&keyspace.to_string().into(), &table.to_string().into())
+                })
+            })
             .try_collect()?)
     }
 
@@ -124,7 +129,11 @@ impl Db {
             .await?
             .into_rows_result()?
             .rows::<(String,)>()?
-            .map_ok(|(id,)| id.into())
+            .filter_map_ok(|(id,)| {
+                id.split_once('.').map(|(keyspace, table)| {
+                    IndexId::new(&keyspace.to_string().into(), &table.to_string().into())
+                })
+            })
             .try_collect()?)
     }
 
@@ -175,17 +184,17 @@ async fn add_indexes(db: &Db, engine: &Sender<Engine>, ids: impl Iterator<Item =
             continue;
         };
 
-        engine
-            .add_index(
-                id.clone(),
-                "id".to_string().into(),
-                "embedding".to_string().into(),
-                dimensions,
-                connectivity,
-                expansion_add,
-                expansion_search,
-            )
-            .await;
+        let metadata = IndexMetadata {
+            keyspace_name: id.keyspace_name(),
+            table_name: id.table_name(),
+            target_name: "embedding".to_string().into(),
+            key_name: "id".to_string().into(),
+            dimensions,
+            connectivity,
+            expansion_add,
+            expansion_search,
+        };
+        engine.add_index(metadata).await;
     }
 }
 
