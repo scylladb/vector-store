@@ -17,6 +17,7 @@ use scylla::client::session::Session;
 use scylla::client::session_builder::SessionBuilder;
 use scylla::statement::prepared::PreparedStatement;
 use std::collections::HashSet;
+use std::num::NonZeroUsize;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio::time;
@@ -149,14 +150,16 @@ impl Db {
                         && *expansion_search >= 0
                 },
             )
-            .map_ok(
+            .filter_map_ok(
                 |(dimensions, connectivity, expansion_add, expansion_search)| {
-                    (
-                        (dimensions as usize).into(),
-                        (connectivity as usize).into(),
-                        (expansion_add as usize).into(),
-                        (expansion_search as usize).into(),
-                    )
+                    NonZeroUsize::new(dimensions as usize).map(|dimensions| {
+                        (
+                            dimensions.into(),
+                            (connectivity as usize).into(),
+                            (expansion_add as usize).into(),
+                            (expansion_search as usize).into(),
+                        )
+                    })
                 },
             )
             .next()

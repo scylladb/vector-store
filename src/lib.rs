@@ -17,8 +17,18 @@ use scylla::serialize::value::SerializeValue;
 use scylla::serialize::writers::CellWriter;
 use scylla::serialize::writers::WrittenCellProof;
 use scylla::serialize::SerializationError;
+use std::borrow::Cow;
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 use tokio::signal;
+use utoipa::openapi::schema::Type;
+use utoipa::openapi::KnownFormat;
+use utoipa::openapi::ObjectBuilder;
+use utoipa::openapi::RefOr;
+use utoipa::openapi::Schema;
+use utoipa::openapi::SchemaFormat;
+use utoipa::PartialSchema;
+use utoipa::ToSchema;
 
 #[derive(Clone, derive_more::From, derive_more::Display)]
 pub struct ScyllaDbUri(String);
@@ -227,7 +237,7 @@ impl SerializeValue for IndexItemsCount {
     derive_more::Display,
 )]
 /// Dimensions of embeddings
-struct Dimensions(usize);
+struct Dimensions(NonZeroUsize);
 
 #[derive(
     Copy,
@@ -278,20 +288,28 @@ struct ParamM(usize);
 /// Embeddings vector
 struct Embeddings(Vec<f32>);
 
-#[derive(
-    Clone,
-    serde::Serialize,
-    serde::Deserialize,
-    derive_more::Display,
-    derive_more::From,
-    utoipa::ToSchema,
-)]
+#[derive(Clone, serde::Serialize, serde::Deserialize, derive_more::Display, derive_more::From)]
 /// Limit the number of search result
-struct Limit(usize);
+struct Limit(NonZeroUsize);
+
+impl ToSchema for Limit {
+    fn name() -> Cow<'static, str> {
+        Cow::Borrowed("Limit")
+    }
+}
+
+impl PartialSchema for Limit {
+    fn schema() -> RefOr<Schema> {
+        ObjectBuilder::new()
+            .schema_type(Type::Integer)
+            .format(Some(SchemaFormat::KnownFormat(KnownFormat::Int32)))
+            .into()
+    }
+}
 
 impl Default for Limit {
     fn default() -> Self {
-        Self(1)
+        Self(NonZeroUsize::new(1).unwrap())
     }
 }
 
