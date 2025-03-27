@@ -5,7 +5,6 @@
 
 use {
     crate::{
-        actor::{ActorHandle, MessageStop},
         modify_indexes::{ModifyIndexes, ModifyIndexesExt},
         Connectivity, Dimensions, Distance, Embeddings, ExpansionAdd, ExpansionSearch, IndexId,
         IndexItemsCount, Key, Limit,
@@ -36,13 +35,6 @@ pub(crate) enum Index {
         limit: Limit,
         tx: oneshot::Sender<anyhow::Result<(Vec<Key>, Vec<Distance>)>>,
     },
-    Stop,
-}
-
-impl MessageStop for Index {
-    fn message_stop() -> Self {
-        Index::Stop
-    }
 }
 
 pub(crate) trait IndexExt {
@@ -84,7 +76,7 @@ pub(crate) fn new(
     connectivity: Connectivity,
     expansion_add: ExpansionAdd,
     expansion_search: ExpansionSearch,
-) -> anyhow::Result<(mpsc::Sender<Index>, ActorHandle)> {
+) -> anyhow::Result<mpsc::Sender<Index>> {
     let options = IndexOptions {
         dimensions: dimensions.0,
         connectivity: connectivity.0,
@@ -97,7 +89,7 @@ pub(crate) fn new(
     let idx = Arc::new(usearch::Index::new(&options)?);
     idx.reserve(RESERVE_INCREMENT)?;
     let (tx, mut rx) = mpsc::channel(100000);
-    let task = tokio::spawn(
+    tokio::spawn(
         {
             let id = id.clone();
             async move {
@@ -151,10 +143,6 @@ pub(crate) fn new(
                                         Arc::clone(&counter_ann)
                                     ).await;
                                 }
-
-                                Index::Stop => {
-                                    rx.close();
-                                }
                             }
                         }
                     }
@@ -163,7 +151,7 @@ pub(crate) fn new(
         }
         .instrument(debug_span!("index", "{}", id.0)),
     );
-    Ok((tx, task))
+    Ok(tx)
 }
 
 async fn housekeeping(
