@@ -16,6 +16,7 @@ use crate::IndexItemsCount;
 use crate::Key;
 use crate::Limit;
 use anyhow::anyhow;
+use std::num::NonZeroUsize;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -89,7 +90,7 @@ pub(crate) fn new(
     expansion_search: ExpansionSearch,
 ) -> anyhow::Result<mpsc::Sender<Index>> {
     let options = IndexOptions {
-        dimensions: dimensions.0,
+        dimensions: dimensions.0.get(),
         connectivity: connectivity.0,
         expansion_add: expansion_add.0,
         expansion_search: expansion_search.0,
@@ -235,21 +236,20 @@ async fn ann(
     limit: Limit,
     counter: Arc<AtomicUsize>,
 ) {
-    if embeddings.0.len() != dimensions.0 {
+    let Some(embeddings_len) = NonZeroUsize::new(embeddings.0.len()) else {
+        tx.send(Err(anyhow!("index ann query: embeddings dimensions == 0")))
+            .unwrap_or_else(|_| {
+                warn!("index::new: Index::Ann: unable to send error response (zero dimensions)")
+            });
+        return;
+    };
+    if embeddings_len != dimensions.0 {
         tx.send(Err(anyhow!(
-            "index ann query: wrong embeddings dimensions: {} != {dimensions}",
-            embeddings.0.len()
+            "index ann query: wrong embeddings dimensions: {embeddings_len} != {dimensions}",
         )))
         .unwrap_or_else(|_| {
             warn!("index::new: Index::Ann: unable to send error response (wrong dimensions)")
         });
-        return;
-    }
-    if limit.0 < 1 {
-        tx.send(Err(anyhow!("index ann query: wrong limit value {limit}")))
-            .unwrap_or_else(|_| {
-                warn!("index::new: Index::Ann: unable to send error response (wrong limit)")
-            });
         return;
     }
     rayon::spawn({
@@ -257,7 +257,7 @@ async fn ann(
         move || {
             counter.fetch_add(1, Ordering::Relaxed);
             tx.send(
-                idx.search(&embeddings.0, limit.0)
+                idx.search(&embeddings.0, limit.0.get())
                     .map(|results| {
                         (
                             results.keys.into_iter().map(|key| key.into()).collect(),
