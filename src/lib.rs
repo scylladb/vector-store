@@ -31,6 +31,7 @@ use utoipa::openapi::Schema;
 use utoipa::openapi::SchemaFormat;
 use utoipa::PartialSchema;
 use utoipa::ToSchema;
+use uuid::Uuid;
 
 #[derive(Clone, derive_more::From, derive_more::Display)]
 pub struct ScyllaDbUri(String);
@@ -45,24 +46,6 @@ struct IndexId(String);
 impl IndexId {
     fn new(keyspace: &KeyspaceName, table: &TableName) -> Self {
         Self(format!("{}.{}", keyspace.0, table.0))
-    }
-
-    fn keyspace_name(&self) -> KeyspaceName {
-        self.0
-            .split_once('.')
-            .expect("IndexId must be created by new!")
-            .0
-            .to_string()
-            .into()
-    }
-
-    fn table_name(&self) -> TableName {
-        self.0
-            .split_once('.')
-            .expect("IndexId must be created by new!")
-            .1
-            .to_string()
-            .into()
     }
 }
 
@@ -292,10 +275,14 @@ impl Default for Limit {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash, derive_more::From)]
+struct IndexVersion(Uuid);
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 /// Information about an index
 struct IndexMetadata {
     keyspace_name: KeyspaceName,
+    index_name: TableName,
     table_name: TableName,
     target_name: ColumnName,
     key_name: ColumnName,
@@ -303,11 +290,12 @@ struct IndexMetadata {
     connectivity: Connectivity,
     expansion_add: ExpansionAdd,
     expansion_search: ExpansionSearch,
+    version: IndexVersion,
 }
 
 impl IndexMetadata {
     fn id(&self) -> IndexId {
-        IndexId::new(&self.keyspace_name, &self.table_name)
+        IndexId::new(&self.keyspace_name, &self.index_name)
     }
 }
 
