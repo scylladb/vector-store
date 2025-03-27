@@ -14,7 +14,6 @@ mod monitor_items;
 use scylla::client::session::Session;
 use scylla::client::session_builder::SessionBuilder;
 use scylla::cluster::metadata::ColumnType;
-use scylla::cluster::metadata::NativeType;
 use scylla::serialize::value::SerializeValue;
 use scylla::serialize::writers::CellWriter;
 use scylla::serialize::writers::WrittenCellProof;
@@ -73,32 +72,7 @@ impl SerializeValue for IndexId {
         typ: &ColumnType,
         writer: CellWriter<'b>,
     ) -> Result<WrittenCellProof<'b>, SerializationError> {
-        use {
-            scylla::serialize::value::{
-                BuiltinSerializationError, BuiltinSerializationErrorKind, BuiltinTypeCheckError,
-                BuiltinTypeCheckErrorKind,
-            },
-            std::any,
-        };
-
-        match typ {
-            ColumnType::Native(NativeType::Text) => {
-                writer.set_value(self.0.as_bytes()).map_err(|_| {
-                    SerializationError::new(BuiltinSerializationError {
-                        rust_name: any::type_name::<Self>(),
-                        got: typ.clone().into_owned(),
-                        kind: BuiltinSerializationErrorKind::ValueOverflow,
-                    })
-                })
-            }
-            _ => Err(SerializationError::new(BuiltinTypeCheckError {
-                rust_name: any::type_name::<Self>(),
-                got: typ.clone().into_owned(),
-                kind: BuiltinTypeCheckErrorKind::MismatchedType {
-                    expected: &[ColumnType::Native(NativeType::Text)],
-                },
-            })),
-        }
+        <String as SerializeValue>::serialize(&self.0, typ, writer)
     }
 }
 
@@ -106,6 +80,16 @@ impl SerializeValue for IndexId {
     Clone, Debug, Eq, Hash, PartialEq, derive_more::From, serde::Deserialize, utoipa::ToSchema,
 )]
 struct KeyspaceName(String);
+
+impl SerializeValue for KeyspaceName {
+    fn serialize<'b>(
+        &self,
+        typ: &ColumnType,
+        writer: CellWriter<'b>,
+    ) -> Result<WrittenCellProof<'b>, SerializationError> {
+        <String as SerializeValue>::serialize(&self.0, typ, writer)
+    }
+}
 
 #[derive(
     Clone,
@@ -119,7 +103,18 @@ struct KeyspaceName(String);
     derive_more::Display,
     utoipa::ToSchema,
 )]
+/// A table name of the table with vectors in a db
 struct TableName(String);
+
+impl SerializeValue for TableName {
+    fn serialize<'b>(
+        &self,
+        typ: &ColumnType,
+        writer: CellWriter<'b>,
+    ) -> Result<WrittenCellProof<'b>, SerializationError> {
+        <String as SerializeValue>::serialize(&self.0, typ, writer)
+    }
+}
 
 #[derive(
     Clone,
@@ -134,6 +129,16 @@ struct TableName(String);
 )]
 /// Name of the column in a db table
 struct ColumnName(String);
+
+impl SerializeValue for ColumnName {
+    fn serialize<'b>(
+        &self,
+        typ: &ColumnType,
+        writer: CellWriter<'b>,
+    ) -> Result<WrittenCellProof<'b>, SerializationError> {
+        <String as SerializeValue>::serialize(&self.0, typ, writer)
+    }
+}
 
 #[derive(
     Copy,
@@ -154,32 +159,7 @@ impl SerializeValue for Key {
         typ: &ColumnType,
         writer: CellWriter<'b>,
     ) -> Result<WrittenCellProof<'b>, SerializationError> {
-        use {
-            scylla::serialize::value::{
-                BuiltinSerializationError, BuiltinSerializationErrorKind, BuiltinTypeCheckError,
-                BuiltinTypeCheckErrorKind,
-            },
-            std::any,
-        };
-
-        match typ {
-            ColumnType::Native(NativeType::BigInt) => writer
-                .set_value(self.0.to_be_bytes().as_slice())
-                .map_err(|_| {
-                    SerializationError::new(BuiltinSerializationError {
-                        rust_name: any::type_name::<Self>(),
-                        got: typ.clone().into_owned(),
-                        kind: BuiltinSerializationErrorKind::ValueOverflow,
-                    })
-                }),
-            _ => Err(SerializationError::new(BuiltinTypeCheckError {
-                rust_name: any::type_name::<Self>(),
-                got: typ.clone().into_owned(),
-                kind: BuiltinTypeCheckErrorKind::MismatchedType {
-                    expected: &[ColumnType::Native(NativeType::BigInt)],
-                },
-            })),
-        }
+        <i64 as SerializeValue>::serialize(&(self.0 as i64), typ, writer)
     }
 }
 
@@ -195,32 +175,7 @@ impl SerializeValue for Distance {
         typ: &ColumnType,
         writer: CellWriter<'b>,
     ) -> Result<WrittenCellProof<'b>, SerializationError> {
-        use {
-            scylla::serialize::value::{
-                BuiltinSerializationError, BuiltinSerializationErrorKind, BuiltinTypeCheckError,
-                BuiltinTypeCheckErrorKind,
-            },
-            std::any,
-        };
-
-        match typ {
-            ColumnType::Native(NativeType::Float) => writer
-                .set_value(self.0.to_be_bytes().as_slice())
-                .map_err(|_| {
-                    SerializationError::new(BuiltinSerializationError {
-                        rust_name: any::type_name::<Self>(),
-                        got: typ.clone().into_owned(),
-                        kind: BuiltinSerializationErrorKind::ValueOverflow,
-                    })
-                }),
-            _ => Err(SerializationError::new(BuiltinTypeCheckError {
-                rust_name: any::type_name::<Self>(),
-                got: typ.clone().into_owned(),
-                kind: BuiltinTypeCheckErrorKind::MismatchedType {
-                    expected: &[ColumnType::Native(NativeType::Float)],
-                },
-            })),
-        }
+        <f32 as SerializeValue>::serialize(&self.0, typ, writer)
     }
 }
 
@@ -235,32 +190,7 @@ impl SerializeValue for IndexItemsCount {
         typ: &ColumnType,
         writer: CellWriter<'b>,
     ) -> Result<WrittenCellProof<'b>, SerializationError> {
-        use {
-            scylla::serialize::value::{
-                BuiltinSerializationError, BuiltinSerializationErrorKind, BuiltinTypeCheckError,
-                BuiltinTypeCheckErrorKind,
-            },
-            std::any,
-        };
-
-        match typ {
-            ColumnType::Native(NativeType::Int) => writer
-                .set_value(self.0.to_be_bytes().as_slice())
-                .map_err(|_| {
-                    SerializationError::new(BuiltinSerializationError {
-                        rust_name: any::type_name::<Self>(),
-                        got: typ.clone().into_owned(),
-                        kind: BuiltinSerializationErrorKind::ValueOverflow,
-                    })
-                }),
-            _ => Err(SerializationError::new(BuiltinTypeCheckError {
-                rust_name: any::type_name::<Self>(),
-                got: typ.clone().into_owned(),
-                kind: BuiltinTypeCheckErrorKind::MismatchedType {
-                    expected: &[ColumnType::Native(NativeType::Int)],
-                },
-            })),
-        }
+        <i32 as SerializeValue>::serialize(&(self.0 as i32), typ, writer)
     }
 }
 
