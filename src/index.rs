@@ -14,8 +14,7 @@ use crate::IndexItemsCount;
 use crate::Key;
 use crate::Limit;
 use crate::db::Db;
-use crate::modify_indexes::ModifyIndexes;
-use crate::modify_indexes::ModifyIndexesExt;
+use crate::db::DbExt;
 use anyhow::anyhow;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -89,8 +88,7 @@ impl IndexExt for mpsc::Sender<Index> {
 
 pub(crate) fn new(
     id: IndexId,
-    modify_actor: mpsc::Sender<ModifyIndexes>,
-    _db: mpsc::Sender<Db>,
+    db: mpsc::Sender<Db>,
     dimensions: Dimensions,
     connectivity: Connectivity,
     expansion_add: ExpansionAdd,
@@ -119,9 +117,11 @@ pub(crate) fn new(
             async move {
                 let mut items_count_db = IndexItemsCount(0);
                 let items_count = Arc::new(AtomicU32::new(0));
-                modify_actor
-                    .update_items_count(id.clone(), items_count_db)
-                    .await;
+
+                db.update_items_count(id.clone(), items_count_db)
+                    .await
+                    .unwrap_or_else(|err| warn!("index::new: unable update items count: {err}"));
+
                 let mut housekeeping_interval = time::interval(time::Duration::from_secs(1));
                 let idx_lock = Arc::new(RwLock::new(()));
                 let counter_add = Arc::new(AtomicUsize::new(0));
@@ -131,7 +131,7 @@ pub(crate) fn new(
                     tokio::select! {
                         _ = housekeeping_interval.tick() => {
                             housekeeping(
-                                &modify_actor,
+                                &db,
                                 id.clone(),
                                 &mut items_count_db,
                                 &items_count,
@@ -181,7 +181,7 @@ pub(crate) fn new(
 }
 
 async fn housekeeping(
-    modify_actor: &mpsc::Sender<ModifyIndexes>,
+    db: &mpsc::Sender<Db>,
     id: IndexId,
     items_count_db: &mut IndexItemsCount,
     items_count: &AtomicU32,
@@ -200,7 +200,9 @@ async fn housekeeping(
     if items != items_count_db.0 {
         debug!("housekeeping update items count: {items_count_db}",);
         items_count_db.0 = items;
-        modify_actor.update_items_count(id, *items_count_db).await;
+        db.update_items_count(id, *items_count_db)
+            .await
+            .unwrap_or_else(|err| warn!("index::housekeeping: unable update items count: {err}"));
     }
 }
 

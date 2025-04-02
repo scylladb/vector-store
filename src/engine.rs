@@ -106,7 +106,6 @@ pub(crate) async fn new(
 
                     let Ok(index_actor) = index::new(
                         id.clone(),
-                        modify_actor.clone(),
                         db.clone(),
                         metadata.dimensions,
                         metadata.connectivity,
