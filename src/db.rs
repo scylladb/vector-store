@@ -5,6 +5,7 @@
 
 use crate::ColumnName;
 use crate::Connectivity;
+use crate::DbCustomIndex;
 use crate::Dimensions;
 use crate::ExpansionAdd;
 use crate::ExpansionSearch;
@@ -36,7 +37,7 @@ use uuid::Uuid;
 
 type GetIndexDbR = anyhow::Result<mpsc::Sender<DbIndex>>;
 type LatestSchemaVersionR = anyhow::Result<Option<CqlTimeuuid>>;
-type GetIndexesR = anyhow::Result<Vec<GetIndexes>>;
+type GetIndexesR = anyhow::Result<Vec<DbCustomIndex>>;
 type GetIndexVersionR = anyhow::Result<Option<IndexVersion>>;
 type GetIndexTargetTypeR = anyhow::Result<Option<Dimensions>>;
 type GetIndexParamsR = anyhow::Result<Option<(Connectivity, ExpansionAdd, ExpansionSearch)>>;
@@ -255,20 +256,6 @@ async fn process(statements: Arc<Statements>, msg: Db) {
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct GetIndexes {
-    pub(crate) keyspace: KeyspaceName,
-    pub(crate) index: TableName,
-    pub(crate) table: TableName,
-    pub(crate) target_column: ColumnName,
-}
-
-impl GetIndexes {
-    pub(crate) fn id(&self) -> IndexId {
-        IndexId::new(&self.keyspace, &self.index)
-    }
-}
-
 struct Statements {
     session: Arc<Session>,
     st_latest_schema_version: PreparedStatement,
@@ -369,7 +356,7 @@ impl Statements {
             .await?
             .rows_stream::<(String, String, String, BTreeMap<String, String>)>()?
             .try_filter_map(|(keyspace, index, table, mut options)| async move {
-                Ok(options.remove("target").map(|target| GetIndexes {
+                Ok(options.remove("target").map(|target| DbCustomIndex {
                     keyspace: keyspace.into(),
                     index: index.into(),
                     table: table.into(),
