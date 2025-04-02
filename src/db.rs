@@ -5,16 +5,20 @@
 
 use crate::db_index;
 use crate::db_index::DbIndex;
+use crate::ColumnName;
 use crate::Connectivity;
 use crate::ExpansionAdd;
 use crate::ExpansionSearch;
 use crate::IndexId;
 use crate::IndexMetadata;
+use crate::KeyspaceName;
+use crate::TableName;
 use anyhow::Context;
 use futures::TryStreamExt;
 use scylla::client::session::Session;
 use scylla::statement::prepared::PreparedStatement;
 use scylla::value::CqlTimeuuid;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -33,6 +37,10 @@ pub(crate) enum Db {
         tx: oneshot::Sender<anyhow::Result<Option<CqlTimeuuid>>>,
     },
 
+    GetIndexes {
+        tx: oneshot::Sender<anyhow::Result<Vec<GetIndexes>>>,
+    },
+
     GetIndexParams {
         id: IndexId,
         #[allow(clippy::type_complexity)]
@@ -44,6 +52,8 @@ pub(crate) trait DbExt {
     async fn get_index_db(&self, metadata: IndexMetadata) -> anyhow::Result<mpsc::Sender<DbIndex>>;
 
     async fn latest_schema_version(&self) -> anyhow::Result<Option<CqlTimeuuid>>;
+
+    async fn get_indexes(&self) -> anyhow::Result<Vec<GetIndexes>>;
 
     async fn get_index_params(
         &self,
@@ -61,6 +71,12 @@ impl DbExt for mpsc::Sender<Db> {
     async fn latest_schema_version(&self) -> anyhow::Result<Option<CqlTimeuuid>> {
         let (tx, rx) = oneshot::channel();
         self.send(Db::LatestSchemaVersion { tx }).await?;
+        rx.await?
+    }
+
+    async fn get_indexes(&self) -> anyhow::Result<Vec<GetIndexes>> {
+        let (tx, rx) = oneshot::channel();
+        self.send(Db::GetIndexes { tx }).await?;
         rx.await?
     }
 
@@ -100,15 +116,34 @@ async fn process(statements: Arc<Statements>, msg: Db) {
                 warn!("db::process: Db::LatestSchemaVersion: unable to send response")
             }),
 
+        Db::GetIndexes { tx } => tx
+            .send(statements.get_indexes().await)
+            .unwrap_or_else(|_| warn!("db::process: Db::GetIndexes: unable to send response")),
+
         Db::GetIndexParams { id, tx } => tx
             .send(statements.get_index_params(id).await)
             .unwrap_or_else(|_| warn!("db::process: Db::GetIndexParams: unable to send response")),
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct GetIndexes {
+    pub(crate) keyspace: KeyspaceName,
+    pub(crate) index: TableName,
+    pub(crate) table: TableName,
+    pub(crate) target: ColumnName,
+}
+
+impl GetIndexes {
+    pub(crate) fn id(&self) -> IndexId {
+        IndexId::new(&self.keyspace, &self.index)
+    }
+}
+
 struct Statements {
     session: Arc<Session>,
     st_latest_schema_version: PreparedStatement,
+    st_get_indexes: PreparedStatement,
     st_get_index_params: PreparedStatement,
 }
 
@@ -119,6 +154,11 @@ impl Statements {
                 .prepare(Self::ST_LATEST_SCHEMA_VERSION)
                 .await
                 .context("ST_LATEST_SCHEMA_VERSION")?,
+
+            st_get_indexes: session
+                .prepare(Self::ST_GET_INDEXES)
+                .await
+                .context("ST_GET_INDEXES")?,
 
             st_get_index_params: session
                 .prepare(Self::ST_GET_INDEX_PARAMS)
@@ -150,6 +190,31 @@ impl Statements {
             .try_next()
             .await?
             .map(|(timeuuid,)| timeuuid))
+    }
+
+    const ST_GET_INDEXES: &str = "
+        SELECT keyspace_name, index_name, table_name, options
+        FROM system_schema.indexes
+        WHERE kind = 'CUSTOM'
+        ALLOW FILTERING
+        ";
+
+    async fn get_indexes(&self) -> anyhow::Result<Vec<GetIndexes>> {
+        Ok(self
+            .session
+            .execute_iter(self.st_get_indexes.clone(), &[])
+            .await?
+            .rows_stream::<(String, String, String, BTreeMap<String, String>)>()?
+            .try_filter_map(|(keyspace, index, table, mut options)| async move {
+                Ok(options.remove("target").map(|target| GetIndexes {
+                    keyspace: keyspace.into(),
+                    index: index.into(),
+                    table: table.into(),
+                    target: target.into(),
+                }))
+            })
+            .try_collect()
+            .await?)
     }
 
     const ST_GET_INDEX_PARAMS: &str = "

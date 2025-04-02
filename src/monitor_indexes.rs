@@ -9,7 +9,6 @@ use crate::engine::Engine;
 use crate::engine::EngineExt;
 use crate::ColumnName;
 use crate::Dimensions;
-use crate::IndexId;
 use crate::IndexMetadata;
 use crate::IndexVersion;
 use crate::KeyspaceName;
@@ -20,7 +19,6 @@ use regex::Regex;
 use scylla::client::session::Session;
 use scylla::statement::prepared::PreparedStatement;
 use scylla::value::CqlTimeuuid;
-use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::mem;
 use std::num::NonZeroUsize;
@@ -72,7 +70,6 @@ pub(crate) async fn new(
 
 struct Db {
     session: Arc<Session>,
-    st_get_indexes: PreparedStatement,
     st_get_index_version: PreparedStatement,
     st_get_index_target_type: PreparedStatement,
     re_get_index_target_type: Regex,
@@ -81,10 +78,6 @@ struct Db {
 impl Db {
     async fn new(session: Arc<Session>) -> anyhow::Result<Self> {
         Ok(Self {
-            st_get_indexes: session
-                .prepare(Self::ST_GET_INDEXES)
-                .await
-                .context("ST_GET_INDEXES")?,
             st_get_index_version: session
                 .prepare(Self::ST_GET_INDEX_VERSION)
                 .await
@@ -97,30 +90,6 @@ impl Db {
                 .context("RE_GET_INDEX_TARGET_TYPE")?,
             session,
         })
-    }
-
-    const ST_GET_INDEXES: &str = "
-        SELECT keyspace_name, index_name, table_name, options
-        FROM system_schema.indexes
-        WHERE kind = 'CUSTOM'
-        ALLOW FILTERING
-        ";
-    async fn get_indexes(&self) -> anyhow::Result<Vec<DbGetIndexes>> {
-        Ok(self
-            .session
-            .execute_iter(self.st_get_indexes.clone(), &[])
-            .await?
-            .rows_stream::<(String, String, String, BTreeMap<String, String>)>()?
-            .try_filter_map(|(keyspace, index, table, mut options)| async move {
-                Ok(options.remove("target").map(|target| DbGetIndexes {
-                    keyspace: keyspace.into(),
-                    index: index.into(),
-                    table: table.into(),
-                    target: target.into(),
-                }))
-            })
-            .try_collect()
-            .await?)
     }
 
     const ST_GET_INDEX_VERSION: &str = "
@@ -179,20 +148,6 @@ impl Db {
     }
 }
 
-#[derive(Debug)]
-struct DbGetIndexes {
-    keyspace: KeyspaceName,
-    index: TableName,
-    table: TableName,
-    target: ColumnName,
-}
-
-impl DbGetIndexes {
-    fn id(&self) -> IndexId {
-        IndexId::new(&self.keyspace, &self.index)
-    }
-}
-
 #[derive(PartialEq)]
 struct SchemaVersion(Option<CqlTimeuuid>);
 
@@ -220,7 +175,7 @@ impl SchemaVersion {
 
 async fn get_indexes(db: &Db, db_actor: &Sender<db::Db>) -> anyhow::Result<HashSet<IndexMetadata>> {
     let mut indexes = HashSet::new();
-    for idx in db.get_indexes().await?.into_iter() {
+    for idx in db_actor.get_indexes().await?.into_iter() {
         let Some(version) = db
             .get_index_version(idx.keyspace.clone(), idx.index.clone())
             .await
