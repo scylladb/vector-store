@@ -42,7 +42,7 @@ type GetIndexVersionR = anyhow::Result<Option<IndexVersion>>;
 type GetIndexTargetTypeR = anyhow::Result<Option<Dimensions>>;
 type GetIndexParamsR = anyhow::Result<Option<(Connectivity, ExpansionAdd, ExpansionSearch)>>;
 
-pub(crate) enum Db {
+pub enum Db {
     GetDbIndex {
         metadata: IndexMetadata,
         tx: oneshot::Sender<GetDbIndexR>,

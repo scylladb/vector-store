@@ -13,7 +13,6 @@ use futures::StreamExt;
 use futures::TryStreamExt;
 use futures::stream::BoxStream;
 use scylla::client::session::Session;
-use scylla::errors::NextRowError;
 use scylla::statement::prepared::PreparedStatement;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -22,10 +21,10 @@ use tracing::Instrument;
 use tracing::debug_span;
 use tracing::warn;
 
-type GetProcessedIdsR = anyhow::Result<BoxStream<'static, Result<Key, NextRowError>>>;
-type GetItemsR = anyhow::Result<BoxStream<'static, Result<(Key, Embeddings), NextRowError>>>;
+type GetProcessedIdsR = anyhow::Result<BoxStream<'static, anyhow::Result<Key>>>;
+type GetItemsR = anyhow::Result<BoxStream<'static, anyhow::Result<(Key, Embeddings)>>>;
 
-pub(crate) enum DbIndex {
+pub enum DbIndex {
     GetProcessedIds {
         tx: oneshot::Sender<GetProcessedIdsR>,
     },
@@ -178,6 +177,7 @@ impl Statements {
             .await?
             .rows_stream::<(i64,)>()?
             .map_ok(|(key,)| (key as u64).into())
+            .map_err(|err| err.into())
             .boxed())
     }
 
@@ -198,6 +198,7 @@ impl Statements {
             .await?
             .rows_stream::<(i64, Vec<f32>)>()?
             .map_ok(|(key, embeddings)| ((key as u64).into(), embeddings.into()))
+            .map_err(|err| err.into())
             .boxed())
     }
 

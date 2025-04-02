@@ -3,15 +3,16 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
-mod db;
-mod db_index;
+pub mod db;
+pub mod db_index;
 mod engine;
-mod httproutes;
+pub mod httproutes;
 mod httpserver;
 mod index;
 mod monitor_indexes;
 mod monitor_items;
 
+use db::Db;
 use scylla::cluster::metadata::ColumnType;
 use scylla::serialize::SerializationError;
 use scylla::serialize::value::SerializeValue;
@@ -21,6 +22,7 @@ use std::borrow::Cow;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use tokio::signal;
+use tokio::sync::mpsc::Sender;
 use utoipa::PartialSchema;
 use utoipa::ToSchema;
 use utoipa::openapi::KnownFormat;
@@ -35,15 +37,32 @@ use uuid::Uuid;
 pub struct ScyllaDbUri(String);
 
 #[derive(
-    Clone, Hash, Eq, PartialEq, Debug, serde::Serialize, derive_more::Display, utoipa::ToSchema,
+    Clone,
+    Hash,
+    Eq,
+    PartialEq,
+    Debug,
+    serde::Deserialize,
+    serde::Serialize,
+    derive_more::Display,
+    derive_more::AsRef,
+    utoipa::ToSchema,
 )]
 /// DB's absolute index/table name (with keyspace) for which index should be build
 #[schema(example = "vector_benchmark.vector_items")]
-struct IndexId(String);
+pub struct IndexId(String);
 
 impl IndexId {
-    fn new(keyspace: &KeyspaceName, index: &TableName) -> Self {
+    pub fn new(keyspace: &KeyspaceName, index: &TableName) -> Self {
         Self(format!("{}.{}", keyspace.0, index.0))
+    }
+
+    pub fn keyspace(&self) -> KeyspaceName {
+        self.0.split_once('.').unwrap().0.to_string().into()
+    }
+
+    pub fn index(&self) -> TableName {
+        self.0.split_once('.').unwrap().1.to_string().into()
     }
 }
 
@@ -58,9 +77,18 @@ impl SerializeValue for IndexId {
 }
 
 #[derive(
-    Clone, Debug, Eq, Hash, PartialEq, derive_more::From, serde::Deserialize, utoipa::ToSchema,
+    Clone,
+    Debug,
+    Eq,
+    Hash,
+    PartialEq,
+    derive_more::AsRef,
+    derive_more::Display,
+    derive_more::From,
+    serde::Deserialize,
+    utoipa::ToSchema,
 )]
-struct KeyspaceName(String);
+pub struct KeyspaceName(String);
 
 impl SerializeValue for KeyspaceName {
     fn serialize<'b>(
@@ -79,13 +107,14 @@ impl SerializeValue for KeyspaceName {
     Eq,
     Hash,
     derive_more::From,
+    derive_more::AsRef,
     serde::Serialize,
     serde::Deserialize,
     derive_more::Display,
     utoipa::ToSchema,
 )]
 /// A table name of the table with vectors in a db
-struct TableName(String);
+pub struct TableName(String);
 
 impl SerializeValue for TableName {
     fn serialize<'b>(
@@ -104,12 +133,13 @@ impl SerializeValue for TableName {
     Eq,
     Hash,
     derive_more::From,
+    derive_more::AsRef,
     serde::Serialize,
     serde::Deserialize,
     derive_more::Display,
 )]
 /// Name of the column in a db table
-struct ColumnName(String);
+pub struct ColumnName(String);
 
 impl SerializeValue for ColumnName {
     fn serialize<'b>(
@@ -125,14 +155,18 @@ impl SerializeValue for ColumnName {
     Copy,
     Clone,
     Debug,
+    PartialEq,
+    Eq,
+    Hash,
     serde::Serialize,
     serde::Deserialize,
     derive_more::From,
+    derive_more::AsRef,
     derive_more::Display,
     utoipa::ToSchema,
 )]
 /// Key for index embeddings
-struct Key(u64);
+pub struct Key(u64);
 
 impl SerializeValue for Key {
     fn serialize<'b>(
@@ -148,7 +182,7 @@ impl SerializeValue for Key {
     Clone, Debug, serde::Serialize, serde::Deserialize, derive_more::From, utoipa::ToSchema,
 )]
 /// Distance beetwen embeddings
-struct Distance(f32);
+pub struct Distance(f32);
 
 impl SerializeValue for Distance {
     fn serialize<'b>(
@@ -161,9 +195,16 @@ impl SerializeValue for Distance {
 }
 
 #[derive(
-    Copy, Clone, serde::Serialize, serde::Deserialize, derive_more::From, derive_more::Display,
+    Copy,
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    derive_more::From,
+    derive_more::Display,
+    derive_more::AsRef,
 )]
-struct IndexItemsCount(u32);
+pub struct IndexItemsCount(u32);
 
 impl SerializeValue for IndexItemsCount {
     fn serialize<'b>(
@@ -184,11 +225,12 @@ impl SerializeValue for IndexItemsCount {
     Hash,
     serde::Serialize,
     serde::Deserialize,
+    derive_more::AsRef,
     derive_more::From,
     derive_more::Display,
 )]
 /// Dimensions of embeddings
-struct Dimensions(NonZeroUsize);
+pub struct Dimensions(NonZeroUsize);
 
 #[derive(
     Copy,
@@ -199,11 +241,12 @@ struct Dimensions(NonZeroUsize);
     Hash,
     serde::Serialize,
     serde::Deserialize,
+    derive_more::AsRef,
     derive_more::From,
     derive_more::Display,
 )]
 /// Limit number of neighbors per graph node
-struct Connectivity(usize);
+pub struct Connectivity(usize);
 
 #[derive(
     Copy,
@@ -214,12 +257,13 @@ struct Connectivity(usize);
     Hash,
     serde::Serialize,
     serde::Deserialize,
+    derive_more::AsRef,
     derive_more::From,
     derive_more::Display,
     utoipa::ToSchema,
 )]
 /// Control the recall of indexing
-struct ExpansionAdd(usize);
+pub struct ExpansionAdd(usize);
 
 #[derive(
     Copy,
@@ -230,27 +274,47 @@ struct ExpansionAdd(usize);
     Hash,
     serde::Serialize,
     serde::Deserialize,
+    derive_more::AsRef,
     derive_more::From,
     derive_more::Display,
     utoipa::ToSchema,
 )]
 /// Control the quality of the search
-struct ExpansionSearch(usize);
+pub struct ExpansionSearch(usize);
 
 #[derive(
-    Copy, Clone, serde::Serialize, serde::Deserialize, derive_more::From, derive_more::Display,
+    Copy,
+    Clone,
+    serde::Serialize,
+    serde::Deserialize,
+    derive_more::AsRef,
+    derive_more::From,
+    derive_more::Display,
 )]
 struct ParamM(usize);
 
 #[derive(
-    Clone, Debug, serde::Serialize, serde::Deserialize, derive_more::From, utoipa::ToSchema,
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    derive_more::AsRef,
+    derive_more::From,
+    utoipa::ToSchema,
 )]
 /// Embeddings vector
-struct Embeddings(Vec<f32>);
+pub struct Embeddings(Vec<f32>);
 
-#[derive(Clone, serde::Serialize, serde::Deserialize, derive_more::Display, derive_more::From)]
+#[derive(
+    Clone,
+    serde::Serialize,
+    serde::Deserialize,
+    derive_more::AsRef,
+    derive_more::Display,
+    derive_more::From,
+)]
 /// Limit the number of search result
-struct Limit(NonZeroUsize);
+pub struct Limit(NonZeroUsize);
 
 impl ToSchema for Limit {
     fn name() -> Cow<'static, str> {
@@ -274,39 +338,39 @@ impl Default for Limit {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, derive_more::From)]
-struct IndexVersion(Uuid);
+pub struct IndexVersion(Uuid);
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 /// Information about an index
-struct IndexMetadata {
-    keyspace_name: KeyspaceName,
-    index_name: TableName,
-    table_name: TableName,
-    target_column: ColumnName,
-    key_name: ColumnName,
-    dimensions: Dimensions,
-    connectivity: Connectivity,
-    expansion_add: ExpansionAdd,
-    expansion_search: ExpansionSearch,
-    version: IndexVersion,
+pub struct IndexMetadata {
+    pub keyspace_name: KeyspaceName,
+    pub index_name: TableName,
+    pub table_name: TableName,
+    pub target_column: ColumnName,
+    pub key_name: ColumnName,
+    pub dimensions: Dimensions,
+    pub connectivity: Connectivity,
+    pub expansion_add: ExpansionAdd,
+    pub expansion_search: ExpansionSearch,
+    pub version: IndexVersion,
 }
 
 impl IndexMetadata {
-    fn id(&self) -> IndexId {
+    pub fn id(&self) -> IndexId {
         IndexId::new(&self.keyspace_name, &self.index_name)
     }
 }
 
 #[derive(Debug)]
-pub(crate) struct DbCustomIndex {
-    pub(crate) keyspace: KeyspaceName,
-    pub(crate) index: TableName,
-    pub(crate) table: TableName,
-    pub(crate) target_column: ColumnName,
+pub struct DbCustomIndex {
+    pub keyspace: KeyspaceName,
+    pub index: TableName,
+    pub table: TableName,
+    pub target_column: ColumnName,
 }
 
 impl DbCustomIndex {
-    pub(crate) fn id(&self) -> IndexId {
+    pub fn id(&self) -> IndexId {
         IndexId::new(&self.keyspace, &self.index)
     }
 }
@@ -317,16 +381,19 @@ pub struct HttpServerAddr(SocketAddr);
 pub async fn run(
     addr: HttpServerAddr,
     background_threads: Option<usize>,
-    scylladb_uri: ScyllaDbUri,
-) -> anyhow::Result<impl Sized> {
+    db_actor: Sender<Db>,
+) -> anyhow::Result<(impl Sized, SocketAddr)> {
     if let Some(background_threads) = background_threads {
         rayon::ThreadPoolBuilder::new()
             .num_threads(background_threads)
             .build_global()?;
     }
-    let db_actor = db::new(scylladb_uri).await?;
     let engine_actor = engine::new(db_actor).await?;
     httpserver::new(addr, engine_actor).await
+}
+
+pub async fn new_db(uri: ScyllaDbUri) -> anyhow::Result<Sender<Db>> {
+    db::new(uri).await
 }
 
 pub async fn wait_for_shutdown() {

@@ -37,8 +37,10 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .and_then(|v| v.parse().ok());
 
-    let _server_actor =
-        vector_store::run(scylla_usearch_addr, background_threads, scylladb_uri).await?;
+    let db_actor = vector_store::new_db(scylladb_uri).await?;
+    let (_server_actor, addr) =
+        vector_store::run(scylla_usearch_addr, background_threads, db_actor).await?;
+    tracing::info!("listening on {addr}");
     vector_store::wait_for_shutdown().await;
 
     Ok(())

@@ -63,17 +63,17 @@ async fn get_indexes(State(engine): State<Sender<Engine>>) -> response::Json<Vec
     response::Json(engine.get_index_ids().await)
 }
 
-#[derive(serde::Deserialize, utoipa::ToSchema)]
-struct PostIndexAnnRequest {
-    embeddings: Embeddings,
+#[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
+pub struct PostIndexAnnRequest {
+    pub embeddings: Embeddings,
     #[serde(default)]
-    limit: Limit,
+    pub limit: Limit,
 }
 
-#[derive(serde::Serialize, utoipa::ToSchema)]
-struct PostIndexAnnResponse {
-    keys: Vec<Key>,
-    distances: Vec<Distance>,
+#[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
+pub struct PostIndexAnnResponse {
+    pub keys: Vec<Key>,
+    pub distances: Vec<Distance>,
 }
 
 #[utoipa::path(
