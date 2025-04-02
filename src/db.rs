@@ -14,6 +14,7 @@ use anyhow::Context;
 use futures::TryStreamExt;
 use scylla::client::session::Session;
 use scylla::statement::prepared::PreparedStatement;
+use scylla::value::CqlTimeuuid;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -28,6 +29,10 @@ pub(crate) enum Db {
         tx: oneshot::Sender<anyhow::Result<mpsc::Sender<DbIndex>>>,
     },
 
+    LatestSchemaVersion {
+        tx: oneshot::Sender<anyhow::Result<Option<CqlTimeuuid>>>,
+    },
+
     GetIndexParams {
         id: IndexId,
         #[allow(clippy::type_complexity)]
@@ -37,6 +42,8 @@ pub(crate) enum Db {
 
 pub(crate) trait DbExt {
     async fn get_index_db(&self, metadata: IndexMetadata) -> anyhow::Result<mpsc::Sender<DbIndex>>;
+
+    async fn latest_schema_version(&self) -> anyhow::Result<Option<CqlTimeuuid>>;
 
     async fn get_index_params(
         &self,
@@ -48,6 +55,12 @@ impl DbExt for mpsc::Sender<Db> {
     async fn get_index_db(&self, metadata: IndexMetadata) -> anyhow::Result<mpsc::Sender<DbIndex>> {
         let (tx, rx) = oneshot::channel();
         self.send(Db::GetIndexDb { metadata, tx }).await?;
+        rx.await?
+    }
+
+    async fn latest_schema_version(&self) -> anyhow::Result<Option<CqlTimeuuid>> {
+        let (tx, rx) = oneshot::channel();
+        self.send(Db::LatestSchemaVersion { tx }).await?;
         rx.await?
     }
 
@@ -81,6 +94,12 @@ async fn process(statements: Arc<Statements>, msg: Db) {
             .send(statements.get_index_db(metadata).await)
             .unwrap_or_else(|_| warn!("db::process: Db::GetIndexDb: unable to send response")),
 
+        Db::LatestSchemaVersion { tx } => tx
+            .send(statements.latest_schema_version().await)
+            .unwrap_or_else(|_| {
+                warn!("db::process: Db::LatestSchemaVersion: unable to send response")
+            }),
+
         Db::GetIndexParams { id, tx } => tx
             .send(statements.get_index_params(id).await)
             .unwrap_or_else(|_| warn!("db::process: Db::GetIndexParams: unable to send response")),
@@ -89,12 +108,18 @@ async fn process(statements: Arc<Statements>, msg: Db) {
 
 struct Statements {
     session: Arc<Session>,
+    st_latest_schema_version: PreparedStatement,
     st_get_index_params: PreparedStatement,
 }
 
 impl Statements {
     async fn new(session: Arc<Session>) -> anyhow::Result<Self> {
         Ok(Self {
+            st_latest_schema_version: session
+                .prepare(Self::ST_LATEST_SCHEMA_VERSION)
+                .await
+                .context("ST_LATEST_SCHEMA_VERSION")?,
+
             st_get_index_params: session
                 .prepare(Self::ST_GET_INDEX_PARAMS)
                 .await
@@ -106,6 +131,25 @@ impl Statements {
 
     async fn get_index_db(&self, metadata: IndexMetadata) -> anyhow::Result<mpsc::Sender<DbIndex>> {
         db_index::new(Arc::clone(&self.session), metadata).await
+    }
+
+    const ST_LATEST_SCHEMA_VERSION: &str = "
+        SELECT state_id
+        FROM system.group0_history
+        WHERE key = 'history'
+        ORDER BY state_id DESC
+        LIMIT 1
+        ";
+
+    async fn latest_schema_version(&self) -> anyhow::Result<Option<CqlTimeuuid>> {
+        Ok(self
+            .session
+            .execute_iter(self.st_latest_schema_version.clone(), &[])
+            .await?
+            .rows_stream::<(CqlTimeuuid,)>()?
+            .try_next()
+            .await?
+            .map(|(timeuuid,)| timeuuid))
     }
 
     const ST_GET_INDEX_PARAMS: &str = "

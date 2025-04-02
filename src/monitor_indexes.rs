@@ -50,7 +50,7 @@ pub(crate) async fn new(
         while !rx.is_closed() {
             tokio::select! {
                 _ = interval.tick() => {
-                    if !schema_version.has_changed(&db).await {
+                    if !schema_version.has_changed(&db_actor).await {
                         continue;
                     }
                     let Ok(mut new_indexes) = get_indexes(&db, &db_actor).await.inspect_err(|err| {
@@ -72,7 +72,6 @@ pub(crate) async fn new(
 
 struct Db {
     session: Arc<Session>,
-    st_latest_schema_version: PreparedStatement,
     st_get_indexes: PreparedStatement,
     st_get_index_version: PreparedStatement,
     st_get_index_target_type: PreparedStatement,
@@ -82,10 +81,6 @@ struct Db {
 impl Db {
     async fn new(session: Arc<Session>) -> anyhow::Result<Self> {
         Ok(Self {
-            st_latest_schema_version: session
-                .prepare(Self::ST_LATEST_SCHEMA_VERSION)
-                .await
-                .context("ST_LATEST_SCHEMA_VERSION")?,
             st_get_indexes: session
                 .prepare(Self::ST_GET_INDEXES)
                 .await
@@ -102,24 +97,6 @@ impl Db {
                 .context("RE_GET_INDEX_TARGET_TYPE")?,
             session,
         })
-    }
-
-    const ST_LATEST_SCHEMA_VERSION: &str = "
-        SELECT state_id
-        FROM system.group0_history
-        WHERE key = 'history'
-        ORDER BY state_id DESC
-        LIMIT 1
-        ";
-    async fn latest_schema_version(&self) -> anyhow::Result<Option<CqlTimeuuid>> {
-        Ok(self
-            .session
-            .execute_iter(self.st_latest_schema_version.clone(), &[])
-            .await?
-            .rows_stream::<(CqlTimeuuid,)>()?
-            .try_next()
-            .await?
-            .map(|(timeuuid,)| timeuuid))
     }
 
     const ST_GET_INDEXES: &str = "
@@ -224,7 +201,7 @@ impl SchemaVersion {
         Self(None)
     }
 
-    async fn has_changed(&mut self, db: &Db) -> bool {
+    async fn has_changed(&mut self, db: &Sender<db::Db>) -> bool {
         let schema_version = db.latest_schema_version().await.unwrap_or_else(|err| {
             warn!("monitor_indexes: unable to get latest schema change: {err}");
             None
