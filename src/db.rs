@@ -13,6 +13,7 @@ use crate::IndexItemsCount;
 use crate::IndexMetadata;
 use crate::IndexVersion;
 use crate::KeyspaceName;
+use crate::ScyllaDbUri;
 use crate::TableName;
 use crate::db_index;
 use crate::db_index::DbIndex;
@@ -20,6 +21,7 @@ use anyhow::Context;
 use futures::TryStreamExt;
 use regex::Regex;
 use scylla::client::session::Session;
+use scylla::client::session_builder::SessionBuilder;
 use scylla::statement::prepared::PreparedStatement;
 use scylla::value::CqlTimeuuid;
 use std::collections::BTreeMap;
@@ -185,8 +187,8 @@ impl DbExt for mpsc::Sender<Db> {
     }
 }
 
-pub(crate) async fn new(db_session: Arc<Session>) -> anyhow::Result<mpsc::Sender<Db>> {
-    let statements = Arc::new(Statements::new(db_session).await?);
+pub(crate) async fn new(uri: ScyllaDbUri) -> anyhow::Result<mpsc::Sender<Db>> {
+    let statements = Arc::new(Statements::new(uri).await?);
     let (tx, mut rx) = mpsc::channel(10);
     tokio::spawn(
         async move {
@@ -283,7 +285,13 @@ struct Statements {
 }
 
 impl Statements {
-    async fn new(session: Arc<Session>) -> anyhow::Result<Self> {
+    async fn new(uri: ScyllaDbUri) -> anyhow::Result<Self> {
+        let session = Arc::new(
+            SessionBuilder::new()
+                .known_node(uri.0.as_str())
+                .build()
+                .await?,
+        );
         Ok(Self {
             st_latest_schema_version: session
                 .prepare(Self::ST_LATEST_SCHEMA_VERSION)
