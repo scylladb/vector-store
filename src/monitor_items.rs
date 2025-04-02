@@ -3,7 +3,6 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
-use crate::Embeddings;
 use crate::IndexMetadata;
 use crate::Key;
 use crate::db_index::DbIndex;
@@ -11,10 +10,8 @@ use crate::db_index::DbIndexExt;
 use crate::index::Index;
 use crate::index::IndexExt;
 use anyhow::Context;
-use futures::Stream;
 use futures::TryStreamExt;
 use scylla::client::session::Session;
-use scylla::errors::NextRowError;
 use scylla::statement::prepared::PreparedStatement;
 use std::mem;
 use std::sync::Arc;
@@ -68,7 +65,7 @@ pub(crate) async fn new(
                             }
                         }
                         State::Copy => {
-                            if table_to_index(&db, &index)
+                            if table_to_index(&db, &db_index, &index)
                                 .await
                                 .unwrap_or_else(|err| {
                                     warn!("monitor_items: unable to copy data from table to index: {err}");
@@ -95,7 +92,6 @@ enum State {
 
 struct Db {
     session: Arc<Session>,
-    st_get_items: PreparedStatement,
     st_reset_items: PreparedStatement,
     st_update_items: PreparedStatement,
 }
@@ -103,10 +99,6 @@ struct Db {
 impl Db {
     async fn new(session: Arc<Session>, metadata: IndexMetadata) -> anyhow::Result<Self> {
         Ok(Self {
-            st_get_items: session
-                .prepare(Self::get_items_query(&metadata))
-                .await
-                .context("get_items_query")?,
             st_reset_items: session
                 .prepare(Self::reset_items_query(&metadata))
                 .await
@@ -117,30 +109,6 @@ impl Db {
                 .context("update_items_query")?,
             session,
         })
-    }
-
-    fn get_items_query(metadata: &IndexMetadata) -> String {
-        format!(
-            "
-            SELECT {}, {}
-            FROM {}.{}
-            WHERE processed = FALSE
-            ",
-            metadata.key_name.0,
-            metadata.target_name.0,
-            metadata.keyspace_name.0,
-            metadata.table_name.0
-        )
-    }
-    async fn get_items(
-        &self,
-    ) -> anyhow::Result<impl Stream<Item = Result<(Key, Embeddings), NextRowError>>> {
-        Ok(self
-            .session
-            .execute_iter(self.st_get_items.clone(), ())
-            .await?
-            .rows_stream::<(i64, Vec<f32>)>()?
-            .map_ok(|(key, embeddings)| ((key as u64).into(), embeddings.into())))
     }
 
     fn reset_items_query(metadata: &IndexMetadata) -> String {
@@ -199,8 +167,12 @@ async fn reset_items(db: &Arc<Db>, db_index: &Sender<DbIndex>) -> anyhow::Result
 }
 
 /// Get new embeddings from db and add to the index. Then mark embeddings in db as processed
-async fn table_to_index(db: &Arc<Db>, index: &Sender<Index>) -> anyhow::Result<bool> {
-    let mut rows = db.get_items().await?;
+async fn table_to_index(
+    db: &Arc<Db>,
+    db_index: &Sender<DbIndex>,
+    index: &Sender<Index>,
+) -> anyhow::Result<bool> {
+    let mut rows = db_index.get_items().await?;
 
     // The value was taken from initial benchmarks
     const PROCESSED_CHUNK_SIZE: usize = 100;

@@ -4,6 +4,7 @@
  */
 
 use crate::ColumnName;
+use crate::Embeddings;
 use crate::IndexMetadata;
 use crate::Key;
 use crate::TableName;
@@ -25,12 +26,23 @@ pub(crate) enum DbIndex {
     GetProcessedIds {
         tx: oneshot::Sender<anyhow::Result<BoxStream<'static, Result<Key, NextRowError>>>>,
     },
+
+    GetItems {
+        #[allow(clippy::type_complexity)]
+        tx: oneshot::Sender<
+            anyhow::Result<BoxStream<'static, Result<(Key, Embeddings), NextRowError>>>,
+        >,
+    },
 }
 
 pub(crate) trait DbIndexExt {
     async fn get_processed_ids(
         &self,
     ) -> anyhow::Result<BoxStream<'static, Result<Key, NextRowError>>>;
+
+    async fn get_items(
+        &self,
+    ) -> anyhow::Result<BoxStream<'static, Result<(Key, Embeddings), NextRowError>>>;
 }
 
 impl DbIndexExt for mpsc::Sender<DbIndex> {
@@ -39,6 +51,14 @@ impl DbIndexExt for mpsc::Sender<DbIndex> {
     ) -> anyhow::Result<BoxStream<'static, Result<Key, NextRowError>>> {
         let (tx, rx) = oneshot::channel();
         self.send(DbIndex::GetProcessedIds { tx }).await?;
+        rx.await?
+    }
+
+    async fn get_items(
+        &self,
+    ) -> anyhow::Result<BoxStream<'static, Result<(Key, Embeddings), NextRowError>>> {
+        let (tx, rx) = oneshot::channel();
+        self.send(DbIndex::GetItems { tx }).await?;
         rx.await?
     }
 }
@@ -67,12 +87,17 @@ async fn process(statements: Arc<Statements>, msg: DbIndex) {
             .unwrap_or_else(|_| {
                 warn!("db_index::process: Db::GetProcessedIds: unable to send response")
             }),
+
+        DbIndex::GetItems { tx } => tx
+            .send(statements.get_items().await)
+            .unwrap_or_else(|_| warn!("db_index::process: Db::GetItems: unable to send response")),
     }
 }
 
 struct Statements {
     session: Arc<Session>,
     st_get_processed_ids: PreparedStatement,
+    st_get_items: PreparedStatement,
 }
 
 impl Statements {
@@ -85,6 +110,15 @@ impl Statements {
                 ))
                 .await
                 .context("get_processed_ids_query")?,
+
+            st_get_items: session
+                .prepare(Self::get_items_query(
+                    &metadata.table_name,
+                    &metadata.key_name,
+                    &metadata.target_name,
+                ))
+                .await
+                .context("get_items_query")?,
 
             session,
         })
@@ -110,6 +144,28 @@ impl Statements {
             .await?
             .rows_stream::<(i64,)>()?
             .map_ok(|(key,)| (key as u64).into())
+            .boxed())
+    }
+
+    fn get_items_query(table: &TableName, col_id: &ColumnName, col_emb: &ColumnName) -> String {
+        format!(
+            "
+            SELECT {col_id}, {col_emb}
+            FROM {table}
+            WHERE processed = FALSE
+            "
+        )
+    }
+
+    async fn get_items(
+        &self,
+    ) -> anyhow::Result<BoxStream<'static, Result<(Key, Embeddings), NextRowError>>> {
+        Ok(self
+            .session
+            .execute_iter(self.st_get_items.clone(), ())
+            .await?
+            .rows_stream::<(i64, Vec<f32>)>()?
+            .map_ok(|(key, embeddings)| ((key as u64).into(), embeddings.into()))
             .boxed())
     }
 }
