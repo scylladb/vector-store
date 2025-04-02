@@ -9,7 +9,6 @@ mod engine;
 mod httproutes;
 mod httpserver;
 mod index;
-mod modify_indexes;
 mod monitor_indexes;
 mod monitor_items;
 

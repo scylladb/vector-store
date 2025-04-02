@@ -70,6 +70,10 @@ pub(crate) enum Db {
         id: IndexId,
         items_count: IndexItemsCount,
     },
+
+    RemoveIndex {
+        id: IndexId,
+    },
 }
 
 pub(crate) trait DbExt {
@@ -102,6 +106,8 @@ pub(crate) trait DbExt {
         id: IndexId,
         items_count: IndexItemsCount,
     ) -> anyhow::Result<()>;
+
+    async fn remove_index(&self, id: IndexId) -> anyhow::Result<()>;
 }
 
 impl DbExt for mpsc::Sender<Db> {
@@ -172,6 +178,11 @@ impl DbExt for mpsc::Sender<Db> {
         self.send(Db::UpdateItemsCount { id, items_count }).await?;
         Ok(())
     }
+
+    async fn remove_index(&self, id: IndexId) -> anyhow::Result<()> {
+        self.send(Db::RemoveIndex { id }).await?;
+        Ok(())
+    }
 }
 
 pub(crate) async fn new(db_session: Arc<Session>) -> anyhow::Result<mpsc::Sender<Db>> {
@@ -235,6 +246,13 @@ async fn process(statements: Arc<Statements>, msg: Db) {
                 .await
                 .unwrap_or_else(|err| warn!("db::process: Db::UpdateItemsCount: {err}"));
         }
+
+        Db::RemoveIndex { id } => {
+            statements
+                .remove_index(id)
+                .await
+                .unwrap_or_else(|err| warn!("db::process: Db::RemoveIndex: {err}"));
+        }
     }
 }
 
@@ -261,6 +279,7 @@ struct Statements {
     re_get_index_target_type: Regex,
     st_get_index_params: PreparedStatement,
     st_update_items_count: PreparedStatement,
+    st_remove_index: PreparedStatement,
 }
 
 impl Statements {
@@ -298,6 +317,11 @@ impl Statements {
                 .prepare(Self::ST_UPDATE_ITEMS_COUNT)
                 .await
                 .context("ST_UPDATE_ITEMS_COUNT")?,
+
+            st_remove_index: session
+                .prepare(Self::ST_REMOVE_INDEX)
+                .await
+                .context("ST_REMOVE_INDEX")?,
 
             session,
         })
@@ -458,6 +482,18 @@ impl Statements {
     ) -> anyhow::Result<()> {
         self.session
             .execute_unpaged(&self.st_update_items_count, (items_count, id))
+            .await?;
+        Ok(())
+    }
+
+    const ST_REMOVE_INDEX: &str = "
+        DELETE FROM vector_benchmark.vector_indexes
+        WHERE id = ?
+        ";
+
+    async fn remove_index(&self, id: IndexId) -> anyhow::Result<()> {
+        self.session
+            .execute_unpaged(&self.st_remove_index, (id,))
             .await?;
         Ok(())
     }

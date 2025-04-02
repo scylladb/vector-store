@@ -9,8 +9,6 @@ use crate::db::Db;
 use crate::db::DbExt;
 use crate::index;
 use crate::index::Index;
-use crate::modify_indexes;
-use crate::modify_indexes::ModifyIndexesExt;
 use crate::monitor_indexes;
 use crate::monitor_items;
 use scylla::client::session::Session;
@@ -83,7 +81,6 @@ pub(crate) async fn new(
     let (tx, mut rx) = mpsc::channel(10);
 
     let monitor_actor = monitor_indexes::new(db.clone(), tx.clone()).await?;
-    let modify_actor = modify_indexes::new(Arc::clone(&db_session), db.clone()).await?;
 
     tokio::spawn(async move {
         let mut indexes = HashMap::new();
@@ -144,7 +141,9 @@ pub(crate) async fn new(
                 Engine::DelIndex { id } => {
                     indexes.remove(&id);
                     monitors.remove(&id);
-                    modify_actor.del(id).await;
+                    db.remove_index(id).await.unwrap_or_else(|err| {
+                        warn!("engine::Engine::DelIndex: issue while removing index: {err}")
+                    });
                 }
 
                 Engine::GetIndex { id, tx } => {
