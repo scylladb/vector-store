@@ -51,7 +51,7 @@ pub(crate) async fn new(
                 _ = interval.tick() => {
                     match state {
                         State::Reset => {
-                            if !reset_items(&db, &db_index)
+                            if !reset_items(&db_index)
                                 .await
                                 .unwrap_or_else(|err| {
                                     warn!("monitor_items: unable to reset items in table: {err}");
@@ -92,40 +92,18 @@ enum State {
 
 struct Db {
     session: Arc<Session>,
-    st_reset_items: PreparedStatement,
     st_update_items: PreparedStatement,
 }
 
 impl Db {
     async fn new(session: Arc<Session>, metadata: IndexMetadata) -> anyhow::Result<Self> {
         Ok(Self {
-            st_reset_items: session
-                .prepare(Self::reset_items_query(&metadata))
-                .await
-                .context("reset_items_query")?,
             st_update_items: session
                 .prepare(Self::update_items_query(&metadata))
                 .await
                 .context("update_items_query")?,
             session,
         })
-    }
-
-    fn reset_items_query(metadata: &IndexMetadata) -> String {
-        format!(
-            "
-            UPDATE {}.{}
-                SET processed = False
-                WHERE id IN ?
-            ",
-            metadata.keyspace_name.0, metadata.table_name.0
-        )
-    }
-    async fn reset_items(&self, keys: &[Key]) -> anyhow::Result<()> {
-        self.session
-            .execute_unpaged(&self.st_reset_items, (keys,))
-            .await?;
-        Ok(())
     }
 
     fn update_items_query(metadata: &IndexMetadata) -> String {
@@ -146,21 +124,15 @@ impl Db {
     }
 }
 
-async fn reset_items(db: &Arc<Db>, db_index: &Sender<DbIndex>) -> anyhow::Result<bool> {
+async fn reset_items(db_index: &Sender<DbIndex>) -> anyhow::Result<bool> {
     // The value was taken from initial benchmarks
     const CHUNK_SIZE: usize = 100;
     let mut keys_chunks = db_index.get_processed_ids().await?.try_chunks(CHUNK_SIZE);
 
-    let mut resetting = Vec::new();
-    while let Some(keys) = keys_chunks.try_next().await? {
-        let db = Arc::clone(db);
-        resetting.push(tokio::spawn(async move {
-            db.reset_items(&keys).await.map(|_| keys.len())
-        }));
-    }
     let mut count = 0;
-    for processed in resetting.into_iter() {
-        count += processed.await??;
+    while let Some(keys) = keys_chunks.try_next().await? {
+        count += keys.len();
+        db_index.reset_items(keys).await?;
     }
     debug!("processed new items: {count}");
     Ok(count > 0)

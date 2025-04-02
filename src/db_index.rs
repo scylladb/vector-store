@@ -33,6 +33,10 @@ pub(crate) enum DbIndex {
             anyhow::Result<BoxStream<'static, Result<(Key, Embeddings), NextRowError>>>,
         >,
     },
+
+    ResetItems {
+        keys: Vec<Key>,
+    },
 }
 
 pub(crate) trait DbIndexExt {
@@ -43,6 +47,8 @@ pub(crate) trait DbIndexExt {
     async fn get_items(
         &self,
     ) -> anyhow::Result<BoxStream<'static, Result<(Key, Embeddings), NextRowError>>>;
+
+    async fn reset_items(&self, keys: Vec<Key>) -> anyhow::Result<()>;
 }
 
 impl DbIndexExt for mpsc::Sender<DbIndex> {
@@ -60,6 +66,11 @@ impl DbIndexExt for mpsc::Sender<DbIndex> {
         let (tx, rx) = oneshot::channel();
         self.send(DbIndex::GetItems { tx }).await?;
         rx.await?
+    }
+
+    async fn reset_items(&self, keys: Vec<Key>) -> anyhow::Result<()> {
+        self.send(DbIndex::ResetItems { keys }).await?;
+        Ok(())
     }
 }
 
@@ -91,6 +102,11 @@ async fn process(statements: Arc<Statements>, msg: DbIndex) {
         DbIndex::GetItems { tx } => tx
             .send(statements.get_items().await)
             .unwrap_or_else(|_| warn!("db_index::process: Db::GetItems: unable to send response")),
+
+        DbIndex::ResetItems { keys } => statements
+            .reset_items(keys)
+            .await
+            .unwrap_or_else(|err| warn!("db_index::process: Db::ResetItems: {err}")),
     }
 }
 
@@ -98,6 +114,7 @@ struct Statements {
     session: Arc<Session>,
     st_get_processed_ids: PreparedStatement,
     st_get_items: PreparedStatement,
+    st_reset_items: PreparedStatement,
 }
 
 impl Statements {
@@ -119,6 +136,11 @@ impl Statements {
                 ))
                 .await
                 .context("get_items_query")?,
+
+            st_reset_items: session
+                .prepare(Self::reset_items_query(&metadata.table_name))
+                .await
+                .context("reset_items_query")?,
 
             session,
         })
@@ -167,5 +189,22 @@ impl Statements {
             .rows_stream::<(i64, Vec<f32>)>()?
             .map_ok(|(key, embeddings)| ((key as u64).into(), embeddings.into()))
             .boxed())
+    }
+
+    fn reset_items_query(table: &TableName) -> String {
+        format!(
+            "
+            UPDATE {table}
+                SET processed = False
+                WHERE id IN ?
+            "
+        )
+    }
+
+    async fn reset_items(&self, keys: Vec<Key>) -> anyhow::Result<()> {
+        self.session
+            .execute_unpaged(&self.st_reset_items, (keys,))
+            .await?;
+        Ok(())
     }
 }
