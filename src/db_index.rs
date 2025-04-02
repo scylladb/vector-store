@@ -37,6 +37,10 @@ pub(crate) enum DbIndex {
     ResetItems {
         keys: Vec<Key>,
     },
+
+    UpdateItems {
+        keys: Vec<Key>,
+    },
 }
 
 pub(crate) trait DbIndexExt {
@@ -49,6 +53,8 @@ pub(crate) trait DbIndexExt {
     ) -> anyhow::Result<BoxStream<'static, Result<(Key, Embeddings), NextRowError>>>;
 
     async fn reset_items(&self, keys: Vec<Key>) -> anyhow::Result<()>;
+
+    async fn update_items(&self, keys: Vec<Key>) -> anyhow::Result<()>;
 }
 
 impl DbIndexExt for mpsc::Sender<DbIndex> {
@@ -70,6 +76,11 @@ impl DbIndexExt for mpsc::Sender<DbIndex> {
 
     async fn reset_items(&self, keys: Vec<Key>) -> anyhow::Result<()> {
         self.send(DbIndex::ResetItems { keys }).await?;
+        Ok(())
+    }
+
+    async fn update_items(&self, keys: Vec<Key>) -> anyhow::Result<()> {
+        self.send(DbIndex::UpdateItems { keys }).await?;
         Ok(())
     }
 }
@@ -107,6 +118,11 @@ async fn process(statements: Arc<Statements>, msg: DbIndex) {
             .reset_items(keys)
             .await
             .unwrap_or_else(|err| warn!("db_index::process: Db::ResetItems: {err}")),
+
+        DbIndex::UpdateItems { keys } => statements
+            .update_items(keys)
+            .await
+            .unwrap_or_else(|err| warn!("db_index::process: Db::UpdateItems: {err}")),
     }
 }
 
@@ -115,6 +131,7 @@ struct Statements {
     st_get_processed_ids: PreparedStatement,
     st_get_items: PreparedStatement,
     st_reset_items: PreparedStatement,
+    st_update_items: PreparedStatement,
 }
 
 impl Statements {
@@ -141,6 +158,11 @@ impl Statements {
                 .prepare(Self::reset_items_query(&metadata.table_name))
                 .await
                 .context("reset_items_query")?,
+
+            st_update_items: session
+                .prepare(Self::update_items_query(&metadata.table_name))
+                .await
+                .context("update_items_query")?,
 
             session,
         })
@@ -204,6 +226,23 @@ impl Statements {
     async fn reset_items(&self, keys: Vec<Key>) -> anyhow::Result<()> {
         self.session
             .execute_unpaged(&self.st_reset_items, (keys,))
+            .await?;
+        Ok(())
+    }
+
+    fn update_items_query(table: &TableName) -> String {
+        format!(
+            "
+            UPDATE {table}
+                SET processed = True
+                WHERE id IN ?
+            "
+        )
+    }
+
+    async fn update_items(&self, keys: Vec<Key>) -> anyhow::Result<()> {
+        self.session
+            .execute_unpaged(&self.st_update_items, (keys,))
             .await?;
         Ok(())
     }

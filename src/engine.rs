@@ -11,9 +11,7 @@ use crate::index;
 use crate::index::Index;
 use crate::monitor_indexes;
 use crate::monitor_items;
-use scylla::client::session::Session;
 use std::collections::HashMap;
-use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tracing::error;
@@ -74,10 +72,7 @@ impl EngineExt for mpsc::Sender<Engine> {
     }
 }
 
-pub(crate) async fn new(
-    db_session: Arc<Session>,
-    db: mpsc::Sender<Db>,
-) -> anyhow::Result<mpsc::Sender<Engine>> {
+pub(crate) async fn new(db: mpsc::Sender<Db>) -> anyhow::Result<mpsc::Sender<Engine>> {
     let (tx, mut rx) = mpsc::channel(10);
 
     let monitor_actor = monitor_indexes::new(db.clone(), tx.clone()).await?;
@@ -122,9 +117,7 @@ pub(crate) async fn new(
                     };
 
                     let Ok(monitor_actor) = monitor_items::new(
-                        Arc::clone(&db_session),
                         db_index.clone(),
-                        metadata.clone(),
                         index_actor.clone(),
                     )
                     .await
