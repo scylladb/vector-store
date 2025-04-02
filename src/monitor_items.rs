@@ -7,6 +7,7 @@ use crate::Embeddings;
 use crate::IndexMetadata;
 use crate::Key;
 use crate::db_index::DbIndex;
+use crate::db_index::DbIndexExt;
 use crate::index::Index;
 use crate::index::IndexExt;
 use anyhow::Context;
@@ -31,7 +32,7 @@ pub(crate) enum MonitorItems {}
 
 pub(crate) async fn new(
     db_session: Arc<Session>,
-    _db_index: Sender<DbIndex>,
+    db_index: Sender<DbIndex>,
     metadata: IndexMetadata,
     index: Sender<Index>,
 ) -> anyhow::Result<Sender<MonitorItems>> {
@@ -53,7 +54,7 @@ pub(crate) async fn new(
                 _ = interval.tick() => {
                     match state {
                         State::Reset => {
-                            if !reset_items(&db)
+                            if !reset_items(&db, &db_index)
                                 .await
                                 .unwrap_or_else(|err| {
                                     warn!("monitor_items: unable to reset items in table: {err}");
@@ -94,7 +95,6 @@ enum State {
 
 struct Db {
     session: Arc<Session>,
-    st_get_processed_ids: PreparedStatement,
     st_get_items: PreparedStatement,
     st_reset_items: PreparedStatement,
     st_update_items: PreparedStatement,
@@ -103,10 +103,6 @@ struct Db {
 impl Db {
     async fn new(session: Arc<Session>, metadata: IndexMetadata) -> anyhow::Result<Self> {
         Ok(Self {
-            st_get_processed_ids: session
-                .prepare(Self::get_processed_ids_query(&metadata))
-                .await
-                .context("get_processed_ids_query")?,
             st_get_items: session
                 .prepare(Self::get_items_query(&metadata))
                 .await
@@ -121,28 +117,6 @@ impl Db {
                 .context("update_items_query")?,
             session,
         })
-    }
-
-    fn get_processed_ids_query(metadata: &IndexMetadata) -> String {
-        format!(
-            "
-            SELECT {}
-            FROM {}.{}
-            WHERE processed = TRUE
-            LIMIT 1000
-            ",
-            metadata.key_name.0, metadata.keyspace_name.0, metadata.table_name.0
-        )
-    }
-    async fn get_processed_ids(
-        &self,
-    ) -> anyhow::Result<impl Stream<Item = Result<Key, NextRowError>>> {
-        Ok(self
-            .session
-            .execute_iter(self.st_get_processed_ids.clone(), ())
-            .await?
-            .rows_stream::<(i64,)>()?
-            .map_ok(|(key,)| (key as u64).into()))
     }
 
     fn get_items_query(metadata: &IndexMetadata) -> String {
@@ -204,10 +178,10 @@ impl Db {
     }
 }
 
-async fn reset_items(db: &Arc<Db>) -> anyhow::Result<bool> {
+async fn reset_items(db: &Arc<Db>, db_index: &Sender<DbIndex>) -> anyhow::Result<bool> {
     // The value was taken from initial benchmarks
     const CHUNK_SIZE: usize = 100;
-    let mut keys_chunks = db.get_processed_ids().await?.try_chunks(CHUNK_SIZE);
+    let mut keys_chunks = db_index.get_processed_ids().await?.try_chunks(CHUNK_SIZE);
 
     let mut resetting = Vec::new();
     while let Some(keys) = keys_chunks.try_next().await? {
