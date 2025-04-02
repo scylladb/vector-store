@@ -5,8 +5,15 @@
 
 use crate::db_index;
 use crate::db_index::DbIndex;
+use crate::Connectivity;
+use crate::ExpansionAdd;
+use crate::ExpansionSearch;
+use crate::IndexId;
 use crate::IndexMetadata;
+use anyhow::Context;
+use futures::TryStreamExt;
 use scylla::client::session::Session;
+use scylla::statement::prepared::PreparedStatement;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -20,16 +27,36 @@ pub(crate) enum Db {
         metadata: IndexMetadata,
         tx: oneshot::Sender<anyhow::Result<mpsc::Sender<DbIndex>>>,
     },
+
+    GetIndexParams {
+        id: IndexId,
+        #[allow(clippy::type_complexity)]
+        tx: oneshot::Sender<anyhow::Result<Option<(Connectivity, ExpansionAdd, ExpansionSearch)>>>,
+    },
 }
 
 pub(crate) trait DbExt {
     async fn get_index_db(&self, metadata: IndexMetadata) -> anyhow::Result<mpsc::Sender<DbIndex>>;
+
+    async fn get_index_params(
+        &self,
+        id: IndexId,
+    ) -> anyhow::Result<Option<(Connectivity, ExpansionAdd, ExpansionSearch)>>;
 }
 
 impl DbExt for mpsc::Sender<Db> {
     async fn get_index_db(&self, metadata: IndexMetadata) -> anyhow::Result<mpsc::Sender<DbIndex>> {
         let (tx, rx) = oneshot::channel();
         self.send(Db::GetIndexDb { metadata, tx }).await?;
+        rx.await?
+    }
+
+    async fn get_index_params(
+        &self,
+        id: IndexId,
+    ) -> anyhow::Result<Option<(Connectivity, ExpansionAdd, ExpansionSearch)>> {
+        let (tx, rx) = oneshot::channel();
+        self.send(Db::GetIndexParams { id, tx }).await?;
         rx.await?
     }
 }
@@ -53,20 +80,68 @@ async fn process(statements: Arc<Statements>, msg: Db) {
         Db::GetIndexDb { metadata, tx } => tx
             .send(statements.get_index_db(metadata).await)
             .unwrap_or_else(|_| warn!("db::process: Db::GetIndexDb: unable to send response")),
+
+        Db::GetIndexParams { id, tx } => tx
+            .send(statements.get_index_params(id).await)
+            .unwrap_or_else(|_| warn!("db::process: Db::GetIndexParams: unable to send response")),
     }
 }
 
-#[allow(dead_code)]
 struct Statements {
     session: Arc<Session>,
+    st_get_index_params: PreparedStatement,
 }
 
 impl Statements {
     async fn new(session: Arc<Session>) -> anyhow::Result<Self> {
-        Ok(Self { session })
+        Ok(Self {
+            st_get_index_params: session
+                .prepare(Self::ST_GET_INDEX_PARAMS)
+                .await
+                .context("ST_GET_INDEX_PARAMS")?,
+
+            session,
+        })
     }
 
     async fn get_index_db(&self, metadata: IndexMetadata) -> anyhow::Result<mpsc::Sender<DbIndex>> {
         db_index::new(Arc::clone(&self.session), metadata).await
+    }
+
+    const ST_GET_INDEX_PARAMS: &str = "
+        SELECT param_m, param_ef_construct, param_ef_search
+        FROM vector_benchmark.vector_indexes
+        WHERE id = ?
+        ";
+
+    async fn get_index_params(
+        &self,
+        id: IndexId,
+    ) -> anyhow::Result<Option<(Connectivity, ExpansionAdd, ExpansionSearch)>> {
+        Ok(self
+            .session
+            .execute_iter(self.st_get_index_params.clone(), (id,))
+            .await?
+            .rows_stream::<(Option<i32>, Option<i32>, Option<i32>)>()?
+            .try_filter_map(|(connectivity, expansion_add, expansion_search)| {
+                Box::pin(async move {
+                    Ok(connectivity
+                        .zip(expansion_add)
+                        .zip(expansion_search)
+                        .and_then(|((connectivity, expansion_add), expansion_search)| {
+                            (connectivity >= 0 && expansion_add >= 0 && expansion_search >= 0)
+                                .then_some((connectivity, expansion_add, expansion_search))
+                        }))
+                })
+            })
+            .map_ok(|(connectivity, expansion_add, expansion_search)| {
+                (
+                    (connectivity as usize).into(),
+                    (expansion_add as usize).into(),
+                    (expansion_search as usize).into(),
+                )
+            })
+            .try_next()
+            .await?)
     }
 }

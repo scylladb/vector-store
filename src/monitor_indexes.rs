@@ -4,13 +4,11 @@
  */
 
 use crate::db;
+use crate::db::DbExt;
 use crate::engine::Engine;
 use crate::engine::EngineExt;
 use crate::ColumnName;
-use crate::Connectivity;
 use crate::Dimensions;
-use crate::ExpansionAdd;
-use crate::ExpansionSearch;
 use crate::IndexId;
 use crate::IndexMetadata;
 use crate::IndexVersion;
@@ -38,7 +36,7 @@ pub(crate) enum MonitorIndexes {}
 
 pub(crate) async fn new(
     db_session: Arc<Session>,
-    _db_actor: Sender<db::Db>,
+    db_actor: Sender<db::Db>,
     engine: Sender<Engine>,
 ) -> anyhow::Result<Sender<MonitorIndexes>> {
     let db = Db::new(db_session).await?;
@@ -55,7 +53,7 @@ pub(crate) async fn new(
                     if !schema_version.has_changed(&db).await {
                         continue;
                     }
-                    let Ok(mut new_indexes) = get_indexes(&db).await.inspect_err(|err| {
+                    let Ok(mut new_indexes) = get_indexes(&db, &db_actor).await.inspect_err(|err| {
                         warn!("monitor_indexes: unable to get the list of indexes: {err}");
                     }) else {
                         schema_version.reset();
@@ -79,7 +77,6 @@ struct Db {
     st_get_index_version: PreparedStatement,
     st_get_index_target_type: PreparedStatement,
     re_get_index_target_type: Regex,
-    st_get_index_params: PreparedStatement,
 }
 
 impl Db {
@@ -103,10 +100,6 @@ impl Db {
                 .context("ST_GET_INDEX_TARGET_TYPE")?,
             re_get_index_target_type: Regex::new(Self::RE_GET_INDEX_TARGET_TYPE)
                 .context("RE_GET_INDEX_TARGET_TYPE")?,
-            st_get_index_params: session
-                .prepare(Self::ST_GET_INDEX_PARAMS)
-                .await
-                .context("ST_GET_INDEX_PARAMS")?,
             session,
         })
     }
@@ -207,42 +200,6 @@ impl Db {
                 NonZeroUsize::new(dimensions).map(|dimensions| dimensions.into())
             }))
     }
-
-    const ST_GET_INDEX_PARAMS: &str = "
-        SELECT param_m, param_ef_construct, param_ef_search
-        FROM vector_benchmark.vector_indexes
-        WHERE id = ?
-        ";
-    async fn get_index_params(
-        &self,
-        id: IndexId,
-    ) -> anyhow::Result<Option<(Connectivity, ExpansionAdd, ExpansionSearch)>> {
-        Ok(self
-            .session
-            .execute_iter(self.st_get_index_params.clone(), (id,))
-            .await?
-            .rows_stream::<(Option<i32>, Option<i32>, Option<i32>)>()?
-            .try_filter_map(|(connectivity, expansion_add, expansion_search)| {
-                Box::pin(async move {
-                    Ok(connectivity
-                        .zip(expansion_add)
-                        .zip(expansion_search)
-                        .and_then(|((connectivity, expansion_add), expansion_search)| {
-                            (connectivity >= 0 && expansion_add >= 0 && expansion_search >= 0)
-                                .then_some((connectivity, expansion_add, expansion_search))
-                        }))
-                })
-            })
-            .map_ok(|(connectivity, expansion_add, expansion_search)| {
-                (
-                    (connectivity as usize).into(),
-                    (expansion_add as usize).into(),
-                    (expansion_search as usize).into(),
-                )
-            })
-            .try_next()
-            .await?)
-    }
 }
 
 #[derive(Debug)]
@@ -284,7 +241,7 @@ impl SchemaVersion {
     }
 }
 
-async fn get_indexes(db: &Db) -> anyhow::Result<HashSet<IndexMetadata>> {
+async fn get_indexes(db: &Db, db_actor: &Sender<db::Db>) -> anyhow::Result<HashSet<IndexMetadata>> {
     let mut indexes = HashSet::new();
     for idx in db.get_indexes().await?.into_iter() {
         let Some(version) = db
@@ -309,8 +266,10 @@ async fn get_indexes(db: &Db) -> anyhow::Result<HashSet<IndexMetadata>> {
             continue;
         };
 
-        let (connectivity, expansion_add, expansion_search) = if let Some(params) =
-            db.get_index_params(idx.id()).await.inspect_err(|err| {
+        let (connectivity, expansion_add, expansion_search) = if let Some(params) = db_actor
+            .get_index_params(idx.id())
+            .await
+            .inspect_err(|err| {
                 warn!("monitor_indexes::get_indexes: unable to get index params: {err}")
             })? {
             params
