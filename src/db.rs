@@ -35,7 +35,7 @@ use tracing::debug_span;
 use tracing::warn;
 use uuid::Uuid;
 
-type GetIndexDbR = anyhow::Result<mpsc::Sender<DbIndex>>;
+type GetDbIndexR = anyhow::Result<mpsc::Sender<DbIndex>>;
 type LatestSchemaVersionR = anyhow::Result<Option<CqlTimeuuid>>;
 type GetIndexesR = anyhow::Result<Vec<DbCustomIndex>>;
 type GetIndexVersionR = anyhow::Result<Option<IndexVersion>>;
@@ -43,10 +43,9 @@ type GetIndexTargetTypeR = anyhow::Result<Option<Dimensions>>;
 type GetIndexParamsR = anyhow::Result<Option<(Connectivity, ExpansionAdd, ExpansionSearch)>>;
 
 pub(crate) enum Db {
-    #[allow(clippy::enum_variant_names)]
-    GetIndexDb {
+    GetDbIndex {
         metadata: IndexMetadata,
-        tx: oneshot::Sender<GetIndexDbR>,
+        tx: oneshot::Sender<GetDbIndexR>,
     },
 
     LatestSchemaVersion {
@@ -86,7 +85,7 @@ pub(crate) enum Db {
 }
 
 pub(crate) trait DbExt {
-    async fn get_index_db(&self, metadata: IndexMetadata) -> GetIndexDbR;
+    async fn get_db_index(&self, metadata: IndexMetadata) -> GetDbIndexR;
 
     async fn latest_schema_version(&self) -> LatestSchemaVersionR;
 
@@ -114,9 +113,9 @@ pub(crate) trait DbExt {
 }
 
 impl DbExt for mpsc::Sender<Db> {
-    async fn get_index_db(&self, metadata: IndexMetadata) -> GetIndexDbR {
+    async fn get_db_index(&self, metadata: IndexMetadata) -> GetDbIndexR {
         let (tx, rx) = oneshot::channel();
-        self.send(Db::GetIndexDb { metadata, tx }).await?;
+        self.send(Db::GetDbIndex { metadata, tx }).await?;
         rx.await?
     }
 
@@ -201,9 +200,9 @@ pub(crate) async fn new(uri: ScyllaDbUri) -> anyhow::Result<mpsc::Sender<Db>> {
 
 async fn process(statements: Arc<Statements>, msg: Db) {
     match msg {
-        Db::GetIndexDb { metadata, tx } => tx
-            .send(statements.get_index_db(metadata).await)
-            .unwrap_or_else(|_| warn!("db::process: Db::GetIndexDb: unable to send response")),
+        Db::GetDbIndex { metadata, tx } => tx
+            .send(statements.get_db_index(metadata).await)
+            .unwrap_or_else(|_| warn!("db::process: Db::GetDbIndex: unable to send response")),
 
         Db::LatestSchemaVersion { tx } => tx
             .send(statements.latest_schema_version().await)
@@ -319,7 +318,7 @@ impl Statements {
         })
     }
 
-    async fn get_index_db(&self, metadata: IndexMetadata) -> GetIndexDbR {
+    async fn get_db_index(&self, metadata: IndexMetadata) -> GetDbIndexR {
         db_index::new(Arc::clone(&self.session), metadata).await
     }
 

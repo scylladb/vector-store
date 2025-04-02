@@ -113,7 +113,7 @@ pub(crate) async fn new(db: mpsc::Sender<Db>) -> anyhow::Result<mpsc::Sender<Eng
                         continue;
                     };
 
-                    let Ok(db_index) = db.get_index_db(metadata.clone()).await.inspect_err(|err| {
+                    let Ok(db_index) = db.get_db_index(metadata.clone()).await.inspect_err(|err| {
                         error!("unable to create db_index from {metadata:?}: {err}")
                     }) else {
                         continue;
