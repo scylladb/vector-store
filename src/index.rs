@@ -42,6 +42,8 @@ const RESERVE_INCREMENT: usize = 1000000;
 // The ratio was taken for initial benchmarks
 const RESERVE_THRESHOLD: usize = RESERVE_INCREMENT / 3;
 
+type AnnR = anyhow::Result<(Vec<Key>, Vec<Distance>)>;
+
 pub(crate) enum Index {
     Add {
         key: Key,
@@ -50,17 +52,13 @@ pub(crate) enum Index {
     Ann {
         embeddings: Embeddings,
         limit: Limit,
-        tx: oneshot::Sender<anyhow::Result<(Vec<Key>, Vec<Distance>)>>,
+        tx: oneshot::Sender<AnnR>,
     },
 }
 
 pub(crate) trait IndexExt {
     async fn add(&self, key: Key, embeddings: Embeddings);
-    async fn ann(
-        &self,
-        embeddings: Embeddings,
-        limit: Limit,
-    ) -> anyhow::Result<(Vec<Key>, Vec<Distance>)>;
+    async fn ann(&self, embeddings: Embeddings, limit: Limit) -> AnnR;
 }
 
 impl IndexExt for mpsc::Sender<Index> {
@@ -70,11 +68,7 @@ impl IndexExt for mpsc::Sender<Index> {
             .unwrap_or_else(|err| warn!("IndexExt::add: unable to send request: {err}"));
     }
 
-    async fn ann(
-        &self,
-        embeddings: Embeddings,
-        limit: Limit,
-    ) -> anyhow::Result<(Vec<Key>, Vec<Distance>)> {
+    async fn ann(&self, embeddings: Embeddings, limit: Limit) -> AnnR {
         let (tx, rx) = oneshot::channel();
         self.send(Index::Ann {
             embeddings,
@@ -244,7 +238,7 @@ async fn add(
 
 async fn ann(
     idx: Arc<usearch::Index>,
-    tx: oneshot::Sender<anyhow::Result<(Vec<Key>, Vec<Distance>)>>,
+    tx: oneshot::Sender<AnnR>,
     embeddings: Embeddings,
     dimensions: Dimensions,
     limit: Limit,

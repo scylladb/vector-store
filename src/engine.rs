@@ -17,9 +17,12 @@ use tokio::sync::oneshot;
 use tracing::error;
 use tracing::warn;
 
+type GetIndexIdsR = Vec<IndexId>;
+type GetIndexR = Option<mpsc::Sender<Index>>;
+
 pub(crate) enum Engine {
     GetIndexIds {
-        tx: oneshot::Sender<Vec<IndexId>>,
+        tx: oneshot::Sender<GetIndexIdsR>,
     },
     AddIndex {
         metadata: IndexMetadata,
@@ -29,19 +32,19 @@ pub(crate) enum Engine {
     },
     GetIndex {
         id: IndexId,
-        tx: oneshot::Sender<Option<mpsc::Sender<Index>>>,
+        tx: oneshot::Sender<GetIndexR>,
     },
 }
 
 pub(crate) trait EngineExt {
-    async fn get_index_ids(&self) -> Vec<IndexId>;
+    async fn get_index_ids(&self) -> GetIndexIdsR;
     async fn add_index(&self, metadata: IndexMetadata);
     async fn del_index(&self, id: IndexId);
-    async fn get_index(&self, id: IndexId) -> Option<mpsc::Sender<Index>>;
+    async fn get_index(&self, id: IndexId) -> GetIndexR;
 }
 
 impl EngineExt for mpsc::Sender<Engine> {
-    async fn get_index_ids(&self) -> Vec<IndexId> {
+    async fn get_index_ids(&self) -> GetIndexIdsR {
         let (tx, rx) = oneshot::channel();
         if self.send(Engine::GetIndexIds { tx }).await.is_ok() {
             rx.await.unwrap_or(Vec::new())
@@ -62,7 +65,7 @@ impl EngineExt for mpsc::Sender<Engine> {
             .unwrap_or_else(|err| warn!("EngineExt::del_index: unable to send request: {err}"));
     }
 
-    async fn get_index(&self, id: IndexId) -> Option<mpsc::Sender<Index>> {
+    async fn get_index(&self, id: IndexId) -> GetIndexR {
         let (tx, rx) = oneshot::channel();
         if self.send(Engine::GetIndex { id, tx }).await.is_ok() {
             rx.await.ok().flatten()

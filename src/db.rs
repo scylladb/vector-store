@@ -34,38 +34,44 @@ use tracing::debug_span;
 use tracing::warn;
 use uuid::Uuid;
 
+type GetIndexDbR = anyhow::Result<mpsc::Sender<DbIndex>>;
+type LatestSchemaVersionR = anyhow::Result<Option<CqlTimeuuid>>;
+type GetIndexesR = anyhow::Result<Vec<GetIndexes>>;
+type GetIndexVersionR = anyhow::Result<Option<IndexVersion>>;
+type GetIndexTargetTypeR = anyhow::Result<Option<Dimensions>>;
+type GetIndexParamsR = anyhow::Result<Option<(Connectivity, ExpansionAdd, ExpansionSearch)>>;
+
 pub(crate) enum Db {
     #[allow(clippy::enum_variant_names)]
     GetIndexDb {
         metadata: IndexMetadata,
-        tx: oneshot::Sender<anyhow::Result<mpsc::Sender<DbIndex>>>,
+        tx: oneshot::Sender<GetIndexDbR>,
     },
 
     LatestSchemaVersion {
-        tx: oneshot::Sender<anyhow::Result<Option<CqlTimeuuid>>>,
+        tx: oneshot::Sender<LatestSchemaVersionR>,
     },
 
     GetIndexes {
-        tx: oneshot::Sender<anyhow::Result<Vec<GetIndexes>>>,
+        tx: oneshot::Sender<GetIndexesR>,
     },
 
     GetIndexVersion {
         keyspace: KeyspaceName,
         index: TableName,
-        tx: oneshot::Sender<anyhow::Result<Option<IndexVersion>>>,
+        tx: oneshot::Sender<GetIndexVersionR>,
     },
 
     GetIndexTargetType {
         keyspace: KeyspaceName,
         table: TableName,
         target_column: ColumnName,
-        tx: oneshot::Sender<anyhow::Result<Option<Dimensions>>>,
+        tx: oneshot::Sender<GetIndexTargetTypeR>,
     },
 
     GetIndexParams {
         id: IndexId,
-        #[allow(clippy::type_complexity)]
-        tx: oneshot::Sender<anyhow::Result<Option<(Connectivity, ExpansionAdd, ExpansionSearch)>>>,
+        tx: oneshot::Sender<GetIndexParamsR>,
     },
 
     UpdateItemsCount {
@@ -79,29 +85,23 @@ pub(crate) enum Db {
 }
 
 pub(crate) trait DbExt {
-    async fn get_index_db(&self, metadata: IndexMetadata) -> anyhow::Result<mpsc::Sender<DbIndex>>;
+    async fn get_index_db(&self, metadata: IndexMetadata) -> GetIndexDbR;
 
-    async fn latest_schema_version(&self) -> anyhow::Result<Option<CqlTimeuuid>>;
+    async fn latest_schema_version(&self) -> LatestSchemaVersionR;
 
-    async fn get_indexes(&self) -> anyhow::Result<Vec<GetIndexes>>;
+    async fn get_indexes(&self) -> GetIndexesR;
 
-    async fn get_index_version(
-        &self,
-        keyspace: KeyspaceName,
-        index: TableName,
-    ) -> anyhow::Result<Option<IndexVersion>>;
+    async fn get_index_version(&self, keyspace: KeyspaceName, index: TableName)
+    -> GetIndexVersionR;
 
     async fn get_index_target_type(
         &self,
         keyspace: KeyspaceName,
         table: TableName,
         target_column: ColumnName,
-    ) -> anyhow::Result<Option<Dimensions>>;
+    ) -> GetIndexTargetTypeR;
 
-    async fn get_index_params(
-        &self,
-        id: IndexId,
-    ) -> anyhow::Result<Option<(Connectivity, ExpansionAdd, ExpansionSearch)>>;
+    async fn get_index_params(&self, id: IndexId) -> GetIndexParamsR;
 
     async fn update_items_count(
         &self,
@@ -113,19 +113,19 @@ pub(crate) trait DbExt {
 }
 
 impl DbExt for mpsc::Sender<Db> {
-    async fn get_index_db(&self, metadata: IndexMetadata) -> anyhow::Result<mpsc::Sender<DbIndex>> {
+    async fn get_index_db(&self, metadata: IndexMetadata) -> GetIndexDbR {
         let (tx, rx) = oneshot::channel();
         self.send(Db::GetIndexDb { metadata, tx }).await?;
         rx.await?
     }
 
-    async fn latest_schema_version(&self) -> anyhow::Result<Option<CqlTimeuuid>> {
+    async fn latest_schema_version(&self) -> LatestSchemaVersionR {
         let (tx, rx) = oneshot::channel();
         self.send(Db::LatestSchemaVersion { tx }).await?;
         rx.await?
     }
 
-    async fn get_indexes(&self) -> anyhow::Result<Vec<GetIndexes>> {
+    async fn get_indexes(&self) -> GetIndexesR {
         let (tx, rx) = oneshot::channel();
         self.send(Db::GetIndexes { tx }).await?;
         rx.await?
@@ -135,7 +135,7 @@ impl DbExt for mpsc::Sender<Db> {
         &self,
         keyspace: KeyspaceName,
         index: TableName,
-    ) -> anyhow::Result<Option<IndexVersion>> {
+    ) -> GetIndexVersionR {
         let (tx, rx) = oneshot::channel();
         self.send(Db::GetIndexVersion {
             keyspace,
@@ -151,7 +151,7 @@ impl DbExt for mpsc::Sender<Db> {
         keyspace: KeyspaceName,
         table: TableName,
         target_column: ColumnName,
-    ) -> anyhow::Result<Option<Dimensions>> {
+    ) -> GetIndexTargetTypeR {
         let (tx, rx) = oneshot::channel();
         self.send(Db::GetIndexTargetType {
             keyspace,
@@ -163,10 +163,7 @@ impl DbExt for mpsc::Sender<Db> {
         rx.await?
     }
 
-    async fn get_index_params(
-        &self,
-        id: IndexId,
-    ) -> anyhow::Result<Option<(Connectivity, ExpansionAdd, ExpansionSearch)>> {
+    async fn get_index_params(&self, id: IndexId) -> GetIndexParamsR {
         let (tx, rx) = oneshot::channel();
         self.send(Db::GetIndexParams { id, tx }).await?;
         rx.await?
@@ -335,7 +332,7 @@ impl Statements {
         })
     }
 
-    async fn get_index_db(&self, metadata: IndexMetadata) -> anyhow::Result<mpsc::Sender<DbIndex>> {
+    async fn get_index_db(&self, metadata: IndexMetadata) -> GetIndexDbR {
         db_index::new(Arc::clone(&self.session), metadata).await
     }
 
@@ -347,7 +344,7 @@ impl Statements {
         LIMIT 1
         ";
 
-    async fn latest_schema_version(&self) -> anyhow::Result<Option<CqlTimeuuid>> {
+    async fn latest_schema_version(&self) -> LatestSchemaVersionR {
         Ok(self
             .session
             .execute_iter(self.st_latest_schema_version.clone(), &[])
@@ -365,7 +362,7 @@ impl Statements {
         ALLOW FILTERING
         ";
 
-    async fn get_indexes(&self) -> anyhow::Result<Vec<GetIndexes>> {
+    async fn get_indexes(&self) -> GetIndexesR {
         Ok(self
             .session
             .execute_iter(self.st_get_indexes.clone(), &[])
@@ -393,7 +390,7 @@ impl Statements {
         &self,
         keyspace: KeyspaceName,
         index: TableName,
-    ) -> anyhow::Result<Option<IndexVersion>> {
+    ) -> GetIndexVersionR {
         Ok(self
             .session
             .execute_iter(
@@ -419,7 +416,7 @@ impl Statements {
         keyspace: KeyspaceName,
         table: TableName,
         target_column: ColumnName,
-    ) -> anyhow::Result<Option<Dimensions>> {
+    ) -> GetIndexTargetTypeR {
         Ok(self
             .session
             .execute_iter(
@@ -446,10 +443,7 @@ impl Statements {
         WHERE id = ?
         ";
 
-    async fn get_index_params(
-        &self,
-        id: IndexId,
-    ) -> anyhow::Result<Option<(Connectivity, ExpansionAdd, ExpansionSearch)>> {
+    async fn get_index_params(&self, id: IndexId) -> GetIndexParamsR {
         Ok(self
             .session
             .execute_iter(self.st_get_index_params.clone(), (id,))

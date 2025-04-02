@@ -22,16 +22,16 @@ use tracing::Instrument;
 use tracing::debug_span;
 use tracing::warn;
 
+type GetProcessedIdsR = anyhow::Result<BoxStream<'static, Result<Key, NextRowError>>>;
+type GetItemsR = anyhow::Result<BoxStream<'static, Result<(Key, Embeddings), NextRowError>>>;
+
 pub(crate) enum DbIndex {
     GetProcessedIds {
-        tx: oneshot::Sender<anyhow::Result<BoxStream<'static, Result<Key, NextRowError>>>>,
+        tx: oneshot::Sender<GetProcessedIdsR>,
     },
 
     GetItems {
-        #[allow(clippy::type_complexity)]
-        tx: oneshot::Sender<
-            anyhow::Result<BoxStream<'static, Result<(Key, Embeddings), NextRowError>>>,
-        >,
+        tx: oneshot::Sender<GetItemsR>,
     },
 
     ResetItems {
@@ -44,13 +44,9 @@ pub(crate) enum DbIndex {
 }
 
 pub(crate) trait DbIndexExt {
-    async fn get_processed_ids(
-        &self,
-    ) -> anyhow::Result<BoxStream<'static, Result<Key, NextRowError>>>;
+    async fn get_processed_ids(&self) -> GetProcessedIdsR;
 
-    async fn get_items(
-        &self,
-    ) -> anyhow::Result<BoxStream<'static, Result<(Key, Embeddings), NextRowError>>>;
+    async fn get_items(&self) -> GetItemsR;
 
     async fn reset_items(&self, keys: Vec<Key>) -> anyhow::Result<()>;
 
@@ -58,17 +54,13 @@ pub(crate) trait DbIndexExt {
 }
 
 impl DbIndexExt for mpsc::Sender<DbIndex> {
-    async fn get_processed_ids(
-        &self,
-    ) -> anyhow::Result<BoxStream<'static, Result<Key, NextRowError>>> {
+    async fn get_processed_ids(&self) -> GetProcessedIdsR {
         let (tx, rx) = oneshot::channel();
         self.send(DbIndex::GetProcessedIds { tx }).await?;
         rx.await?
     }
 
-    async fn get_items(
-        &self,
-    ) -> anyhow::Result<BoxStream<'static, Result<(Key, Embeddings), NextRowError>>> {
+    async fn get_items(&self) -> GetItemsR {
         let (tx, rx) = oneshot::channel();
         self.send(DbIndex::GetItems { tx }).await?;
         rx.await?
@@ -179,9 +171,7 @@ impl Statements {
         )
     }
 
-    async fn get_processed_ids(
-        &self,
-    ) -> anyhow::Result<BoxStream<'static, Result<Key, NextRowError>>> {
+    async fn get_processed_ids(&self) -> GetProcessedIdsR {
         Ok(self
             .session
             .execute_iter(self.st_get_processed_ids.clone(), ())
@@ -201,9 +191,7 @@ impl Statements {
         )
     }
 
-    async fn get_items(
-        &self,
-    ) -> anyhow::Result<BoxStream<'static, Result<(Key, Embeddings), NextRowError>>> {
+    async fn get_items(&self) -> GetItemsR {
         Ok(self
             .session
             .execute_iter(self.st_get_items.clone(), ())
