@@ -82,8 +82,7 @@ pub(crate) async fn new(
 ) -> anyhow::Result<mpsc::Sender<Engine>> {
     let (tx, mut rx) = mpsc::channel(10);
 
-    let monitor_actor =
-        monitor_indexes::new(Arc::clone(&db_session), db.clone(), tx.clone()).await?;
+    let monitor_actor = monitor_indexes::new(db.clone(), tx.clone()).await?;
     let modify_actor = modify_indexes::new(Arc::clone(&db_session), db.clone()).await?;
 
     tokio::spawn(async move {

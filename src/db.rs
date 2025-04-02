@@ -7,6 +7,7 @@ use crate::db_index;
 use crate::db_index::DbIndex;
 use crate::ColumnName;
 use crate::Connectivity;
+use crate::Dimensions;
 use crate::ExpansionAdd;
 use crate::ExpansionSearch;
 use crate::IndexId;
@@ -16,10 +17,12 @@ use crate::KeyspaceName;
 use crate::TableName;
 use anyhow::Context;
 use futures::TryStreamExt;
+use regex::Regex;
 use scylla::client::session::Session;
 use scylla::statement::prepared::PreparedStatement;
 use scylla::value::CqlTimeuuid;
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -49,6 +52,13 @@ pub(crate) enum Db {
         tx: oneshot::Sender<anyhow::Result<Option<IndexVersion>>>,
     },
 
+    GetIndexTargetType {
+        keyspace: KeyspaceName,
+        table: TableName,
+        target_column: ColumnName,
+        tx: oneshot::Sender<anyhow::Result<Option<Dimensions>>>,
+    },
+
     GetIndexParams {
         id: IndexId,
         #[allow(clippy::type_complexity)]
@@ -68,6 +78,13 @@ pub(crate) trait DbExt {
         keyspace: KeyspaceName,
         index: TableName,
     ) -> anyhow::Result<Option<IndexVersion>>;
+
+    async fn get_index_target_type(
+        &self,
+        keyspace: KeyspaceName,
+        table: TableName,
+        target_column: ColumnName,
+    ) -> anyhow::Result<Option<Dimensions>>;
 
     async fn get_index_params(
         &self,
@@ -103,6 +120,23 @@ impl DbExt for mpsc::Sender<Db> {
         self.send(Db::GetIndexVersion {
             keyspace,
             index,
+            tx,
+        })
+        .await?;
+        rx.await?
+    }
+
+    async fn get_index_target_type(
+        &self,
+        keyspace: KeyspaceName,
+        table: TableName,
+        target_column: ColumnName,
+    ) -> anyhow::Result<Option<Dimensions>> {
+        let (tx, rx) = oneshot::channel();
+        self.send(Db::GetIndexTargetType {
+            keyspace,
+            table,
+            target_column,
             tx,
         })
         .await?;
@@ -157,6 +191,19 @@ async fn process(statements: Arc<Statements>, msg: Db) {
             .send(statements.get_index_version(keyspace, index).await)
             .unwrap_or_else(|_| warn!("db::process: Db::GetIndexVersion: unable to send response")),
 
+        Db::GetIndexTargetType {
+            keyspace,
+            table,
+            target_column,
+            tx,
+        } => tx
+            .send(
+                statements
+                    .get_index_target_type(keyspace, table, target_column)
+                    .await,
+            )
+            .unwrap_or_else(|_| warn!("db::process: Db::GetIndexVersion: unable to send response")),
+
         Db::GetIndexParams { id, tx } => tx
             .send(statements.get_index_params(id).await)
             .unwrap_or_else(|_| warn!("db::process: Db::GetIndexParams: unable to send response")),
@@ -182,6 +229,8 @@ struct Statements {
     st_latest_schema_version: PreparedStatement,
     st_get_indexes: PreparedStatement,
     st_get_index_version: PreparedStatement,
+    st_get_index_target_type: PreparedStatement,
+    re_get_index_target_type: Regex,
     st_get_index_params: PreparedStatement,
 }
 
@@ -202,6 +251,14 @@ impl Statements {
                 .prepare(Self::ST_GET_INDEX_VERSION)
                 .await
                 .context("ST_GET_INDEX_VERSION")?,
+
+            st_get_index_target_type: session
+                .prepare(Self::ST_GET_INDEX_TARGET_TYPE)
+                .await
+                .context("ST_GET_INDEX_TARGET_TYPE")?,
+
+            re_get_index_target_type: Regex::new(Self::RE_GET_INDEX_TARGET_TYPE)
+                .context("RE_GET_INDEX_TARGET_TYPE")?,
 
             st_get_index_params: session
                 .prepare(Self::ST_GET_INDEX_PARAMS)
@@ -282,6 +339,39 @@ impl Statements {
             .try_next()
             .await?
             .map(|(version,)| version.into()))
+    }
+
+    const ST_GET_INDEX_TARGET_TYPE: &str = "
+        SELECT type
+        FROM system_schema.columns
+        WHERE keyspace_name = ? AND table_name = ? AND column_name = ?
+        ";
+    const RE_GET_INDEX_TARGET_TYPE: &str = r"^vector<float, (?<dimensions>\d+)>$";
+
+    async fn get_index_target_type(
+        &self,
+        keyspace: KeyspaceName,
+        table: TableName,
+        target_column: ColumnName,
+    ) -> anyhow::Result<Option<Dimensions>> {
+        Ok(self
+            .session
+            .execute_iter(
+                self.st_get_index_target_type.clone(),
+                (keyspace, table, target_column),
+            )
+            .await?
+            .rows_stream::<(String,)>()?
+            .try_next()
+            .await?
+            .and_then(|(typ,)| {
+                self.re_get_index_target_type
+                    .captures(&typ)
+                    .and_then(|captures| captures["dimensions"].parse::<usize>().ok())
+            })
+            .and_then(|dimensions| {
+                NonZeroUsize::new(dimensions).map(|dimensions| dimensions.into())
+            }))
     }
 
     const ST_GET_INDEX_PARAMS: &str = "

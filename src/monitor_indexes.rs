@@ -3,25 +3,14 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
-use crate::db;
+use crate::db::Db;
 use crate::db::DbExt;
 use crate::engine::Engine;
 use crate::engine::EngineExt;
-use crate::ColumnName;
-use crate::Dimensions;
 use crate::IndexMetadata;
-use crate::KeyspaceName;
-use crate::TableName;
-use anyhow::Context;
-use futures::TryStreamExt;
-use regex::Regex;
-use scylla::client::session::Session;
-use scylla::statement::prepared::PreparedStatement;
 use scylla::value::CqlTimeuuid;
 use std::collections::HashSet;
 use std::mem;
-use std::num::NonZeroUsize;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
@@ -31,11 +20,9 @@ use tracing::warn;
 pub(crate) enum MonitorIndexes {}
 
 pub(crate) async fn new(
-    db_session: Arc<Session>,
-    db_actor: Sender<db::Db>,
+    db: Sender<Db>,
     engine: Sender<Engine>,
 ) -> anyhow::Result<Sender<MonitorIndexes>> {
-    let db = Db::new(db_session).await?;
     let (tx, mut rx) = mpsc::channel(10);
     tokio::spawn(async move {
         const INTERVAL: Duration = Duration::from_secs(1);
@@ -46,10 +33,10 @@ pub(crate) async fn new(
         while !rx.is_closed() {
             tokio::select! {
                 _ = interval.tick() => {
-                    if !schema_version.has_changed(&db_actor).await {
+                    if !schema_version.has_changed(&db).await {
                         continue;
                     }
-                    let Ok(mut new_indexes) = get_indexes(&db, &db_actor).await.inspect_err(|err| {
+                    let Ok(mut new_indexes) = get_indexes(&db).await.inspect_err(|err| {
                         warn!("monitor_indexes: unable to get the list of indexes: {err}");
                     }) else {
                         schema_version.reset();
@@ -66,58 +53,6 @@ pub(crate) async fn new(
     Ok(tx)
 }
 
-struct Db {
-    session: Arc<Session>,
-    st_get_index_target_type: PreparedStatement,
-    re_get_index_target_type: Regex,
-}
-
-impl Db {
-    async fn new(session: Arc<Session>) -> anyhow::Result<Self> {
-        Ok(Self {
-            st_get_index_target_type: session
-                .prepare(Self::ST_GET_INDEX_TARGET_TYPE)
-                .await
-                .context("ST_GET_INDEX_TARGET_TYPE")?,
-            re_get_index_target_type: Regex::new(Self::RE_GET_INDEX_TARGET_TYPE)
-                .context("RE_GET_INDEX_TARGET_TYPE")?,
-            session,
-        })
-    }
-
-    const ST_GET_INDEX_TARGET_TYPE: &str = "
-        SELECT type
-        FROM system_schema.columns
-        WHERE keyspace_name = ? AND table_name = ? AND column_name = ?
-        ";
-    const RE_GET_INDEX_TARGET_TYPE: &str = r"^vector<float, (?<dimensions>\d+)>$";
-    async fn get_index_target_type(
-        &self,
-        keyspace: KeyspaceName,
-        table: TableName,
-        target: ColumnName,
-    ) -> anyhow::Result<Option<Dimensions>> {
-        Ok(self
-            .session
-            .execute_iter(
-                self.st_get_index_target_type.clone(),
-                (keyspace, table, target),
-            )
-            .await?
-            .rows_stream::<(String,)>()?
-            .try_next()
-            .await?
-            .and_then(|(typ,)| {
-                self.re_get_index_target_type
-                    .captures(&typ)
-                    .and_then(|captures| captures["dimensions"].parse::<usize>().ok())
-            })
-            .and_then(|dimensions| {
-                NonZeroUsize::new(dimensions).map(|dimensions| dimensions.into())
-            }))
-    }
-}
-
 #[derive(PartialEq)]
 struct SchemaVersion(Option<CqlTimeuuid>);
 
@@ -126,7 +61,7 @@ impl SchemaVersion {
         Self(None)
     }
 
-    async fn has_changed(&mut self, db: &Sender<db::Db>) -> bool {
+    async fn has_changed(&mut self, db: &Sender<Db>) -> bool {
         let schema_version = db.latest_schema_version().await.unwrap_or_else(|err| {
             warn!("monitor_indexes: unable to get latest schema change: {err}");
             None
@@ -143,10 +78,10 @@ impl SchemaVersion {
     }
 }
 
-async fn get_indexes(db: &Db, db_actor: &Sender<db::Db>) -> anyhow::Result<HashSet<IndexMetadata>> {
+async fn get_indexes(db: &Sender<Db>) -> anyhow::Result<HashSet<IndexMetadata>> {
     let mut indexes = HashSet::new();
-    for idx in db_actor.get_indexes().await?.into_iter() {
-        let Some(version) = db_actor
+    for idx in db.get_indexes().await?.into_iter() {
+        let Some(version) = db
             .get_index_version(idx.keyspace.clone(), idx.index.clone())
             .await
             .inspect_err(|err| {
@@ -168,10 +103,8 @@ async fn get_indexes(db: &Db, db_actor: &Sender<db::Db>) -> anyhow::Result<HashS
             continue;
         };
 
-        let (connectivity, expansion_add, expansion_search) = if let Some(params) = db_actor
-            .get_index_params(idx.id())
-            .await
-            .inspect_err(|err| {
+        let (connectivity, expansion_add, expansion_search) = if let Some(params) =
+            db.get_index_params(idx.id()).await.inspect_err(|err| {
                 warn!("monitor_indexes::get_indexes: unable to get index params: {err}")
             })? {
             params
