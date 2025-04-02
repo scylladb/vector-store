@@ -11,6 +11,7 @@ use crate::ExpansionAdd;
 use crate::ExpansionSearch;
 use crate::IndexId;
 use crate::IndexMetadata;
+use crate::IndexVersion;
 use crate::KeyspaceName;
 use crate::TableName;
 use anyhow::Context;
@@ -25,6 +26,7 @@ use tokio::sync::oneshot;
 use tracing::debug_span;
 use tracing::warn;
 use tracing::Instrument;
+use uuid::Uuid;
 
 pub(crate) enum Db {
     #[allow(clippy::enum_variant_names)]
@@ -41,6 +43,12 @@ pub(crate) enum Db {
         tx: oneshot::Sender<anyhow::Result<Vec<GetIndexes>>>,
     },
 
+    GetIndexVersion {
+        keyspace: KeyspaceName,
+        index: TableName,
+        tx: oneshot::Sender<anyhow::Result<Option<IndexVersion>>>,
+    },
+
     GetIndexParams {
         id: IndexId,
         #[allow(clippy::type_complexity)]
@@ -54,6 +62,12 @@ pub(crate) trait DbExt {
     async fn latest_schema_version(&self) -> anyhow::Result<Option<CqlTimeuuid>>;
 
     async fn get_indexes(&self) -> anyhow::Result<Vec<GetIndexes>>;
+
+    async fn get_index_version(
+        &self,
+        keyspace: KeyspaceName,
+        index: TableName,
+    ) -> anyhow::Result<Option<IndexVersion>>;
 
     async fn get_index_params(
         &self,
@@ -77,6 +91,21 @@ impl DbExt for mpsc::Sender<Db> {
     async fn get_indexes(&self) -> anyhow::Result<Vec<GetIndexes>> {
         let (tx, rx) = oneshot::channel();
         self.send(Db::GetIndexes { tx }).await?;
+        rx.await?
+    }
+
+    async fn get_index_version(
+        &self,
+        keyspace: KeyspaceName,
+        index: TableName,
+    ) -> anyhow::Result<Option<IndexVersion>> {
+        let (tx, rx) = oneshot::channel();
+        self.send(Db::GetIndexVersion {
+            keyspace,
+            index,
+            tx,
+        })
+        .await?;
         rx.await?
     }
 
@@ -120,6 +149,14 @@ async fn process(statements: Arc<Statements>, msg: Db) {
             .send(statements.get_indexes().await)
             .unwrap_or_else(|_| warn!("db::process: Db::GetIndexes: unable to send response")),
 
+        Db::GetIndexVersion {
+            keyspace,
+            index,
+            tx,
+        } => tx
+            .send(statements.get_index_version(keyspace, index).await)
+            .unwrap_or_else(|_| warn!("db::process: Db::GetIndexVersion: unable to send response")),
+
         Db::GetIndexParams { id, tx } => tx
             .send(statements.get_index_params(id).await)
             .unwrap_or_else(|_| warn!("db::process: Db::GetIndexParams: unable to send response")),
@@ -144,6 +181,7 @@ struct Statements {
     session: Arc<Session>,
     st_latest_schema_version: PreparedStatement,
     st_get_indexes: PreparedStatement,
+    st_get_index_version: PreparedStatement,
     st_get_index_params: PreparedStatement,
 }
 
@@ -159,6 +197,11 @@ impl Statements {
                 .prepare(Self::ST_GET_INDEXES)
                 .await
                 .context("ST_GET_INDEXES")?,
+
+            st_get_index_version: session
+                .prepare(Self::ST_GET_INDEX_VERSION)
+                .await
+                .context("ST_GET_INDEX_VERSION")?,
 
             st_get_index_params: session
                 .prepare(Self::ST_GET_INDEX_PARAMS)
@@ -215,6 +258,30 @@ impl Statements {
             })
             .try_collect()
             .await?)
+    }
+
+    const ST_GET_INDEX_VERSION: &str = "
+        SELECT version
+        FROM system_schema.scylla_tables
+        WHERE keyspace_name = ? AND table_name = ?
+        ";
+
+    async fn get_index_version(
+        &self,
+        keyspace: KeyspaceName,
+        index: TableName,
+    ) -> anyhow::Result<Option<IndexVersion>> {
+        Ok(self
+            .session
+            .execute_iter(
+                self.st_get_index_version.clone(),
+                (keyspace, format!("{}_index", index.0)),
+            )
+            .await?
+            .rows_stream::<(Uuid,)>()?
+            .try_next()
+            .await?
+            .map(|(version,)| version.into()))
     }
 
     const ST_GET_INDEX_PARAMS: &str = "

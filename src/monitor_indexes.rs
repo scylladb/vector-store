@@ -10,7 +10,6 @@ use crate::engine::EngineExt;
 use crate::ColumnName;
 use crate::Dimensions;
 use crate::IndexMetadata;
-use crate::IndexVersion;
 use crate::KeyspaceName;
 use crate::TableName;
 use anyhow::Context;
@@ -28,7 +27,6 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio::time;
 use tracing::warn;
-use uuid::Uuid;
 
 pub(crate) enum MonitorIndexes {}
 
@@ -70,7 +68,6 @@ pub(crate) async fn new(
 
 struct Db {
     session: Arc<Session>,
-    st_get_index_version: PreparedStatement,
     st_get_index_target_type: PreparedStatement,
     re_get_index_target_type: Regex,
 }
@@ -78,10 +75,6 @@ struct Db {
 impl Db {
     async fn new(session: Arc<Session>) -> anyhow::Result<Self> {
         Ok(Self {
-            st_get_index_version: session
-                .prepare(Self::ST_GET_INDEX_VERSION)
-                .await
-                .context("ST_GET_INDEX_VERSION")?,
             st_get_index_target_type: session
                 .prepare(Self::ST_GET_INDEX_TARGET_TYPE)
                 .await
@@ -90,29 +83,6 @@ impl Db {
                 .context("RE_GET_INDEX_TARGET_TYPE")?,
             session,
         })
-    }
-
-    const ST_GET_INDEX_VERSION: &str = "
-        SELECT version
-        FROM system_schema.scylla_tables
-        WHERE keyspace_name = ? AND table_name = ?
-        ";
-    async fn get_index_version(
-        &self,
-        keyspace: KeyspaceName,
-        index: TableName,
-    ) -> anyhow::Result<Option<IndexVersion>> {
-        Ok(self
-            .session
-            .execute_iter(
-                self.st_get_index_version.clone(),
-                (keyspace, format!("{}_index", index.0)),
-            )
-            .await?
-            .rows_stream::<(Uuid,)>()?
-            .try_next()
-            .await?
-            .map(|(version,)| version.into()))
     }
 
     const ST_GET_INDEX_TARGET_TYPE: &str = "
@@ -176,7 +146,7 @@ impl SchemaVersion {
 async fn get_indexes(db: &Db, db_actor: &Sender<db::Db>) -> anyhow::Result<HashSet<IndexMetadata>> {
     let mut indexes = HashSet::new();
     for idx in db_actor.get_indexes().await?.into_iter() {
-        let Some(version) = db
+        let Some(version) = db_actor
             .get_index_version(idx.keyspace.clone(), idx.index.clone())
             .await
             .inspect_err(|err| {
