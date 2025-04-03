@@ -34,3 +34,6 @@ utoipa = { version = "5.3.1", features = ["axum_extras"] }
 utoipa-axum = "0.2.0"
 utoipa-swagger-ui = { version = "9.0.0", features = ["axum"] }
 uuid = "1.16.0"
+
+[dev-dependencies]
+reqwest = { version = "0.12.15", features = ["json"] }
