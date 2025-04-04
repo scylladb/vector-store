@@ -9,6 +9,7 @@ use crate::Dimensions;
 use crate::ExpansionAdd;
 use crate::ExpansionSearch;
 use crate::IndexId;
+use crate::IndexItemsCount;
 use crate::IndexMetadata;
 use crate::IndexVersion;
 use crate::KeyspaceName;
@@ -64,6 +65,11 @@ pub(crate) enum Db {
         #[allow(clippy::type_complexity)]
         tx: oneshot::Sender<anyhow::Result<Option<(Connectivity, ExpansionAdd, ExpansionSearch)>>>,
     },
+
+    UpdateItemsCount {
+        id: IndexId,
+        items_count: IndexItemsCount,
+    },
 }
 
 pub(crate) trait DbExt {
@@ -90,6 +96,12 @@ pub(crate) trait DbExt {
         &self,
         id: IndexId,
     ) -> anyhow::Result<Option<(Connectivity, ExpansionAdd, ExpansionSearch)>>;
+
+    async fn update_items_count(
+        &self,
+        id: IndexId,
+        items_count: IndexItemsCount,
+    ) -> anyhow::Result<()>;
 }
 
 impl DbExt for mpsc::Sender<Db> {
@@ -151,6 +163,15 @@ impl DbExt for mpsc::Sender<Db> {
         self.send(Db::GetIndexParams { id, tx }).await?;
         rx.await?
     }
+
+    async fn update_items_count(
+        &self,
+        id: IndexId,
+        items_count: IndexItemsCount,
+    ) -> anyhow::Result<()> {
+        self.send(Db::UpdateItemsCount { id, items_count }).await?;
+        Ok(())
+    }
 }
 
 pub(crate) async fn new(db_session: Arc<Session>) -> anyhow::Result<mpsc::Sender<Db>> {
@@ -207,6 +228,13 @@ async fn process(statements: Arc<Statements>, msg: Db) {
         Db::GetIndexParams { id, tx } => tx
             .send(statements.get_index_params(id).await)
             .unwrap_or_else(|_| warn!("db::process: Db::GetIndexParams: unable to send response")),
+
+        Db::UpdateItemsCount { id, items_count } => {
+            statements
+                .update_items_count(id, items_count)
+                .await
+                .unwrap_or_else(|err| warn!("db::process: Db::UpdateItemsCount: {err}"));
+        }
     }
 }
 
@@ -232,6 +260,7 @@ struct Statements {
     st_get_index_target_type: PreparedStatement,
     re_get_index_target_type: Regex,
     st_get_index_params: PreparedStatement,
+    st_update_items_count: PreparedStatement,
 }
 
 impl Statements {
@@ -264,6 +293,11 @@ impl Statements {
                 .prepare(Self::ST_GET_INDEX_PARAMS)
                 .await
                 .context("ST_GET_INDEX_PARAMS")?,
+
+            st_update_items_count: session
+                .prepare(Self::ST_UPDATE_ITEMS_COUNT)
+                .await
+                .context("ST_UPDATE_ITEMS_COUNT")?,
 
             session,
         })
@@ -409,5 +443,22 @@ impl Statements {
             })
             .try_next()
             .await?)
+    }
+
+    const ST_UPDATE_ITEMS_COUNT: &str = "
+        UPDATE vector_benchmark.vector_indexes
+            SET indexed_elements_count = ?
+            WHERE id = ?
+        ";
+
+    async fn update_items_count(
+        &self,
+        id: IndexId,
+        items_count: IndexItemsCount,
+    ) -> anyhow::Result<()> {
+        self.session
+            .execute_unpaged(&self.st_update_items_count, (items_count, id))
+            .await?;
+        Ok(())
     }
 }
