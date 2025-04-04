@@ -16,23 +16,23 @@ mod monitor_items;
 use scylla::client::session::Session;
 use scylla::client::session_builder::SessionBuilder;
 use scylla::cluster::metadata::ColumnType;
+use scylla::serialize::SerializationError;
 use scylla::serialize::value::SerializeValue;
 use scylla::serialize::writers::CellWriter;
 use scylla::serialize::writers::WrittenCellProof;
-use scylla::serialize::SerializationError;
 use std::borrow::Cow;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tokio::signal;
-use utoipa::openapi::schema::Type;
+use utoipa::PartialSchema;
+use utoipa::ToSchema;
 use utoipa::openapi::KnownFormat;
 use utoipa::openapi::ObjectBuilder;
 use utoipa::openapi::RefOr;
 use utoipa::openapi::Schema;
 use utoipa::openapi::SchemaFormat;
-use utoipa::PartialSchema;
-use utoipa::ToSchema;
+use utoipa::openapi::schema::Type;
 use uuid::Uuid;
 
 #[derive(Clone, derive_more::From, derive_more::Display)]

@@ -3,14 +3,14 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+use crate::HttpServerAddr;
 use crate::engine::Engine;
 use crate::httproutes;
-use crate::HttpServerAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use tokio::sync::Notify;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
-use tokio::sync::Notify;
 
 pub(crate) enum HttpServer {}
 

@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+use crate::IndexId;
+use crate::IndexMetadata;
 use crate::db::Db;
 use crate::db::DbExt;
 use crate::index;
@@ -11,8 +13,6 @@ use crate::modify_indexes;
 use crate::modify_indexes::ModifyIndexesExt;
 use crate::monitor_indexes;
 use crate::monitor_items;
-use crate::IndexId;
-use crate::IndexMetadata;
 use scylla::client::session::Session;
 use std::collections::HashMap;
 use std::sync::Arc;

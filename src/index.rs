@@ -3,9 +3,6 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
-use crate::db::Db;
-use crate::modify_indexes::ModifyIndexes;
-use crate::modify_indexes::ModifyIndexesExt;
 use crate::Connectivity;
 use crate::Dimensions;
 use crate::Distance;
@@ -16,22 +13,25 @@ use crate::IndexId;
 use crate::IndexItemsCount;
 use crate::Key;
 use crate::Limit;
+use crate::db::Db;
+use crate::modify_indexes::ModifyIndexes;
+use crate::modify_indexes::ModifyIndexesExt;
 use anyhow::anyhow;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
+use std::sync::RwLock;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
-use std::sync::RwLock;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time;
+use tracing::Instrument;
 use tracing::debug;
 use tracing::debug_span;
 use tracing::error;
 use tracing::info;
 use tracing::warn;
-use tracing::Instrument;
 use usearch::IndexOptions;
 use usearch::ScalarKind;
 

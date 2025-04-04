@@ -1,0 +1,57 @@
+name: Rust
+
+on:
+  push:
+    branches:
+    - 'master'
+    - '**'
+
+  pull_request:
+    branches:
+    - 'master'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+  RUST_BACKTRACE: full
+
+jobs:
+  static_checks:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup rust toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        components: clippy, rustfmt
+
+    - name: Print rustc version
+      run: rustc --version
+
+    - name: Print rustfmt version
+      run: cargo fmt --version
+
+    - name: Print clippy version
+      run: cargo clippy --version
+
+    - name: Format check
+      run: cargo fmt --all -- --check
+
+    - name: Clippy check
+      run: cargo clippy --all-targets
+
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup rust toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+
+    - name: Print rustc version
+      run: rustc --version
+
+    - name: Run tests
+      run: cargo test --verbose
+

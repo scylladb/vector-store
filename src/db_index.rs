@@ -7,7 +7,7 @@ use crate::IndexMetadata;
 use scylla::client::session::Session;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{debug_span, Instrument};
+use tracing::{Instrument, debug_span};
 
 pub(crate) enum DbIndex {}
 

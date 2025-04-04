@@ -3,12 +3,12 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
-use crate::db_index::DbIndex;
-use crate::index::Index;
-use crate::index::IndexExt;
 use crate::Embeddings;
 use crate::IndexMetadata;
 use crate::Key;
+use crate::db_index::DbIndex;
+use crate::index::Index;
+use crate::index::IndexExt;
 use anyhow::Context;
 use futures::Stream;
 use futures::TryStreamExt;
@@ -21,11 +21,11 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio::time;
+use tracing::Instrument;
 use tracing::debug;
 use tracing::info;
 use tracing::info_span;
 use tracing::warn;
-use tracing::Instrument;
 
 pub(crate) enum MonitorItems {}
 

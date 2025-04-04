@@ -3,9 +3,6 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
-use crate::engine::Engine;
-use crate::engine::EngineExt;
-use crate::index::IndexExt;
 use crate::Distance;
 use crate::Embeddings;
 use crate::IndexId;
@@ -13,6 +10,10 @@ use crate::Key;
 use crate::KeyspaceName;
 use crate::Limit;
 use crate::TableName;
+use crate::engine::Engine;
+use crate::engine::EngineExt;
+use crate::index::IndexExt;
+use axum::Router;
 use axum::extract;
 use axum::extract::Path;
 use axum::extract::State;
@@ -20,7 +21,6 @@ use axum::http::StatusCode;
 use axum::response;
 use axum::response::IntoResponse;
 use axum::response::Response;
-use axum::Router;
 use tokio::sync::mpsc::Sender;
 use tower_http::trace::TraceLayer;
 use utoipa::OpenApi;

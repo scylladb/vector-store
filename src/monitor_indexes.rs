@@ -3,11 +3,11 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+use crate::IndexMetadata;
 use crate::db::Db;
 use crate::db::DbExt;
 use crate::engine::Engine;
 use crate::engine::EngineExt;
-use crate::IndexMetadata;
 use scylla::value::CqlTimeuuid;
 use std::collections::HashSet;
 use std::mem;

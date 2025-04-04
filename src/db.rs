@@ -3,8 +3,6 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
-use crate::db_index;
-use crate::db_index::DbIndex;
 use crate::ColumnName;
 use crate::Connectivity;
 use crate::Dimensions;
@@ -15,6 +13,8 @@ use crate::IndexMetadata;
 use crate::IndexVersion;
 use crate::KeyspaceName;
 use crate::TableName;
+use crate::db_index;
+use crate::db_index::DbIndex;
 use anyhow::Context;
 use futures::TryStreamExt;
 use regex::Regex;
@@ -26,9 +26,9 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
+use tracing::Instrument;
 use tracing::debug_span;
 use tracing::warn;
-use tracing::Instrument;
 use uuid::Uuid;
 
 pub(crate) enum Db {

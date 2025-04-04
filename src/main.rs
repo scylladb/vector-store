@@ -5,9 +5,9 @@
 
 use anyhow::anyhow;
 use std::net::ToSocketAddrs;
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
-use tracing_subscriber::EnvFilter;
 
 // Index creating/querying is CPU bound task, so that vector-store uses rayon ThreadPool for them.
 // From the start there was no need (network traffic seems to be not so high) to support more than

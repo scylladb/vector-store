@@ -3,9 +3,9 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
-use crate::db;
 use crate::IndexId;
 use crate::IndexItemsCount;
+use crate::db;
 use anyhow::Context;
 use scylla::client::session::Session;
 use scylla::statement::prepared::PreparedStatement;
