@@ -10,6 +10,8 @@ on:
     branches:
     - 'master'
 
+  merge_group:
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
