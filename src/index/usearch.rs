@@ -5,7 +5,6 @@
 
 use crate::Connectivity;
 use crate::Dimensions;
-use crate::Distance;
 use crate::Embeddings;
 use crate::ExpansionAdd;
 use crate::ExpansionSearch;
@@ -15,6 +14,8 @@ use crate::Key;
 use crate::Limit;
 use crate::db::Db;
 use crate::db::DbExt;
+use crate::index::actor::AnnR;
+use crate::index::actor::Index;
 use anyhow::anyhow;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -41,44 +42,6 @@ const RESERVE_INCREMENT: usize = 1000000;
 // When free space for index vectors drops below this, will reserve more space
 // The ratio was taken for initial benchmarks
 const RESERVE_THRESHOLD: usize = RESERVE_INCREMENT / 3;
-
-type AnnR = anyhow::Result<(Vec<Key>, Vec<Distance>)>;
-
-pub(crate) enum Index {
-    Add {
-        key: Key,
-        embeddings: Embeddings,
-    },
-    Ann {
-        embeddings: Embeddings,
-        limit: Limit,
-        tx: oneshot::Sender<AnnR>,
-    },
-}
-
-pub(crate) trait IndexExt {
-    async fn add(&self, key: Key, embeddings: Embeddings);
-    async fn ann(&self, embeddings: Embeddings, limit: Limit) -> AnnR;
-}
-
-impl IndexExt for mpsc::Sender<Index> {
-    async fn add(&self, key: Key, embeddings: Embeddings) {
-        self.send(Index::Add { key, embeddings })
-            .await
-            .unwrap_or_else(|err| warn!("IndexExt::add: unable to send request: {err}"));
-    }
-
-    async fn ann(&self, embeddings: Embeddings, limit: Limit) -> AnnR {
-        let (tx, rx) = oneshot::channel();
-        self.send(Index::Ann {
-            embeddings,
-            limit,
-            tx,
-        })
-        .await?;
-        rx.await?
-    }
-}
 
 pub(crate) fn new(
     id: IndexId,
