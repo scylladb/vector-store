@@ -285,7 +285,7 @@ struct IndexMetadata {
     keyspace_name: KeyspaceName,
     index_name: TableName,
     table_name: TableName,
-    target_name: ColumnName,
+    target_column: ColumnName,
     key_name: ColumnName,
     dimensions: Dimensions,
     connectivity: Connectivity,

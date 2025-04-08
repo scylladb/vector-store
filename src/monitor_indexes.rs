@@ -93,7 +93,11 @@ async fn get_indexes(db: &Sender<Db>) -> anyhow::Result<HashSet<IndexMetadata>> 
         };
 
         let Some(dimensions) = db
-            .get_index_target_type(idx.keyspace.clone(), idx.table.clone(), idx.target.clone())
+            .get_index_target_type(
+                idx.keyspace.clone(),
+                idx.table.clone(),
+                idx.target_column.clone(),
+            )
             .await
             .inspect_err(|err| {
                 warn!("monitor_indexes::get_indexes: unable to get index target type: {err}")
@@ -117,7 +121,7 @@ async fn get_indexes(db: &Sender<Db>) -> anyhow::Result<HashSet<IndexMetadata>> 
             keyspace_name: idx.keyspace,
             index_name: idx.index,
             table_name: idx.table,
-            target_name: idx.target,
+            target_column: idx.target_column,
             key_name: "id".to_string().into(),
             dimensions,
             connectivity,

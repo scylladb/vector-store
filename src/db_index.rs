@@ -149,7 +149,7 @@ impl Statements {
                 .prepare(Self::get_items_query(
                     &metadata.table_name,
                     &metadata.key_name,
-                    &metadata.target_name,
+                    &metadata.target_column,
                 ))
                 .await
                 .context("get_items_query")?,

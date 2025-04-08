@@ -261,7 +261,7 @@ pub(crate) struct GetIndexes {
     pub(crate) keyspace: KeyspaceName,
     pub(crate) index: TableName,
     pub(crate) table: TableName,
-    pub(crate) target: ColumnName,
+    pub(crate) target_column: ColumnName,
 }
 
 impl GetIndexes {
@@ -368,7 +368,7 @@ impl Statements {
                     keyspace: keyspace.into(),
                     index: index.into(),
                     table: table.into(),
-                    target: target.into(),
+                    target_column: target.into(),
                 }))
             })
             .try_collect()
