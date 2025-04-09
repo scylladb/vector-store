@@ -42,7 +42,7 @@ const RESERVE_INCREMENT: usize = 1000000;
 // The ratio was taken for initial benchmarks
 const RESERVE_THRESHOLD: usize = RESERVE_INCREMENT / 3;
 
-pub(crate) enum Index {
+pub enum Index {
     Add {
         key: Key,
         embeddings: Embeddings,
@@ -54,7 +54,7 @@ pub(crate) enum Index {
     },
 }
 
-pub(crate) trait IndexExt {
+pub trait IndexExt {
     async fn add(&self, key: Key, embeddings: Embeddings);
     async fn ann(
         &self,
@@ -86,7 +86,7 @@ impl IndexExt for mpsc::Sender<Index> {
     }
 }
 
-pub(crate) fn new(
+pub fn new(
     id: IndexId,
     db: mpsc::Sender<Db>,
     dimensions: Dimensions,
