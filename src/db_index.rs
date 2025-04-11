@@ -7,6 +7,7 @@ use crate::ColumnName;
 use crate::Embeddings;
 use crate::IndexMetadata;
 use crate::Key;
+use crate::KeyspaceName;
 use crate::TableName;
 use anyhow::Context;
 use futures::StreamExt;
@@ -130,6 +131,7 @@ impl Statements {
         Ok(Self {
             st_get_processed_ids: session
                 .prepare(Self::get_processed_ids_query(
+                    &metadata.keyspace_name,
                     &metadata.table_name,
                     &metadata.key_name,
                 ))
@@ -138,6 +140,7 @@ impl Statements {
 
             st_get_items: session
                 .prepare(Self::get_items_query(
+                    &metadata.keyspace_name,
                     &metadata.table_name,
                     &metadata.key_name,
                     &metadata.target_column,
@@ -146,12 +149,18 @@ impl Statements {
                 .context("get_items_query")?,
 
             st_reset_items: session
-                .prepare(Self::reset_items_query(&metadata.table_name))
+                .prepare(Self::reset_items_query(
+                    &metadata.keyspace_name,
+                    &metadata.table_name,
+                ))
                 .await
                 .context("reset_items_query")?,
 
             st_update_items: session
-                .prepare(Self::update_items_query(&metadata.table_name))
+                .prepare(Self::update_items_query(
+                    &metadata.keyspace_name,
+                    &metadata.table_name,
+                ))
                 .await
                 .context("update_items_query")?,
 
@@ -159,11 +168,15 @@ impl Statements {
         })
     }
 
-    fn get_processed_ids_query(table: &TableName, col_id: &ColumnName) -> String {
+    fn get_processed_ids_query(
+        keyspace: &KeyspaceName,
+        table: &TableName,
+        col_id: &ColumnName,
+    ) -> String {
         format!(
             "
             SELECT {col_id}
-            FROM {table}
+            FROM {keyspace}.{table}
             WHERE processed = TRUE
             LIMIT 1000
             "
@@ -181,11 +194,16 @@ impl Statements {
             .boxed())
     }
 
-    fn get_items_query(table: &TableName, col_id: &ColumnName, col_emb: &ColumnName) -> String {
+    fn get_items_query(
+        keyspace: &KeyspaceName,
+        table: &TableName,
+        col_id: &ColumnName,
+        col_emb: &ColumnName,
+    ) -> String {
         format!(
             "
             SELECT {col_id}, {col_emb}
-            FROM {table}
+            FROM {keyspace}.{table}
             WHERE processed = FALSE
             "
         )
@@ -202,10 +220,10 @@ impl Statements {
             .boxed())
     }
 
-    fn reset_items_query(table: &TableName) -> String {
+    fn reset_items_query(keyspace: &KeyspaceName, table: &TableName) -> String {
         format!(
             "
-            UPDATE {table}
+            UPDATE {keyspace}.{table}
                 SET processed = False
                 WHERE id IN ?
             "
@@ -219,10 +237,10 @@ impl Statements {
         Ok(())
     }
 
-    fn update_items_query(table: &TableName) -> String {
+    fn update_items_query(keyspace: &KeyspaceName, table: &TableName) -> String {
         format!(
             "
-            UPDATE {table}
+            UPDATE {keyspace}.{table}
                 SET processed = True
                 WHERE id IN ?
             "
