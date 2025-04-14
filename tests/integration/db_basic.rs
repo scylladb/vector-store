@@ -401,7 +401,7 @@ async fn process_db_index(db: &DbBasic, metadata: &IndexMetadata, msg: DbIndex) 
             .map_err(|_| anyhow!("DbIndex::GetItems: unable to send response"))
             .unwrap(),
 
-        DbIndex::ResetItems { keys } => {
+        DbIndex::ResetItem { key } => {
             if let Some(rows) =
                 db.0.write()
                     .unwrap()
@@ -410,16 +410,14 @@ async fn process_db_index(db: &DbBasic, metadata: &IndexMetadata, msg: DbIndex) 
                     .and_then(|keyspace| keyspace.tables.get_mut(&metadata.table_name))
                     .and_then(|table| table.embeddings.get_mut(&metadata.target_column))
             {
-                keys.iter().for_each(|key| {
-                    rows.get_mut(key)
-                        .map(|(_, processed)| *processed = false)
-                        .map(|_| ())
-                        .unwrap_or(())
-                });
+                rows.get_mut(&key)
+                    .map(|(_, processed)| *processed = false)
+                    .map(|_| ())
+                    .unwrap_or(());
             }
         }
 
-        DbIndex::UpdateItems { keys } => {
+        DbIndex::UpdateItem { key } => {
             if let Some(rows) =
                 db.0.write()
                     .unwrap()
@@ -428,12 +426,10 @@ async fn process_db_index(db: &DbBasic, metadata: &IndexMetadata, msg: DbIndex) 
                     .and_then(|keyspace| keyspace.tables.get_mut(&metadata.table_name))
                     .and_then(|table| table.embeddings.get_mut(&metadata.target_column))
             {
-                keys.iter().for_each(|key| {
-                    rows.get_mut(key)
-                        .map(|(_, processed)| *processed = true)
-                        .map(|_| ())
-                        .unwrap_or(())
-                });
+                rows.get_mut(&key)
+                    .map(|(_, processed)| *processed = true)
+                    .map(|_| ())
+                    .unwrap_or(());
             }
         }
     }

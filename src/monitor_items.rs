@@ -8,7 +8,6 @@ use crate::db_index::DbIndexExt;
 use crate::index::Index;
 use crate::index::IndexExt;
 use futures::TryStreamExt;
-use std::mem;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
@@ -81,14 +80,12 @@ enum State {
 }
 
 async fn reset_items(db_index: &Sender<DbIndex>) -> anyhow::Result<bool> {
-    // The value was taken from initial benchmarks
-    const CHUNK_SIZE: usize = 100;
-    let mut keys_chunks = db_index.get_processed_ids().await?.try_chunks(CHUNK_SIZE);
+    let mut keys = db_index.get_processed_ids().await?;
 
     let mut count = 0;
-    while let Some(keys) = keys_chunks.try_next().await? {
-        count += keys.len();
-        db_index.reset_items(keys).await?;
+    while let Some(key) = keys.try_next().await? {
+        count += 1;
+        db_index.reset_item(key).await?;
     }
     debug!("processed new items: {count}");
     Ok(count > 0)
@@ -98,35 +95,13 @@ async fn reset_items(db_index: &Sender<DbIndex>) -> anyhow::Result<bool> {
 async fn table_to_index(db_index: &Sender<DbIndex>, index: &Sender<Index>) -> anyhow::Result<bool> {
     let mut rows = db_index.get_items().await?;
 
-    // The value was taken from initial benchmarks
-    const PROCESSED_CHUNK_SIZE: usize = 100;
-
-    // The container for processed keys
-    let mut processed = Vec::new();
     // The accumulator for number of processed embeddings
     let mut count = 0;
 
     while let Some((key, embeddings)) = rows.try_next().await? {
-        processed.push(key);
         count += 1;
-
-        if processed.len() == PROCESSED_CHUNK_SIZE {
-            // A new chunk of processed keys is prepared. Mark them as processed in db in the
-            // background.
-            let processed: Vec<_> = mem::take(&mut processed);
-            db_index
-                .update_items(processed)
-                .await
-                .unwrap_or_else(|err| {
-                    warn!("monitor_items::table_to_index: unable to update items: {err}")
-                });
-        }
-
+        db_index.update_item(key).await?;
         index.add(key, embeddings).await;
-    }
-
-    if !processed.is_empty() {
-        db_index.update_items(processed).await?;
     }
 
     if count > 0 {
