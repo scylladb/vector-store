@@ -7,6 +7,7 @@ use crate::IndexId;
 use crate::IndexMetadata;
 use crate::db::Db;
 use crate::db::DbExt;
+use crate::db_index::DbIndex;
 use crate::index;
 use crate::index::Index;
 use crate::monitor_indexes;
@@ -18,7 +19,7 @@ use tracing::error;
 use tracing::warn;
 
 type GetIndexIdsR = Vec<IndexId>;
-type GetIndexR = Option<mpsc::Sender<Index>>;
+type GetIndexR = Option<(mpsc::Sender<Index>, mpsc::Sender<DbIndex>)>;
 
 pub(crate) enum Engine {
     GetIndexIds {
@@ -82,7 +83,6 @@ pub(crate) async fn new(db: mpsc::Sender<Db>) -> anyhow::Result<mpsc::Sender<Eng
 
     tokio::spawn(async move {
         let mut indexes = HashMap::new();
-        let mut monitors = HashMap::new();
         while let Some(msg) = rx.recv().await {
             match msg {
                 Engine::GetIndexIds { tx } => {
@@ -130,22 +130,23 @@ pub(crate) async fn new(db: mpsc::Sender<Db>) -> anyhow::Result<mpsc::Sender<Eng
                         continue;
                     };
 
-                    indexes.insert(id.clone(), index_actor);
-                    monitors.insert(id, monitor_actor);
+                    indexes.insert(id.clone(), (index_actor, monitor_actor, db_index));
                 }
 
                 Engine::DelIndex { id } => {
                     indexes.remove(&id);
-                    monitors.remove(&id);
                     db.remove_index(id).await.unwrap_or_else(|err| {
                         warn!("engine::Engine::DelIndex: issue while removing index: {err}")
                     });
                 }
 
                 Engine::GetIndex { id, tx } => {
-                    tx.send(indexes.get(&id).cloned()).unwrap_or_else(|_| {
-                        warn!("engine::Engine::GetIndex: unable to send response")
-                    });
+                    tx.send(
+                        indexes
+                            .get(&id)
+                            .map(|(index, _, db_index)| (index.clone(), db_index.clone())),
+                    )
+                    .unwrap_or_else(|_| warn!("engine::Engine::GetIndex: unable to send response"));
                 }
             }
         }

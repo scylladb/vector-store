@@ -6,8 +6,8 @@
 use crate::ColumnName;
 use crate::Embeddings;
 use crate::IndexMetadata;
-use crate::Key;
 use crate::KeyspaceName;
+use crate::PrimaryKey;
 use crate::TableName;
 use anyhow::Context;
 use futures::StreamExt;
@@ -22,8 +22,9 @@ use tracing::Instrument;
 use tracing::debug_span;
 use tracing::warn;
 
-type GetProcessedIdsR = anyhow::Result<BoxStream<'static, anyhow::Result<Key>>>;
-type GetItemsR = anyhow::Result<BoxStream<'static, anyhow::Result<(Key, Embeddings)>>>;
+type GetProcessedIdsR = anyhow::Result<BoxStream<'static, anyhow::Result<PrimaryKey>>>;
+type GetItemsR = anyhow::Result<BoxStream<'static, anyhow::Result<(PrimaryKey, Embeddings)>>>;
+type GetPrimaryKeyColumnsR = Vec<ColumnName>;
 
 pub enum DbIndex {
     GetProcessedIds {
@@ -34,12 +35,16 @@ pub enum DbIndex {
         tx: oneshot::Sender<GetItemsR>,
     },
 
+    GetPrimaryKeyColumns {
+        tx: oneshot::Sender<GetPrimaryKeyColumnsR>,
+    },
+
     ResetItem {
-        key: Key,
+        primary_key: PrimaryKey,
     },
 
     UpdateItem {
-        key: Key,
+        primary_key: PrimaryKey,
     },
 }
 
@@ -48,9 +53,11 @@ pub(crate) trait DbIndexExt {
 
     async fn get_items(&self) -> GetItemsR;
 
-    async fn reset_item(&self, key: Key) -> anyhow::Result<()>;
+    async fn get_primary_key_columns(&self) -> GetPrimaryKeyColumnsR;
 
-    async fn update_item(&self, key: Key) -> anyhow::Result<()>;
+    async fn reset_item(&self, primary_key: PrimaryKey) -> anyhow::Result<()>;
+
+    async fn update_item(&self, primary_key: PrimaryKey) -> anyhow::Result<()>;
 }
 
 impl DbIndexExt for mpsc::Sender<DbIndex> {
@@ -66,13 +73,29 @@ impl DbIndexExt for mpsc::Sender<DbIndex> {
         rx.await?
     }
 
-    async fn reset_item(&self, key: Key) -> anyhow::Result<()> {
-        self.send(DbIndex::ResetItem { key }).await?;
+    async fn get_primary_key_columns(&self) -> GetPrimaryKeyColumnsR {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .send(DbIndex::GetPrimaryKeyColumns { tx })
+            .await
+            .is_err()
+        {
+            warn!("db_index::get_primary_key_columns: unable to send internal message");
+            return Vec::new();
+        }
+        rx.await.unwrap_or_else(|err| {
+            warn!("db_index::get_primary_key_columns: unable to recv internal message: {err}");
+            Vec::new()
+        })
+    }
+
+    async fn reset_item(&self, primary_key: PrimaryKey) -> anyhow::Result<()> {
+        self.send(DbIndex::ResetItem { primary_key }).await?;
         Ok(())
     }
 
-    async fn update_item(&self, key: Key) -> anyhow::Result<()> {
-        self.send(DbIndex::UpdateItem { key }).await?;
+    async fn update_item(&self, primary_key: PrimaryKey) -> anyhow::Result<()> {
+        self.send(DbIndex::UpdateItem { primary_key }).await?;
         Ok(())
     }
 }
@@ -106,13 +129,19 @@ async fn process(statements: Arc<Statements>, msg: DbIndex) {
             .send(statements.get_items().await)
             .unwrap_or_else(|_| warn!("db_index::process: Db::GetItems: unable to send response")),
 
-        DbIndex::ResetItem { key } => statements
-            .reset_item(key)
+        DbIndex::GetPrimaryKeyColumns { tx } => tx
+            .send(statements.get_primary_key_columns())
+            .unwrap_or_else(|_| {
+                warn!("db_index::process: Db::GetPrimaryKeyColumns: unable to send response")
+            }),
+
+        DbIndex::ResetItem { primary_key } => statements
+            .reset_item(primary_key)
             .await
             .unwrap_or_else(|err| warn!("db_index::process: Db::ResetItem: {err}")),
 
-        DbIndex::UpdateItem { key } => statements
-            .update_item(key)
+        DbIndex::UpdateItem { primary_key } => statements
+            .update_item(primary_key)
             .await
             .unwrap_or_else(|err| warn!("db_index::process: Db::UpdateItem: {err}")),
     }
@@ -120,6 +149,7 @@ async fn process(statements: Arc<Statements>, msg: DbIndex) {
 
 struct Statements {
     session: Arc<Session>,
+    primary_key_columns: Vec<ColumnName>,
     st_get_processed_ids: PreparedStatement,
     st_get_items: PreparedStatement,
     st_reset_item: PreparedStatement,
@@ -164,8 +194,14 @@ impl Statements {
                 .await
                 .context("update_item_query")?,
 
+            primary_key_columns: vec![metadata.key_name],
+
             session,
         })
+    }
+
+    fn get_primary_key_columns(&self) -> Vec<ColumnName> {
+        self.primary_key_columns.clone()
     }
 
     fn get_processed_ids_query(
@@ -189,7 +225,7 @@ impl Statements {
             .execute_iter(self.st_get_processed_ids.clone(), ())
             .await?
             .rows_stream::<(i64,)>()?
-            .map_ok(|(key,)| (key as u64).into())
+            .map_ok(|(key,)| vec![(key as u64).into()].into())
             .map_err(|err| err.into())
             .boxed())
     }
@@ -215,7 +251,7 @@ impl Statements {
             .execute_iter(self.st_get_items.clone(), ())
             .await?
             .rows_stream::<(i64, Vec<f32>)>()?
-            .map_ok(|(key, embeddings)| ((key as u64).into(), embeddings.into()))
+            .map_ok(|(key, embeddings)| (vec![(key as u64).into()].into(), embeddings.into()))
             .map_err(|err| err.into())
             .boxed())
     }
@@ -230,9 +266,9 @@ impl Statements {
         )
     }
 
-    async fn reset_item(&self, key: Key) -> anyhow::Result<()> {
+    async fn reset_item(&self, primary_key: PrimaryKey) -> anyhow::Result<()> {
         self.session
-            .execute_unpaged(&self.st_reset_item, (key,))
+            .execute_unpaged(&self.st_reset_item, primary_key.0)
             .await?;
         Ok(())
     }
@@ -247,9 +283,9 @@ impl Statements {
         )
     }
 
-    async fn update_item(&self, key: Key) -> anyhow::Result<()> {
+    async fn update_item(&self, primary_key: PrimaryKey) -> anyhow::Result<()> {
         self.session
-            .execute_unpaged(&self.st_update_item, (key,))
+            .execute_unpaged(&self.st_update_item, primary_key.0)
             .await?;
         Ok(())
     }

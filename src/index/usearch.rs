@@ -10,8 +10,8 @@ use crate::ExpansionAdd;
 use crate::ExpansionSearch;
 use crate::IndexId;
 use crate::IndexItemsCount;
-use crate::Key;
 use crate::Limit;
+use crate::PrimaryKey;
 use crate::db::Db;
 use crate::db::DbExt;
 use crate::index::actor::AnnR;
@@ -121,8 +121,11 @@ async fn process(
     items_count: Arc<AtomicU32>,
 ) {
     match msg {
-        Index::Add { key, embeddings } => {
-            add(idx, idx_lock, key, embeddings, items_count).await;
+        Index::Add {
+            primary_key,
+            embeddings,
+        } => {
+            add(idx, idx_lock, primary_key, embeddings, items_count).await;
         }
 
         Index::Ann {
@@ -154,7 +157,7 @@ async fn housekeeping(
 async fn add(
     idx: Arc<usearch::Index>,
     idx_lock: Arc<RwLock<()>>,
-    key: Key,
+    primary_key: PrimaryKey,
     embeddings: Embeddings,
     items_count: Arc<AtomicU32>,
 ) {
@@ -173,6 +176,10 @@ async fn add(
         }
 
         let _lock = idx_lock.read().unwrap();
+        let Some(key) = primary_key.0.first() else {
+            error!("index::add: an empty primary key");
+            return;
+        };
         if let Err(err) = idx.add(key.0, &embeddings.0) {
             warn!("index::add: unable to add embeddings for key {key}: {err}");
             return;
@@ -222,7 +229,11 @@ async fn ann(
                 })
                 .map(|matches| {
                     (
-                        matches.keys.into_iter().map(|key| key.into()).collect(),
+                        matches
+                            .keys
+                            .into_iter()
+                            .map(|key| vec![key.into()].into())
+                            .collect(),
                         matches
                             .distances
                             .into_iter()

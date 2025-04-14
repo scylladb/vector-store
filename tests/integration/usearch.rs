@@ -46,6 +46,7 @@ async fn simple_create_search_delete_index() {
     db.add_table(
         index.keyspace_name.clone(),
         index.table_name.clone(),
+        index.key_name.clone(),
         Table {
             dimensions: [(index.target_column.clone(), index.dimensions)]
                 .into_iter()
@@ -70,9 +71,9 @@ async fn simple_create_search_delete_index() {
         &index.table_name,
         &index.target_column,
         vec![
-            (1.into(), vec![1., 1., 1.].into()),
-            (2.into(), vec![2., -2., 2.].into()),
-            (3.into(), vec![3., 3., 3.].into()),
+            (vec![1.into()].into(), vec![1., 1., 1.].into()),
+            (vec![2.into()].into(), vec![2., -2., 2.].into()),
+            (vec![3.into()].into(), vec![3., 3., 3.].into()),
         ],
     )
     .unwrap();
@@ -94,16 +95,17 @@ async fn simple_create_search_delete_index() {
     assert_eq!(indexes.len(), 1);
     assert_eq!(indexes.first().unwrap().as_ref(), "vector.ann");
 
-    let (keys, distances) = client
+    let (primary_keys, distances) = client
         .ann(
             &index,
             vec![2.1, -2., 2.].into(),
             NonZeroUsize::new(1).unwrap().into(),
         )
         .await;
-    assert_eq!(keys.len(), 1);
-    assert_eq!(distances.len(), keys.len());
-    assert_eq!(keys.first().unwrap().as_ref(), &2u64);
+    assert_eq!(distances.len(), 1);
+    let primary_keys_id = primary_keys.get(&"id".to_string().into()).unwrap();
+    assert_eq!(distances.len(), primary_keys_id.len());
+    assert_eq!(primary_keys_id.first().unwrap().as_ref(), &2);
 
     db.del_index(&index.keyspace_name, &index.index_name)
         .unwrap();

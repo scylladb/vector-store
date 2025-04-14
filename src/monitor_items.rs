@@ -98,10 +98,10 @@ async fn table_to_index(db_index: &Sender<DbIndex>, index: &Sender<Index>) -> an
     // The accumulator for number of processed embeddings
     let mut count = 0;
 
-    while let Some((key, embeddings)) = rows.try_next().await? {
+    while let Some((primary_key, embeddings)) = rows.try_next().await? {
         count += 1;
-        db_index.update_item(key).await?;
-        index.add(key, embeddings).await;
+        db_index.update_item(primary_key.clone()).await?;
+        index.add(primary_key, embeddings).await;
     }
 
     if count > 0 {

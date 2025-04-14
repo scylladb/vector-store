@@ -23,8 +23,8 @@ use vector_store::ExpansionAdd;
 use vector_store::ExpansionSearch;
 use vector_store::IndexItemsCount;
 use vector_store::IndexMetadata;
-use vector_store::Key;
 use vector_store::KeyspaceName;
+use vector_store::PrimaryKey;
 use vector_store::TableName;
 use vector_store::db::Db;
 use vector_store::db_index::DbIndex;
@@ -48,17 +48,19 @@ pub(crate) fn new() -> (mpsc::Sender<Db>, DbBasic) {
 
 struct TableStore {
     table: Table,
-    embeddings: HashMap<ColumnName, HashMap<Key, (Embeddings, bool)>>,
+    primary_keys: Vec<ColumnName>,
+    embeddings: HashMap<ColumnName, HashMap<PrimaryKey, (Embeddings, bool)>>,
 }
 
 impl TableStore {
-    fn new(table: Table) -> Self {
+    fn new(table: Table, key_name: ColumnName) -> Self {
         Self {
             embeddings: table
                 .dimensions
                 .keys()
                 .map(|key| (key.clone(), HashMap::new()))
                 .collect(),
+            primary_keys: vec![key_name],
             table,
         }
     }
@@ -131,6 +133,7 @@ impl DbBasic {
         &self,
         keyspace_name: KeyspaceName,
         table_name: TableName,
+        key_name: ColumnName,
         table: Table,
     ) -> anyhow::Result<()> {
         let mut db = self.0.write().unwrap();
@@ -142,7 +145,9 @@ impl DbBasic {
         if keyspace.tables.contains_key(&table_name) {
             bail!("a table {table_name} already exists in a keyspace");
         }
-        keyspace.tables.insert(table_name, TableStore::new(table));
+        keyspace
+            .tables
+            .insert(table_name, TableStore::new(table, key_name));
 
         db.create_new_schema_version();
         Ok(())
@@ -201,7 +206,7 @@ impl DbBasic {
         keyspace_name: &KeyspaceName,
         table_name: &TableName,
         target_column: &ColumnName,
-        values: impl IntoIterator<Item = (Key, Embeddings)>,
+        values: impl IntoIterator<Item = (PrimaryKey, Embeddings)>,
     ) -> anyhow::Result<()> {
         let mut db = self.0.write().unwrap();
 
@@ -215,8 +220,8 @@ impl DbBasic {
             bail!("a column {target_column} does not exist in a table {table_name}");
         };
 
-        values.into_iter().for_each(|(key, embeddings)| {
-            column.insert(key, (embeddings, false));
+        values.into_iter().for_each(|(primary_key, embeddings)| {
+            column.insert(primary_key, (embeddings, false));
         });
 
         Ok(())
@@ -371,7 +376,9 @@ async fn process_db_index(db: &DbBasic, metadata: &IndexMetadata, msg: DbIndex) 
                     .and_then(|table| table.embeddings.get(&metadata.target_column))
                     .map(|rows| {
                         rows.iter()
-                            .filter_map(|(key, (_, processed))| processed.then_some(Ok(*key)))
+                            .filter_map(|(primary_key, (_, processed))| {
+                                processed.then_some(Ok(primary_key.clone()))
+                            })
                             .collect_vec()
                     })
                     .unwrap_or_default(),
@@ -390,8 +397,9 @@ async fn process_db_index(db: &DbBasic, metadata: &IndexMetadata, msg: DbIndex) 
                     .and_then(|table| table.embeddings.get(&metadata.target_column))
                     .map(|rows| {
                         rows.iter()
-                            .filter_map(|(key, (embeddings, processed))| {
-                                (!processed).then_some(Ok((*key, embeddings.clone())))
+                            .filter_map(|(primary_key, (embeddings, processed))| {
+                                (!processed)
+                                    .then_some(Ok((primary_key.clone(), embeddings.clone())))
                             })
                             .collect_vec()
                     })
@@ -401,7 +409,7 @@ async fn process_db_index(db: &DbBasic, metadata: &IndexMetadata, msg: DbIndex) 
             .map_err(|_| anyhow!("DbIndex::GetItems: unable to send response"))
             .unwrap(),
 
-        DbIndex::ResetItem { key } => {
+        DbIndex::ResetItem { primary_key } => {
             if let Some(rows) =
                 db.0.write()
                     .unwrap()
@@ -410,14 +418,14 @@ async fn process_db_index(db: &DbBasic, metadata: &IndexMetadata, msg: DbIndex) 
                     .and_then(|keyspace| keyspace.tables.get_mut(&metadata.table_name))
                     .and_then(|table| table.embeddings.get_mut(&metadata.target_column))
             {
-                rows.get_mut(&key)
+                rows.get_mut(&primary_key)
                     .map(|(_, processed)| *processed = false)
                     .map(|_| ())
                     .unwrap_or(());
             }
         }
 
-        DbIndex::UpdateItem { key } => {
+        DbIndex::UpdateItem { primary_key } => {
             if let Some(rows) =
                 db.0.write()
                     .unwrap()
@@ -426,11 +434,24 @@ async fn process_db_index(db: &DbBasic, metadata: &IndexMetadata, msg: DbIndex) 
                     .and_then(|keyspace| keyspace.tables.get_mut(&metadata.table_name))
                     .and_then(|table| table.embeddings.get_mut(&metadata.target_column))
             {
-                rows.get_mut(&key)
+                rows.get_mut(&primary_key)
                     .map(|(_, processed)| *processed = true)
                     .map(|_| ())
                     .unwrap_or(());
             }
         }
+
+        DbIndex::GetPrimaryKeyColumns { tx } => tx
+            .send(
+                db.0.read()
+                    .unwrap()
+                    .keyspaces
+                    .get(&metadata.keyspace_name)
+                    .and_then(|keyspace| keyspace.tables.get(&metadata.table_name))
+                    .map(|table| table.primary_keys.clone())
+                    .unwrap_or_default(),
+            )
+            .map_err(|_| anyhow!("DbIndex::GetPrimaryKeyColumns: unable to send response"))
+            .unwrap(),
     }
 }

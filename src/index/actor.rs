@@ -5,17 +5,17 @@
 
 use crate::Distance;
 use crate::Embeddings;
-use crate::Key;
 use crate::Limit;
+use crate::PrimaryKey;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tracing::warn;
 
-pub(crate) type AnnR = anyhow::Result<(Vec<Key>, Vec<Distance>)>;
+pub(crate) type AnnR = anyhow::Result<(Vec<PrimaryKey>, Vec<Distance>)>;
 
 pub(crate) enum Index {
     Add {
-        key: Key,
+        primary_key: PrimaryKey,
         embeddings: Embeddings,
     },
     Ann {
@@ -26,15 +26,18 @@ pub(crate) enum Index {
 }
 
 pub(crate) trait IndexExt {
-    async fn add(&self, key: Key, embeddings: Embeddings);
+    async fn add(&self, primary_key: PrimaryKey, embeddings: Embeddings);
     async fn ann(&self, embeddings: Embeddings, limit: Limit) -> AnnR;
 }
 
 impl IndexExt for mpsc::Sender<Index> {
-    async fn add(&self, key: Key, embeddings: Embeddings) {
-        self.send(Index::Add { key, embeddings })
-            .await
-            .unwrap_or_else(|err| warn!("IndexExt::add: unable to send request: {err}"));
+    async fn add(&self, primary_key: PrimaryKey, embeddings: Embeddings) {
+        self.send(Index::Add {
+            primary_key,
+            embeddings,
+        })
+        .await
+        .unwrap_or_else(|err| warn!("IndexExt::add: unable to send request: {err}"));
     }
 
     async fn ann(&self, embeddings: Embeddings, limit: Limit) -> AnnR {

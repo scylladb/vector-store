@@ -4,7 +4,9 @@
  */
 
 use reqwest::Client;
+use std::collections::HashMap;
 use std::net::SocketAddr;
+use vector_store::ColumnName;
 use vector_store::Distance;
 use vector_store::Embeddings;
 use vector_store::IndexId;
@@ -43,7 +45,7 @@ impl HttpClient {
         index: &IndexMetadata,
         embeddings: Embeddings,
         limit: Limit,
-    ) -> (Vec<Key>, Vec<Distance>) {
+    ) -> (HashMap<ColumnName, Vec<Key>>, Vec<Distance>) {
         let resp = self
             .client
             .post(format!(
@@ -57,6 +59,6 @@ impl HttpClient {
             .json::<PostIndexAnnResponse>()
             .await
             .unwrap();
-        (resp.keys, resp.distances)
+        (resp.primary_keys, resp.distances)
     }
 }

@@ -137,6 +137,7 @@ impl SerializeValue for TableName {
     serde::Serialize,
     serde::Deserialize,
     derive_more::Display,
+    utoipa::ToSchema,
 )]
 /// Name of the column in a db table
 pub struct ColumnName(String);
@@ -177,6 +178,9 @@ impl SerializeValue for Key {
         <i64 as SerializeValue>::serialize(&(self.0 as i64), typ, writer)
     }
 }
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, derive_more::From)]
+pub struct PrimaryKey(Vec<Key>);
 
 #[derive(
     Clone, Debug, serde::Serialize, serde::Deserialize, derive_more::From, utoipa::ToSchema,
