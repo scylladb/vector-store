@@ -122,13 +122,7 @@ async fn table_to_index(db_index: &Sender<DbIndex>, index: &Sender<Index>) -> an
                 });
         }
 
-        // Add the embeddings in the background
-        tokio::spawn({
-            let index = index.clone();
-            async move {
-                index.add(key, embeddings).await;
-            }
-        });
+        index.add(key, embeddings).await;
     }
 
     if !processed.is_empty() {

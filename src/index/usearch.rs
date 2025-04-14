@@ -21,7 +21,6 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicU32;
-use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -81,8 +80,6 @@ pub(crate) fn new(
 
                 let mut housekeeping_interval = time::interval(time::Duration::from_secs(1));
                 let idx_lock = Arc::new(RwLock::new(()));
-                let counter_add = Arc::new(AtomicUsize::new(0));
-                let counter_ann = Arc::new(AtomicUsize::new(0));
 
                 while !rx.is_closed() {
                     tokio::select! {
@@ -92,40 +89,19 @@ pub(crate) fn new(
                                 id.clone(),
                                 &mut items_count_db,
                                 &items_count,
-                                &counter_add,
-                                &counter_ann,
-                                rx.len()
                             ).await;
                         }
 
                         Some(msg) = rx.recv() => {
-                            match msg {
-                                Index::Add { key, embeddings } => {
-                                    add(
-                                        Arc::clone(&idx),
-                                        Arc::clone(&idx_lock),
-                                        key,
-                                        embeddings,
-                                        Arc::clone(&items_count),
-                                        Arc::clone(&counter_add)
-                                    ).await;
-                                }
-
-                                Index::Ann {
-                                    embeddings,
-                                    limit,
-                                    tx,
-                                } => {
-                                    ann(
-                                        Arc::clone(&idx),
-                                        tx,
-                                        embeddings,
-                                        dimensions,
-                                        limit,
-                                        Arc::clone(&counter_ann)
-                                    ).await;
-                                }
-                            }
+                            tokio::spawn(
+                                process(
+                                    msg,
+                                    dimensions,
+                                    Arc::clone(&idx),
+                                    Arc::clone(&idx_lock),
+                                    Arc::clone(&items_count),
+                                )
+                            );
                         }
                     }
                 }
@@ -137,22 +113,34 @@ pub(crate) fn new(
     Ok(tx)
 }
 
+async fn process(
+    msg: Index,
+    dimensions: Dimensions,
+    idx: Arc<usearch::Index>,
+    idx_lock: Arc<RwLock<()>>,
+    items_count: Arc<AtomicU32>,
+) {
+    match msg {
+        Index::Add { key, embeddings } => {
+            add(idx, idx_lock, key, embeddings, items_count).await;
+        }
+
+        Index::Ann {
+            embeddings,
+            limit,
+            tx,
+        } => {
+            ann(idx, tx, embeddings, dimensions, limit).await;
+        }
+    }
+}
+
 async fn housekeeping(
     db: &mpsc::Sender<Db>,
     id: IndexId,
     items_count_db: &mut IndexItemsCount,
     items_count: &AtomicU32,
-    counter_add: &AtomicUsize,
-    counter_ann: &AtomicUsize,
-    channel_len: usize,
 ) {
-    {
-        let add = counter_add.load(Ordering::Relaxed);
-        let ann = counter_ann.load(Ordering::Relaxed);
-        if add != 0 || ann != 0 || channel_len != 0 {
-            debug!("housekeeping counters: add: {add}, ann: {ann}, channel len {channel_len}",);
-        }
-    }
     let items = items_count.load(Ordering::Relaxed);
     if items != items_count_db.0 {
         debug!("housekeeping update items count: {items_count_db}",);
@@ -169,11 +157,8 @@ async fn add(
     key: Key,
     embeddings: Embeddings,
     items_count: Arc<AtomicU32>,
-    counter: Arc<AtomicUsize>,
 ) {
     rayon::spawn(move || {
-        counter.fetch_add(1, Ordering::Relaxed);
-
         let capacity = idx.capacity();
         if capacity - idx.size() < RESERVE_THRESHOLD {
             // free space below threshold, reserve more space
@@ -182,7 +167,6 @@ async fn add(
             debug!("index::add: trying to reserve {capacity}");
             if let Err(err) = idx.reserve(capacity) {
                 error!("index::add: unable to reserve index capacity for {capacity}: {err}");
-                counter.fetch_sub(1, Ordering::Relaxed);
                 return;
             }
             debug!("index::add: finished reserve {capacity}");
@@ -191,58 +175,61 @@ async fn add(
         let _lock = idx_lock.read().unwrap();
         if let Err(err) = idx.add(key.0, &embeddings.0) {
             warn!("index::add: unable to add embeddings for key {key}: {err}");
-            counter.fetch_sub(1, Ordering::Relaxed);
             return;
         };
         items_count.fetch_add(1, Ordering::Relaxed);
-        counter.fetch_sub(1, Ordering::Relaxed);
     });
 }
 
 async fn ann(
     idx: Arc<usearch::Index>,
-    tx: oneshot::Sender<AnnR>,
+    tx_ann: oneshot::Sender<AnnR>,
     embeddings: Embeddings,
     dimensions: Dimensions,
     limit: Limit,
-    counter: Arc<AtomicUsize>,
 ) {
     let Some(embeddings_len) = NonZeroUsize::new(embeddings.0.len()) else {
-        tx.send(Err(anyhow!("index ann query: embeddings dimensions == 0")))
+        tx_ann
+            .send(Err(anyhow!("index::ann: embeddings dimensions == 0")))
             .unwrap_or_else(|_| {
-                warn!("index::new: Index::Ann: unable to send error response (zero dimensions)")
+                warn!("index::ann: unable to send error response (zero dimensions)")
             });
         return;
     };
     if embeddings_len != dimensions.0 {
-        tx.send(Err(anyhow!(
-            "index ann query: wrong embeddings dimensions: {embeddings_len} != {dimensions}",
-        )))
-        .unwrap_or_else(|_| {
-            warn!("index::new: Index::Ann: unable to send error response (wrong dimensions)")
-        });
+        tx_ann
+            .send(Err(anyhow!(
+                "index::ann: wrong embeddings dimensions: {embeddings_len} != {dimensions}",
+            )))
+            .unwrap_or_else(|_| {
+                warn!("index::ann: unable to send error response (wrong dimensions)")
+            });
         return;
     }
-    rayon::spawn({
-        let idx = Arc::clone(&idx);
-        move || {
-            counter.fetch_add(1, Ordering::Relaxed);
-            tx.send(
-                idx.search(&embeddings.0, limit.0.get())
-                    .map(|results| {
-                        (
-                            results.keys.into_iter().map(|key| key.into()).collect(),
-                            results
-                                .distances
-                                .into_iter()
-                                .map(|value| value.into())
-                                .collect(),
-                        )
-                    })
-                    .map_err(|err| anyhow!("index ann query: search failed: {err}")),
-            )
-            .unwrap_or_else(|_| warn!("index::new: Index::Ann: unable to send response"));
-            counter.fetch_sub(1, Ordering::Relaxed);
-        }
+
+    let (tx, rx) = oneshot::channel();
+    rayon::spawn(move || {
+        tx.send(idx.search(&embeddings.0, limit.0.get()))
+            .unwrap_or_else(|_| warn!("index::ann: unable to send response"));
     });
+
+    tx_ann
+        .send(
+            rx.await
+                .map_err(|err| anyhow!("index::ann: unable to recv matches: {err}"))
+                .and_then(|matches| {
+                    matches.map_err(|err| anyhow!("index::ann: search failed: {err}"))
+                })
+                .map(|matches| {
+                    (
+                        matches.keys.into_iter().map(|key| key.into()).collect(),
+                        matches
+                            .distances
+                            .into_iter()
+                            .map(|value| value.into())
+                            .collect(),
+                    )
+                }),
+        )
+        .unwrap_or_else(|_| warn!("index::ann: unable to send response"));
 }
