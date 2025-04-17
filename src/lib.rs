@@ -354,7 +354,7 @@ pub struct IndexMetadata {
     pub index_name: TableName,
     pub table_name: TableName,
     pub target_column: ColumnName,
-    pub key_name: ColumnName,
+    pub key_names: Vec<ColumnName>,
     pub dimensions: Dimensions,
     pub connectivity: Connectivity,
     pub expansion_add: ExpansionAdd,

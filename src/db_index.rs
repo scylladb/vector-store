@@ -10,11 +10,16 @@ use crate::KeyspaceName;
 use crate::PrimaryKey;
 use crate::TableName;
 use anyhow::Context;
+use anyhow::anyhow;
+use anyhow::bail;
 use futures::StreamExt;
 use futures::TryStreamExt;
 use futures::stream::BoxStream;
+use itertools::Itertools;
 use scylla::client::session::Session;
 use scylla::statement::prepared::PreparedStatement;
+use scylla::value::CqlValue;
+use scylla::value::Row;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -158,12 +163,23 @@ struct Statements {
 
 impl Statements {
     async fn new(session: Arc<Session>, metadata: IndexMetadata) -> anyhow::Result<Self> {
+        let primary_key_columns = metadata.key_names;
+
+        let st_primary_key_select = primary_key_columns.iter().join(", ");
+
+        let st_primary_key_where = primary_key_columns
+            .iter()
+            .map(|column| format!("{column} = ?"))
+            .join(" AND ");
+
         Ok(Self {
+            primary_key_columns,
+
             st_get_processed_ids: session
                 .prepare(Self::get_processed_ids_query(
                     &metadata.keyspace_name,
                     &metadata.table_name,
-                    &metadata.key_name,
+                    &st_primary_key_select,
                 ))
                 .await
                 .context("get_processed_ids_query")?,
@@ -172,7 +188,7 @@ impl Statements {
                 .prepare(Self::get_items_query(
                     &metadata.keyspace_name,
                     &metadata.table_name,
-                    &metadata.key_name,
+                    &st_primary_key_select,
                     &metadata.target_column,
                 ))
                 .await
@@ -182,6 +198,7 @@ impl Statements {
                 .prepare(Self::reset_item_query(
                     &metadata.keyspace_name,
                     &metadata.table_name,
+                    &st_primary_key_where,
                 ))
                 .await
                 .context("reset_items_query")?,
@@ -190,11 +207,10 @@ impl Statements {
                 .prepare(Self::update_item_query(
                     &metadata.keyspace_name,
                     &metadata.table_name,
+                    &st_primary_key_where,
                 ))
                 .await
                 .context("update_item_query")?,
-
-            primary_key_columns: vec![metadata.key_name],
 
             session,
         })
@@ -207,11 +223,11 @@ impl Statements {
     fn get_processed_ids_query(
         keyspace: &KeyspaceName,
         table: &TableName,
-        col_id: &ColumnName,
+        st_primary_key_select: &str,
     ) -> String {
         format!(
             "
-            SELECT {col_id}
+            SELECT {st_primary_key_select}
             FROM {keyspace}.{table}
             WHERE processed = TRUE
             LIMIT 1000
@@ -224,21 +240,34 @@ impl Statements {
             .session
             .execute_iter(self.st_get_processed_ids.clone(), ())
             .await?
-            .rows_stream::<(i64,)>()?
-            .map_ok(|(key,)| vec![(key as u64).into()].into())
+            .rows_stream::<Row>()?
             .map_err(|err| err.into())
+            .and_then(|row| async move {
+                row.columns
+                    .into_iter()
+                    .map(|col| col.ok_or_else(|| anyhow!("missing value for a primary key")))
+                    .map_ok(|col| {
+                        let CqlValue::BigInt(key) = col else {
+                            bail!("wrong type of a primary kery");
+                        };
+                        Ok((key as u64).into())
+                    })
+                    .flatten()
+                    .collect::<anyhow::Result<Vec<_>>>()
+                    .map(PrimaryKey::from)
+            })
             .boxed())
     }
 
     fn get_items_query(
         keyspace: &KeyspaceName,
         table: &TableName,
-        col_id: &ColumnName,
-        col_emb: &ColumnName,
+        st_primary_key_select: &str,
+        embeddings: &ColumnName,
     ) -> String {
         format!(
             "
-            SELECT {col_id}, {col_emb}
+            SELECT {st_primary_key_select}, {embeddings}
             FROM {keyspace}.{table}
             WHERE processed = FALSE
             "
@@ -256,12 +285,16 @@ impl Statements {
             .boxed())
     }
 
-    fn reset_item_query(keyspace: &KeyspaceName, table: &TableName) -> String {
+    fn reset_item_query(
+        keyspace: &KeyspaceName,
+        table: &TableName,
+        st_primary_key_where: &str,
+    ) -> String {
         format!(
             "
             UPDATE {keyspace}.{table}
                 SET processed = False
-                WHERE id = ?
+                WHERE {st_primary_key_where}
             "
         )
     }
@@ -273,12 +306,16 @@ impl Statements {
         Ok(())
     }
 
-    fn update_item_query(keyspace: &KeyspaceName, table: &TableName) -> String {
+    fn update_item_query(
+        keyspace: &KeyspaceName,
+        table: &TableName,
+        st_primary_key_where: &str,
+    ) -> String {
         format!(
             "
             UPDATE {keyspace}.{table}
                 SET processed = True
-                WHERE id = ?
+                WHERE {st_primary_key_where}
             "
         )
     }

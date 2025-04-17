@@ -53,14 +53,14 @@ struct TableStore {
 }
 
 impl TableStore {
-    fn new(table: Table, key_name: ColumnName) -> Self {
+    fn new(table: Table, primary_keys: Vec<ColumnName>) -> Self {
         Self {
             embeddings: table
                 .dimensions
                 .keys()
                 .map(|key| (key.clone(), HashMap::new()))
                 .collect(),
-            primary_keys: vec![key_name],
+            primary_keys,
             table,
         }
     }
@@ -133,7 +133,7 @@ impl DbBasic {
         &self,
         keyspace_name: KeyspaceName,
         table_name: TableName,
-        key_name: ColumnName,
+        key_names: Vec<ColumnName>,
         table: Table,
     ) -> anyhow::Result<()> {
         let mut db = self.0.write().unwrap();
@@ -147,7 +147,7 @@ impl DbBasic {
         }
         keyspace
             .tables
-            .insert(table_name, TableStore::new(table, key_name));
+            .insert(table_name, TableStore::new(table, key_names));
 
         db.create_new_schema_version();
         Ok(())

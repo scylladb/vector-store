@@ -10,6 +10,7 @@ use crate::ExpansionAdd;
 use crate::ExpansionSearch;
 use crate::IndexId;
 use crate::IndexItemsCount;
+use crate::Key;
 use crate::Limit;
 use crate::PrimaryKey;
 use crate::db::Db;
@@ -17,10 +18,12 @@ use crate::db::DbExt;
 use crate::index::actor::AnnR;
 use crate::index::actor::Index;
 use anyhow::anyhow;
+use bimap::BiMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicU32;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -60,8 +63,8 @@ pub(crate) fn new(
     };
 
     info!("Creating new index with id: {id}");
-    let idx = Arc::new(usearch::Index::new(&options)?);
-    idx.reserve(RESERVE_INCREMENT)?;
+    let idx = Arc::new(RwLock::new(usearch::Index::new(&options)?));
+    idx.write().unwrap().reserve(RESERVE_INCREMENT)?;
 
     // TODO: The value of channel size was taken from initial benchmarks. Needs more testing
     const CHANNEL_SIZE: usize = 100000;
@@ -78,8 +81,13 @@ pub(crate) fn new(
                     .await
                     .unwrap_or_else(|err| warn!("index::new: unable update items count: {err}"));
 
+                // bimap between PrimaryKey and Key for an usearch index
+                let keys = Arc::new(RwLock::new(BiMap::new()));
+
+                // Incremental key for a usearch index
+                let usearch_key = Arc::new(AtomicU64::new(0));
+
                 let mut housekeeping_interval = time::interval(time::Duration::from_secs(1));
-                let idx_lock = Arc::new(RwLock::new(()));
 
                 while !rx.is_closed() {
                     tokio::select! {
@@ -98,7 +106,8 @@ pub(crate) fn new(
                                     msg,
                                     dimensions,
                                     Arc::clone(&idx),
-                                    Arc::clone(&idx_lock),
+                                    Arc::clone(&keys),
+                                    Arc::clone(&usearch_key),
                                     Arc::clone(&items_count),
                                 )
                             );
@@ -116,8 +125,9 @@ pub(crate) fn new(
 async fn process(
     msg: Index,
     dimensions: Dimensions,
-    idx: Arc<usearch::Index>,
-    idx_lock: Arc<RwLock<()>>,
+    idx: Arc<RwLock<usearch::Index>>,
+    keys: Arc<RwLock<BiMap<PrimaryKey, Key>>>,
+    usearch_key: Arc<AtomicU64>,
     items_count: Arc<AtomicU32>,
 ) {
     match msg {
@@ -125,7 +135,7 @@ async fn process(
             primary_key,
             embeddings,
         } => {
-            add(idx, idx_lock, primary_key, embeddings, items_count).await;
+            add(idx, keys, usearch_key, primary_key, embeddings, items_count).await;
         }
 
         Index::Ann {
@@ -133,7 +143,7 @@ async fn process(
             limit,
             tx,
         } => {
-            ann(idx, tx, embeddings, dimensions, limit).await;
+            ann(idx, tx, keys, embeddings, dimensions, limit).await;
         }
     }
 }
@@ -155,42 +165,60 @@ async fn housekeeping(
 }
 
 async fn add(
-    idx: Arc<usearch::Index>,
-    idx_lock: Arc<RwLock<()>>,
+    idx: Arc<RwLock<usearch::Index>>,
+    keys: Arc<RwLock<BiMap<PrimaryKey, Key>>>,
+    usearch_key: Arc<AtomicU64>,
     primary_key: PrimaryKey,
     embeddings: Embeddings,
     items_count: Arc<AtomicU32>,
 ) {
+    let key = usearch_key.fetch_add(1, Ordering::Relaxed).into();
+
+    if keys
+        .write()
+        .unwrap()
+        .insert_no_overwrite(primary_key.clone(), key)
+        .is_err()
+    {
+        warn!("index::add: primary_key already exists: {primary_key:?}");
+        return;
+    }
+
+    let (tx, rx) = oneshot::channel();
+
     rayon::spawn(move || {
-        let capacity = idx.capacity();
-        if capacity - idx.size() < RESERVE_THRESHOLD {
+        let capacity = idx.read().unwrap().capacity();
+        let free_space = capacity - idx.read().unwrap().size();
+        if free_space < RESERVE_THRESHOLD {
             // free space below threshold, reserve more space
-            let _lock = idx_lock.write().unwrap();
             let capacity = capacity + RESERVE_INCREMENT;
-            debug!("index::add: trying to reserve {capacity}");
-            if let Err(err) = idx.reserve(capacity) {
+            if let Err(err) = idx.write().unwrap().reserve(capacity) {
                 error!("index::add: unable to reserve index capacity for {capacity}: {err}");
+                _ = tx.send(false);
                 return;
             }
-            debug!("index::add: finished reserve {capacity}");
+            debug!("index::add: reserved index capacity for {capacity}");
         }
 
-        let _lock = idx_lock.read().unwrap();
-        let Some(key) = primary_key.0.first() else {
-            error!("index::add: an empty primary key");
-            return;
-        };
-        if let Err(err) = idx.add(key.0, &embeddings.0) {
+        if let Err(err) = idx.read().unwrap().add(key.0, &embeddings.0) {
             warn!("index::add: unable to add embeddings for key {key}: {err}");
+            _ = tx.send(false);
             return;
         };
+
         items_count.fetch_add(1, Ordering::Relaxed);
+        _ = tx.send(true);
     });
+
+    if let Ok(false) = rx.await {
+        keys.write().unwrap().remove_by_right(&key);
+    }
 }
 
 async fn ann(
-    idx: Arc<usearch::Index>,
+    idx: Arc<RwLock<usearch::Index>>,
     tx_ann: oneshot::Sender<AnnR>,
+    keys: Arc<RwLock<BiMap<PrimaryKey, Key>>>,
     embeddings: Embeddings,
     dimensions: Dimensions,
     limit: Limit,
@@ -216,8 +244,7 @@ async fn ann(
 
     let (tx, rx) = oneshot::channel();
     rayon::spawn(move || {
-        tx.send(idx.search(&embeddings.0, limit.0.get()))
-            .unwrap_or_else(|_| warn!("index::ann: unable to send response"));
+        _ = tx.send(idx.read().unwrap().search(&embeddings.0, limit.0.get()));
     });
 
     tx_ann
@@ -227,19 +254,25 @@ async fn ann(
                 .and_then(|matches| {
                     matches.map_err(|err| anyhow!("index::ann: search failed: {err}"))
                 })
-                .map(|matches| {
-                    (
+                .and_then(|matches| {
+                    let primary_keys = {
+                        let keys = keys.read().unwrap();
                         matches
                             .keys
                             .into_iter()
-                            .map(|key| vec![key.into()].into())
-                            .collect(),
-                        matches
-                            .distances
-                            .into_iter()
-                            .map(|value| value.into())
-                            .collect(),
-                    )
+                            .map(|key| {
+                                keys.get_by_right(&key.into())
+                                    .cloned()
+                                    .ok_or(anyhow!("not defined primary key column {key}"))
+                            })
+                            .collect::<anyhow::Result<_>>()?
+                    };
+                    let distances = matches
+                        .distances
+                        .into_iter()
+                        .map(|value| value.into())
+                        .collect();
+                    Ok((primary_keys, distances))
                 }),
         )
         .unwrap_or_else(|_| warn!("index::ann: unable to send response"));

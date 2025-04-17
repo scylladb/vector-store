@@ -25,7 +25,7 @@ async fn simple_create_search_delete_index() {
         keyspace_name: "vector".to_string().into(),
         table_name: "items".to_string().into(),
         index_name: "ann".to_string().into(),
-        key_name: "id".to_string().into(),
+        key_names: vec!["pk".to_string().into(), "ck".to_string().into()],
         target_column: "embeddings".to_string().into(),
         dimensions: NonZeroUsize::new(3).unwrap().into(),
         connectivity: Default::default(),
@@ -46,7 +46,7 @@ async fn simple_create_search_delete_index() {
     db.add_table(
         index.keyspace_name.clone(),
         index.table_name.clone(),
-        index.key_name.clone(),
+        index.key_names.clone(),
         Table {
             dimensions: [(index.target_column.clone(), index.dimensions)]
                 .into_iter()
@@ -71,9 +71,9 @@ async fn simple_create_search_delete_index() {
         &index.table_name,
         &index.target_column,
         vec![
-            (vec![1.into()].into(), vec![1., 1., 1.].into()),
-            (vec![2.into()].into(), vec![2., -2., 2.].into()),
-            (vec![3.into()].into(), vec![3., 3., 3.].into()),
+            (vec![1.into(), 2.into()].into(), vec![1., 1., 1.].into()),
+            (vec![2.into(), 3.into()].into(), vec![2., -2., 2.].into()),
+            (vec![3.into(), 4.into()].into(), vec![3., 3., 3.].into()),
         ],
     )
     .unwrap();
@@ -103,9 +103,12 @@ async fn simple_create_search_delete_index() {
         )
         .await;
     assert_eq!(distances.len(), 1);
-    let primary_keys_id = primary_keys.get(&"id".to_string().into()).unwrap();
-    assert_eq!(distances.len(), primary_keys_id.len());
-    assert_eq!(primary_keys_id.first().unwrap().as_ref(), &2);
+    let primary_keys_pk = primary_keys.get(&"pk".to_string().into()).unwrap();
+    let primary_keys_ck = primary_keys.get(&"ck".to_string().into()).unwrap();
+    assert_eq!(distances.len(), primary_keys_pk.len());
+    assert_eq!(distances.len(), primary_keys_ck.len());
+    assert_eq!(primary_keys_pk.first().unwrap().as_ref(), &2);
+    assert_eq!(primary_keys_ck.first().unwrap().as_ref(), &3);
 
     db.del_index(&index.keyspace_name, &index.index_name)
         .unwrap();
