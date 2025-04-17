@@ -48,25 +48,24 @@ pub(crate) fn new() -> (mpsc::Sender<Db>, DbBasic) {
 
 struct TableStore {
     table: Table,
-    primary_keys: Vec<ColumnName>,
     embeddings: HashMap<ColumnName, HashMap<PrimaryKey, (Embeddings, bool)>>,
 }
 
 impl TableStore {
-    fn new(table: Table, primary_keys: Vec<ColumnName>) -> Self {
+    fn new(table: Table) -> Self {
         Self {
             embeddings: table
                 .dimensions
                 .keys()
                 .map(|key| (key.clone(), HashMap::new()))
                 .collect(),
-            primary_keys,
             table,
         }
     }
 }
 
 pub(crate) struct Table {
+    pub(crate) primary_keys: Vec<ColumnName>,
     pub(crate) dimensions: HashMap<ColumnName, Dimensions>,
 }
 
@@ -133,7 +132,6 @@ impl DbBasic {
         &self,
         keyspace_name: KeyspaceName,
         table_name: TableName,
-        key_names: Vec<ColumnName>,
         table: Table,
     ) -> anyhow::Result<()> {
         let mut db = self.0.write().unwrap();
@@ -145,9 +143,7 @@ impl DbBasic {
         if keyspace.tables.contains_key(&table_name) {
             bail!("a table {table_name} already exists in a keyspace");
         }
-        keyspace
-            .tables
-            .insert(table_name, TableStore::new(table, key_names));
+        keyspace.tables.insert(table_name, TableStore::new(table));
 
         db.create_new_schema_version();
         Ok(())
@@ -448,7 +444,7 @@ async fn process_db_index(db: &DbBasic, metadata: &IndexMetadata, msg: DbIndex) 
                     .keyspaces
                     .get(&metadata.keyspace_name)
                     .and_then(|keyspace| keyspace.tables.get(&metadata.table_name))
-                    .map(|table| table.primary_keys.clone())
+                    .map(|table| table.table.primary_keys.clone())
                     .unwrap_or_default(),
             )
             .map_err(|_| anyhow!("DbIndex::GetPrimaryKeyColumns: unable to send response"))

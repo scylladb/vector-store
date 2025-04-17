@@ -10,7 +10,6 @@ use crate::ExpansionAdd;
 use crate::ExpansionSearch;
 use crate::IndexId;
 use crate::IndexItemsCount;
-use crate::Key;
 use crate::Limit;
 use crate::PrimaryKey;
 use crate::db::Db;
@@ -44,6 +43,20 @@ const RESERVE_INCREMENT: usize = 1000000;
 // When free space for index vectors drops below this, will reserve more space
 // The ratio was taken for initial benchmarks
 const RESERVE_THRESHOLD: usize = RESERVE_INCREMENT / 3;
+
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    derive_more::From,
+    derive_more::AsRef,
+    derive_more::Display,
+)]
+/// Key for index embeddings
+struct Key(u64);
 
 pub(crate) fn new(
     id: IndexId,

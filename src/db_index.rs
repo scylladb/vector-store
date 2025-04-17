@@ -11,12 +11,19 @@ use crate::PrimaryKey;
 use crate::TableName;
 use anyhow::Context;
 use anyhow::anyhow;
-use anyhow::bail;
 use futures::StreamExt;
 use futures::TryStreamExt;
 use futures::stream::BoxStream;
 use itertools::Itertools;
 use scylla::client::session::Session;
+use scylla::cluster::metadata::ColumnType;
+use scylla::cluster::metadata::NativeType;
+use scylla::deserialize::row::ColumnIterator;
+use scylla::deserialize::row::DeserializeRow;
+use scylla::deserialize::value::DeserializeValue;
+use scylla::errors::DeserializationError;
+use scylla::errors::TypeCheckError;
+use scylla::frame::response::result::ColumnSpec;
 use scylla::statement::prepared::PreparedStatement;
 use scylla::value::CqlValue;
 use scylla::value::Row;
@@ -152,6 +159,61 @@ async fn process(statements: Arc<Statements>, msg: DbIndex) {
     }
 }
 
+#[derive(thiserror::Error, Debug)]
+enum DeserializeError {
+    #[error("Query for primary key & embeddings should contain at least two elements")]
+    InvalidQuerySelectLength,
+    #[error("Invalid embeddings type")]
+    InvalidEmbeddingsType,
+}
+
+struct PrimaryKeyWithEmbeddings {
+    primary_key: PrimaryKey,
+    embeddings: Embeddings,
+}
+
+impl<'frame, 'metadata> DeserializeRow<'frame, 'metadata> for PrimaryKeyWithEmbeddings {
+    fn type_check(specs: &[ColumnSpec]) -> Result<(), TypeCheckError> {
+        if specs.len() < 2 {
+            return Err(TypeCheckError::new(
+                DeserializeError::InvalidQuerySelectLength,
+            ));
+        }
+        let ColumnType::Vector { typ, .. } = specs.last().unwrap().typ() else {
+            return Err(TypeCheckError::new(DeserializeError::InvalidEmbeddingsType));
+        };
+        let ColumnType::Native(NativeType::Float) = typ.as_ref() else {
+            return Err(TypeCheckError::new(DeserializeError::InvalidEmbeddingsType));
+        };
+        Ok(())
+    }
+
+    fn deserialize(
+        mut row: ColumnIterator<'frame, 'metadata>,
+    ) -> Result<Self, DeserializationError> {
+        let columns = row.columns_remaining();
+        let mut count = 0;
+        let primary_key = row
+            .take_while_ref(|_| {
+                count += 1;
+                count < columns
+            })
+            .map_ok(|column| CqlValue::deserialize(column.spec.typ(), column.slice))
+            .flatten()
+            .collect::<Result<Vec<_>, _>>()?
+            .into();
+        let embeddings = row
+            .next()
+            .unwrap()
+            .and_then(|column| Vec::<f32>::deserialize(column.spec.typ(), column.slice))?
+            .into();
+        Ok(PrimaryKeyWithEmbeddings {
+            primary_key,
+            embeddings,
+        })
+    }
+}
+
 struct Statements {
     session: Arc<Session>,
     primary_key_columns: Vec<ColumnName>,
@@ -163,7 +225,21 @@ struct Statements {
 
 impl Statements {
     async fn new(session: Arc<Session>, metadata: IndexMetadata) -> anyhow::Result<Self> {
-        let primary_key_columns = metadata.key_names;
+        let cluster_state = session.get_cluster_state();
+        let table = cluster_state
+            .get_keyspace(metadata.keyspace_name.as_ref())
+            .ok_or_else(|| anyhow!("keyspace {} does not exist", metadata.keyspace_name))?
+            .tables
+            .get(metadata.table_name.as_ref())
+            .ok_or_else(|| anyhow!("table {} does not exist", metadata.table_name))?;
+
+        let primary_key_columns = table
+            .partition_key
+            .iter()
+            .chain(table.clustering_key.iter())
+            .cloned()
+            .map(ColumnName::from)
+            .collect_vec();
 
         let st_primary_key_select = primary_key_columns.iter().join(", ");
 
@@ -246,13 +322,6 @@ impl Statements {
                 row.columns
                     .into_iter()
                     .map(|col| col.ok_or_else(|| anyhow!("missing value for a primary key")))
-                    .map_ok(|col| {
-                        let CqlValue::BigInt(key) = col else {
-                            bail!("wrong type of a primary kery");
-                        };
-                        Ok((key as u64).into())
-                    })
-                    .flatten()
                     .collect::<anyhow::Result<Vec<_>>>()
                     .map(PrimaryKey::from)
             })
@@ -279,9 +348,9 @@ impl Statements {
             .session
             .execute_iter(self.st_get_items.clone(), ())
             .await?
-            .rows_stream::<(i64, Vec<f32>)>()?
-            .map_ok(|(key, embeddings)| (vec![(key as u64).into()].into(), embeddings.into()))
+            .rows_stream::<PrimaryKeyWithEmbeddings>()?
             .map_err(|err| err.into())
+            .map_ok(|row| (row.primary_key, row.embeddings))
             .boxed())
     }
 

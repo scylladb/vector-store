@@ -18,7 +18,10 @@ use scylla::serialize::SerializationError;
 use scylla::serialize::value::SerializeValue;
 use scylla::serialize::writers::CellWriter;
 use scylla::serialize::writers::WrittenCellProof;
+use scylla::value::CqlValue;
 use std::borrow::Cow;
+use std::hash::Hash;
+use std::hash::Hasher;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use tokio::signal;
@@ -152,35 +155,22 @@ impl SerializeValue for ColumnName {
     }
 }
 
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    PartialEq,
-    Eq,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-    derive_more::From,
-    derive_more::AsRef,
-    derive_more::Display,
-    utoipa::ToSchema,
-)]
-/// Key for index embeddings
-pub struct Key(u64);
+#[derive(Clone, Debug, derive_more::From)]
+pub struct PrimaryKey(Vec<CqlValue>);
 
-impl SerializeValue for Key {
-    fn serialize<'b>(
-        &self,
-        typ: &ColumnType,
-        writer: CellWriter<'b>,
-    ) -> Result<WrittenCellProof<'b>, SerializationError> {
-        <i64 as SerializeValue>::serialize(&(self.0 as i64), typ, writer)
+impl Hash for PrimaryKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        format!("{self:?}").hash(state);
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, derive_more::From)]
-pub struct PrimaryKey(Vec<Key>);
+impl PartialEq for PrimaryKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.eq(&other.0)
+    }
+}
+
+impl Eq for PrimaryKey {}
 
 #[derive(
     Clone, Debug, serde::Serialize, serde::Deserialize, derive_more::From, utoipa::ToSchema,
@@ -354,7 +344,6 @@ pub struct IndexMetadata {
     pub index_name: TableName,
     pub table_name: TableName,
     pub target_column: ColumnName,
-    pub key_names: Vec<ColumnName>,
     pub dimensions: Dimensions,
     pub connectivity: Connectivity,
     pub expansion_add: ExpansionAdd,

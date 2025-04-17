@@ -7,7 +7,6 @@ use crate::ColumnName;
 use crate::Distance;
 use crate::Embeddings;
 use crate::IndexId;
-use crate::Key;
 use crate::KeyspaceName;
 use crate::Limit;
 use crate::TableName;
@@ -25,7 +24,14 @@ use axum::response;
 use axum::response::IntoResponse;
 use axum::response::Response;
 use itertools::Itertools;
+use scylla::value::CqlValue;
+use serde_json::Number;
+use serde_json::Value;
 use std::collections::HashMap;
+use time::Date;
+use time::OffsetDateTime;
+use time::Time;
+use time::format_description::well_known::Iso8601;
 use tokio::sync::mpsc::Sender;
 use tower_http::trace::TraceLayer;
 use tracing::error;
@@ -78,7 +84,7 @@ pub struct PostIndexAnnRequest {
 
 #[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
 pub struct PostIndexAnnResponse {
-    pub primary_keys: HashMap<ColumnName, Vec<Key>>,
+    pub primary_keys: HashMap<ColumnName, Vec<Value>>,
     pub distances: Vec<Distance>,
 }
 
@@ -140,7 +146,8 @@ async fn post_index_ann(
                                 }
                                 Ok(primary_key)
                             })
-                            .map_ok(|primary_key| primary_key.0[idx_column])
+                            .map_ok(|primary_key| primary_key.0[idx_column].clone())
+                            .map_ok(to_json)
                             .collect();
                         primary_keys.map(|primary_keys| (column, primary_keys))
                     })
@@ -163,5 +170,112 @@ async fn post_index_ann(
                 }
             }
         }
+    }
+}
+
+fn to_json(value: CqlValue) -> Value {
+    match value {
+        CqlValue::Ascii(value) => Value::String(value),
+        CqlValue::Text(value) => Value::String(value),
+
+        CqlValue::Boolean(value) => Value::Bool(value),
+
+        CqlValue::Double(value) => {
+            Value::Number(Number::from_f64(value).expect("CqlValue::Double should be finite"))
+        }
+        CqlValue::Float(value) => {
+            Value::Number(Number::from_f64(value.into()).expect("CqlValue::Float should be finite"))
+        }
+
+        CqlValue::Int(value) => Value::Number(value.into()),
+        CqlValue::BigInt(value) => Value::Number(value.into()),
+        CqlValue::SmallInt(value) => Value::Number(value.into()),
+        CqlValue::TinyInt(value) => Value::Number(value.into()),
+
+        CqlValue::Uuid(value) => Value::String(value.into()),
+        CqlValue::Timeuuid(value) => Value::String((*value.as_ref()).into()),
+
+        CqlValue::Date(value) => Value::String(
+            TryInto::<Date>::try_into(value)
+                .expect("CqlValue::Date should be correct")
+                .format(&Iso8601::DATE)
+                .expect("Date should be correct"),
+        ),
+        CqlValue::Time(value) => Value::String(
+            TryInto::<Time>::try_into(value)
+                .expect("CqlValue::Time should be correct")
+                .format(&Iso8601::TIME)
+                .expect("Time should be correct"),
+        ),
+        CqlValue::Timestamp(value) => Value::String(
+            TryInto::<OffsetDateTime>::try_into(value)
+                .expect("CqlValue::Timestamp should be correct")
+                .format(&Iso8601::DEFAULT)
+                .expect("OffsetDateTime should be correct"),
+        ),
+
+        _ => unimplemented!(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    #[test]
+    fn to_json_conversion() {
+        assert_eq!(
+            to_json(CqlValue::Ascii("ascii".to_string())),
+            Value::String("ascii".to_string())
+        );
+        assert_eq!(
+            to_json(CqlValue::Text("text".to_string())),
+            Value::String("text".to_string())
+        );
+
+        assert_eq!(to_json(CqlValue::Boolean(true)), Value::Bool(true));
+
+        assert_eq!(
+            to_json(CqlValue::Double(101.)),
+            Value::Number(Number::from_f64(101.).unwrap())
+        );
+        assert_eq!(
+            to_json(CqlValue::Float(201.)),
+            Value::Number(Number::from_f64(201.).unwrap())
+        );
+
+        assert_eq!(to_json(CqlValue::Int(10)), Value::Number(10.into()));
+        assert_eq!(to_json(CqlValue::BigInt(20)), Value::Number(20.into()));
+        assert_eq!(to_json(CqlValue::SmallInt(30)), Value::Number(30.into()));
+        assert_eq!(to_json(CqlValue::TinyInt(40)), Value::Number(40.into()));
+
+        let uuid = Uuid::new_v4();
+        assert_eq!(to_json(CqlValue::Uuid(uuid)), Value::String(uuid.into()));
+        let uuid = Uuid::new_v4();
+        assert_eq!(
+            to_json(CqlValue::Timeuuid(uuid.into())),
+            Value::String(uuid.into())
+        );
+
+        let now = OffsetDateTime::now_utc();
+        assert_eq!(
+            to_json(CqlValue::Date(now.date().into())),
+            Value::String(now.date().format(&Iso8601::DATE).unwrap())
+        );
+        assert_eq!(
+            to_json(CqlValue::Time(now.time().into())),
+            Value::String(now.format(&Iso8601::TIME).unwrap())
+        );
+        assert_eq!(
+            to_json(CqlValue::Timestamp(now.into())),
+            Value::String(
+                // truncate microseconds
+                now.replace_millisecond(now.millisecond())
+                    .unwrap()
+                    .format(&Iso8601::DEFAULT)
+                    .unwrap()
+            )
+        );
     }
 }

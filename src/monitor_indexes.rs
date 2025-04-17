@@ -122,7 +122,6 @@ async fn get_indexes(db: &Sender<Db>) -> anyhow::Result<HashSet<IndexMetadata>> 
             index_name: idx.index,
             table_name: idx.table,
             target_column: idx.target_column,
-            key_names: vec!["id".to_string().into()],
             dimensions,
             connectivity,
             expansion_add,
