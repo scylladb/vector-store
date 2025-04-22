@@ -27,6 +27,7 @@ use vector_store::IndexMetadata;
 use vector_store::KeyspaceName;
 use vector_store::PrimaryKey;
 use vector_store::TableName;
+use vector_store::Timestamp;
 use vector_store::db::Db;
 use vector_store::db_index::DbIndex;
 
@@ -49,7 +50,7 @@ pub(crate) fn new() -> (mpsc::Sender<Db>, DbBasic) {
 
 struct TableStore {
     table: Table,
-    embeddings: HashMap<ColumnName, HashMap<PrimaryKey, (Embeddings, bool)>>,
+    embeddings: HashMap<ColumnName, HashMap<PrimaryKey, (Embeddings, Timestamp)>>,
 }
 
 impl TableStore {
@@ -201,7 +202,7 @@ impl DbBasic {
         keyspace_name: &KeyspaceName,
         table_name: &TableName,
         target_column: &ColumnName,
-        values: impl IntoIterator<Item = (PrimaryKey, Embeddings)>,
+        values: impl IntoIterator<Item = (PrimaryKey, Embeddings, Timestamp)>,
     ) -> anyhow::Result<()> {
         let mut db = self.0.write().unwrap();
 
@@ -215,9 +216,19 @@ impl DbBasic {
             bail!("a column {target_column} does not exist in a table {table_name}");
         };
 
-        values.into_iter().for_each(|(primary_key, embeddings)| {
-            column.insert(primary_key, (embeddings, false));
-        });
+        values
+            .into_iter()
+            .for_each(|(primary_key, embeddings, timestamp)| {
+                column
+                    .entry(primary_key)
+                    .and_modify(|(entry_embeddings, entry_timestamp)| {
+                        if entry_timestamp.as_ref() < timestamp.as_ref() {
+                            *entry_embeddings = embeddings.clone();
+                            *entry_timestamp = timestamp;
+                        }
+                    })
+                    .or_insert((embeddings, timestamp));
+            });
 
         Ok(())
     }
@@ -362,11 +373,10 @@ fn initial_scan(db: &DbBasic, metadata: &IndexMetadata) -> impl Stream<Item = Db
             .and_then(|table| table.embeddings.get(&metadata.target_column))
             .map(|rows| {
                 rows.iter()
-                    .filter_map(|(primary_key, (embeddings, processed))| {
-                        (!processed).then_some(DbEmbeddings {
-                            primary_key: primary_key.clone(),
-                            embeddings: embeddings.clone(),
-                        })
+                    .map(|(primary_key, (embeddings, timestamp))| DbEmbeddings {
+                        primary_key: primary_key.clone(),
+                        embeddings: embeddings.clone(),
+                        timestamp: *timestamp,
                     })
                     .collect_vec()
             })

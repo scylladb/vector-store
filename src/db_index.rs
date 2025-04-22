@@ -5,31 +5,26 @@
 
 use crate::ColumnName;
 use crate::DbEmbeddings;
-use crate::Embeddings;
 use crate::IndexMetadata;
 use crate::KeyspaceName;
-use crate::PrimaryKey;
 use crate::TableName;
 use anyhow::Context;
 use anyhow::anyhow;
+use anyhow::bail;
 use futures::StreamExt;
+use futures::TryStreamExt;
 use futures::stream::BoxStream;
 use itertools::Itertools;
 use scylla::client::session::Session;
-use scylla::cluster::metadata::ColumnType;
-use scylla::cluster::metadata::NativeType;
-use scylla::deserialize::row::ColumnIterator;
-use scylla::deserialize::row::DeserializeRow;
-use scylla::deserialize::value::DeserializeValue;
-use scylla::errors::DeserializationError;
-use scylla::errors::TypeCheckError;
-use scylla::frame::response::result::ColumnSpec;
 use scylla::routing::Token;
 use scylla::statement::prepared::PreparedStatement;
 use scylla::value::CqlValue;
+use scylla::value::Row;
 use std::iter;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::time::Duration;
+use time::OffsetDateTime;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -111,61 +106,6 @@ async fn process(statements: Arc<Statements>, msg: DbIndex) {
     }
 }
 
-#[derive(thiserror::Error, Debug)]
-enum DeserializeError {
-    #[error("Query for primary key & embeddings should contain at least two elements")]
-    InvalidQuerySelectLength,
-    #[error("Invalid embeddings type")]
-    InvalidEmbeddingsType,
-}
-
-struct PrimaryKeyWithEmbeddings {
-    primary_key: PrimaryKey,
-    embeddings: Embeddings,
-}
-
-impl<'frame, 'metadata> DeserializeRow<'frame, 'metadata> for PrimaryKeyWithEmbeddings {
-    fn type_check(specs: &[ColumnSpec]) -> Result<(), TypeCheckError> {
-        if specs.len() < 2 {
-            return Err(TypeCheckError::new(
-                DeserializeError::InvalidQuerySelectLength,
-            ));
-        }
-        let ColumnType::Vector { typ, .. } = specs.last().unwrap().typ() else {
-            return Err(TypeCheckError::new(DeserializeError::InvalidEmbeddingsType));
-        };
-        let ColumnType::Native(NativeType::Float) = typ.as_ref() else {
-            return Err(TypeCheckError::new(DeserializeError::InvalidEmbeddingsType));
-        };
-        Ok(())
-    }
-
-    fn deserialize(
-        mut row: ColumnIterator<'frame, 'metadata>,
-    ) -> Result<Self, DeserializationError> {
-        let columns = row.columns_remaining();
-        let mut count = 0;
-        let primary_key = row
-            .take_while_ref(|_| {
-                count += 1;
-                count < columns
-            })
-            .map_ok(|column| CqlValue::deserialize(column.spec.typ(), column.slice))
-            .flatten()
-            .collect::<Result<Vec<_>, _>>()?
-            .into();
-        let embeddings = row
-            .next()
-            .unwrap()
-            .and_then(|column| Vec::<f32>::deserialize(column.spec.typ(), column.slice))?
-            .into();
-        Ok(PrimaryKeyWithEmbeddings {
-            primary_key,
-            embeddings,
-        })
-    }
-}
-
 struct Statements {
     session: Arc<Session>,
     primary_key_columns: Vec<ColumnName>,
@@ -226,7 +166,7 @@ impl Statements {
     ) -> String {
         format!(
             "
-            SELECT {st_primary_key_list}, {embeddings}
+            SELECT {st_primary_key_list}, {embeddings}, writetime({embeddings})
             FROM {keyspace}.{table}
             WHERE
                 token({st_partition_key_list}) >= ?
@@ -324,19 +264,77 @@ impl Statements {
         begin: Token,
         end: Token,
     ) -> anyhow::Result<BoxStream<'static, DbEmbeddings>> {
+        // last two columns are embedding and writetime
+        let columns_len_expected = self.primary_key_columns.len() + 2;
         Ok(self
             .session
             .execute_iter(self.st_range_scan.clone(), (begin.value(), end.value()))
             .await?
-            .rows_stream::<PrimaryKeyWithEmbeddings>()?
-            .filter_map(|embeddings| async move {
-                embeddings
+            .rows_stream::<Row>()?
+            .map_err(anyhow::Error::from)
+            .map_ok(move |mut row| {
+                if row.columns.len() != columns_len_expected {
+                    debug!(
+                        "range_scan_stream: bad length of columns: {} != {}",
+                        row.columns.len(),
+                        columns_len_expected
+                    );
+                    return None;
+                }
+
+                let Some(CqlValue::BigInt(timestamp)) = row.columns.pop().unwrap() else {
+                    debug!("range_scan_stream: bad type of a writetime");
+                    return None;
+                };
+                let timestamp =
+                    (OffsetDateTime::UNIX_EPOCH + Duration::from_micros(timestamp as u64)).into();
+
+                let Some(CqlValue::Vector(embedding)) = row.columns.pop().unwrap() else {
+                    debug!("range_scan_stream: bad type of an embedding");
+                    return None;
+                };
+                let Ok(embedding) = embedding
+                    .into_iter()
+                    .map(|value| {
+                        let CqlValue::Float(value) = value else {
+                            bail!("range_scan_stream: bad type of an embedding element");
+                        };
+                        Ok(value)
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()
+                    .inspect_err(|err| debug!("range_scan_stream: {err}"))
+                else {
+                    return None;
+                };
+                let embeddings = embedding.into();
+
+                let Ok(primary_key) = row
+                    .columns
+                    .into_iter()
+                    .map(|value| {
+                        let Some(value) = value else {
+                            bail!("range_scan_stream: missing a primary key column");
+                        };
+                        Ok(value)
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()
+                    .inspect_err(|err| debug!("range_scan_stream: {err}"))
+                else {
+                    return None;
+                };
+                let primary_key = primary_key.into();
+
+                Some(DbEmbeddings {
+                    primary_key,
+                    embeddings,
+                    timestamp,
+                })
+            })
+            .filter_map(|value| async move {
+                value
                     .inspect_err(|err| debug!("range_scan_stream: problem with parsing row: {err}"))
                     .ok()
-            })
-            .map(|row| DbEmbeddings {
-                primary_key: row.primary_key,
-                embeddings: row.embeddings,
+                    .flatten()
             })
             .boxed())
     }

@@ -24,6 +24,7 @@ use std::hash::Hash;
 use std::hash::Hasher;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
+use time::OffsetDateTime;
 use tokio::signal;
 use tokio::sync::mpsc::Sender;
 use utoipa::PartialSchema;
@@ -350,10 +351,14 @@ impl DbCustomIndex {
     }
 }
 
+#[derive(Clone, Copy, Debug, derive_more::From, derive_more::AsRef)]
+pub struct Timestamp(OffsetDateTime);
+
 #[derive(Debug)]
 pub struct DbEmbeddings {
     pub primary_key: PrimaryKey,
     pub embeddings: Embeddings,
+    pub timestamp: Timestamp,
 }
 
 #[derive(derive_more::From)]

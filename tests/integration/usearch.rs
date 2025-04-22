@@ -7,6 +7,7 @@ use crate::db_basic;
 use crate::db_basic::Index;
 use crate::db_basic::Table;
 use crate::httpclient::HttpClient;
+use ::time::OffsetDateTime;
 use scylla::value::CqlValue;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
@@ -74,14 +75,17 @@ async fn simple_create_search_delete_index() {
             (
                 vec![CqlValue::Int(1), CqlValue::Text("one".to_string())].into(),
                 vec![1., 1., 1.].into(),
+                OffsetDateTime::from_unix_timestamp(10).unwrap().into(),
             ),
             (
                 vec![CqlValue::Int(2), CqlValue::Text("two".to_string())].into(),
                 vec![2., -2., 2.].into(),
+                OffsetDateTime::from_unix_timestamp(20).unwrap().into(),
             ),
             (
                 vec![CqlValue::Int(3), CqlValue::Text("three".to_string())].into(),
                 vec![3., 3., 3.].into(),
+                OffsetDateTime::from_unix_timestamp(30).unwrap().into(),
             ),
         ],
     )
