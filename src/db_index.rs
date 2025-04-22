@@ -12,9 +12,8 @@ use crate::PrimaryKey;
 use crate::TableName;
 use anyhow::Context;
 use anyhow::anyhow;
-use futures::Stream;
 use futures::StreamExt;
-use futures::TryStreamExt;
+use futures::stream::BoxStream;
 use itertools::Itertools;
 use scylla::client::session::Session;
 use scylla::cluster::metadata::ColumnType;
@@ -25,15 +24,20 @@ use scylla::deserialize::value::DeserializeValue;
 use scylla::errors::DeserializationError;
 use scylla::errors::TypeCheckError;
 use scylla::frame::response::result::ColumnSpec;
+use scylla::routing::Token;
 use scylla::statement::prepared::PreparedStatement;
 use scylla::value::CqlValue;
+use std::iter;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tracing::Instrument;
 use tracing::debug;
 use tracing::debug_span;
 use tracing::trace;
+use tracing::warn;
 
 type GetPrimaryKeyColumnsR = Vec<ColumnName>;
 
@@ -69,23 +73,14 @@ pub(crate) async fn new(
     let (tx_index, mut rx_index) = mpsc::channel(CHANNEL_SIZE);
     let (tx_embeddings, rx_embeddings) = mpsc::channel(CHANNEL_SIZE);
 
-    let mut items = statements.initial_scan().await?;
     tokio::spawn(
         async move {
             debug!("starting");
 
             while !rx_index.is_closed() {
                 tokio::select! {
-                    item = items.next() => {
-                        let Some(item) = item else {
-                            break;
-                        };
-                        let Ok(item) = item else {
-                            break;
-                        };
-                        if tx_embeddings.send(item).await.is_err() {
-                            break;
-                        }
+                    _ = statements.initial_scan(tx_embeddings.clone()) => {
+                        break;
                     }
                     Some(msg) = rx_index.recv() => {
                         tokio::spawn(process(Arc::clone(&statements), msg));
@@ -174,7 +169,7 @@ impl<'frame, 'metadata> DeserializeRow<'frame, 'metadata> for PrimaryKeyWithEmbe
 struct Statements {
     session: Arc<Session>,
     primary_key_columns: Vec<ColumnName>,
-    st_initial_scan: PreparedStatement,
+    st_range_scan: PreparedStatement,
 }
 
 impl Statements {
@@ -195,20 +190,22 @@ impl Statements {
             .map(ColumnName::from)
             .collect_vec();
 
-        let st_primary_key_select = primary_key_columns.iter().join(", ");
+        let st_partition_key_list = table.partition_key.iter().join(", ");
+        let st_primary_key_list = primary_key_columns.iter().join(", ");
 
         Ok(Self {
             primary_key_columns,
 
-            st_initial_scan: session
-                .prepare(Self::initial_scan_query(
+            st_range_scan: session
+                .prepare(Self::range_scan_query(
                     &metadata.keyspace_name,
                     &metadata.table_name,
-                    &st_primary_key_select,
+                    &st_primary_key_list,
+                    &st_partition_key_list,
                     &metadata.target_column,
                 ))
                 .await
-                .context("initial_scan_query")?,
+                .context("range_scan_query")?,
 
             session,
         })
@@ -218,32 +215,127 @@ impl Statements {
         self.primary_key_columns.clone()
     }
 
-    fn initial_scan_query(
+    fn range_scan_query(
         keyspace: &KeyspaceName,
         table: &TableName,
-        st_primary_key_select: &str,
+        st_primary_key_list: &str,
+        st_partition_key_list: &str,
         embeddings: &ColumnName,
     ) -> String {
         format!(
             "
-            SELECT {st_primary_key_select}, {embeddings}
+            SELECT {st_primary_key_list}, {embeddings}
             FROM {keyspace}.{table}
+            WHERE
+                token({st_partition_key_list}) >= ?
+                AND token({st_partition_key_list}) <= ?
             "
         )
     }
 
-    async fn initial_scan(
+    /// The initial full scan of embeddings stored in a ScyllaDB table. It scans concurrently using
+    /// token ranges read from a rust driver. At first it prepares ranges, limits concurrent scans
+    /// using semaphore, and runs each scan in separate concurrent task using cloned mpsc channel
+    /// to send read embeddings into the pipeline.
+    async fn initial_scan(&self, tx: mpsc::Sender<DbEmbeddings>) {
+        let semaphore = Arc::new(Semaphore::new(self.nr_parallel_queries().get()));
+
+        for (begin, end) in self.fullscan_ranges() {
+            let permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
+
+            if let Ok(embeddings) = self.range_scan_stream(begin, end).await.inspect_err(|err| {
+                warn!("unable to do initial scan for range ({begin:?}, {end:?}): {err}")
+            }) {
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    embeddings
+                        .for_each(|embedding| async {
+                            _ = tx.send(embedding).await;
+                        })
+                        .await;
+                    drop(permit);
+                });
+            }
+        }
+    }
+
+    fn nr_shards_in_cluster(&self) -> NonZeroUsize {
+        NonZeroUsize::try_from(
+            self.session
+                .get_cluster_state()
+                .get_nodes_info()
+                .iter()
+                .filter_map(|node| node.sharder())
+                .map(|sharder| sharder.nr_shards.get() as usize)
+                .sum::<usize>(),
+        )
+        .unwrap_or(NonZeroUsize::new(1).unwrap())
+    }
+
+    // Parallel queries = (cores in cluster) * (smuge factor)
+    fn nr_parallel_queries(&self) -> NonZeroUsize {
+        const SMUGE_FACTOR: NonZeroUsize = NonZeroUsize::new(3).unwrap();
+        self.nr_shards_in_cluster()
+            .checked_mul(SMUGE_FACTOR)
+            .unwrap()
+    }
+
+    /// Creates an iterator over all tokens ranges available in a cluster. A token ring is taken
+    /// from the rust driver as a list of tokens. A token range is build from a token pair
+    /// (tokens[idx], tokens[idx+1]-1) to be able to use WHERE token >= ? AND token <= ? in CQL
+    /// queries - the next token starts the new range. Additionally to the list of tokens taken
+    /// from the token ring, the first item is the lowest possible token, and the last item is the
+    /// highest possible token - for support the specific token range after the highest token to
+    /// the lowest token. The highest possible token value is not decremented, because it doesn't
+    /// start a new range.
+    fn fullscan_ranges(&self) -> impl Iterator<Item = (Token, Token)> {
+        const TOKEN_MAX: i64 = i64::MAX; // the highest possible token value in the ScyllaDB
+        const TOKEN_MIN: i64 = -TOKEN_MAX; // the lowest possible token value in the ScyllaDB
+
+        let tokens = iter::once(Token::new(TOKEN_MIN))
+            .chain(
+                self.session
+                    .get_cluster_state()
+                    .replica_locator()
+                    .ring()
+                    .iter()
+                    .map(|(token, _)| token)
+                    .copied(),
+            )
+            .collect_vec();
+        tokens
+            .into_iter()
+            .circular_tuple_windows()
+            .map(|(begin, end)| {
+                if begin > end {
+                    // this is the last token range
+                    (begin, Token::new(TOKEN_MAX))
+                } else {
+                    // prepare a range without the last token
+                    (begin, Token::new(end.value() - 1))
+                }
+            })
+    }
+
+    async fn range_scan_stream(
         &self,
-    ) -> anyhow::Result<impl Stream<Item = anyhow::Result<DbEmbeddings>> + use<>> {
+        begin: Token,
+        end: Token,
+    ) -> anyhow::Result<BoxStream<'static, DbEmbeddings>> {
         Ok(self
             .session
-            .execute_iter(self.st_initial_scan.clone(), ())
+            .execute_iter(self.st_range_scan.clone(), (begin.value(), end.value()))
             .await?
             .rows_stream::<PrimaryKeyWithEmbeddings>()?
-            .map_err(|err| err.into())
-            .map_ok(|row| DbEmbeddings {
+            .filter_map(|embeddings| async move {
+                embeddings
+                    .inspect_err(|err| debug!("range_scan_stream: problem with parsing row: {err}"))
+                    .ok()
+            })
+            .map(|row| DbEmbeddings {
                 primary_key: row.primary_key,
                 embeddings: row.embeddings,
-            }))
+            })
+            .boxed())
     }
 }
