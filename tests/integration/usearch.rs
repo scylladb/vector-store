@@ -99,6 +99,7 @@ async fn simple_create_search_delete_index() {
     })
     .await
     .unwrap();
+    assert_eq!(client.count(&index).await, Some(3));
 
     let indexes = client.indexes().await;
     assert_eq!(indexes.len(), 1);

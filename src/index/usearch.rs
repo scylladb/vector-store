@@ -15,6 +15,7 @@ use crate::PrimaryKey;
 use crate::db::Db;
 use crate::db::DbExt;
 use crate::index::actor::AnnR;
+use crate::index::actor::CountR;
 use crate::index::actor::Index;
 use anyhow::anyhow;
 use bimap::BiMap;
@@ -158,6 +159,10 @@ async fn process(
         } => {
             ann(idx, tx, keys, embeddings, dimensions, limit).await;
         }
+
+        Index::Count { tx } => {
+            count(idx, tx);
+        }
     }
 }
 
@@ -289,4 +294,9 @@ async fn ann(
                 }),
         )
         .unwrap_or_else(|_| warn!("index::ann: unable to send response"));
+}
+
+fn count(idx: Arc<RwLock<usearch::Index>>, tx: oneshot::Sender<CountR>) {
+    tx.send(Ok(idx.read().unwrap().size()))
+        .unwrap_or_else(|_| warn!("index::count: unable to send response"));
 }

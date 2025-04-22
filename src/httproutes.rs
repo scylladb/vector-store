@@ -54,6 +54,7 @@ pub(crate) fn new(engine: Sender<Engine>) -> Router {
         .merge(
             OpenApiRouter::new()
                 .routes(routes!(get_indexes))
+                .routes(routes!(get_index_count))
                 .routes(routes!(post_index_ann))
                 .layer(TraceLayer::new_for_http())
                 .with_state(engine),
@@ -73,6 +74,36 @@ pub(crate) fn new(engine: Sender<Engine>) -> Router {
 )]
 async fn get_indexes(State(engine): State<Sender<Engine>>) -> response::Json<Vec<IndexId>> {
     response::Json(engine.get_index_ids().await)
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/indexes/{keyspace}/{index}/count",
+    description = "Get a number of elements for a specific index",
+    params(
+        ("keyspace" = KeyspaceName, Path, description = "A keyspace name for the index"),
+        ("index" = TableName, Path, description = "An index name")
+    ),
+    responses(
+        (status = 200, description = "Index count", body = usize)
+    )
+)]
+async fn get_index_count(
+    State(engine): State<Sender<Engine>>,
+    Path((keyspace, index)): Path<(KeyspaceName, TableName)>,
+) -> Response {
+    let Some((index, _)) = engine.get_index(IndexId::new(&keyspace, &index)).await else {
+        return (StatusCode::NOT_FOUND, "").into_response();
+    };
+    match index.count().await {
+        Err(err) => {
+            let msg = format!("index.count request error: {err}");
+            error!("get_index_count: {msg}");
+            (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
+        }
+
+        Ok(count) => (StatusCode::OK, response::Json(count)).into_response(),
+    }
 }
 
 #[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
