@@ -14,7 +14,7 @@ pub(crate) type AnnR = anyhow::Result<(Vec<PrimaryKey>, Vec<Distance>)>;
 pub(crate) type CountR = anyhow::Result<usize>;
 
 pub(crate) enum Index {
-    Add {
+    AddOrReplace {
         primary_key: PrimaryKey,
         embeddings: Embeddings,
     },
@@ -29,14 +29,14 @@ pub(crate) enum Index {
 }
 
 pub(crate) trait IndexExt {
-    async fn add(&self, primary_key: PrimaryKey, embeddings: Embeddings);
+    async fn add_or_replace(&self, primary_key: PrimaryKey, embeddings: Embeddings);
     async fn ann(&self, embeddings: Embeddings, limit: Limit) -> AnnR;
     async fn count(&self) -> CountR;
 }
 
 impl IndexExt for mpsc::Sender<Index> {
-    async fn add(&self, primary_key: PrimaryKey, embeddings: Embeddings) {
-        self.send(Index::Add {
+    async fn add_or_replace(&self, primary_key: PrimaryKey, embeddings: Embeddings) {
+        self.send(Index::AddOrReplace {
             primary_key,
             embeddings,
         })

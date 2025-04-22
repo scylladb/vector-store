@@ -121,11 +121,11 @@ async fn process(
     usearch_key: Arc<AtomicU64>,
 ) {
     match msg {
-        Index::Add {
+        Index::AddOrReplace {
             primary_key,
             embeddings,
         } => {
-            add(idx, keys, usearch_key, primary_key, embeddings).await;
+            add_or_replace(idx, keys, usearch_key, primary_key, embeddings).await;
         }
 
         Index::Ann {
@@ -142,7 +142,7 @@ async fn process(
     }
 }
 
-async fn add(
+async fn add_or_replace(
     idx: Arc<RwLock<usearch::Index>>,
     keys: Arc<RwLock<BiMap<PrimaryKey, Key>>>,
     usearch_key: Arc<AtomicU64>,
@@ -151,15 +151,20 @@ async fn add(
 ) {
     let key = usearch_key.fetch_add(1, Ordering::Relaxed).into();
 
-    if keys
+    let (key, remove) = if keys
         .write()
         .unwrap()
         .insert_no_overwrite(primary_key.clone(), key)
-        .is_err()
+        .is_ok()
     {
-        debug!("add: primary_key already exists: {primary_key:?}");
-        return;
-    }
+        (key, false)
+    } else {
+        usearch_key.fetch_sub(1, Ordering::Relaxed);
+        (
+            *keys.read().unwrap().get_by_left(&primary_key).unwrap(),
+            true,
+        )
+    };
 
     let (tx, rx) = oneshot::channel();
 
@@ -174,11 +179,18 @@ async fn add(
                 _ = tx.send(false);
                 return;
             }
-            debug!("add: reserved index capacity for {capacity}");
+            debug!("add_or_replace: reserved index capacity for {capacity}");
         }
 
+        if remove {
+            if let Err(err) = idx.read().unwrap().remove(key.0) {
+                debug!("add_or_replace: unable to remove embeddings for key {key}: {err}");
+                _ = tx.send(true); // don't remove a key from a bimap
+                return;
+            };
+        }
         if let Err(err) = idx.read().unwrap().add(key.0, &embeddings.0) {
-            debug!("add: unable to add embeddings for key {key}: {err}");
+            debug!("add_or_replace: unable to add embeddings for key {key}: {err}");
             _ = tx.send(false);
             return;
         };
@@ -263,7 +275,7 @@ mod tests {
     use tokio::time;
 
     #[tokio::test]
-    async fn add_size_ann() {
+    async fn add_or_replace_size_ann() {
         let actor = new(
             IndexId::new(&"vector".to_string().into(), &"store".to_string().into()),
             NonZeroUsize::new(3).unwrap().into(),
@@ -274,19 +286,19 @@ mod tests {
         .unwrap();
 
         actor
-            .add(
+            .add_or_replace(
                 vec![CqlValue::Int(1), CqlValue::Text("one".to_string())].into(),
                 vec![1., 1., 1.].into(),
             )
             .await;
         actor
-            .add(
+            .add_or_replace(
                 vec![CqlValue::Int(2), CqlValue::Text("two".to_string())].into(),
                 vec![2., -2., 2.].into(),
             )
             .await;
         actor
-            .add(
+            .add_or_replace(
                 vec![CqlValue::Int(3), CqlValue::Text("three".to_string())].into(),
                 vec![3., 3., 3.].into(),
             )
@@ -302,7 +314,7 @@ mod tests {
 
         let (primary_keys, distances) = actor
             .ann(
-                vec![2.1, -2., 2.].into(),
+                vec![2.2, -2.2, 2.2].into(),
                 NonZeroUsize::new(1).unwrap().into(),
             )
             .await
@@ -313,5 +325,31 @@ mod tests {
             primary_keys.first().unwrap(),
             &vec![CqlValue::Int(2), CqlValue::Text("two".to_string())].into(),
         );
+
+        actor
+            .add_or_replace(
+                vec![CqlValue::Int(3), CqlValue::Text("three".to_string())].into(),
+                vec![2.1, -2.1, 2.1].into(),
+            )
+            .await;
+
+        time::timeout(Duration::from_secs(10), async {
+            while actor
+                .ann(
+                    vec![2.2, -2.2, 2.2].into(),
+                    NonZeroUsize::new(1).unwrap().into(),
+                )
+                .await
+                .unwrap()
+                .0
+                .first()
+                .unwrap()
+                != &vec![CqlValue::Int(3), CqlValue::Text("three".to_string())].into()
+            {
+                task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 }

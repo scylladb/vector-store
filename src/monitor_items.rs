@@ -35,7 +35,7 @@ pub(crate) async fn new(
                         let Some(embeddings) = embeddings else {
                             break;
                         };
-                        index.add(embeddings.primary_key, embeddings.embeddings).await;
+                        index.add_or_replace(embeddings.primary_key, embeddings.embeddings).await;
                     }
                     _ = rx.recv() => { }
                 }
