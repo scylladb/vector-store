@@ -271,6 +271,7 @@ struct ParamM(usize);
 #[derive(
     Clone,
     Debug,
+    PartialEq,
     serde::Serialize,
     serde::Deserialize,
     derive_more::AsRef,

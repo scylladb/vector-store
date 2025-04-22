@@ -47,3 +47,60 @@ pub(crate) async fn new(
     );
     Ok(tx)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use scylla::value::CqlValue;
+
+    #[tokio::test]
+    async fn flow() {
+        let (tx_embeddings, rx_embeddings) = mpsc::channel(10);
+        let (tx_index, mut rx_index) = mpsc::channel(10);
+        let _actor = new(
+            IndexId::new(&"vector".to_string().into(), &"store".to_string().into()),
+            rx_embeddings,
+            tx_index,
+        )
+        .await
+        .unwrap();
+
+        tx_embeddings
+            .send(DbEmbeddings {
+                primary_key: vec![CqlValue::Int(1)].into(),
+                embeddings: vec![1.].into(),
+            })
+            .await
+            .unwrap();
+        tx_embeddings
+            .send(DbEmbeddings {
+                primary_key: vec![CqlValue::Int(2)].into(),
+                embeddings: vec![2.].into(),
+            })
+            .await
+            .unwrap();
+
+        let Some(Index::AddOrReplace {
+            primary_key,
+            embeddings,
+        }) = rx_index.recv().await
+        else {
+            unreachable!();
+        };
+        assert_eq!(primary_key, vec![CqlValue::Int(1)].into());
+        assert_eq!(embeddings, vec![1.].into());
+
+        let Some(Index::AddOrReplace {
+            primary_key,
+            embeddings,
+        }) = rx_index.recv().await
+        else {
+            unreachable!();
+        };
+        assert_eq!(primary_key, vec![CqlValue::Int(2)].into());
+        assert_eq!(embeddings, vec![2.].into());
+
+        drop(tx_embeddings);
+        assert!(rx_index.recv().await.is_none());
+    }
+}
