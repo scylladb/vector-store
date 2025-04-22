@@ -88,18 +88,12 @@ async fn simple_create_search_delete_index() {
     .unwrap();
 
     time::timeout(Duration::from_secs(10), async {
-        while db
-            .get_indexed_elements_count(&index.keyspace_name, &index.index_name)
-            .unwrap()
-            .as_ref()
-            != &3
-        {
+        while client.count(&index).await != Some(3) {
             task::yield_now().await;
         }
     })
     .await
     .unwrap();
-    assert_eq!(client.count(&index).await, Some(3));
 
     let indexes = client.indexes().await;
     assert_eq!(indexes.len(), 1);

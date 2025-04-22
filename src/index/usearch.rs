@@ -9,11 +9,8 @@ use crate::Embeddings;
 use crate::ExpansionAdd;
 use crate::ExpansionSearch;
 use crate::IndexId;
-use crate::IndexItemsCount;
 use crate::Limit;
 use crate::PrimaryKey;
-use crate::db::Db;
-use crate::db::DbExt;
 use crate::index::actor::AnnR;
 use crate::index::actor::CountR;
 use crate::index::actor::Index;
@@ -22,12 +19,10 @@ use bimap::BiMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::RwLock;
-use std::sync::atomic::AtomicU32;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
-use tokio::time;
 use tracing::Instrument;
 use tracing::debug;
 use tracing::debug_span;
@@ -61,7 +56,6 @@ struct Key(u64);
 
 pub(crate) fn new(
     id: IndexId,
-    db: mpsc::Sender<Db>,
     dimensions: Dimensions,
     connectivity: Connectivity,
     expansion_add: ExpansionAdd,
@@ -85,49 +79,21 @@ pub(crate) fn new(
     let (tx, mut rx) = mpsc::channel(CHANNEL_SIZE);
 
     tokio::spawn(
-        {
-            let id = id.clone();
-            async move {
-                let mut items_count_db = IndexItemsCount(0);
-                let items_count = Arc::new(AtomicU32::new(0));
+        async move {
+            // bimap between PrimaryKey and Key for an usearch index
+            let keys = Arc::new(RwLock::new(BiMap::new()));
 
-                db.update_items_count(id.clone(), items_count_db)
-                    .await
-                    .unwrap_or_else(|err| warn!("index::new: unable update items count: {err}"));
+            // Incremental key for a usearch index
+            let usearch_key = Arc::new(AtomicU64::new(0));
 
-                // bimap between PrimaryKey and Key for an usearch index
-                let keys = Arc::new(RwLock::new(BiMap::new()));
-
-                // Incremental key for a usearch index
-                let usearch_key = Arc::new(AtomicU64::new(0));
-
-                let mut housekeeping_interval = time::interval(time::Duration::from_secs(1));
-
-                while !rx.is_closed() {
-                    tokio::select! {
-                        _ = housekeeping_interval.tick() => {
-                            housekeeping(
-                                &db,
-                                id.clone(),
-                                &mut items_count_db,
-                                &items_count,
-                            ).await;
-                        }
-
-                        Some(msg) = rx.recv() => {
-                            tokio::spawn(
-                                process(
-                                    msg,
-                                    dimensions,
-                                    Arc::clone(&idx),
-                                    Arc::clone(&keys),
-                                    Arc::clone(&usearch_key),
-                                    Arc::clone(&items_count),
-                                )
-                            );
-                        }
-                    }
-                }
+            while let Some(msg) = rx.recv().await {
+                tokio::spawn(process(
+                    msg,
+                    dimensions,
+                    Arc::clone(&idx),
+                    Arc::clone(&keys),
+                    Arc::clone(&usearch_key),
+                ));
             }
         }
         .instrument(debug_span!("index", "{}", id.0)),
@@ -142,14 +108,13 @@ async fn process(
     idx: Arc<RwLock<usearch::Index>>,
     keys: Arc<RwLock<BiMap<PrimaryKey, Key>>>,
     usearch_key: Arc<AtomicU64>,
-    items_count: Arc<AtomicU32>,
 ) {
     match msg {
         Index::Add {
             primary_key,
             embeddings,
         } => {
-            add(idx, keys, usearch_key, primary_key, embeddings, items_count).await;
+            add(idx, keys, usearch_key, primary_key, embeddings).await;
         }
 
         Index::Ann {
@@ -166,29 +131,12 @@ async fn process(
     }
 }
 
-async fn housekeeping(
-    db: &mpsc::Sender<Db>,
-    id: IndexId,
-    items_count_db: &mut IndexItemsCount,
-    items_count: &AtomicU32,
-) {
-    let items = items_count.load(Ordering::Relaxed);
-    if items != items_count_db.0 {
-        debug!("housekeeping update items count: {items_count_db}",);
-        items_count_db.0 = items;
-        db.update_items_count(id, *items_count_db)
-            .await
-            .unwrap_or_else(|err| warn!("index::housekeeping: unable update items count: {err}"));
-    }
-}
-
 async fn add(
     idx: Arc<RwLock<usearch::Index>>,
     keys: Arc<RwLock<BiMap<PrimaryKey, Key>>>,
     usearch_key: Arc<AtomicU64>,
     primary_key: PrimaryKey,
     embeddings: Embeddings,
-    items_count: Arc<AtomicU32>,
 ) {
     let key = usearch_key.fetch_add(1, Ordering::Relaxed).into();
 
@@ -224,7 +172,6 @@ async fn add(
             return;
         };
 
-        items_count.fetch_add(1, Ordering::Relaxed);
         _ = tx.send(true);
     });
 

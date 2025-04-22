@@ -192,28 +192,6 @@ impl SerializeValue for Distance {
     Copy,
     Clone,
     Debug,
-    serde::Serialize,
-    serde::Deserialize,
-    derive_more::From,
-    derive_more::Display,
-    derive_more::AsRef,
-)]
-pub struct IndexItemsCount(u32);
-
-impl SerializeValue for IndexItemsCount {
-    fn serialize<'b>(
-        &self,
-        typ: &ColumnType,
-        writer: CellWriter<'b>,
-    ) -> Result<WrittenCellProof<'b>, SerializationError> {
-        <i32 as SerializeValue>::serialize(&(self.0 as i32), typ, writer)
-    }
-}
-
-#[derive(
-    Copy,
-    Clone,
-    Debug,
     PartialEq,
     Eq,
     Hash,

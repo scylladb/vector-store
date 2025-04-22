@@ -10,7 +10,6 @@ use crate::Dimensions;
 use crate::ExpansionAdd;
 use crate::ExpansionSearch;
 use crate::IndexId;
-use crate::IndexItemsCount;
 use crate::IndexMetadata;
 use crate::IndexVersion;
 use crate::KeyspaceName;
@@ -74,11 +73,6 @@ pub enum Db {
         tx: oneshot::Sender<GetIndexParamsR>,
     },
 
-    UpdateItemsCount {
-        id: IndexId,
-        items_count: IndexItemsCount,
-    },
-
     RemoveIndex {
         id: IndexId,
     },
@@ -102,12 +96,6 @@ pub(crate) trait DbExt {
     ) -> GetIndexTargetTypeR;
 
     async fn get_index_params(&self, id: IndexId) -> GetIndexParamsR;
-
-    async fn update_items_count(
-        &self,
-        id: IndexId,
-        items_count: IndexItemsCount,
-    ) -> anyhow::Result<()>;
 
     async fn remove_index(&self, id: IndexId) -> anyhow::Result<()>;
 }
@@ -167,15 +155,6 @@ impl DbExt for mpsc::Sender<Db> {
         let (tx, rx) = oneshot::channel();
         self.send(Db::GetIndexParams { id, tx }).await?;
         rx.await?
-    }
-
-    async fn update_items_count(
-        &self,
-        id: IndexId,
-        items_count: IndexItemsCount,
-    ) -> anyhow::Result<()> {
-        self.send(Db::UpdateItemsCount { id, items_count }).await?;
-        Ok(())
     }
 
     async fn remove_index(&self, id: IndexId) -> anyhow::Result<()> {
@@ -239,13 +218,6 @@ async fn process(statements: Arc<Statements>, msg: Db) {
             .send(statements.get_index_params(id).await)
             .unwrap_or_else(|_| warn!("db::process: Db::GetIndexParams: unable to send response")),
 
-        Db::UpdateItemsCount { id, items_count } => {
-            statements
-                .update_items_count(id, items_count)
-                .await
-                .unwrap_or_else(|err| warn!("db::process: Db::UpdateItemsCount: {err}"));
-        }
-
         Db::RemoveIndex { id } => {
             statements
                 .remove_index(id)
@@ -263,7 +235,6 @@ struct Statements {
     st_get_index_target_type: PreparedStatement,
     re_get_index_target_type: Regex,
     st_get_index_params: PreparedStatement,
-    st_update_items_count: PreparedStatement,
     st_remove_index: PreparedStatement,
 }
 
@@ -303,11 +274,6 @@ impl Statements {
                 .prepare(Self::ST_GET_INDEX_PARAMS)
                 .await
                 .context("ST_GET_INDEX_PARAMS")?,
-
-            st_update_items_count: session
-                .prepare(Self::ST_UPDATE_ITEMS_COUNT)
-                .await
-                .context("ST_UPDATE_ITEMS_COUNT")?,
 
             st_remove_index: session
                 .prepare(Self::ST_REMOVE_INDEX)
@@ -455,23 +421,6 @@ impl Statements {
             })
             .try_next()
             .await?)
-    }
-
-    const ST_UPDATE_ITEMS_COUNT: &str = "
-        UPDATE vector_benchmark.vector_indexes
-            SET indexed_elements_count = ?
-            WHERE id = ?
-        ";
-
-    async fn update_items_count(
-        &self,
-        id: IndexId,
-        items_count: IndexItemsCount,
-    ) -> anyhow::Result<()> {
-        self.session
-            .execute_unpaged(&self.st_update_items_count, (items_count, id))
-            .await?;
-        Ok(())
     }
 
     const ST_REMOVE_INDEX: &str = "

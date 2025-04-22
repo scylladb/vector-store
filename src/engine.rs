@@ -101,7 +101,6 @@ pub(crate) async fn new(db: mpsc::Sender<Db>) -> anyhow::Result<mpsc::Sender<Eng
 
                     let Ok(index_actor) = index::new(
                         id.clone(),
-                        db.clone(),
                         metadata.dimensions,
                         metadata.connectivity,
                         metadata.expansion_add,

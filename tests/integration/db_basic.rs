@@ -21,7 +21,6 @@ use vector_store::Dimensions;
 use vector_store::Embeddings;
 use vector_store::ExpansionAdd;
 use vector_store::ExpansionSearch;
-use vector_store::IndexItemsCount;
 use vector_store::IndexMetadata;
 use vector_store::KeyspaceName;
 use vector_store::PrimaryKey;
@@ -73,14 +72,12 @@ pub(crate) struct Table {
 struct IndexStore {
     index: Index,
     version: Uuid,
-    elements_count: IndexItemsCount,
 }
 
 impl IndexStore {
     fn new(index: Index) -> Self {
         Self {
             version: Uuid::new_v4(),
-            elements_count: 0.into(),
             index,
         }
     }
@@ -222,21 +219,6 @@ impl DbBasic {
 
         Ok(())
     }
-
-    pub(crate) fn get_indexed_elements_count(
-        &self,
-        keyspace_name: &KeyspaceName,
-        index_name: &TableName,
-    ) -> anyhow::Result<IndexItemsCount> {
-        let db = self.0.read().unwrap();
-        let Some(keyspace) = db.keyspaces.get(keyspace_name) else {
-            bail!("a keyspace {keyspace_name} does not exist");
-        };
-        let Some(index) = keyspace.indexes.get(index_name) else {
-            bail!("an index {index_name} does not exist");
-        };
-        Ok(index.elements_count)
-    }
 }
 
 fn process_db(db: &DbBasic, msg: Db) {
@@ -324,18 +306,6 @@ fn process_db(db: &DbBasic, msg: Db) {
                 })))
             .map_err(|_| anyhow!("Db::GetIndexParams: unable to send response"))
             .unwrap(),
-
-        Db::UpdateItemsCount { id, items_count } => {
-            if let Some(index) =
-                db.0.write()
-                    .unwrap()
-                    .keyspaces
-                    .get_mut(&id.keyspace())
-                    .and_then(|keyspace| keyspace.indexes.get_mut(&id.index()))
-            {
-                index.elements_count = items_count;
-            }
-        }
 
         Db::RemoveIndex { id } => {
             if let Some(keyspace) = db.0.write().unwrap().keyspaces.get_mut(&id.keyspace()) {
