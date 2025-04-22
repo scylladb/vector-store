@@ -134,9 +134,6 @@ pub(crate) async fn new(db: mpsc::Sender<Db>) -> anyhow::Result<mpsc::Sender<Eng
 
                 Engine::DelIndex { id } => {
                     indexes.remove(&id);
-                    db.remove_index(id).await.unwrap_or_else(|err| {
-                        warn!("engine::Engine::DelIndex: issue while removing index: {err}")
-                    });
                 }
 
                 Engine::GetIndex { id, tx } => {

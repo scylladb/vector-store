@@ -306,12 +306,6 @@ fn process_db(db: &DbBasic, msg: Db) {
                 })))
             .map_err(|_| anyhow!("Db::GetIndexParams: unable to send response"))
             .unwrap(),
-
-        Db::RemoveIndex { id } => {
-            if let Some(keyspace) = db.0.write().unwrap().keyspaces.get_mut(&id.keyspace()) {
-                keyspace.indexes.remove(&id.index());
-            }
-        }
     }
 }
 
