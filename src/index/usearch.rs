@@ -252,3 +252,66 @@ fn count(idx: Arc<RwLock<usearch::Index>>, tx: oneshot::Sender<CountR>) {
     tx.send(Ok(idx.read().unwrap().size()))
         .unwrap_or_else(|_| trace!("count: unable to send response"));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::index::IndexExt;
+    use scylla::value::CqlValue;
+    use std::time::Duration;
+    use tokio::task;
+    use tokio::time;
+
+    #[tokio::test]
+    async fn add_size_ann() {
+        let actor = new(
+            IndexId::new(&"vector".to_string().into(), &"store".to_string().into()),
+            NonZeroUsize::new(3).unwrap().into(),
+            Connectivity::default(),
+            ExpansionAdd::default(),
+            ExpansionSearch::default(),
+        )
+        .unwrap();
+
+        actor
+            .add(
+                vec![CqlValue::Int(1), CqlValue::Text("one".to_string())].into(),
+                vec![1., 1., 1.].into(),
+            )
+            .await;
+        actor
+            .add(
+                vec![CqlValue::Int(2), CqlValue::Text("two".to_string())].into(),
+                vec![2., -2., 2.].into(),
+            )
+            .await;
+        actor
+            .add(
+                vec![CqlValue::Int(3), CqlValue::Text("three".to_string())].into(),
+                vec![3., 3., 3.].into(),
+            )
+            .await;
+
+        time::timeout(Duration::from_secs(10), async {
+            while actor.count().await.unwrap() != 3 {
+                task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let (primary_keys, distances) = actor
+            .ann(
+                vec![2.1, -2., 2.].into(),
+                NonZeroUsize::new(1).unwrap().into(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(primary_keys.len(), 1);
+        assert_eq!(distances.len(), 1);
+        assert_eq!(
+            primary_keys.first().unwrap(),
+            &vec![CqlValue::Int(2), CqlValue::Text("two".to_string())].into(),
+        );
+    }
+}
