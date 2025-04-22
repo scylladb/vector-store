@@ -9,7 +9,6 @@ use crate::DbCustomIndex;
 use crate::Dimensions;
 use crate::ExpansionAdd;
 use crate::ExpansionSearch;
-use crate::IndexId;
 use crate::IndexMetadata;
 use crate::IndexVersion;
 use crate::KeyspaceName;
@@ -69,7 +68,8 @@ pub enum Db {
     },
 
     GetIndexParams {
-        id: IndexId,
+        keyspace: KeyspaceName,
+        index: TableName,
         tx: oneshot::Sender<GetIndexParamsR>,
     },
 }
@@ -91,7 +91,7 @@ pub(crate) trait DbExt {
         target_column: ColumnName,
     ) -> GetIndexTargetTypeR;
 
-    async fn get_index_params(&self, id: IndexId) -> GetIndexParamsR;
+    async fn get_index_params(&self, keyspace: KeyspaceName, index: TableName) -> GetIndexParamsR;
 }
 
 impl DbExt for mpsc::Sender<Db> {
@@ -145,9 +145,14 @@ impl DbExt for mpsc::Sender<Db> {
         rx.await?
     }
 
-    async fn get_index_params(&self, id: IndexId) -> GetIndexParamsR {
+    async fn get_index_params(&self, keyspace: KeyspaceName, index: TableName) -> GetIndexParamsR {
         let (tx, rx) = oneshot::channel();
-        self.send(Db::GetIndexParams { id, tx }).await?;
+        self.send(Db::GetIndexParams {
+            keyspace,
+            index,
+            tx,
+        })
+        .await?;
         rx.await?
     }
 }
@@ -203,8 +208,12 @@ async fn process(statements: Arc<Statements>, msg: Db) {
             )
             .unwrap_or_else(|_| warn!("db::process: Db::GetIndexVersion: unable to send response")),
 
-        Db::GetIndexParams { id, tx } => tx
-            .send(statements.get_index_params(id).await)
+        Db::GetIndexParams {
+            keyspace,
+            index,
+            tx,
+        } => tx
+            .send(statements.get_index_params(keyspace, index).await)
             .unwrap_or_else(|_| warn!("db::process: Db::GetIndexParams: unable to send response")),
     }
 }
@@ -216,7 +225,6 @@ struct Statements {
     st_get_index_version: PreparedStatement,
     st_get_index_target_type: PreparedStatement,
     re_get_index_target_type: Regex,
-    st_get_index_params: PreparedStatement,
 }
 
 impl Statements {
@@ -250,11 +258,6 @@ impl Statements {
 
             re_get_index_target_type: Regex::new(Self::RE_GET_INDEX_TARGET_TYPE)
                 .context("RE_GET_INDEX_TARGET_TYPE")?,
-
-            st_get_index_params: session
-                .prepare(Self::ST_GET_INDEX_PARAMS)
-                .await
-                .context("ST_GET_INDEX_PARAMS")?,
 
             session,
         })
@@ -365,37 +368,15 @@ impl Statements {
             }))
     }
 
-    const ST_GET_INDEX_PARAMS: &str = "
-        SELECT param_m, param_ef_construct, param_ef_search
-        FROM vector_benchmark.vector_indexes
-        WHERE id = ?
-        ";
-
-    async fn get_index_params(&self, id: IndexId) -> GetIndexParamsR {
-        Ok(self
-            .session
-            .execute_iter(self.st_get_index_params.clone(), (id,))
-            .await?
-            .rows_stream::<(Option<i32>, Option<i32>, Option<i32>)>()?
-            .try_filter_map(|(connectivity, expansion_add, expansion_search)| {
-                Box::pin(async move {
-                    Ok(connectivity
-                        .zip(expansion_add)
-                        .zip(expansion_search)
-                        .and_then(|((connectivity, expansion_add), expansion_search)| {
-                            (connectivity >= 0 && expansion_add >= 0 && expansion_search >= 0)
-                                .then_some((connectivity, expansion_add, expansion_search))
-                        }))
-                })
-            })
-            .map_ok(|(connectivity, expansion_add, expansion_search)| {
-                (
-                    (connectivity as usize).into(),
-                    (expansion_add as usize).into(),
-                    (expansion_search as usize).into(),
-                )
-            })
-            .try_next()
-            .await?)
+    async fn get_index_params(
+        &self,
+        _keyspace: KeyspaceName,
+        _index: TableName,
+    ) -> GetIndexParamsR {
+        Ok(Some((
+            Connectivity::default(),
+            ExpansionAdd::default(),
+            ExpansionSearch::default(),
+        )))
     }
 }

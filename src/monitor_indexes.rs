@@ -107,8 +107,10 @@ async fn get_indexes(db: &Sender<Db>) -> anyhow::Result<HashSet<IndexMetadata>> 
             continue;
         };
 
-        let (connectivity, expansion_add, expansion_search) = if let Some(params) =
-            db.get_index_params(idx.id()).await.inspect_err(|err| {
+        let (connectivity, expansion_add, expansion_search) = if let Some(params) = db
+            .get_index_params(idx.keyspace.clone(), idx.index.clone())
+            .await
+            .inspect_err(|err| {
                 warn!("monitor_indexes::get_indexes: unable to get index params: {err}")
             })? {
             params

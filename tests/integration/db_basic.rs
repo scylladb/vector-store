@@ -289,14 +289,18 @@ fn process_db(db: &DbBasic, msg: Db) {
             .map_err(|_| anyhow!("Db::GetIndexTargetType: unable to send response"))
             .unwrap(),
 
-        Db::GetIndexParams { id, tx } => tx
+        Db::GetIndexParams {
+            keyspace,
+            index,
+            tx,
+        } => tx
             .send(Ok(db
                 .0
                 .read()
                 .unwrap()
                 .keyspaces
-                .get(&id.keyspace())
-                .and_then(|keyspace| keyspace.indexes.get(&id.index()))
+                .get(&keyspace)
+                .and_then(|keyspace| keyspace.indexes.get(&index))
                 .map(|index| {
                     (
                         index.index.connectivity,
