@@ -27,8 +27,7 @@ use tracing::Instrument;
 use tracing::debug;
 use tracing::debug_span;
 use tracing::error;
-use tracing::info;
-use tracing::warn;
+use tracing::trace;
 use usearch::IndexOptions;
 use usearch::ScalarKind;
 
@@ -70,7 +69,6 @@ pub(crate) fn new(
         ..Default::default()
     };
 
-    info!("Creating new index with id: {id}");
     let idx = Arc::new(RwLock::new(usearch::Index::new(&options)?));
     idx.write().unwrap().reserve(RESERVE_INCREMENT)?;
 
@@ -80,6 +78,8 @@ pub(crate) fn new(
 
     tokio::spawn(
         async move {
+            debug!("starting");
+
             // bimap between PrimaryKey and Key for an usearch index
             let keys = Arc::new(RwLock::new(BiMap::new()));
 
@@ -95,8 +95,10 @@ pub(crate) fn new(
                     Arc::clone(&usearch_key),
                 ));
             }
+
+            debug!("finished");
         }
-        .instrument(debug_span!("index", "{}", id.0)),
+        .instrument(debug_span!("usearch", "{id}")),
     );
 
     Ok(tx)
@@ -146,7 +148,7 @@ async fn add(
         .insert_no_overwrite(primary_key.clone(), key)
         .is_err()
     {
-        warn!("index::add: primary_key already exists: {primary_key:?}");
+        debug!("add: primary_key already exists: {primary_key:?}");
         return;
     }
 
@@ -159,15 +161,15 @@ async fn add(
             // free space below threshold, reserve more space
             let capacity = capacity + RESERVE_INCREMENT;
             if let Err(err) = idx.write().unwrap().reserve(capacity) {
-                error!("index::add: unable to reserve index capacity for {capacity}: {err}");
+                error!("unable to reserve index capacity for {capacity} in usearch: {err}");
                 _ = tx.send(false);
                 return;
             }
-            debug!("index::add: reserved index capacity for {capacity}");
+            debug!("add: reserved index capacity for {capacity}");
         }
 
         if let Err(err) = idx.read().unwrap().add(key.0, &embeddings.0) {
-            warn!("index::add: unable to add embeddings for key {key}: {err}");
+            debug!("add: unable to add embeddings for key {key}: {err}");
             _ = tx.send(false);
             return;
         };
@@ -190,20 +192,16 @@ async fn ann(
 ) {
     let Some(embeddings_len) = NonZeroUsize::new(embeddings.0.len()) else {
         tx_ann
-            .send(Err(anyhow!("index::ann: embeddings dimensions == 0")))
-            .unwrap_or_else(|_| {
-                warn!("index::ann: unable to send error response (zero dimensions)")
-            });
+            .send(Err(anyhow!("ann: embeddings dimensions == 0")))
+            .unwrap_or_else(|_| trace!("ann: unable to send error response (zero dimensions)"));
         return;
     };
     if embeddings_len != dimensions.0 {
         tx_ann
             .send(Err(anyhow!(
-                "index::ann: wrong embeddings dimensions: {embeddings_len} != {dimensions}",
+                "ann: wrong embeddings dimensions: {embeddings_len} != {dimensions}",
             )))
-            .unwrap_or_else(|_| {
-                warn!("index::ann: unable to send error response (wrong dimensions)")
-            });
+            .unwrap_or_else(|_| trace!("ann: unable to send error response (wrong dimensions)"));
         return;
     }
 
@@ -215,10 +213,8 @@ async fn ann(
     tx_ann
         .send(
             rx.await
-                .map_err(|err| anyhow!("index::ann: unable to recv matches: {err}"))
-                .and_then(|matches| {
-                    matches.map_err(|err| anyhow!("index::ann: search failed: {err}"))
-                })
+                .map_err(|err| anyhow!("ann: unable to recv matches: {err}"))
+                .and_then(|matches| matches.map_err(|err| anyhow!("ann: search failed: {err}")))
                 .and_then(|matches| {
                     let primary_keys = {
                         let keys = keys.read().unwrap();
@@ -240,10 +236,10 @@ async fn ann(
                     Ok((primary_keys, distances))
                 }),
         )
-        .unwrap_or_else(|_| warn!("index::ann: unable to send response"));
+        .unwrap_or_else(|_| trace!("ann: unable to send response"));
 }
 
 fn count(idx: Arc<RwLock<usearch::Index>>, tx: oneshot::Sender<CountR>) {
     tx.send(Ok(idx.read().unwrap().size()))
-        .unwrap_or_else(|_| warn!("index::count: unable to send response"));
+        .unwrap_or_else(|_| trace!("count: unable to send response"));
 }

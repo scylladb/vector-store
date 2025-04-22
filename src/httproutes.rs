@@ -34,7 +34,7 @@ use time::Time;
 use time::format_description::well_known::Iso8601;
 use tokio::sync::mpsc::Sender;
 use tower_http::trace::TraceLayer;
-use tracing::error;
+use tracing::debug;
 use utoipa::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -93,12 +93,13 @@ async fn get_index_count(
     Path((keyspace, index)): Path<(KeyspaceName, TableName)>,
 ) -> Response {
     let Some((index, _)) = engine.get_index(IndexId::new(&keyspace, &index)).await else {
+        debug!("get_index_size: missing index: {keyspace}/{index}");
         return (StatusCode::NOT_FOUND, "").into_response();
     };
     match index.count().await {
         Err(err) => {
             let msg = format!("index.count request error: {err}");
-            error!("get_index_count: {msg}");
+            debug!("get_index_count: {msg}");
             (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
         }
 
@@ -145,7 +146,7 @@ async fn post_index_ann(
     match index.ann(request.embeddings, request.limit).await {
         Err(err) => {
             let msg = format!("index.ann request error: {err}");
-            error!("post_index_ann: {msg}");
+            debug!("post_index_ann: {msg}");
             (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
         }
 
@@ -156,7 +157,7 @@ async fn post_index_ann(
                     primary_keys.len(),
                     distances.len()
                 );
-                error!("post_index_ann: {msg}");
+                debug!("post_index_ann: {msg}");
                 (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
             } else {
                 let primary_key_columns = db_index.get_primary_key_columns().await;
@@ -186,7 +187,7 @@ async fn post_index_ann(
 
                 match primary_keys {
                     Err(err) => {
-                        error!("post_index_ann: {err}");
+                        debug!("post_index_ann: {err}");
                         (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
                     }
 

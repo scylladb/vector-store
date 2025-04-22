@@ -30,7 +30,7 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tracing::Instrument;
 use tracing::debug_span;
-use tracing::warn;
+use tracing::trace;
 use uuid::Uuid;
 
 type GetDbIndexR = anyhow::Result<mpsc::Sender<DbIndex>>;
@@ -175,17 +175,17 @@ async fn process(statements: Arc<Statements>, msg: Db) {
     match msg {
         Db::GetDbIndex { metadata, tx } => tx
             .send(statements.get_db_index(metadata).await)
-            .unwrap_or_else(|_| warn!("db::process: Db::GetDbIndex: unable to send response")),
+            .unwrap_or_else(|_| trace!("process: Db::GetDbIndex: unable to send response")),
 
         Db::LatestSchemaVersion { tx } => tx
             .send(statements.latest_schema_version().await)
             .unwrap_or_else(|_| {
-                warn!("db::process: Db::LatestSchemaVersion: unable to send response")
+                trace!("process: Db::LatestSchemaVersion: unable to send response")
             }),
 
         Db::GetIndexes { tx } => tx
             .send(statements.get_indexes().await)
-            .unwrap_or_else(|_| warn!("db::process: Db::GetIndexes: unable to send response")),
+            .unwrap_or_else(|_| trace!("process: Db::GetIndexes: unable to send response")),
 
         Db::GetIndexVersion {
             keyspace,
@@ -193,7 +193,7 @@ async fn process(statements: Arc<Statements>, msg: Db) {
             tx,
         } => tx
             .send(statements.get_index_version(keyspace, index).await)
-            .unwrap_or_else(|_| warn!("db::process: Db::GetIndexVersion: unable to send response")),
+            .unwrap_or_else(|_| trace!("process: Db::GetIndexVersion: unable to send response")),
 
         Db::GetIndexTargetType {
             keyspace,
@@ -206,7 +206,7 @@ async fn process(statements: Arc<Statements>, msg: Db) {
                     .get_index_target_type(keyspace, table, target_column)
                     .await,
             )
-            .unwrap_or_else(|_| warn!("db::process: Db::GetIndexVersion: unable to send response")),
+            .unwrap_or_else(|_| trace!("process: Db::GetIndexVersion: unable to send response")),
 
         Db::GetIndexParams {
             keyspace,
@@ -214,7 +214,7 @@ async fn process(statements: Arc<Statements>, msg: Db) {
             tx,
         } => tx
             .send(statements.get_index_params(keyspace, index).await)
-            .unwrap_or_else(|_| warn!("db::process: Db::GetIndexParams: unable to send response")),
+            .unwrap_or_else(|_| trace!("process: Db::GetIndexParams: unable to send response")),
     }
 }
 

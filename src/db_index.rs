@@ -30,8 +30,9 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tracing::Instrument;
+use tracing::debug;
 use tracing::debug_span;
-use tracing::warn;
+use tracing::trace;
 
 type GetItemsR = anyhow::Result<BoxStream<'static, anyhow::Result<(PrimaryKey, Embeddings)>>>;
 type GetPrimaryKeyColumnsR = Vec<ColumnName>;
@@ -61,18 +62,10 @@ impl DbIndexExt for mpsc::Sender<DbIndex> {
 
     async fn get_primary_key_columns(&self) -> GetPrimaryKeyColumnsR {
         let (tx, rx) = oneshot::channel();
-        if self
-            .send(DbIndex::GetPrimaryKeyColumns { tx })
+        self.send(DbIndex::GetPrimaryKeyColumns { tx })
             .await
-            .is_err()
-        {
-            warn!("db_index::get_primary_key_columns: unable to send internal message");
-            return Vec::new();
-        }
-        rx.await.unwrap_or_else(|err| {
-            warn!("db_index::get_primary_key_columns: unable to recv internal message: {err}");
-            Vec::new()
-        })
+            .expect("internal actor should receive request");
+        rx.await.expect("internal actor should send response")
     }
 }
 
@@ -80,15 +73,18 @@ pub(crate) async fn new(
     db_session: Arc<Session>,
     metadata: IndexMetadata,
 ) -> anyhow::Result<mpsc::Sender<DbIndex>> {
+    let id = metadata.id();
     let statements = Arc::new(Statements::new(db_session, metadata).await?);
     let (tx, mut rx) = mpsc::channel(10);
     tokio::spawn(
         async move {
             while let Some(msg) = rx.recv().await {
+                debug!("starting");
                 tokio::spawn(process(Arc::clone(&statements), msg));
             }
+            debug!("finished");
         }
-        .instrument(debug_span!("db_index")),
+        .instrument(debug_span!("db_index", "{}", id)),
     );
     Ok(tx)
 }
@@ -97,12 +93,12 @@ async fn process(statements: Arc<Statements>, msg: DbIndex) {
     match msg {
         DbIndex::GetItems { tx } => tx
             .send(statements.get_items().await)
-            .unwrap_or_else(|_| warn!("db_index::process: Db::GetItems: unable to send response")),
+            .unwrap_or_else(|_| trace!("process: Db::GetItems: unable to send response")),
 
         DbIndex::GetPrimaryKeyColumns { tx } => tx
             .send(statements.get_primary_key_columns())
             .unwrap_or_else(|_| {
-                warn!("db_index::process: Db::GetPrimaryKeyColumns: unable to send response")
+                trace!("process: Db::GetPrimaryKeyColumns: unable to send response")
             }),
     }
 }

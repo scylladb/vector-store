@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+use crate::IndexId;
 use crate::db_index::DbIndex;
 use crate::db_index::DbIndexExt;
 use crate::index::Index;
@@ -13,13 +14,14 @@ use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
 use tracing::Instrument;
 use tracing::debug;
-use tracing::info_span;
+use tracing::debug_span;
 use tracing::warn;
 
 pub(crate) enum MonitorItems {}
 
 pub(crate) async fn new(
     db_index: Sender<DbIndex>,
+    id: IndexId,
     index: Sender<Index>,
 ) -> anyhow::Result<Sender<MonitorItems>> {
     // The value was taken from initial benchmarks
@@ -27,16 +29,23 @@ pub(crate) async fn new(
     let (tx, mut rx) = mpsc::channel(CHANNEL_SIZE);
 
     tokio::spawn(
-        async move {
-            initial_read(&mut rx, &db_index, &index)
-                .await
-                .unwrap_or_else(|err| {
-                    warn!("monitor_items: unable to do initial read: {err}");
-                });
+        {
+            let id = id.clone();
+            async move {
+                debug!("starting");
 
-            while rx.recv().await.is_some() {}
+                initial_read(&mut rx, &db_index, &index)
+                    .await
+                    .unwrap_or_else(|err| {
+                        warn!("unable to do initial read from db for {id}: {err}");
+                    });
+
+                while rx.recv().await.is_some() {}
+
+                debug!("finished");
+            }
         }
-        .instrument(info_span!("monitor items")),
+        .instrument(debug_span!("monitor items", "{id}")),
     );
     Ok(tx)
 }
@@ -49,16 +58,12 @@ async fn initial_read(
 ) -> anyhow::Result<()> {
     let mut rows = db_index.get_items().await?;
 
-    // The accumulator for number of processed embeddings
-    let mut count = 0;
-
     while !rx.is_closed() {
         tokio::select! {
             row = rows.try_next() => {
                 let Some((primary_key, embeddings)) = row? else {
                     break;
                 };
-                count += 1;
                 index.add(primary_key, embeddings).await;
             }
 
@@ -66,8 +71,5 @@ async fn initial_read(
         }
     }
 
-    if count > 0 {
-        debug!("initial_read: processed {count} items");
-    }
     Ok(())
 }

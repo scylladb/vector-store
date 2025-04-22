@@ -15,6 +15,9 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio::time;
+use tracing::Instrument;
+use tracing::debug;
+use tracing::debug_span;
 use tracing::warn;
 
 pub(crate) enum MonitorIndexes {}
@@ -24,32 +27,35 @@ pub(crate) async fn new(
     engine: Sender<Engine>,
 ) -> anyhow::Result<Sender<MonitorIndexes>> {
     let (tx, mut rx) = mpsc::channel(10);
-    tokio::spawn(async move {
-        const INTERVAL: Duration = Duration::from_secs(1);
-        let mut interval = time::interval(INTERVAL);
+    tokio::spawn(
+        async move {
+            const INTERVAL: Duration = Duration::from_secs(1);
+            let mut interval = time::interval(INTERVAL);
 
-        let mut schema_version = SchemaVersion::new();
-        let mut indexes = HashSet::new();
-        while !rx.is_closed() {
-            tokio::select! {
-                _ = interval.tick() => {
-                    if !schema_version.has_changed(&db).await {
-                        continue;
+            let mut schema_version = SchemaVersion::new();
+            let mut indexes = HashSet::new();
+            while !rx.is_closed() {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        if !schema_version.has_changed(&db).await {
+                            continue;
+                        }
+                        let Ok(mut new_indexes) = get_indexes(&db).await.inspect_err(|err| {
+                            debug!("monitor_indexes: unable to get the list of indexes: {err}");
+                        }) else {
+                            schema_version.reset();
+                            continue;
+                        };
+                        del_indexes(&engine, indexes.difference(&new_indexes)).await;
+                        add_indexes(&engine, new_indexes.difference(&indexes)).await;
+                        mem::swap(&mut indexes, &mut new_indexes);
                     }
-                    let Ok(mut new_indexes) = get_indexes(&db).await.inspect_err(|err| {
-                        warn!("monitor_indexes: unable to get the list of indexes: {err}");
-                    }) else {
-                        schema_version.reset();
-                        continue;
-                    };
-                    del_indexes(&engine, indexes.difference(&new_indexes)).await;
-                    add_indexes(&engine, new_indexes.difference(&indexes)).await;
-                    mem::swap(&mut indexes, &mut new_indexes);
+                    _ = rx.recv() => { }
                 }
-                _ = rx.recv() => { }
             }
         }
-    });
+        .instrument(debug_span!("monitor_indexes")),
+    );
     Ok(tx)
 }
 
@@ -63,7 +69,7 @@ impl SchemaVersion {
 
     async fn has_changed(&mut self, db: &Sender<Db>) -> bool {
         let schema_version = db.latest_schema_version().await.unwrap_or_else(|err| {
-            warn!("monitor_indexes: unable to get latest schema change: {err}");
+            warn!("unable to get latest schema change from db: {err}");
             None
         });
         if self.0 == schema_version {
@@ -84,11 +90,9 @@ async fn get_indexes(db: &Sender<Db>) -> anyhow::Result<HashSet<IndexMetadata>> 
         let Some(version) = db
             .get_index_version(idx.keyspace.clone(), idx.index.clone())
             .await
-            .inspect_err(|err| {
-                warn!("monitor_indexes::get_indexes: unable to get index version: {err}")
-            })?
+            .inspect_err(|err| warn!("unable to get index version: {err}"))?
         else {
-            warn!("monitor_indexes::get_indexes: no version for index {idx:?}");
+            debug!("get_indexes: no version for index {idx:?}");
             continue;
         };
 
@@ -99,23 +103,20 @@ async fn get_indexes(db: &Sender<Db>) -> anyhow::Result<HashSet<IndexMetadata>> 
                 idx.target_column.clone(),
             )
             .await
-            .inspect_err(|err| {
-                warn!("monitor_indexes::get_indexes: unable to get index target type: {err}")
-            })?
+            .inspect_err(|err| warn!("unable to get index target dimensions: {err}"))?
         else {
-            warn!("monitor_indexes::get_indexes: missing or unsupported type for index {idx:?}");
+            debug!("get_indexes: missing or unsupported type for index {idx:?}");
             continue;
         };
 
         let (connectivity, expansion_add, expansion_search) = if let Some(params) = db
             .get_index_params(idx.keyspace.clone(), idx.index.clone())
             .await
-            .inspect_err(|err| {
-                warn!("monitor_indexes::get_indexes: unable to get index params: {err}")
-            })? {
+            .inspect_err(|err| warn!("unable to get index params: {err}"))?
+        {
             params
         } else {
-            warn!("monitor_indexes::get_indexes: no params for index {idx:?}");
+            debug!("get_indexes: no params for index {idx:?}");
             (0.into(), 0.into(), 0.into())
         };
 

@@ -9,7 +9,6 @@ use crate::Limit;
 use crate::PrimaryKey;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
-use tracing::warn;
 
 pub(crate) type AnnR = anyhow::Result<(Vec<PrimaryKey>, Vec<Distance>)>;
 pub(crate) type CountR = anyhow::Result<usize>;
@@ -42,7 +41,7 @@ impl IndexExt for mpsc::Sender<Index> {
             embeddings,
         })
         .await
-        .unwrap_or_else(|err| warn!("IndexExt::add: unable to send request: {err}"));
+        .expect("internal actor should receive request");
     }
 
     async fn ann(&self, embeddings: Embeddings, limit: Limit) -> AnnR {

@@ -15,8 +15,12 @@ use crate::monitor_items;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
+use tracing::Instrument;
+use tracing::debug;
+use tracing::debug_span;
 use tracing::error;
-use tracing::warn;
+use tracing::info;
+use tracing::trace;
 
 type GetIndexIdsR = Vec<IndexId>;
 type GetIndexR = Option<(mpsc::Sender<Index>, mpsc::Sender<DbIndex>)>;
@@ -57,13 +61,13 @@ impl EngineExt for mpsc::Sender<Engine> {
     async fn add_index(&self, metadata: IndexMetadata) {
         self.send(Engine::AddIndex { metadata })
             .await
-            .unwrap_or_else(|err| warn!("EngineExt::add_index: unable to send request: {err}"));
+            .unwrap_or_else(|err| trace!("EngineExt::add_index: unable to send request: {err}"));
     }
 
     async fn del_index(&self, id: IndexId) {
         self.send(Engine::DelIndex { id })
             .await
-            .unwrap_or_else(|err| warn!("EngineExt::del_index: unable to send request: {err}"));
+            .unwrap_or_else(|err| trace!("EngineExt::del_index: unable to send request: {err}"));
     }
 
     async fn get_index(&self, id: IndexId) -> GetIndexR {
@@ -81,73 +85,84 @@ pub(crate) async fn new(db: mpsc::Sender<Db>) -> anyhow::Result<mpsc::Sender<Eng
 
     let monitor_actor = monitor_indexes::new(db.clone(), tx.clone()).await?;
 
-    tokio::spawn(async move {
-        let mut indexes = HashMap::new();
-        while let Some(msg) = rx.recv().await {
-            match msg {
-                Engine::GetIndexIds { tx } => {
-                    tx.send(indexes.keys().cloned().collect())
-                        .unwrap_or_else(|_| {
-                            warn!("engine::Engine::GetIndexIds: unable to send response")
-                        });
-                }
+    tokio::spawn(
+        async move {
+            debug!("starting");
 
-                Engine::AddIndex { metadata } => {
-                    let id = metadata.id();
-                    if indexes.contains_key(&id) {
-                        warn!("engine::Engine::AddIndex: trying to replace index with id {id}");
-                        continue;
+            let mut indexes = HashMap::new();
+            while let Some(msg) = rx.recv().await {
+                match msg {
+                    Engine::GetIndexIds { tx } => {
+                        tx.send(indexes.keys().cloned().collect())
+                            .unwrap_or_else(|_| {
+                                trace!("Engine::GetIndexIds: unable to send response")
+                            });
                     }
 
-                    let Ok(index_actor) = index::new(
-                        id.clone(),
-                        metadata.dimensions,
-                        metadata.connectivity,
-                        metadata.expansion_add,
-                        metadata.expansion_search,
-                    )
-                    .inspect_err(|err| {
-                        error!("unable to create index with metadata {metadata:?}: {err}")
-                    }) else {
-                        continue;
-                    };
+                    Engine::AddIndex { metadata } => {
+                        let id = metadata.id();
+                        if indexes.contains_key(&id) {
+                            trace!("Engine::AddIndex: trying to replace index with id {id}");
+                            continue;
+                        }
 
-                    let Ok(db_index) = db.get_db_index(metadata.clone()).await.inspect_err(|err| {
-                        error!("unable to create db_index from {metadata:?}: {err}")
-                    }) else {
-                        continue;
-                    };
+                        info!("creating a new index {id}");
 
-                    let Ok(monitor_actor) = monitor_items::new(
-                        db_index.clone(),
-                        index_actor.clone(),
-                    )
-                    .await
-                    .inspect_err(|err| {
-                        error!("unable to create monitor items with metadata {metadata:?}: {err}")
-                    }) else {
-                        continue;
-                    };
+                        let Ok(index_actor) = index::new(
+                            id.clone(),
+                            metadata.dimensions,
+                            metadata.connectivity,
+                            metadata.expansion_add,
+                            metadata.expansion_search,
+                        )
+                        .inspect_err(|err| error!("unable to create an index {id}: {err}")) else {
+                            continue;
+                        };
 
-                    indexes.insert(id.clone(), (index_actor, monitor_actor, db_index));
-                }
+                        let Ok(db_index) =
+                            db.get_db_index(metadata.clone()).await.inspect_err(|err| {
+                                error!("unable to create a db monitoring task for an index {id}: {err}")
+                            })
+                        else {
+                            continue;
+                        };
 
-                Engine::DelIndex { id } => {
-                    indexes.remove(&id);
-                }
+                        let Ok(monitor_actor) =
+                            monitor_items::new(db_index.clone(), id.clone(), index_actor.clone())
+                                .await
+                                .inspect_err(|err| {
+                                    error!(
+                                        "unable to create a synchronisation task between a db and an index {id}: {err}"
+                                    )
+                                })
+                        else {
+                            continue;
+                        };
 
-                Engine::GetIndex { id, tx } => {
-                    tx.send(
-                        indexes
-                            .get(&id)
-                            .map(|(index, _, db_index)| (index.clone(), db_index.clone())),
-                    )
-                    .unwrap_or_else(|_| warn!("engine::Engine::GetIndex: unable to send response"));
+                        indexes.insert(id.clone(), (index_actor, monitor_actor, db_index));
+                    }
+
+                    Engine::DelIndex { id } => {
+                        info!("removing an index {id}");
+                        indexes.remove(&id);
+                    }
+
+                    Engine::GetIndex { id, tx } => {
+                        tx.send(
+                            indexes
+                                .get(&id)
+                                .map(|(index, _, db_index)| (index.clone(), db_index.clone())),
+                        )
+                        .unwrap_or_else(|_| trace!("Engine::GetIndex: unable to send response"));
+                    }
                 }
             }
+            drop(monitor_actor);
+
+            debug!("starting");
         }
-        drop(monitor_actor);
-    });
+        .instrument(debug_span!("engine")),
+    );
 
     Ok(tx)
 }
