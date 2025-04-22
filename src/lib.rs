@@ -349,6 +349,12 @@ impl DbCustomIndex {
     }
 }
 
+#[derive(Debug)]
+pub struct DbEmbeddings {
+    pub primary_key: PrimaryKey,
+    pub embeddings: Embeddings,
+}
+
 #[derive(derive_more::From)]
 pub struct HttpServerAddr(SocketAddr);
 

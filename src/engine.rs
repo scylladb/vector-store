@@ -119,7 +119,7 @@ pub(crate) async fn new(db: mpsc::Sender<Db>) -> anyhow::Result<mpsc::Sender<Eng
                             continue;
                         };
 
-                        let Ok(db_index) =
+                        let Ok((db_index, embeddings_stream)) =
                             db.get_db_index(metadata.clone()).await.inspect_err(|err| {
                                 error!("unable to create a db monitoring task for an index {id}: {err}")
                             })
@@ -128,7 +128,7 @@ pub(crate) async fn new(db: mpsc::Sender<Db>) -> anyhow::Result<mpsc::Sender<Eng
                         };
 
                         let Ok(monitor_actor) =
-                            monitor_items::new(db_index.clone(), id.clone(), index_actor.clone())
+                            monitor_items::new(id.clone(), embeddings_stream, index_actor.clone())
                                 .await
                                 .inspect_err(|err| {
                                     error!(

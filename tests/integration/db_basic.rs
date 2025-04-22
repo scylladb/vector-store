@@ -5,6 +5,7 @@
 
 use anyhow::anyhow;
 use anyhow::bail;
+use futures::Stream;
 use futures::StreamExt;
 use futures::stream;
 use itertools::Itertools;
@@ -17,6 +18,7 @@ use uuid::Uuid;
 use vector_store::ColumnName;
 use vector_store::Connectivity;
 use vector_store::DbCustomIndex;
+use vector_store::DbEmbeddings;
 use vector_store::Dimensions;
 use vector_store::Embeddings;
 use vector_store::ExpansionAdd;
@@ -316,42 +318,59 @@ fn process_db(db: &DbBasic, msg: Db) {
 pub(crate) fn new_db_index(
     db: DbBasic,
     metadata: IndexMetadata,
-) -> anyhow::Result<mpsc::Sender<DbIndex>> {
-    let (tx, mut rx) = mpsc::channel(10);
+) -> anyhow::Result<(mpsc::Sender<DbIndex>, mpsc::Receiver<DbEmbeddings>)> {
+    let (tx_index, mut rx_index) = mpsc::channel(10);
+    let (tx_embeddings, rx_embeddings) = mpsc::channel(10);
     tokio::spawn({
         async move {
-            while let Some(msg) = rx.recv().await {
+            let mut items = initial_scan(&db, &metadata);
+            while !rx_index.is_closed() {
+                tokio::select! {
+                    item = items.next() => {
+                        let Some(item) = item else {
+                            break;
+                        };
+                        if tx_embeddings.send(item).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(msg) = rx_index.recv() => {
+                        process_db_index(&db, &metadata, msg).await;
+                    }
+                }
+            }
+            while let Some(msg) = rx_index.recv().await {
                 process_db_index(&db, &metadata, msg).await;
             }
         }
     });
-    Ok(tx)
+    Ok((tx_index, rx_embeddings))
+}
+
+fn initial_scan(db: &DbBasic, metadata: &IndexMetadata) -> impl Stream<Item = DbEmbeddings> {
+    stream::iter(
+        db.0.read()
+            .unwrap()
+            .keyspaces
+            .get(&metadata.keyspace_name)
+            .and_then(|keyspace| keyspace.tables.get(&metadata.table_name))
+            .and_then(|table| table.embeddings.get(&metadata.target_column))
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|(primary_key, (embeddings, processed))| {
+                        (!processed).then_some(DbEmbeddings {
+                            primary_key: primary_key.clone(),
+                            embeddings: embeddings.clone(),
+                        })
+                    })
+                    .collect_vec()
+            })
+            .unwrap_or_default(),
+    )
 }
 
 async fn process_db_index(db: &DbBasic, metadata: &IndexMetadata, msg: DbIndex) {
     match msg {
-        DbIndex::GetItems { tx } => tx
-            .send(Ok(stream::iter(
-                db.0.read()
-                    .unwrap()
-                    .keyspaces
-                    .get(&metadata.keyspace_name)
-                    .and_then(|keyspace| keyspace.tables.get(&metadata.table_name))
-                    .and_then(|table| table.embeddings.get(&metadata.target_column))
-                    .map(|rows| {
-                        rows.iter()
-                            .filter_map(|(primary_key, (embeddings, processed))| {
-                                (!processed)
-                                    .then_some(Ok((primary_key.clone(), embeddings.clone())))
-                            })
-                            .collect_vec()
-                    })
-                    .unwrap_or_default(),
-            )
-            .boxed()))
-            .map_err(|_| anyhow!("DbIndex::GetItems: unable to send response"))
-            .unwrap(),
-
         DbIndex::GetPrimaryKeyColumns { tx } => tx
             .send(
                 db.0.read()

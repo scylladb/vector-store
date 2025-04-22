@@ -4,6 +4,7 @@
  */
 
 use crate::ColumnName;
+use crate::DbEmbeddings;
 use crate::Embeddings;
 use crate::IndexMetadata;
 use crate::KeyspaceName;
@@ -11,9 +12,9 @@ use crate::PrimaryKey;
 use crate::TableName;
 use anyhow::Context;
 use anyhow::anyhow;
+use futures::Stream;
 use futures::StreamExt;
 use futures::TryStreamExt;
-use futures::stream::BoxStream;
 use itertools::Itertools;
 use scylla::client::session::Session;
 use scylla::cluster::metadata::ColumnType;
@@ -34,32 +35,19 @@ use tracing::debug;
 use tracing::debug_span;
 use tracing::trace;
 
-type GetItemsR = anyhow::Result<BoxStream<'static, anyhow::Result<(PrimaryKey, Embeddings)>>>;
 type GetPrimaryKeyColumnsR = Vec<ColumnName>;
 
 pub enum DbIndex {
-    GetItems {
-        tx: oneshot::Sender<GetItemsR>,
-    },
-
     GetPrimaryKeyColumns {
         tx: oneshot::Sender<GetPrimaryKeyColumnsR>,
     },
 }
 
 pub(crate) trait DbIndexExt {
-    async fn get_items(&self) -> GetItemsR;
-
     async fn get_primary_key_columns(&self) -> GetPrimaryKeyColumnsR;
 }
 
 impl DbIndexExt for mpsc::Sender<DbIndex> {
-    async fn get_items(&self) -> GetItemsR {
-        let (tx, rx) = oneshot::channel();
-        self.send(DbIndex::GetItems { tx }).await?;
-        rx.await?
-    }
-
     async fn get_primary_key_columns(&self) -> GetPrimaryKeyColumnsR {
         let (tx, rx) = oneshot::channel();
         self.send(DbIndex::GetPrimaryKeyColumns { tx })
@@ -72,29 +60,54 @@ impl DbIndexExt for mpsc::Sender<DbIndex> {
 pub(crate) async fn new(
     db_session: Arc<Session>,
     metadata: IndexMetadata,
-) -> anyhow::Result<mpsc::Sender<DbIndex>> {
+) -> anyhow::Result<(mpsc::Sender<DbIndex>, mpsc::Receiver<DbEmbeddings>)> {
     let id = metadata.id();
     let statements = Arc::new(Statements::new(db_session, metadata).await?);
-    let (tx, mut rx) = mpsc::channel(10);
+
+    // TODO: The value of channel size was taken from initial benchmarks. Needs more testing
+    const CHANNEL_SIZE: usize = 10;
+    let (tx_index, mut rx_index) = mpsc::channel(CHANNEL_SIZE);
+    let (tx_embeddings, rx_embeddings) = mpsc::channel(CHANNEL_SIZE);
+
+    let mut items = statements.initial_scan().await?;
     tokio::spawn(
         async move {
-            while let Some(msg) = rx.recv().await {
-                debug!("starting");
+            debug!("starting");
+
+            while !rx_index.is_closed() {
+                tokio::select! {
+                    item = items.next() => {
+                        let Some(item) = item else {
+                            break;
+                        };
+                        let Ok(item) = item else {
+                            break;
+                        };
+                        if tx_embeddings.send(item).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(msg) = rx_index.recv() => {
+                        tokio::spawn(process(Arc::clone(&statements), msg));
+                    }
+                }
+            }
+
+            debug!("finished initial load");
+
+            while let Some(msg) = rx_index.recv().await {
                 tokio::spawn(process(Arc::clone(&statements), msg));
             }
+
             debug!("finished");
         }
         .instrument(debug_span!("db_index", "{}", id)),
     );
-    Ok(tx)
+    Ok((tx_index, rx_embeddings))
 }
 
 async fn process(statements: Arc<Statements>, msg: DbIndex) {
     match msg {
-        DbIndex::GetItems { tx } => tx
-            .send(statements.get_items().await)
-            .unwrap_or_else(|_| trace!("process: Db::GetItems: unable to send response")),
-
         DbIndex::GetPrimaryKeyColumns { tx } => tx
             .send(statements.get_primary_key_columns())
             .unwrap_or_else(|_| {
@@ -161,7 +174,7 @@ impl<'frame, 'metadata> DeserializeRow<'frame, 'metadata> for PrimaryKeyWithEmbe
 struct Statements {
     session: Arc<Session>,
     primary_key_columns: Vec<ColumnName>,
-    st_get_items: PreparedStatement,
+    st_initial_scan: PreparedStatement,
 }
 
 impl Statements {
@@ -187,15 +200,15 @@ impl Statements {
         Ok(Self {
             primary_key_columns,
 
-            st_get_items: session
-                .prepare(Self::get_items_query(
+            st_initial_scan: session
+                .prepare(Self::initial_scan_query(
                     &metadata.keyspace_name,
                     &metadata.table_name,
                     &st_primary_key_select,
                     &metadata.target_column,
                 ))
                 .await
-                .context("get_items_query")?,
+                .context("initial_scan_query")?,
 
             session,
         })
@@ -205,7 +218,7 @@ impl Statements {
         self.primary_key_columns.clone()
     }
 
-    fn get_items_query(
+    fn initial_scan_query(
         keyspace: &KeyspaceName,
         table: &TableName,
         st_primary_key_select: &str,
@@ -219,14 +232,18 @@ impl Statements {
         )
     }
 
-    async fn get_items(&self) -> GetItemsR {
+    async fn initial_scan(
+        &self,
+    ) -> anyhow::Result<impl Stream<Item = anyhow::Result<DbEmbeddings>> + use<>> {
         Ok(self
             .session
-            .execute_iter(self.st_get_items.clone(), ())
+            .execute_iter(self.st_initial_scan.clone(), ())
             .await?
             .rows_stream::<PrimaryKeyWithEmbeddings>()?
             .map_err(|err| err.into())
-            .map_ok(|row| (row.primary_key, row.embeddings))
-            .boxed())
+            .map_ok(|row| DbEmbeddings {
+                primary_key: row.primary_key,
+                embeddings: row.embeddings,
+            }))
     }
 }

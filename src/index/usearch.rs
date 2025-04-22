@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tracing::Instrument;
@@ -73,7 +74,7 @@ pub(crate) fn new(
     idx.write().unwrap().reserve(RESERVE_INCREMENT)?;
 
     // TODO: The value of channel size was taken from initial benchmarks. Needs more testing
-    const CHANNEL_SIZE: usize = 100000;
+    const CHANNEL_SIZE: usize = 10;
     let (tx, mut rx) = mpsc::channel(CHANNEL_SIZE);
 
     tokio::spawn(
@@ -86,14 +87,22 @@ pub(crate) fn new(
             // Incremental key for a usearch index
             let usearch_key = Arc::new(AtomicU64::new(0));
 
+            // This semaphore decides how many tasks are queued for an usearch process. It is
+            // calculated as a number of threads multiply 2, to be sure that there is always a new
+            // task waiting in the queue.
+            let semaphore = Arc::new(Semaphore::new(rayon::current_num_threads() * 2));
+
             while let Some(msg) = rx.recv().await {
-                tokio::spawn(process(
-                    msg,
-                    dimensions,
-                    Arc::clone(&idx),
-                    Arc::clone(&keys),
-                    Arc::clone(&usearch_key),
-                ));
+                let permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
+                tokio::spawn({
+                    let idx = Arc::clone(&idx);
+                    let keys = Arc::clone(&keys);
+                    let usearch_key = Arc::clone(&usearch_key);
+                    async move {
+                        process(msg, dimensions, idx, keys, usearch_key).await;
+                        drop(permit);
+                    }
+                });
             }
 
             debug!("finished");
