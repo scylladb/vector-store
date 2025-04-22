@@ -362,27 +362,6 @@ pub(crate) fn new_db_index(
 
 async fn process_db_index(db: &DbBasic, metadata: &IndexMetadata, msg: DbIndex) {
     match msg {
-        DbIndex::GetProcessedIds { tx } => tx
-            .send(Ok(stream::iter(
-                db.0.read()
-                    .unwrap()
-                    .keyspaces
-                    .get(&metadata.keyspace_name)
-                    .and_then(|keyspace| keyspace.tables.get(&metadata.table_name))
-                    .and_then(|table| table.embeddings.get(&metadata.target_column))
-                    .map(|rows| {
-                        rows.iter()
-                            .filter_map(|(primary_key, (_, processed))| {
-                                processed.then_some(Ok(primary_key.clone()))
-                            })
-                            .collect_vec()
-                    })
-                    .unwrap_or_default(),
-            )
-            .boxed()))
-            .map_err(|_| anyhow!("DbIndex::GetProcessedIds: unable to send response"))
-            .unwrap(),
-
         DbIndex::GetItems { tx } => tx
             .send(Ok(stream::iter(
                 db.0.read()
@@ -404,38 +383,6 @@ async fn process_db_index(db: &DbBasic, metadata: &IndexMetadata, msg: DbIndex) 
             .boxed()))
             .map_err(|_| anyhow!("DbIndex::GetItems: unable to send response"))
             .unwrap(),
-
-        DbIndex::ResetItem { primary_key } => {
-            if let Some(rows) =
-                db.0.write()
-                    .unwrap()
-                    .keyspaces
-                    .get_mut(&metadata.keyspace_name)
-                    .and_then(|keyspace| keyspace.tables.get_mut(&metadata.table_name))
-                    .and_then(|table| table.embeddings.get_mut(&metadata.target_column))
-            {
-                rows.get_mut(&primary_key)
-                    .map(|(_, processed)| *processed = false)
-                    .map(|_| ())
-                    .unwrap_or(());
-            }
-        }
-
-        DbIndex::UpdateItem { primary_key } => {
-            if let Some(rows) =
-                db.0.write()
-                    .unwrap()
-                    .keyspaces
-                    .get_mut(&metadata.keyspace_name)
-                    .and_then(|keyspace| keyspace.tables.get_mut(&metadata.table_name))
-                    .and_then(|table| table.embeddings.get_mut(&metadata.target_column))
-            {
-                rows.get_mut(&primary_key)
-                    .map(|(_, processed)| *processed = true)
-                    .map(|_| ())
-                    .unwrap_or(());
-            }
-        }
 
         DbIndex::GetPrimaryKeyColumns { tx } => tx
             .send(

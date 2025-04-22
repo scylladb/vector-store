@@ -8,13 +8,11 @@ use crate::db_index::DbIndexExt;
 use crate::index::Index;
 use crate::index::IndexExt;
 use futures::TryStreamExt;
-use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
-use tokio::time;
 use tracing::Instrument;
 use tracing::debug;
-use tracing::info;
 use tracing::info_span;
 use tracing::warn;
 
@@ -28,85 +26,48 @@ pub(crate) async fn new(
     const CHANNEL_SIZE: usize = 10;
     let (tx, mut rx) = mpsc::channel(CHANNEL_SIZE);
 
-    tokio::spawn(async move {
-        info!("resetting items");
-        let mut state = State::Reset;
+    tokio::spawn(
+        async move {
+            initial_read(&mut rx, &db_index, &index)
+                .await
+                .unwrap_or_else(|err| {
+                    warn!("monitor_items: unable to do initial read: {err}");
+                });
 
-        const INTERVAL: Duration = Duration::from_secs(1);
-        let mut interval = time::interval(INTERVAL);
-
-        while !rx.is_closed() {
-            tokio::select! {
-                _ = interval.tick() => {
-                    match state {
-                        State::Reset => {
-                            if !reset_items(&db_index)
-                                .await
-                                .unwrap_or_else(|err| {
-                                    warn!("monitor_items: unable to reset items in table: {err}");
-                                    false
-                                })
-                            {
-                                info!("copying items");
-                                state = State::Copy;
-                            } else {
-                                interval.reset_immediately();
-                            }
-                        }
-                        State::Copy => {
-                            if table_to_index(&db_index, &index)
-                                .await
-                                .unwrap_or_else(|err| {
-                                    warn!("monitor_items: unable to copy data from table to index: {err}");
-                                    false
-                                })
-                            {
-                                interval.reset_immediately();
-                            }
-                        }
-                    }
-                }
-
-                _ = rx.recv() => { }
-            }
+            while rx.recv().await.is_some() {}
         }
-    }.instrument(info_span!("monitor items")));
+        .instrument(info_span!("monitor items")),
+    );
     Ok(tx)
 }
 
-enum State {
-    Reset,
-    Copy,
-}
-
-async fn reset_items(db_index: &Sender<DbIndex>) -> anyhow::Result<bool> {
-    let mut keys = db_index.get_processed_ids().await?;
-
-    let mut count = 0;
-    while let Some(key) = keys.try_next().await? {
-        count += 1;
-        db_index.reset_item(key).await?;
-    }
-    debug!("processed new items: {count}");
-    Ok(count > 0)
-}
-
-/// Get new embeddings from db and add to the index. Then mark embeddings in db as processed
-async fn table_to_index(db_index: &Sender<DbIndex>, index: &Sender<Index>) -> anyhow::Result<bool> {
+/// Get all current embeddings from the db table and add to the index
+async fn initial_read(
+    rx: &mut Receiver<MonitorItems>,
+    db_index: &Sender<DbIndex>,
+    index: &Sender<Index>,
+) -> anyhow::Result<()> {
     let mut rows = db_index.get_items().await?;
 
     // The accumulator for number of processed embeddings
     let mut count = 0;
 
-    while let Some((primary_key, embeddings)) = rows.try_next().await? {
-        count += 1;
-        db_index.update_item(primary_key.clone()).await?;
-        index.add(primary_key, embeddings).await;
+    while !rx.is_closed() {
+        tokio::select! {
+            row = rows.try_next() => {
+                let Some((primary_key, embeddings)) = row? else {
+                    break;
+                };
+                count += 1;
+                index.add(primary_key, embeddings).await;
+            }
+
+            _ = rx.recv() => { }
+        }
     }
 
     if count > 0 {
-        debug!("table_to_index: processed {count} items",);
+        debug!("initial_read: processed {count} items");
     }
-
-    Ok(count > 0)
+    Ok(())
 }
