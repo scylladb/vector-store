@@ -74,17 +74,17 @@ async fn simple_create_search_delete_index() {
         vec![
             (
                 vec![CqlValue::Int(1), CqlValue::Text("one".to_string())].into(),
-                vec![1., 1., 1.].into(),
+                Some(vec![1., 1., 1.].into()),
                 OffsetDateTime::from_unix_timestamp(10).unwrap().into(),
             ),
             (
                 vec![CqlValue::Int(2), CqlValue::Text("two".to_string())].into(),
-                vec![2., -2., 2.].into(),
+                Some(vec![2., -2., 2.].into()),
                 OffsetDateTime::from_unix_timestamp(20).unwrap().into(),
             ),
             (
                 vec![CqlValue::Int(3), CqlValue::Text("three".to_string())].into(),
-                vec![3., 3., 3.].into(),
+                Some(vec![3., 3., 3.].into()),
                 OffsetDateTime::from_unix_timestamp(30).unwrap().into(),
             ),
         ],

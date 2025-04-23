@@ -383,7 +383,7 @@ pub struct Timestamp(OffsetDateTime);
 #[derive(Debug)]
 pub struct DbEmbedding {
     pub primary_key: PrimaryKey,
-    pub embedding: Embedding,
+    pub embedding: Option<Embedding>,
     pub timestamp: Timestamp,
 }
 

@@ -306,7 +306,7 @@ impl Statements {
                 else {
                     return None;
                 };
-                let embedding = embedding.into();
+                let embedding = Some(embedding.into());
 
                 let Ok(primary_key) = row
                     .columns

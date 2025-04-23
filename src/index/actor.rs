@@ -18,6 +18,9 @@ pub(crate) enum Index {
         primary_key: PrimaryKey,
         embedding: Embedding,
     },
+    Remove {
+        primary_key: PrimaryKey,
+    },
     Ann {
         embedding: Embedding,
         limit: Limit,
@@ -30,6 +33,7 @@ pub(crate) enum Index {
 
 pub(crate) trait IndexExt {
     async fn add_or_replace(&self, primary_key: PrimaryKey, embedding: Embedding);
+    async fn remove(&self, primary_key: PrimaryKey);
     async fn ann(&self, embedding: Embedding, limit: Limit) -> AnnR;
     async fn count(&self) -> CountR;
 }
@@ -42,6 +46,12 @@ impl IndexExt for mpsc::Sender<Index> {
         })
         .await
         .expect("internal actor should receive request");
+    }
+
+    async fn remove(&self, primary_key: PrimaryKey) {
+        self.send(Index::Remove { primary_key })
+            .await
+            .expect("internal actor should receive request");
     }
 
     async fn ann(&self, embedding: Embedding, limit: Limit) -> AnnR {

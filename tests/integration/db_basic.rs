@@ -51,7 +51,7 @@ pub(crate) fn new() -> (mpsc::Sender<Db>, DbBasic) {
 
 struct TableStore {
     table: Table,
-    embeddings: HashMap<ColumnName, HashMap<PrimaryKey, (Embedding, Timestamp)>>,
+    embeddings: HashMap<ColumnName, HashMap<PrimaryKey, (Option<Embedding>, Timestamp)>>,
 }
 
 impl TableStore {
@@ -203,7 +203,7 @@ impl DbBasic {
         keyspace_name: &KeyspaceName,
         table_name: &TableName,
         target_column: &ColumnName,
-        values: impl IntoIterator<Item = (PrimaryKey, Embedding, Timestamp)>,
+        values: impl IntoIterator<Item = (PrimaryKey, Option<Embedding>, Timestamp)>,
     ) -> anyhow::Result<()> {
         let mut db = self.0.write().unwrap();
 

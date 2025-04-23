@@ -128,6 +128,10 @@ async fn process(
             add_or_replace(idx, keys, usearch_key, primary_key, embedding).await;
         }
 
+        Index::Remove { primary_key } => {
+            remove(idx, keys, primary_key).await;
+        }
+
         Index::Ann {
             embedding,
             limit,
@@ -201,6 +205,22 @@ async fn add_or_replace(
     if let Ok(false) = rx.await {
         keys.write().unwrap().remove_by_right(&key);
     }
+}
+
+async fn remove(
+    idx: Arc<RwLock<usearch::Index>>,
+    keys: Arc<RwLock<BiMap<PrimaryKey, Key>>>,
+    primary_key: PrimaryKey,
+) {
+    let Some((_, key)) = keys.write().unwrap().remove_by_left(&primary_key) else {
+        return;
+    };
+
+    rayon::spawn(move || {
+        if let Err(err) = idx.read().unwrap().remove(key.0) {
+            debug!("add_or_replace: unable to remove embeddings for key {key}: {err}");
+        };
+    });
 }
 
 async fn ann(
@@ -351,5 +371,31 @@ mod tests {
         })
         .await
         .unwrap();
+
+        actor
+            .remove(vec![CqlValue::Int(3), CqlValue::Text("three".to_string())].into())
+            .await;
+
+        time::timeout(Duration::from_secs(10), async {
+            while actor.count().await.unwrap() != 2 {
+                task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let (primary_keys, distances) = actor
+            .ann(
+                vec![2.2, -2.2, 2.2].into(),
+                NonZeroUsize::new(1).unwrap().into(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(primary_keys.len(), 1);
+        assert_eq!(distances.len(), 1);
+        assert_eq!(
+            primary_keys.first().unwrap(),
+            &vec![CqlValue::Int(2), CqlValue::Text("two".to_string())].into(),
+        );
     }
 }
