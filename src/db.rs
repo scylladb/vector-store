@@ -40,6 +40,7 @@ type GetIndexesR = anyhow::Result<Vec<DbCustomIndex>>;
 type GetIndexVersionR = anyhow::Result<Option<IndexVersion>>;
 type GetIndexTargetTypeR = anyhow::Result<Option<Dimensions>>;
 type GetIndexParamsR = anyhow::Result<Option<(Connectivity, ExpansionAdd, ExpansionSearch)>>;
+type IsValidIndexR = bool;
 
 pub enum Db {
     GetDbIndex {
@@ -73,6 +74,18 @@ pub enum Db {
         index: TableName,
         tx: oneshot::Sender<GetIndexParamsR>,
     },
+
+    // Schema changes are concurrent processes without an atomic view from the client/driver side.
+    // A process of retrieving an index metadata from the vector-store could be faster than similar
+    // process in a driver itself. The vector-store reads some schema metadata from system tables
+    // directly, because they are not available from a rust driver, and it reads some other schema
+    // metadata from the rust driver, so there must be an agreement between data read directly from
+    // a db and a driver. This message checks if index metadata are correct and if there is an
+    // agreement on a db schema in the rust driver.
+    IsValidIndex {
+        metadata: IndexMetadata,
+        tx: oneshot::Sender<IsValidIndexR>,
+    },
 }
 
 pub(crate) trait DbExt {
@@ -93,6 +106,8 @@ pub(crate) trait DbExt {
     ) -> GetIndexTargetTypeR;
 
     async fn get_index_params(&self, keyspace: KeyspaceName, index: TableName) -> GetIndexParamsR;
+
+    async fn is_valid_index(&self, metadata: IndexMetadata) -> IsValidIndexR;
 }
 
 impl DbExt for mpsc::Sender<Db> {
@@ -156,6 +171,14 @@ impl DbExt for mpsc::Sender<Db> {
         .await?;
         rx.await?
     }
+
+    async fn is_valid_index(&self, metadata: IndexMetadata) -> IsValidIndexR {
+        let (tx, rx) = oneshot::channel();
+        if self.send(Db::IsValidIndex { metadata, tx }).await.is_err() {
+            return false;
+        };
+        rx.await.is_ok()
+    }
 }
 
 pub(crate) async fn new(uri: ScyllaDbUri) -> anyhow::Result<mpsc::Sender<Db>> {
@@ -216,6 +239,10 @@ async fn process(statements: Arc<Statements>, msg: Db) {
         } => tx
             .send(statements.get_index_params(keyspace, index).await)
             .unwrap_or_else(|_| trace!("process: Db::GetIndexParams: unable to send response")),
+
+        Db::IsValidIndex { metadata, tx } => tx
+            .send(statements.is_valid_index(metadata).await)
+            .unwrap_or_else(|_| trace!("process: Db::IsValidIndex: unable to send response")),
     }
 }
 
@@ -379,5 +406,36 @@ impl Statements {
             ExpansionAdd::default(),
             ExpansionSearch::default(),
         )))
+    }
+
+    async fn is_valid_index(&self, metadata: IndexMetadata) -> IsValidIndexR {
+        let Ok(version_begin) = self.session.await_schema_agreement().await else {
+            return false;
+        };
+        let cluster_state = self.session.get_cluster_state();
+
+        // check a keyspace
+        let Some(keyspace) = cluster_state.get_keyspace(metadata.keyspace_name.as_ref()) else {
+            return false;
+        };
+
+        // check a table
+        if keyspace.tables.contains_key(metadata.table_name.as_ref()) {
+            return false;
+        }
+
+        // check a cdc log table
+        if keyspace
+            .tables
+            .contains_key(&format!("{}_scylla_cdc_log", metadata.table_name))
+        {
+            return false;
+        }
+
+        // check if schema version changed
+        let Ok(Some(version_end)) = self.session.check_schema_agreement().await else {
+            return false;
+        };
+        version_begin == version_end
     }
 }

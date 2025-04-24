@@ -174,6 +174,8 @@ struct Statements {
 
 impl Statements {
     async fn new(session: Arc<Session>, metadata: IndexMetadata) -> anyhow::Result<Self> {
+        session.await_schema_agreement().await?;
+
         let cluster_state = session.get_cluster_state();
         let table = cluster_state
             .get_keyspace(metadata.keyspace_name.as_ref())

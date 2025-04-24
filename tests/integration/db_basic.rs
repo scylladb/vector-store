@@ -312,6 +312,11 @@ fn process_db(db: &DbBasic, msg: Db) {
                 })))
             .map_err(|_| anyhow!("Db::GetIndexParams: unable to send response"))
             .unwrap(),
+
+        Db::IsValidIndex { tx, .. } => tx
+            .send(true)
+            .map_err(|_| anyhow!("Db::IsValidIndex: unable to send response"))
+            .unwrap(),
     }
 }
 

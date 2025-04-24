@@ -37,12 +37,15 @@ pub(crate) async fn new(
             while !rx.is_closed() {
                 tokio::select! {
                     _ = interval.tick() => {
+                        // check if schema has changed from the last time
                         if !schema_version.has_changed(&db).await {
                             continue;
                         }
                         let Ok(mut new_indexes) = get_indexes(&db).await.inspect_err(|err| {
                             debug!("monitor_indexes: unable to get the list of indexes: {err}");
                         }) else {
+                            // there was an error during retrieving indexes, reset schema version
+                            // and retry next time
                             schema_version.reset();
                             continue;
                         };
@@ -131,6 +134,12 @@ async fn get_indexes(db: &Sender<Db>) -> anyhow::Result<HashSet<IndexMetadata>> 
             expansion_search,
             version,
         };
+
+        if !db.is_valid_index(metadata.clone()).await {
+            debug!("get_indexes: not valid index {}", metadata.id());
+            continue;
+        }
+
         indexes.insert(metadata);
     }
     Ok(indexes)
