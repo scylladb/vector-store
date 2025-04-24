@@ -11,6 +11,7 @@ use crate::TableName;
 use anyhow::Context;
 use anyhow::anyhow;
 use anyhow::bail;
+use async_trait::async_trait;
 use futures::StreamExt;
 use futures::TryStreamExt;
 use futures::stream::BoxStream;
@@ -20,11 +21,17 @@ use scylla::routing::Token;
 use scylla::statement::prepared::PreparedStatement;
 use scylla::value::CqlValue;
 use scylla::value::Row;
+use scylla_cdc::consumer::CDCRow;
+use scylla_cdc::consumer::Consumer;
+use scylla_cdc::consumer::ConsumerFactory;
+use scylla_cdc::log_reader::CDCLogReaderBuilder;
 use std::iter;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
+use time::Date;
 use time::OffsetDateTime;
+use time::Time;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -61,12 +68,38 @@ pub(crate) async fn new(
     metadata: IndexMetadata,
 ) -> anyhow::Result<(mpsc::Sender<DbIndex>, mpsc::Receiver<DbEmbedding>)> {
     let id = metadata.id();
-    let statements = Arc::new(Statements::new(db_session, metadata).await?);
 
     // TODO: The value of channel size was taken from initial benchmarks. Needs more testing
     const CHANNEL_SIZE: usize = 10;
     let (tx_index, mut rx_index) = mpsc::channel(CHANNEL_SIZE);
     let (tx_embeddings, rx_embeddings) = mpsc::channel(CHANNEL_SIZE);
+
+    let (mut cdc_reader, cdc_handler) = CDCLogReaderBuilder::new()
+        .session(Arc::clone(&db_session))
+        .keyspace(metadata.keyspace_name.as_ref())
+        .table_name(metadata.table_name.as_ref())
+        .consumer_factory(Arc::new(CdcConsumerFactory::new(
+            Arc::clone(&db_session),
+            &metadata,
+            tx_embeddings.clone(),
+        )?))
+        .build()
+        .await?;
+
+    let statements = Arc::new(Statements::new(db_session, metadata).await?);
+
+    tokio::spawn(
+        async move {
+            debug!("starting");
+
+            if let Err(err) = cdc_handler.await {
+                debug!("handler: {err}");
+            }
+
+            debug!("finished");
+        }
+        .instrument(debug_span!("cdc", "{}", id)),
+    );
 
     tokio::spawn(
         async move {
@@ -88,6 +121,8 @@ pub(crate) async fn new(
             while let Some(msg) = rx_index.recv().await {
                 tokio::spawn(process(Arc::clone(&statements), msg));
             }
+
+            cdc_reader.stop();
 
             debug!("finished");
         }
@@ -337,5 +372,133 @@ impl Statements {
                     .flatten()
             })
             .boxed())
+    }
+}
+
+struct CdcConsumerData {
+    primary_key_columns: Vec<ColumnName>,
+    target_column: ColumnName,
+    tx: mpsc::Sender<DbEmbedding>,
+    gregorian_epoch: OffsetDateTime,
+}
+
+struct CdcConsumer(Arc<CdcConsumerData>);
+
+#[async_trait]
+impl Consumer for CdcConsumer {
+    async fn consume_cdc(&mut self, mut row: CDCRow<'_>) -> anyhow::Result<()> {
+        if self.0.tx.is_closed() {
+            // a consumer should be closed now, some concurrent tasks could stay in a pipeline
+            return Ok(());
+        }
+
+        let target_column = self.0.target_column.as_ref();
+        if !row.column_deletable(target_column) {
+            bail!("CDC error: target column {target_column} should be deletable");
+        }
+
+        let embedding = row
+            .take_value(target_column)
+            .map(|value| {
+                let CqlValue::Vector(value) = value else {
+                    bail!("CDC error: target column {target_column} should be VECTOR type");
+                };
+                value
+                    .into_iter()
+                    .map(|value| {
+                        value.as_float().ok_or(anyhow!(
+                            "CDC error: target column {target_column} should be VECTOR<float> type"
+                        ))
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()
+            })
+            .transpose()?
+            .map(|embedding| embedding.into());
+
+        let primary_key = self
+            .0
+            .primary_key_columns
+            .iter()
+            .map(|column| {
+                if !row.column_exists(column.as_ref()) {
+                    bail!("CDC error: primary key column {column} should exist");
+                }
+                if row.column_deletable(column.as_ref()) {
+                    bail!("CDC error: primary key column {column} should not be deletable");
+                }
+                row.take_value(column.as_ref()).ok_or(anyhow!(
+                    "CDC error: primary key column {column} value should exist"
+                ))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?
+            .into();
+
+        const HUNDREDS_NANOS_TO_MICROS: u64 = 10;
+        let timestamp = (self.0.gregorian_epoch
+            + Duration::from_micros(
+                row.time
+                    .get_timestamp()
+                    .ok_or(anyhow!("CDC error: time has no timestamp"))?
+                    .to_gregorian()
+                    .0
+                    / HUNDREDS_NANOS_TO_MICROS,
+            ))
+        .into();
+
+        _ = self
+            .0
+            .tx
+            .send(DbEmbedding {
+                primary_key,
+                embedding,
+                timestamp,
+            })
+            .await;
+        Ok(())
+    }
+}
+
+struct CdcConsumerFactory(Arc<CdcConsumerData>);
+
+#[async_trait]
+impl ConsumerFactory for CdcConsumerFactory {
+    async fn new_consumer(&self) -> Box<dyn Consumer> {
+        Box::new(CdcConsumer(Arc::clone(&self.0)))
+    }
+}
+
+impl CdcConsumerFactory {
+    fn new(
+        session: Arc<Session>,
+        metadata: &IndexMetadata,
+        tx: mpsc::Sender<DbEmbedding>,
+    ) -> anyhow::Result<Self> {
+        let cluster_state = session.get_cluster_state();
+        let table = cluster_state
+            .get_keyspace(metadata.keyspace_name.as_ref())
+            .ok_or_else(|| anyhow!("keyspace {} does not exist", metadata.keyspace_name))?
+            .tables
+            .get(metadata.table_name.as_ref())
+            .ok_or_else(|| anyhow!("table {} does not exist", metadata.table_name))?;
+
+        let primary_key_columns = table
+            .partition_key
+            .iter()
+            .chain(table.clustering_key.iter())
+            .cloned()
+            .map(ColumnName::from)
+            .collect();
+
+        let gregorian_epoch = OffsetDateTime::new_utc(
+            Date::from_calendar_date(1582, time::Month::October, 15)?,
+            Time::MIDNIGHT,
+        );
+
+        Ok(Self(Arc::new(CdcConsumerData {
+            primary_key_columns,
+            target_column: metadata.target_column.clone(),
+            tx,
+            gregorian_epoch,
+        })))
     }
 }
