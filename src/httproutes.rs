@@ -7,9 +7,9 @@ use crate::ColumnName;
 use crate::Distance;
 use crate::Embeddings;
 use crate::IndexId;
+use crate::IndexName;
 use crate::KeyspaceName;
 use crate::Limit;
-use crate::TableName;
 use crate::db_index::DbIndexExt;
 use crate::engine::Engine;
 use crate::engine::EngineExt;
@@ -82,7 +82,7 @@ async fn get_indexes(State(engine): State<Sender<Engine>>) -> response::Json<Vec
     description = "Get a number of elements for a specific index",
     params(
         ("keyspace" = KeyspaceName, Path, description = "A keyspace name for the index"),
-        ("index" = TableName, Path, description = "An index name")
+        ("index" = IndexName, Path, description = "An index name")
     ),
     responses(
         (status = 200, description = "Index count", body = usize)
@@ -90,7 +90,7 @@ async fn get_indexes(State(engine): State<Sender<Engine>>) -> response::Json<Vec
 )]
 async fn get_index_count(
     State(engine): State<Sender<Engine>>,
-    Path((keyspace, index)): Path<(KeyspaceName, TableName)>,
+    Path((keyspace, index)): Path<(KeyspaceName, IndexName)>,
 ) -> Response {
     let Some((index, _)) = engine.get_index(IndexId::new(&keyspace, &index)).await else {
         debug!("get_index_size: missing index: {keyspace}/{index}");
@@ -126,7 +126,7 @@ pub struct PostIndexAnnResponse {
     description = "Ann search in the index",
     params(
         ("keyspace" = KeyspaceName, Path, description = "Keyspace name for the table to search"),
-        ("index" = TableName, Path, description = "Index to search")
+        ("index" = IndexName, Path, description = "Index to search")
     ),
     request_body = PostIndexAnnRequest,
     responses(
@@ -136,7 +136,7 @@ pub struct PostIndexAnnResponse {
 )]
 async fn post_index_ann(
     State(engine): State<Sender<Engine>>,
-    Path((keyspace, index)): Path<(KeyspaceName, TableName)>,
+    Path((keyspace, index)): Path<(KeyspaceName, IndexName)>,
     extract::Json(request): extract::Json<PostIndexAnnRequest>,
 ) -> Response {
     let Some((index, db_index)) = engine.get_index(IndexId::new(&keyspace, &index)).await else {

@@ -57,7 +57,7 @@ pub struct ScyllaDbUri(String);
 pub struct IndexId(String);
 
 impl IndexId {
-    pub fn new(keyspace: &KeyspaceName, index: &TableName) -> Self {
+    pub fn new(keyspace: &KeyspaceName, index: &IndexName) -> Self {
         Self(format!("{}.{}", keyspace.0, index.0))
     }
 
@@ -65,7 +65,7 @@ impl IndexId {
         self.0.split_once('.').unwrap().0.to_string().into()
     }
 
-    pub fn index(&self) -> TableName {
+    pub fn index(&self) -> IndexName {
         self.0.split_once('.').unwrap().1.to_string().into()
     }
 }
@@ -95,6 +95,32 @@ impl SerializeValue for IndexId {
 pub struct KeyspaceName(String);
 
 impl SerializeValue for KeyspaceName {
+    fn serialize<'b>(
+        &self,
+        typ: &ColumnType,
+        writer: CellWriter<'b>,
+    ) -> Result<WrittenCellProof<'b>, SerializationError> {
+        <String as SerializeValue>::serialize(&self.0, typ, writer)
+    }
+}
+
+#[derive(
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    derive_more::From,
+    derive_more::AsRef,
+    serde::Serialize,
+    serde::Deserialize,
+    derive_more::Display,
+    utoipa::ToSchema,
+)]
+/// A table name of the table with vectors in a db
+pub struct IndexName(String);
+
+impl SerializeValue for IndexName {
     fn serialize<'b>(
         &self,
         typ: &ColumnType,
@@ -321,7 +347,7 @@ pub struct IndexVersion(Uuid);
 /// Information about an index
 pub struct IndexMetadata {
     pub keyspace_name: KeyspaceName,
-    pub index_name: TableName,
+    pub index_name: IndexName,
     pub table_name: TableName,
     pub target_column: ColumnName,
     pub dimensions: Dimensions,
@@ -340,7 +366,7 @@ impl IndexMetadata {
 #[derive(Debug)]
 pub struct DbCustomIndex {
     pub keyspace: KeyspaceName,
-    pub index: TableName,
+    pub index: IndexName,
     pub table: TableName,
     pub target_column: ColumnName,
 }

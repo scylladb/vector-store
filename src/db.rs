@@ -11,6 +11,7 @@ use crate::Dimensions;
 use crate::ExpansionAdd;
 use crate::ExpansionSearch;
 use crate::IndexMetadata;
+use crate::IndexName;
 use crate::IndexVersion;
 use crate::KeyspaceName;
 use crate::ScyllaDbUri;
@@ -58,7 +59,7 @@ pub enum Db {
 
     GetIndexVersion {
         keyspace: KeyspaceName,
-        index: TableName,
+        index: IndexName,
         tx: oneshot::Sender<GetIndexVersionR>,
     },
 
@@ -71,7 +72,7 @@ pub enum Db {
 
     GetIndexParams {
         keyspace: KeyspaceName,
-        index: TableName,
+        index: IndexName,
         tx: oneshot::Sender<GetIndexParamsR>,
     },
 
@@ -95,7 +96,7 @@ pub(crate) trait DbExt {
 
     async fn get_indexes(&self) -> GetIndexesR;
 
-    async fn get_index_version(&self, keyspace: KeyspaceName, index: TableName)
+    async fn get_index_version(&self, keyspace: KeyspaceName, index: IndexName)
     -> GetIndexVersionR;
 
     async fn get_index_target_type(
@@ -105,7 +106,7 @@ pub(crate) trait DbExt {
         target_column: ColumnName,
     ) -> GetIndexTargetTypeR;
 
-    async fn get_index_params(&self, keyspace: KeyspaceName, index: TableName) -> GetIndexParamsR;
+    async fn get_index_params(&self, keyspace: KeyspaceName, index: IndexName) -> GetIndexParamsR;
 
     async fn is_valid_index(&self, metadata: IndexMetadata) -> IsValidIndexR;
 }
@@ -132,7 +133,7 @@ impl DbExt for mpsc::Sender<Db> {
     async fn get_index_version(
         &self,
         keyspace: KeyspaceName,
-        index: TableName,
+        index: IndexName,
     ) -> GetIndexVersionR {
         let (tx, rx) = oneshot::channel();
         self.send(Db::GetIndexVersion {
@@ -161,7 +162,7 @@ impl DbExt for mpsc::Sender<Db> {
         rx.await?
     }
 
-    async fn get_index_params(&self, keyspace: KeyspaceName, index: TableName) -> GetIndexParamsR {
+    async fn get_index_params(&self, keyspace: KeyspaceName, index: IndexName) -> GetIndexParamsR {
         let (tx, rx) = oneshot::channel();
         self.send(Db::GetIndexParams {
             keyspace,
@@ -348,7 +349,7 @@ impl Statements {
     async fn get_index_version(
         &self,
         keyspace: KeyspaceName,
-        index: TableName,
+        index: IndexName,
     ) -> GetIndexVersionR {
         Ok(self
             .session
@@ -399,7 +400,7 @@ impl Statements {
     async fn get_index_params(
         &self,
         _keyspace: KeyspaceName,
-        _index: TableName,
+        _index: IndexName,
     ) -> GetIndexParamsR {
         Ok(Some((
             Connectivity::default(),

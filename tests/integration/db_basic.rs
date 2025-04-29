@@ -24,6 +24,7 @@ use vector_store::Embeddings;
 use vector_store::ExpansionAdd;
 use vector_store::ExpansionSearch;
 use vector_store::IndexMetadata;
+use vector_store::IndexName;
 use vector_store::KeyspaceName;
 use vector_store::PrimaryKey;
 use vector_store::TableName;
@@ -97,7 +98,7 @@ pub(crate) struct Index {
 
 struct Keyspace {
     tables: HashMap<TableName, TableStore>,
-    indexes: HashMap<TableName, IndexStore>,
+    indexes: HashMap<IndexName, IndexStore>,
 }
 
 impl Keyspace {
@@ -152,7 +153,7 @@ impl DbBasic {
     pub(crate) fn add_index(
         &self,
         keyspace_name: &KeyspaceName,
-        index_name: TableName,
+        index_name: IndexName,
         index: Index,
     ) -> anyhow::Result<()> {
         let mut db = self.0.write().unwrap();
@@ -182,7 +183,7 @@ impl DbBasic {
     pub(crate) fn del_index(
         &self,
         keyspace_name: &KeyspaceName,
-        index_name: &TableName,
+        index_name: &IndexName,
     ) -> anyhow::Result<()> {
         let mut db = self.0.write().unwrap();
 
