@@ -42,6 +42,9 @@ jobs:
     - name: Clippy check
       run: cargo clippy --all-targets
 
+    - name: Clippy check with opensearch feature
+      run: cargo clippy --all-targets --features opensearch
+
   tests:
     runs-on: ubuntu-latest
     steps:
@@ -55,4 +58,7 @@ jobs:
 
     - name: Run tests
       run: cargo test --verbose
+
+    - name: Run tests with opensearch feature
+      run: cargo test --verbose --features opensearch
 
