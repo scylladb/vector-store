@@ -4,7 +4,7 @@
  */
 
 use crate::Distance;
-use crate::Embeddings;
+use crate::Embedding;
 use crate::Limit;
 use crate::PrimaryKey;
 use tokio::sync::mpsc;
@@ -16,10 +16,10 @@ pub(crate) type CountR = anyhow::Result<usize>;
 pub(crate) enum Index {
     AddOrReplace {
         primary_key: PrimaryKey,
-        embeddings: Embeddings,
+        embedding: Embedding,
     },
     Ann {
-        embeddings: Embeddings,
+        embedding: Embedding,
         limit: Limit,
         tx: oneshot::Sender<AnnR>,
     },
@@ -29,25 +29,25 @@ pub(crate) enum Index {
 }
 
 pub(crate) trait IndexExt {
-    async fn add_or_replace(&self, primary_key: PrimaryKey, embeddings: Embeddings);
-    async fn ann(&self, embeddings: Embeddings, limit: Limit) -> AnnR;
+    async fn add_or_replace(&self, primary_key: PrimaryKey, embedding: Embedding);
+    async fn ann(&self, embedding: Embedding, limit: Limit) -> AnnR;
     async fn count(&self) -> CountR;
 }
 
 impl IndexExt for mpsc::Sender<Index> {
-    async fn add_or_replace(&self, primary_key: PrimaryKey, embeddings: Embeddings) {
+    async fn add_or_replace(&self, primary_key: PrimaryKey, embedding: Embedding) {
         self.send(Index::AddOrReplace {
             primary_key,
-            embeddings,
+            embedding,
         })
         .await
         .expect("internal actor should receive request");
     }
 
-    async fn ann(&self, embeddings: Embeddings, limit: Limit) -> AnnR {
+    async fn ann(&self, embedding: Embedding, limit: Limit) -> AnnR {
         let (tx, rx) = oneshot::channel();
         self.send(Index::Ann {
-            embeddings,
+            embedding,
             limit,
             tx,
         })

@@ -5,7 +5,7 @@
 
 use crate::Connectivity;
 use crate::Dimensions;
-use crate::Embeddings;
+use crate::Embedding;
 use crate::ExpansionAdd;
 use crate::ExpansionSearch;
 use crate::IndexId;
@@ -123,17 +123,17 @@ async fn process(
     match msg {
         Index::AddOrReplace {
             primary_key,
-            embeddings,
+            embedding,
         } => {
-            add_or_replace(idx, keys, usearch_key, primary_key, embeddings).await;
+            add_or_replace(idx, keys, usearch_key, primary_key, embedding).await;
         }
 
         Index::Ann {
-            embeddings,
+            embedding,
             limit,
             tx,
         } => {
-            ann(idx, tx, keys, embeddings, dimensions, limit).await;
+            ann(idx, tx, keys, embedding, dimensions, limit).await;
         }
 
         Index::Count { tx } => {
@@ -147,7 +147,7 @@ async fn add_or_replace(
     keys: Arc<RwLock<BiMap<PrimaryKey, Key>>>,
     usearch_key: Arc<AtomicU64>,
     primary_key: PrimaryKey,
-    embeddings: Embeddings,
+    embedding: Embedding,
 ) {
     let key = usearch_key.fetch_add(1, Ordering::Relaxed).into();
 
@@ -184,13 +184,13 @@ async fn add_or_replace(
 
         if remove {
             if let Err(err) = idx.read().unwrap().remove(key.0) {
-                debug!("add_or_replace: unable to remove embeddings for key {key}: {err}");
+                debug!("add_or_replace: unable to remove embedding for key {key}: {err}");
                 _ = tx.send(true); // don't remove a key from a bimap
                 return;
             };
         }
-        if let Err(err) = idx.read().unwrap().add(key.0, &embeddings.0) {
-            debug!("add_or_replace: unable to add embeddings for key {key}: {err}");
+        if let Err(err) = idx.read().unwrap().add(key.0, &embedding.0) {
+            debug!("add_or_replace: unable to add embedding for key {key}: {err}");
             _ = tx.send(false);
             return;
         };
@@ -207,20 +207,20 @@ async fn ann(
     idx: Arc<RwLock<usearch::Index>>,
     tx_ann: oneshot::Sender<AnnR>,
     keys: Arc<RwLock<BiMap<PrimaryKey, Key>>>,
-    embeddings: Embeddings,
+    embedding: Embedding,
     dimensions: Dimensions,
     limit: Limit,
 ) {
-    let Some(embeddings_len) = NonZeroUsize::new(embeddings.0.len()) else {
+    let Some(embedding_len) = NonZeroUsize::new(embedding.0.len()) else {
         tx_ann
-            .send(Err(anyhow!("ann: embeddings dimensions == 0")))
+            .send(Err(anyhow!("ann: embedding dimensions == 0")))
             .unwrap_or_else(|_| trace!("ann: unable to send error response (zero dimensions)"));
         return;
     };
-    if embeddings_len != dimensions.0 {
+    if embedding_len != dimensions.0 {
         tx_ann
             .send(Err(anyhow!(
-                "ann: wrong embeddings dimensions: {embeddings_len} != {dimensions}",
+                "ann: wrong embedding dimensions: {embedding_len} != {dimensions}",
             )))
             .unwrap_or_else(|_| trace!("ann: unable to send error response (wrong dimensions)"));
         return;
@@ -228,7 +228,7 @@ async fn ann(
 
     let (tx, rx) = oneshot::channel();
     rayon::spawn(move || {
-        _ = tx.send(idx.read().unwrap().search(&embeddings.0, limit.0.get()));
+        _ = tx.send(idx.read().unwrap().search(&embedding.0, limit.0.get()));
     });
 
     tx_ann

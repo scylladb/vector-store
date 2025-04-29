@@ -18,9 +18,9 @@ use uuid::Uuid;
 use vector_store::ColumnName;
 use vector_store::Connectivity;
 use vector_store::DbCustomIndex;
-use vector_store::DbEmbeddings;
+use vector_store::DbEmbedding;
 use vector_store::Dimensions;
-use vector_store::Embeddings;
+use vector_store::Embedding;
 use vector_store::ExpansionAdd;
 use vector_store::ExpansionSearch;
 use vector_store::IndexMetadata;
@@ -50,7 +50,7 @@ pub(crate) fn new() -> (mpsc::Sender<Db>, DbBasic) {
 
 struct TableStore {
     table: Table,
-    embeddings: HashMap<ColumnName, HashMap<PrimaryKey, (Embeddings, Timestamp)>>,
+    embeddings: HashMap<ColumnName, HashMap<PrimaryKey, (Embedding, Timestamp)>>,
 }
 
 impl TableStore {
@@ -202,7 +202,7 @@ impl DbBasic {
         keyspace_name: &KeyspaceName,
         table_name: &TableName,
         target_column: &ColumnName,
-        values: impl IntoIterator<Item = (PrimaryKey, Embeddings, Timestamp)>,
+        values: impl IntoIterator<Item = (PrimaryKey, Embedding, Timestamp)>,
     ) -> anyhow::Result<()> {
         let mut db = self.0.write().unwrap();
 
@@ -218,16 +218,16 @@ impl DbBasic {
 
         values
             .into_iter()
-            .for_each(|(primary_key, embeddings, timestamp)| {
+            .for_each(|(primary_key, embedding, timestamp)| {
                 column
                     .entry(primary_key)
-                    .and_modify(|(entry_embeddings, entry_timestamp)| {
+                    .and_modify(|(entry_embedding, entry_timestamp)| {
                         if entry_timestamp.as_ref() < timestamp.as_ref() {
-                            *entry_embeddings = embeddings.clone();
+                            *entry_embedding = embedding.clone();
                             *entry_timestamp = timestamp;
                         }
                     })
-                    .or_insert((embeddings, timestamp));
+                    .or_insert((embedding, timestamp));
             });
 
         Ok(())
@@ -334,7 +334,7 @@ fn process_db(db: &DbBasic, msg: Db) {
 pub(crate) fn new_db_index(
     db: DbBasic,
     metadata: IndexMetadata,
-) -> anyhow::Result<(mpsc::Sender<DbIndex>, mpsc::Receiver<DbEmbeddings>)> {
+) -> anyhow::Result<(mpsc::Sender<DbIndex>, mpsc::Receiver<DbEmbedding>)> {
     let (tx_index, mut rx_index) = mpsc::channel(10);
     let (tx_embeddings, rx_embeddings) = mpsc::channel(10);
     tokio::spawn({
@@ -363,7 +363,7 @@ pub(crate) fn new_db_index(
     Ok((tx_index, rx_embeddings))
 }
 
-fn initial_scan(db: &DbBasic, metadata: &IndexMetadata) -> impl Stream<Item = DbEmbeddings> {
+fn initial_scan(db: &DbBasic, metadata: &IndexMetadata) -> impl Stream<Item = DbEmbedding> {
     stream::iter(
         db.0.read()
             .unwrap()
@@ -373,9 +373,9 @@ fn initial_scan(db: &DbBasic, metadata: &IndexMetadata) -> impl Stream<Item = Db
             .and_then(|table| table.embeddings.get(&metadata.target_column))
             .map(|rows| {
                 rows.iter()
-                    .map(|(primary_key, (embeddings, timestamp))| DbEmbeddings {
+                    .map(|(primary_key, (embedding, timestamp))| DbEmbedding {
                         primary_key: primary_key.clone(),
-                        embeddings: embeddings.clone(),
+                        embedding: embedding.clone(),
                         timestamp: *timestamp,
                     })
                     .collect_vec()

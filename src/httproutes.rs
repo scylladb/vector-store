@@ -5,7 +5,7 @@
 
 use crate::ColumnName;
 use crate::Distance;
-use crate::Embeddings;
+use crate::Embedding;
 use crate::IndexId;
 use crate::KeyspaceName;
 use crate::Limit;
@@ -109,7 +109,7 @@ async fn get_index_count(
 
 #[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
 pub struct PostIndexAnnRequest {
-    pub embeddings: Embeddings,
+    pub embedding: Embedding,
     #[serde(default)]
     pub limit: Limit,
 }
@@ -143,7 +143,7 @@ async fn post_index_ann(
         return (StatusCode::NOT_FOUND, "").into_response();
     };
 
-    match index.ann(request.embeddings, request.limit).await {
+    match index.ann(request.embedding, request.limit).await {
         Err(err) => {
             let msg = format!("index.ann request error: {err}");
             debug!("post_index_ann: {msg}");

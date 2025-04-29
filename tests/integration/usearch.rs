@@ -27,7 +27,7 @@ async fn simple_create_search_delete_index() {
         keyspace_name: "vector".to_string().into(),
         table_name: "items".to_string().into(),
         index_name: "ann".to_string().into(),
-        target_column: "embeddings".to_string().into(),
+        target_column: "embedding".to_string().into(),
         dimensions: NonZeroUsize::new(3).unwrap().into(),
         connectivity: Default::default(),
         expansion_add: Default::default(),

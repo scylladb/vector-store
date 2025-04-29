@@ -4,7 +4,7 @@
  */
 
 use crate::ColumnName;
-use crate::DbEmbeddings;
+use crate::DbEmbedding;
 use crate::IndexMetadata;
 use crate::KeyspaceName;
 use crate::TableName;
@@ -59,7 +59,7 @@ impl DbIndexExt for mpsc::Sender<DbIndex> {
 pub(crate) async fn new(
     db_session: Arc<Session>,
     metadata: IndexMetadata,
-) -> anyhow::Result<(mpsc::Sender<DbIndex>, mpsc::Receiver<DbEmbeddings>)> {
+) -> anyhow::Result<(mpsc::Sender<DbIndex>, mpsc::Receiver<DbEmbedding>)> {
     let id = metadata.id();
     let statements = Arc::new(Statements::new(db_session, metadata).await?);
 
@@ -162,11 +162,11 @@ impl Statements {
         table: &TableName,
         st_primary_key_list: &str,
         st_partition_key_list: &str,
-        embeddings: &ColumnName,
+        embedding: &ColumnName,
     ) -> String {
         format!(
             "
-            SELECT {st_primary_key_list}, {embeddings}, writetime({embeddings})
+            SELECT {st_primary_key_list}, {embedding}, writetime({embedding})
             FROM {keyspace}.{table}
             WHERE
                 token({st_partition_key_list}) >= ?
@@ -179,7 +179,7 @@ impl Statements {
     /// token ranges read from a rust driver. At first it prepares ranges, limits concurrent scans
     /// using semaphore, and runs each scan in separate concurrent task using cloned mpsc channel
     /// to send read embeddings into the pipeline.
-    async fn initial_scan(&self, tx: mpsc::Sender<DbEmbeddings>) {
+    async fn initial_scan(&self, tx: mpsc::Sender<DbEmbedding>) {
         let semaphore = Arc::new(Semaphore::new(self.nr_parallel_queries().get()));
 
         for (begin, end) in self.fullscan_ranges() {
@@ -263,7 +263,7 @@ impl Statements {
         &self,
         begin: Token,
         end: Token,
-    ) -> anyhow::Result<BoxStream<'static, DbEmbeddings>> {
+    ) -> anyhow::Result<BoxStream<'static, DbEmbedding>> {
         // last two columns are embedding and writetime
         let columns_len_expected = self.primary_key_columns.len() + 2;
         Ok(self
@@ -306,7 +306,7 @@ impl Statements {
                 else {
                     return None;
                 };
-                let embeddings = embedding.into();
+                let embedding = embedding.into();
 
                 let Ok(primary_key) = row
                     .columns
@@ -324,9 +324,9 @@ impl Statements {
                 };
                 let primary_key = primary_key.into();
 
-                Some(DbEmbeddings {
+                Some(DbEmbedding {
                     primary_key,
-                    embeddings,
+                    embedding,
                     timestamp,
                 })
             })

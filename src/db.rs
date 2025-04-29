@@ -6,7 +6,7 @@
 use crate::ColumnName;
 use crate::Connectivity;
 use crate::DbCustomIndex;
-use crate::DbEmbeddings;
+use crate::DbEmbedding;
 use crate::Dimensions;
 use crate::ExpansionAdd;
 use crate::ExpansionSearch;
@@ -34,7 +34,7 @@ use tracing::debug_span;
 use tracing::trace;
 use uuid::Uuid;
 
-type GetDbIndexR = anyhow::Result<(mpsc::Sender<DbIndex>, mpsc::Receiver<DbEmbeddings>)>;
+type GetDbIndexR = anyhow::Result<(mpsc::Sender<DbIndex>, mpsc::Receiver<DbEmbedding>)>;
 type LatestSchemaVersionR = anyhow::Result<Option<CqlTimeuuid>>;
 type GetIndexesR = anyhow::Result<Vec<DbCustomIndex>>;
 type GetIndexVersionR = anyhow::Result<Option<IndexVersion>>;

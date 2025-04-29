@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use vector_store::ColumnName;
 use vector_store::Distance;
-use vector_store::Embeddings;
+use vector_store::Embedding;
 use vector_store::IndexId;
 use vector_store::IndexMetadata;
 use vector_store::Limit;
@@ -43,7 +43,7 @@ impl HttpClient {
     pub(crate) async fn ann(
         &self,
         index: &IndexMetadata,
-        embeddings: Embeddings,
+        embedding: Embedding,
         limit: Limit,
     ) -> (HashMap<ColumnName, Vec<Value>>, Vec<Distance>) {
         let resp = self
@@ -52,7 +52,7 @@ impl HttpClient {
                 "{}/indexes/{}/{}/ann",
                 self.url_api, index.keyspace_name, index.index_name
             ))
-            .json(&PostIndexAnnRequest { embeddings, limit })
+            .json(&PostIndexAnnRequest { embedding, limit })
             .send()
             .await
             .unwrap()

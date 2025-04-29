@@ -279,8 +279,8 @@ struct ParamM(usize);
     derive_more::From,
     utoipa::ToSchema,
 )]
-/// Embeddings vector
-pub struct Embeddings(Vec<f32>);
+/// Embedding vector
+pub struct Embedding(Vec<f32>);
 
 #[derive(
     Clone,
@@ -355,9 +355,9 @@ impl DbCustomIndex {
 pub struct Timestamp(OffsetDateTime);
 
 #[derive(Debug)]
-pub struct DbEmbeddings {
+pub struct DbEmbedding {
     pub primary_key: PrimaryKey,
-    pub embeddings: Embeddings,
+    pub embedding: Embedding,
     pub timestamp: Timestamp,
 }
 
