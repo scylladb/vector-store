@@ -8,7 +8,7 @@ use crate::IndexMetadata;
 use crate::db::Db;
 use crate::db::DbExt;
 use crate::db_index::DbIndex;
-use crate::index;
+use crate::factory::IndexFactory;
 use crate::index::Index;
 use crate::monitor_indexes;
 use crate::monitor_items;
@@ -80,7 +80,10 @@ impl EngineExt for mpsc::Sender<Engine> {
     }
 }
 
-pub(crate) async fn new(db: mpsc::Sender<Db>) -> anyhow::Result<mpsc::Sender<Engine>> {
+pub(crate) async fn new(
+    db: mpsc::Sender<Db>,
+    index_factory: impl IndexFactory + Send + 'static,
+) -> anyhow::Result<mpsc::Sender<Engine>> {
     let (tx, mut rx) = mpsc::channel(10);
 
     let monitor_actor = monitor_indexes::new(db.clone(), tx.clone()).await?;
@@ -107,8 +110,7 @@ pub(crate) async fn new(db: mpsc::Sender<Db>) -> anyhow::Result<mpsc::Sender<Eng
                         }
 
                         info!("creating a new index {id}");
-
-                        let Ok(index_actor) = index::new(
+                        let Ok(index_actor) = index_factory.create_index(
                             id.clone(),
                             metadata.dimensions,
                             metadata.connectivity,

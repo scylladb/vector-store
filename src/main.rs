@@ -37,9 +37,24 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .and_then(|v| v.parse().ok());
 
+    #[cfg(feature = "opensearch")]
+    let index_factory = {
+        let addr = dotenvy::var("OPENSEARCH_ADDRESS").unwrap_or("http://localhost".to_string());
+        let port = dotenvy::var("OPENSEARCH_PORT").unwrap_or("9200".to_string());
+        let addr = format!("{addr}:{port}");
+        vector_store::new_index_factory(addr)?
+    };
+    #[cfg(not(feature = "opensearch"))]
+    let index_factory = vector_store::new_index_factory()?;
+
     let db_actor = vector_store::new_db(scylladb_uri).await?;
-    let (_server_actor, addr) =
-        vector_store::run(scylla_usearch_addr, background_threads, db_actor).await?;
+    let (_server_actor, addr) = vector_store::run(
+        scylla_usearch_addr,
+        background_threads,
+        db_actor,
+        index_factory,
+    )
+    .await?;
     tracing::info!("listening on {addr}");
     vector_store::wait_for_shutdown().await;
 

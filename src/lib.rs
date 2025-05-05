@@ -13,6 +13,8 @@ mod monitor_indexes;
 mod monitor_items;
 
 use db::Db;
+use index::factory;
+use index::factory::IndexFactory;
 use scylla::cluster::metadata::ColumnType;
 use scylla::serialize::SerializationError;
 use scylla::serialize::value::SerializeValue;
@@ -394,18 +396,29 @@ pub async fn run(
     addr: HttpServerAddr,
     background_threads: Option<usize>,
     db_actor: Sender<Db>,
+    index_factory: impl IndexFactory + Send + 'static,
 ) -> anyhow::Result<(impl Sized, SocketAddr)> {
     if let Some(background_threads) = background_threads {
         rayon::ThreadPoolBuilder::new()
             .num_threads(background_threads)
             .build_global()?;
     }
-    let engine_actor = engine::new(db_actor).await?;
+    let engine_actor = engine::new(db_actor, index_factory).await?;
     httpserver::new(addr, engine_actor).await
 }
 
 pub async fn new_db(uri: ScyllaDbUri) -> anyhow::Result<Sender<Db>> {
     db::new(uri).await
+}
+
+#[cfg(not(feature = "opensearch"))]
+pub fn new_index_factory() -> anyhow::Result<impl IndexFactory> {
+    index::usearch::new_usearch()
+}
+
+#[cfg(feature = "opensearch")]
+pub fn new_index_factory(addr: String) -> anyhow::Result<impl IndexFactory> {
+    index::opensearch::new_opensearch(&addr)
 }
 
 pub async fn wait_for_shutdown() {

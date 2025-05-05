@@ -8,6 +8,7 @@ use crate::Dimensions;
 use crate::Embedding;
 use crate::ExpansionAdd;
 use crate::ExpansionSearch;
+use crate::IndexFactory;
 use crate::IndexId;
 use crate::Limit;
 use crate::PrimaryKey;
@@ -31,6 +32,30 @@ use tracing::error;
 use tracing::trace;
 use usearch::IndexOptions;
 use usearch::ScalarKind;
+
+pub struct UsearchIndexFactory;
+impl IndexFactory for UsearchIndexFactory {
+    fn create_index(
+        &self,
+        id: IndexId,
+        dimensions: Dimensions,
+        connectivity: Connectivity,
+        expansion_add: ExpansionAdd,
+        expansion_search: ExpansionSearch,
+    ) -> anyhow::Result<mpsc::Sender<Index>> {
+        new(
+            id,
+            dimensions,
+            connectivity,
+            expansion_add,
+            expansion_search,
+        )
+    }
+}
+
+pub fn new_usearch() -> anyhow::Result<UsearchIndexFactory> {
+    Ok(UsearchIndexFactory {})
+}
 
 // Initial and incremental number for the index vectors reservation.
 // The value was taken for initial benchmarks (size similar to benchmark size)

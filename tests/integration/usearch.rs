@@ -17,6 +17,7 @@ use tokio::time;
 use uuid::Uuid;
 use vector_store::IndexMetadata;
 
+#[cfg(not(feature = "opensearch"))]
 #[tokio::test]
 async fn simple_create_search_delete_index() {
     crate::enable_tracing();
@@ -35,10 +36,13 @@ async fn simple_create_search_delete_index() {
         version: Uuid::new_v4().into(),
     };
 
+    let index_factory = vector_store::new_index_factory().unwrap();
+
     let (_server_actor, addr) = vector_store::run(
         SocketAddr::from(([127, 0, 0, 1], 0)).into(),
         Some(1),
         db_actor,
+        index_factory,
     )
     .await
     .unwrap();

@@ -4,6 +4,7 @@
  */
 
 pub mod actor;
+pub mod factory;
 
 pub(crate) use actor::Index;
 pub(crate) use actor::IndexExt;
@@ -11,8 +12,3 @@ pub(crate) use actor::IndexExt;
 pub(crate) mod opensearch;
 #[cfg(not(feature = "opensearch"))]
 pub(crate) mod usearch;
-
-#[cfg(feature = "opensearch")]
-pub(crate) use opensearch::new;
-#[cfg(not(feature = "opensearch"))]
-pub(crate) use usearch::new;

@@ -13,7 +13,7 @@ use tokio::sync::oneshot;
 pub(crate) type AnnR = anyhow::Result<(Vec<PrimaryKey>, Vec<Distance>)>;
 pub(crate) type CountR = anyhow::Result<usize>;
 
-pub(crate) enum Index {
+pub enum Index {
     AddOrReplace {
         primary_key: PrimaryKey,
         embedding: Embedding,
