@@ -3,30 +3,41 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+// TODO: Please remove if necessary implementation is provided.
+#![allow(dead_code)]
+
 use crate::Connectivity;
 use crate::Dimensions;
-use crate::Distance;
-use crate::Embeddings;
 use crate::ExpansionAdd;
 use crate::ExpansionSearch;
 use crate::IndexId;
-use crate::IndexItemsCount;
-use crate::Key;
-use crate::Limit;
-use crate::db::Db;
+use crate::PrimaryKey;
 use crate::index::actor::Index;
+use bimap::BiMap;
+use opensearch::OpenSearch;
 use std::sync::Arc;
 use std::sync::RwLock;
-use std::sync::atomic::AtomicU32;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::AtomicU64;
 use tokio::sync::mpsc;
-use tokio::sync::oneshot;
 use tracing::info;
+
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    derive_more::From,
+    derive_more::AsRef,
+    derive_more::Display,
+)]
+/// Key for index embeddings
+struct Key(u64);
 
 pub fn new(
     id: IndexId,
-    db: mpsc::Sender<Db>,
-    dimensions: Dimensions,
+    _dimensions: Dimensions,
     _connectivity: Connectivity,
     _expansion_add: ExpansionAdd,
     _expansion_search: ExpansionSearch,
@@ -39,34 +50,37 @@ pub fn new(
     Ok(tx)
 }
 
-async fn housekeeping(
-    db: &mpsc::Sender<Db>,
-    id: IndexId,
-    items_count_db: &mut IndexItemsCount,
-    items_count: &AtomicU32,
-    counter_add: &AtomicUsize,
-    counter_ann: &AtomicUsize,
-    channel_len: usize,
+async fn _process(
+    msg: Index,
+    _dimensions: Dimensions,
+    _id: Arc<IndexId>,
+    _keys: Arc<RwLock<BiMap<PrimaryKey, Key>>>,
+    _opensearch_key: Arc<AtomicU64>,
+    _client: Arc<OpenSearch>,
 ) {
-    {}
-}
-
-async fn add(
-    idx: Arc<usearch::Index>,
-    idx_lock: Arc<RwLock<()>>,
-    key: Key,
-    embeddings: Embeddings,
-    items_count: Arc<AtomicU32>,
-    counter: Arc<AtomicUsize>,
-) {
-}
-
-async fn ann(
-    idx: Arc<usearch::Index>,
-    tx: oneshot::Sender<anyhow::Result<(Vec<Key>, Vec<Distance>)>>,
-    embeddings: Embeddings,
-    dimensions: Dimensions,
-    limit: Limit,
-    counter: Arc<AtomicUsize>,
-) {
+    // TODO: Implement the logic for processing the messages
+    match msg {
+        Index::AddOrReplace {
+            primary_key,
+            embedding,
+        } => {
+            let _ = primary_key;
+            let _ = embedding;
+        }
+        Index::Remove { primary_key } => {
+            let _ = primary_key;
+        }
+        Index::Ann {
+            embedding,
+            limit,
+            tx,
+        } => {
+            let _ = embedding;
+            let _ = limit;
+            let _ = tx;
+        }
+        Index::Count { tx } => {
+            let _ = tx;
+        }
+    }
 }

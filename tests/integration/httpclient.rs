@@ -3,6 +3,9 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+// TODO: This should be removed when the opensearch tests are implemented.
+#![cfg_attr(feature = "opensearch", allow(dead_code))]
+
 use reqwest::Client;
 use serde_json::Value;
 use std::collections::HashMap;
