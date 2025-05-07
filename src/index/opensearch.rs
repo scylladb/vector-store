@@ -230,9 +230,7 @@ async fn process(
             primary_key,
             embedding,
         } => add(id, keys, opensearch_key, primary_key, embedding, client).await,
-        Index::Remove { primary_key } => {
-            let _ = primary_key;
-        }
+        Index::Remove { primary_key } => remove(id, keys, primary_key, client).await,
         Index::Ann {
             embedding,
             limit,
@@ -308,5 +306,30 @@ async fn add(
 
     if response.is_err() {
         keys.write().unwrap().remove_by_right(&key);
+    }
+}
+
+async fn remove(
+    id: Arc<IndexId>,
+    keys: Arc<RwLock<BiMap<PrimaryKey, Key>>>,
+    primary_key: PrimaryKey,
+    client: Arc<OpenSearch>,
+) {
+    let (primary_key, key) = keys.write().unwrap().remove_by_left(&primary_key).unwrap();
+
+    let response = client
+        .delete(DeleteParts::IndexId(&id.0, &key.0.to_string()))
+        .send()
+        .await
+        .map_or_else(
+            Err,
+            opensearch::http::response::Response::error_for_status_code,
+        )
+        .map_err(|err| {
+            error!("remove: unable to remove embedding for key {key}: {err}");
+        });
+
+    if response.is_err() {
+        keys.write().unwrap().insert(primary_key, key);
     }
 }
