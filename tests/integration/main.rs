@@ -12,6 +12,11 @@ mod httpclient;
 #[cfg(not(feature = "opensearch"))]
 mod usearch;
 
+#[cfg(feature = "opensearch")]
+mod mock_opensearch;
+#[cfg(feature = "opensearch")]
+mod opensearch;
+
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
