@@ -1,0 +1,26 @@
+name: Update Status - in review
+on:
+  pull_request:
+    types: [ ready_for_review, review_requested ]
+
+jobs:
+  action-jira-status-update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: determine associated issue id
+        id: get-jira
+        run: |
+          echo "looking for Jira issue key"
+          title="${{github.event.pull_request.title}}"
+          echo "PR title [$title]"
+          ticket_id=`echo $title | awk -F" " '{print $1}'`
+          echo "ticket_id [$ticket_id]"
+          if echo $ticket_id | grep -Eqx '[A-Z]+-[0-9]+'; then
+            echo "we found it"
+            echo "ticket-id=[$ticket_id]" 
+            curl -v -X POST --url $USER_AND_KEY_FOR_JIRA --header "Accept: application/json" --header "Content-Type: application/json" -d "{\"transition\":{\"id\":\"41\"}}"
+          fi
+  
+
+
+

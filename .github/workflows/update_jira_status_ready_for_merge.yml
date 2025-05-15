@@ -1,0 +1,24 @@
+name: Update Status - Ready For Merge
+on:
+  pull_request:
+    types: [ labeled ]
+
+jobs:
+  action-jira-status-update-ready-for-merge:
+    if: ${{ github.event.label.name == 'status/merge candidate' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: determine associated issue id
+        id: get-jira
+        run: |
+          echo "found label status/merge candidate"
+          echo "looking for Jira issue key. label = status/merge candidate"
+          title="${{github.event.pull_request.title}}"
+          echo "PR title [$title]"
+          ticket_id=`echo $title | awk -F" " '{print $1}'`
+          echo "ticket_id [$ticket_id]"
+          if echo $ticket_id | grep -Eqx '[A-Z]+-[0-9]+'; then
+            echo "Updating status to 'ready for merge' in jira"
+            echo "ticket-id=[$ticket_id]" 
+            curl -v -X POST --url "https://scylladb.atlassian.net/rest/api/3/issue/${ticket_id}/transitions" --user $USER_AND_KEY_FOR_JIRA --header "Accept: application/json" --header "Content-Type: application/json" -d "{\"transition\":{\"id\":\"51\"}}"
+          fi
