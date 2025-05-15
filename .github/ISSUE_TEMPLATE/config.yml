@@ -1,5 +1,5 @@
 blank_issues_enabled: false  # Disables blank issue creation
 contact_links:
-  - name: 🚀 Press to open an issue the vector store project in Jira.
+  - name: 🚀 Press to open an issue in the vector store project in Jira.
     url: https://scylladb.atlassian.net/browse/VS
     about: "Opening issues is not allowed in this Github repository."
