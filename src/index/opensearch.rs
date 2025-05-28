@@ -256,7 +256,7 @@ async fn process(
         Index::AddOrReplace {
             primary_key,
             embedding,
-        } => add(id, keys, opensearch_key, primary_key, embedding, client).await,
+        } => add_or_replace(id, keys, opensearch_key, primary_key, embedding, client).await,
         Index::Remove { primary_key } => remove(id, keys, primary_key, client).await,
         Index::Ann {
             embedding,
@@ -269,7 +269,7 @@ async fn process(
     }
 }
 
-async fn add(
+async fn add_or_replace(
     id: Arc<IndexId>,
     keys: Arc<RwLock<BiMap<PrimaryKey, Key>>>,
     opensearch_key: Arc<AtomicU64>,
