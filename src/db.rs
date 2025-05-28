@@ -15,6 +15,7 @@ use crate::IndexName;
 use crate::IndexVersion;
 use crate::KeyspaceName;
 use crate::ScyllaDbUri;
+use crate::SpaceType;
 use crate::TableName;
 use crate::db_index;
 use crate::db_index::DbIndex;
@@ -40,7 +41,8 @@ type LatestSchemaVersionR = anyhow::Result<Option<CqlTimeuuid>>;
 type GetIndexesR = anyhow::Result<Vec<DbCustomIndex>>;
 type GetIndexVersionR = anyhow::Result<Option<IndexVersion>>;
 type GetIndexTargetTypeR = anyhow::Result<Option<Dimensions>>;
-type GetIndexParamsR = anyhow::Result<Option<(Connectivity, ExpansionAdd, ExpansionSearch)>>;
+type GetIndexParamsR =
+    anyhow::Result<Option<(Connectivity, ExpansionAdd, ExpansionSearch, SpaceType)>>;
 type IsValidIndexR = bool;
 
 pub enum Db {
@@ -406,6 +408,7 @@ impl Statements {
             Connectivity::default(),
             ExpansionAdd::default(),
             ExpansionSearch::default(),
+            SpaceType::default(),
         )))
     }
 

@@ -33,6 +33,7 @@ async fn simple_create_search_delete_index() {
         connectivity: Default::default(),
         expansion_add: Default::default(),
         expansion_search: Default::default(),
+        space_type: Default::default(),
         version: Uuid::new_v4().into(),
     };
 
@@ -68,6 +69,7 @@ async fn simple_create_search_delete_index() {
             connectivity: index.connectivity,
             expansion_add: index.expansion_add,
             expansion_search: index.expansion_search,
+            space_type: index.space_type,
         },
     )
     .unwrap();

@@ -30,6 +30,7 @@ use vector_store::IndexMetadata;
 use vector_store::IndexName;
 use vector_store::KeyspaceName;
 use vector_store::PrimaryKey;
+use vector_store::SpaceType;
 use vector_store::TableName;
 use vector_store::Timestamp;
 use vector_store::db::Db;
@@ -97,6 +98,7 @@ pub(crate) struct Index {
     pub(crate) connectivity: Connectivity,
     pub(crate) expansion_add: ExpansionAdd,
     pub(crate) expansion_search: ExpansionSearch,
+    pub(crate) space_type: SpaceType,
 }
 
 struct Keyspace {
@@ -323,6 +325,7 @@ fn process_db(db: &DbBasic, msg: Db) {
                         index.index.connectivity,
                         index.index.expansion_add,
                         index.index.expansion_search,
+                        index.index.space_type,
                     )
                 })))
             .map_err(|_| anyhow!("Db::GetIndexParams: unable to send response"))

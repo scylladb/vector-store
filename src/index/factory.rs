@@ -8,6 +8,7 @@ use crate::Dimensions;
 use crate::ExpansionAdd;
 use crate::ExpansionSearch;
 use crate::IndexId;
+use crate::SpaceType;
 use crate::index::actor::Index;
 use tokio::sync::mpsc;
 
@@ -19,5 +20,6 @@ pub trait IndexFactory {
         connectivity: Connectivity,
         expansion_add: ExpansionAdd,
         expansion_search: ExpansionSearch,
+        space_type: SpaceType,
     ) -> anyhow::Result<mpsc::Sender<Index>>;
 }

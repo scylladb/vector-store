@@ -12,6 +12,7 @@ use crate::IndexFactory;
 use crate::IndexId;
 use crate::Limit;
 use crate::PrimaryKey;
+use crate::SpaceType;
 use crate::index::actor::AnnR;
 use crate::index::actor::CountR;
 use crate::index::actor::Index;
@@ -31,6 +32,7 @@ use tracing::debug_span;
 use tracing::error;
 use tracing::trace;
 use usearch::IndexOptions;
+use usearch::MetricKind;
 use usearch::ScalarKind;
 
 pub struct UsearchIndexFactory;
@@ -42,6 +44,7 @@ impl IndexFactory for UsearchIndexFactory {
         connectivity: Connectivity,
         expansion_add: ExpansionAdd,
         expansion_search: ExpansionSearch,
+        space_type: SpaceType,
     ) -> anyhow::Result<mpsc::Sender<Index>> {
         new(
             id,
@@ -49,6 +52,7 @@ impl IndexFactory for UsearchIndexFactory {
             connectivity,
             expansion_add,
             expansion_search,
+            space_type,
         )
     }
 }
@@ -79,18 +83,30 @@ const RESERVE_THRESHOLD: usize = RESERVE_INCREMENT / 3;
 /// Key for index embeddings
 struct Key(u64);
 
+impl From<SpaceType> for MetricKind {
+    fn from(space_type: SpaceType) -> Self {
+        match space_type {
+            SpaceType::Cosine => MetricKind::Cos,
+            SpaceType::Euclidean => MetricKind::L2sq,
+            SpaceType::DotProduct => MetricKind::IP,
+        }
+    }
+}
+
 pub(crate) fn new(
     id: IndexId,
     dimensions: Dimensions,
     connectivity: Connectivity,
     expansion_add: ExpansionAdd,
     expansion_search: ExpansionSearch,
+    space_type: SpaceType,
 ) -> anyhow::Result<mpsc::Sender<Index>> {
     let options = IndexOptions {
         dimensions: dimensions.0.get(),
         connectivity: connectivity.0,
         expansion_add: expansion_add.0,
         expansion_search: expansion_search.0,
+        metric: space_type.into(),
         quantization: ScalarKind::F32,
         ..Default::default()
     };
@@ -327,6 +343,7 @@ mod tests {
             Connectivity::default(),
             ExpansionAdd::default(),
             ExpansionSearch::default(),
+            SpaceType::default(),
         )
         .unwrap();
 

@@ -14,6 +14,7 @@ use crate::ExpansionSearch;
 use crate::IndexFactory;
 use crate::IndexId;
 use crate::PrimaryKey;
+use crate::SpaceType;
 use crate::index::actor::Index;
 use bimap::BiMap;
 use opensearch::DeleteParts;
@@ -24,6 +25,7 @@ use opensearch::http::transport::SingleNodeConnectionPool;
 use opensearch::http::transport::TransportBuilder;
 use opensearch::indices::IndicesCreateParts;
 use serde_json::json;
+use std::fmt::Display;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicU64;
@@ -50,6 +52,16 @@ impl OpenSearchIndexFactory {
     }
 }
 
+impl Display for SpaceType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Euclidean => write!(f, "l2"),
+            Self::Cosine => write!(f, "cosinesimil"),
+            Self::DotProduct => write!(f, "innerproduct"),
+        }
+    }
+}
+
 impl IndexFactory for OpenSearchIndexFactory {
     fn create_index(
         &self,
@@ -58,6 +70,7 @@ impl IndexFactory for OpenSearchIndexFactory {
         connectivity: Connectivity,
         expansion_add: ExpansionAdd,
         expansion_search: ExpansionSearch,
+        space_type: SpaceType,
     ) -> anyhow::Result<mpsc::Sender<Index>> {
         new(
             id,
@@ -65,6 +78,7 @@ impl IndexFactory for OpenSearchIndexFactory {
             connectivity,
             expansion_add,
             expansion_search,
+            space_type,
             self.client.clone(),
         )
     }
@@ -96,6 +110,7 @@ async fn create_index(
     connectivity: Connectivity,
     expansion_add: ExpansionAdd,
     expansion_search: ExpansionSearch,
+    space_type: SpaceType,
     client: Arc<OpenSearch>,
 ) -> Result<opensearch::http::response::Response, ()> {
     let response: Result<opensearch::http::response::Response, ()> = client
@@ -112,6 +127,7 @@ async fn create_index(
                         "dimension": dimensions.0.get(),
                         "method": {
                             "name": "hnsw",
+                            "space_type": space_type.to_string(),
                             "parameters": {
                                 "ef_search": if expansion_search.0 > 0 {
                                     expansion_search.0
@@ -153,6 +169,7 @@ pub fn new(
     connectivity: Connectivity,
     expansion_add: ExpansionAdd,
     expansion_search: ExpansionSearch,
+    space_type: SpaceType,
     client: Arc<OpenSearch>,
 ) -> anyhow::Result<mpsc::Sender<Index>> {
     info!("Creating new index with id: {id}");
@@ -169,6 +186,7 @@ pub fn new(
                 connectivity,
                 expansion_add,
                 expansion_search,
+                space_type,
                 client.clone(),
             )
             .await;
