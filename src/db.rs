@@ -74,6 +74,7 @@ pub enum Db {
 
     GetIndexParams {
         keyspace: KeyspaceName,
+        table: TableName,
         index: IndexName,
         tx: oneshot::Sender<GetIndexParamsR>,
     },
@@ -108,7 +109,12 @@ pub(crate) trait DbExt {
         target_column: ColumnName,
     ) -> GetIndexTargetTypeR;
 
-    async fn get_index_params(&self, keyspace: KeyspaceName, index: IndexName) -> GetIndexParamsR;
+    async fn get_index_params(
+        &self,
+        keyspace: KeyspaceName,
+        table: TableName,
+        index: IndexName,
+    ) -> GetIndexParamsR;
 
     async fn is_valid_index(&self, metadata: IndexMetadata) -> IsValidIndexR;
 }
@@ -164,10 +170,16 @@ impl DbExt for mpsc::Sender<Db> {
         rx.await?
     }
 
-    async fn get_index_params(&self, keyspace: KeyspaceName, index: IndexName) -> GetIndexParamsR {
+    async fn get_index_params(
+        &self,
+        keyspace: KeyspaceName,
+        table: TableName,
+        index: IndexName,
+    ) -> GetIndexParamsR {
         let (tx, rx) = oneshot::channel();
         self.send(Db::GetIndexParams {
             keyspace,
+            table,
             index,
             tx,
         })
@@ -237,10 +249,11 @@ async fn process(statements: Arc<Statements>, msg: Db) {
 
         Db::GetIndexParams {
             keyspace,
+            table,
             index,
             tx,
         } => tx
-            .send(statements.get_index_params(keyspace, index).await)
+            .send(statements.get_index_params(keyspace, table, index).await)
             .unwrap_or_else(|_| trace!("process: Db::GetIndexParams: unable to send response")),
 
         Db::IsValidIndex { metadata, tx } => tx
@@ -255,6 +268,7 @@ struct Statements {
     st_get_indexes: PreparedStatement,
     st_get_index_version: PreparedStatement,
     st_get_index_target_type: PreparedStatement,
+    st_get_index_options: PreparedStatement,
     re_get_index_target_type: Regex,
 }
 
@@ -286,6 +300,11 @@ impl Statements {
                 .prepare(Self::ST_GET_INDEX_TARGET_TYPE)
                 .await
                 .context("ST_GET_INDEX_TARGET_TYPE")?,
+
+            st_get_index_options: session
+                .prepare(Self::ST_GET_INDEX_OPTIONS)
+                .await
+                .context("ST_GET_INDEX_OPTIONS")?,
 
             re_get_index_target_type: Regex::new(Self::RE_GET_INDEX_TARGET_TYPE)
                 .context("RE_GET_INDEX_TARGET_TYPE")?,
@@ -373,6 +392,12 @@ impl Statements {
         ";
     const RE_GET_INDEX_TARGET_TYPE: &str = r"^vector<float, (?<dimensions>\d+)>$";
 
+    const ST_GET_INDEX_OPTIONS: &str = "
+        SELECT options
+        FROM system_schema.indexes
+        WHERE keyspace_name = ? AND table_name = ? AND index_name = ?
+        ";
+
     async fn get_index_target_type(
         &self,
         keyspace: KeyspaceName,
@@ -401,15 +426,40 @@ impl Statements {
 
     async fn get_index_params(
         &self,
-        _keyspace: KeyspaceName,
-        _index: IndexName,
+        keyspace: KeyspaceName,
+        table: TableName,
+        index: IndexName,
     ) -> GetIndexParamsR {
-        Ok(Some((
-            Connectivity::default(),
-            ExpansionAdd::default(),
-            ExpansionSearch::default(),
-            SpaceType::default(),
-        )))
+        let options = self
+            .session
+            .execute_iter(self.st_get_index_options.clone(), (keyspace, table, index))
+            .await?
+            .rows_stream::<(BTreeMap<String, String>,)>()?
+            .try_next()
+            .await?
+            .map(|(options,)| options);
+        Ok(options.map(|mut options| {
+            let connectivity = options
+                .remove("maximum_node_connections")
+                .and_then(|s| s.parse::<usize>().ok())
+                .map(Connectivity)
+                .unwrap_or_default();
+            let expansion_add = options
+                .remove("construction_beam_width")
+                .and_then(|s| s.parse::<usize>().ok())
+                .map(ExpansionAdd)
+                .unwrap_or_default();
+            let expansion_search = options
+                .remove("search_beam_width")
+                .and_then(|s| s.parse::<usize>().ok())
+                .map(ExpansionSearch)
+                .unwrap_or_default();
+            let space_type = options
+                .remove("similarity_function")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_default();
+            (connectivity, expansion_add, expansion_search, space_type)
+        }))
     }
 
     async fn is_valid_index(&self, metadata: IndexMetadata) -> IsValidIndexR {

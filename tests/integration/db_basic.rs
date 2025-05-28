@@ -310,6 +310,7 @@ fn process_db(db: &DbBasic, msg: Db) {
 
         Db::GetIndexParams {
             keyspace,
+            table: _,
             index,
             tx,
         } => tx
