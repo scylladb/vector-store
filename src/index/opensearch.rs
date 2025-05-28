@@ -46,6 +46,7 @@ use tracing::info;
 use tracing::trace;
 
 use super::actor::AnnR;
+use super::actor::CountR;
 
 pub struct OpenSearchIndexFactory {
     client: Arc<OpenSearch>,
@@ -263,9 +264,7 @@ async fn process(
             limit,
             tx,
         } => ann(id, tx, keys, embedding, dimensions, limit, client).await,
-        Index::Count { tx } => {
-            let _ = tx;
-        }
+        Index::Count { tx } => count(id, tx, client).await,
     }
 }
 
@@ -446,4 +445,41 @@ async fn ann(
     tx_ann
         .send(Ok((keys, distances)))
         .unwrap_or_else(|_| trace!("ann: unable to send response"));
+}
+
+async fn count(id: Arc<IndexId>, tx: oneshot::Sender<CountR>, client: Arc<OpenSearch>) {
+    let response = client
+        .count(opensearch::CountParts::Index(&[&id.0]))
+        .send()
+        .await
+        .map_or_else(
+            Err,
+            opensearch::http::response::Response::error_for_status_code,
+        )
+        .map_err(|err| {
+            error!("count: unable to count embeddings: {err}");
+        });
+
+    if response.is_err() {
+        _ = tx.send(Ok(0));
+        return;
+    }
+
+    let response_body = response.unwrap().json::<Value>().await;
+
+    if response_body.is_err() {
+        _ = tx.send(Ok(0));
+        return;
+    }
+    let response_body = response_body.unwrap();
+
+    let count = response_body.get("count").and_then(|count| count.as_u64());
+
+    if count.is_none() {
+        _ = tx.send(Ok(0));
+        return;
+    }
+    let count = count.unwrap();
+
+    _ = tx.send(Ok(count as usize));
 }
