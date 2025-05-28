@@ -22,10 +22,12 @@ use scylla::serialize::writers::CellWriter;
 use scylla::serialize::writers::WrittenCellProof;
 use scylla::value::CqlValue;
 use std::borrow::Cow;
+use std::fmt::Display;
 use std::hash::Hash;
 use std::hash::Hasher;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
+use std::str::FromStr;
 use time::OffsetDateTime;
 use tokio::signal;
 use tokio::sync::mpsc::Sender;
@@ -289,6 +291,53 @@ pub struct ExpansionSearch(usize);
 #[derive(
     Copy,
     Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    derive_more::From,
+    utoipa::ToSchema,
+)]
+pub enum SpaceType {
+    Euclidean,
+    Cosine,
+    DotProduct,
+}
+
+impl Default for SpaceType {
+    fn default() -> Self {
+        Self::Cosine
+    }
+}
+
+impl Display for SpaceType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Euclidean => write!(f, "l2"),
+            Self::Cosine => write!(f, "cosinesimil"),
+            Self::DotProduct => write!(f, "innerproduct"),
+        }
+    }
+}
+
+impl FromStr for SpaceType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "EUCLIDEAN" => Ok(Self::Euclidean),
+            "COSINE" => Ok(Self::Cosine),
+            "DOT_PRODUCT" => Ok(Self::DotProduct),
+            _ => Err(format!("Unknown space type: {s}")),
+        }
+    }
+}
+
+#[derive(
+    Copy,
+    Clone,
     serde::Serialize,
     serde::Deserialize,
     derive_more::AsRef,
@@ -356,6 +405,7 @@ pub struct IndexMetadata {
     pub connectivity: Connectivity,
     pub expansion_add: ExpansionAdd,
     pub expansion_search: ExpansionSearch,
+    pub space_type: SpaceType,
     pub version: IndexVersion,
 }
 

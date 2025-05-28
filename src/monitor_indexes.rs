@@ -4,6 +4,7 @@
  */
 
 use crate::IndexMetadata;
+use crate::SpaceType;
 use crate::db::Db;
 use crate::db::DbExt;
 use crate::engine::Engine;
@@ -112,15 +113,15 @@ async fn get_indexes(db: &Sender<Db>) -> anyhow::Result<HashSet<IndexMetadata>> 
             continue;
         };
 
-        let (connectivity, expansion_add, expansion_search) = if let Some(params) = db
-            .get_index_params(idx.keyspace.clone(), idx.index.clone())
+        let (connectivity, expansion_add, expansion_search, space_type) = if let Some(params) = db
+            .get_index_params(idx.keyspace.clone(), idx.table.clone(), idx.index.clone())
             .await
             .inspect_err(|err| warn!("unable to get index params: {err}"))?
         {
             params
         } else {
             debug!("get_indexes: no params for index {idx:?}");
-            (0.into(), 0.into(), 0.into())
+            (0.into(), 0.into(), 0.into(), SpaceType::default())
         };
 
         let metadata = IndexMetadata {
@@ -132,6 +133,7 @@ async fn get_indexes(db: &Sender<Db>) -> anyhow::Result<HashSet<IndexMetadata>> 
             connectivity,
             expansion_add,
             expansion_search,
+            space_type,
             version,
         };
 

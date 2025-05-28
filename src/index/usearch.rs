@@ -12,6 +12,7 @@ use crate::IndexFactory;
 use crate::IndexId;
 use crate::Limit;
 use crate::PrimaryKey;
+use crate::SpaceType;
 use crate::index::actor::AnnR;
 use crate::index::actor::CountR;
 use crate::index::actor::Index;
@@ -42,6 +43,7 @@ impl IndexFactory for UsearchIndexFactory {
         connectivity: Connectivity,
         expansion_add: ExpansionAdd,
         expansion_search: ExpansionSearch,
+        space_type: SpaceType,
     ) -> anyhow::Result<mpsc::Sender<Index>> {
         new(
             id,
@@ -49,6 +51,7 @@ impl IndexFactory for UsearchIndexFactory {
             connectivity,
             expansion_add,
             expansion_search,
+            space_type,
         )
     }
 }
@@ -85,12 +88,19 @@ pub(crate) fn new(
     connectivity: Connectivity,
     expansion_add: ExpansionAdd,
     expansion_search: ExpansionSearch,
+    space_type: SpaceType,
 ) -> anyhow::Result<mpsc::Sender<Index>> {
+    let metric = match space_type {
+        SpaceType::Euclidean => usearch::MetricKind::L2sq,
+        SpaceType::Cosine => usearch::MetricKind::Cos,
+        SpaceType::DotProduct => usearch::MetricKind::IP,
+    };
     let options = IndexOptions {
         dimensions: dimensions.0.get(),
         connectivity: connectivity.0,
         expansion_add: expansion_add.0,
         expansion_search: expansion_search.0,
+        metric,
         quantization: ScalarKind::F32,
         ..Default::default()
     };
@@ -327,6 +337,7 @@ mod tests {
             Connectivity::default(),
             ExpansionAdd::default(),
             ExpansionSearch::default(),
+            SpaceType::default(),
         )
         .unwrap();
 

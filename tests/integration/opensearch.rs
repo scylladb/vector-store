@@ -7,6 +7,7 @@ use crate::db_basic;
 use crate::db_basic::Index;
 use crate::db_basic::Table;
 use crate::httpclient::HttpClient;
+use crate::mock_opensearch;
 use ::time::OffsetDateTime;
 use scylla::value::CqlValue;
 use std::net::SocketAddr;
@@ -17,7 +18,6 @@ use tokio::time;
 use uuid::Uuid;
 use vector_store::IndexMetadata;
 
-#[cfg(not(feature = "opensearch"))]
 #[tokio::test]
 async fn simple_create_search_delete_index() {
     crate::enable_tracing();
@@ -36,8 +36,9 @@ async fn simple_create_search_delete_index() {
         space_type: Default::default(),
         version: Uuid::new_v4().into(),
     };
+    let server = mock_opensearch::TestOpenSearchServer::start().await;
 
-    let index_factory = vector_store::new_index_factory().unwrap();
+    let index_factory = vector_store::new_index_factory(server.base_url()).unwrap();
 
     let (_server_actor, addr) = vector_store::run(
         SocketAddr::from(([127, 0, 0, 1], 0)).into(),

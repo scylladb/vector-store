@@ -116,6 +116,7 @@ pub(crate) async fn new(
                             metadata.connectivity,
                             metadata.expansion_add,
                             metadata.expansion_search,
+                            metadata.space_type,
                         )
                         .inspect_err(|err| error!("unable to create an index {id}: {err}")) else {
                             continue;
