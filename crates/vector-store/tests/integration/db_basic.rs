@@ -27,6 +27,7 @@ use vector_store::IndexMetadata;
 use vector_store::IndexName;
 use vector_store::KeyspaceName;
 use vector_store::PrimaryKey;
+use vector_store::Progress;
 use vector_store::SpaceType;
 use vector_store::TableName;
 use vector_store::Timestamp;
@@ -116,6 +117,7 @@ struct DbMock {
     schema_version: CqlTimeuuid,
     keyspaces: HashMap<KeyspaceName, Keyspace>,
     next_get_db_index_failed: bool,
+    next_full_scan_progress: Progress,
 }
 
 impl DbMock {
@@ -130,6 +132,7 @@ impl DbBasic {
             schema_version: CqlTimeuuid::from(Uuid::new_v4()),
             keyspaces: HashMap::new(),
             next_get_db_index_failed: false,
+            next_full_scan_progress: Progress::Done,
         })))
     }
 
@@ -240,6 +243,10 @@ impl DbBasic {
 
     pub(crate) fn set_next_get_db_index_failed(&self) {
         self.0.write().unwrap().next_get_db_index_failed = true;
+    }
+
+    pub(crate) fn set_next_full_scan_progress(&self, progress: Progress) {
+        self.0.write().unwrap().next_full_scan_progress = progress;
     }
 }
 
@@ -413,6 +420,15 @@ async fn process_db_index(db: &DbBasic, metadata: &IndexMetadata, msg: DbIndex) 
                     .unwrap_or_default(),
             )
             .map_err(|_| anyhow!("DbIndex::GetPrimaryKeyColumns: unable to send response"))
+            .unwrap(),
+        DbIndex::FullScanProgress { tx } => tx
+            .send({
+                let mut db = db.0.write().unwrap();
+                let val = db.next_full_scan_progress.clone();
+                db.next_full_scan_progress = Progress::Done;
+                val
+            })
+            .map_err(|_| anyhow!("DbIndex::GetTargetColumn: unable to send response"))
             .unwrap(),
     }
 }

@@ -7,6 +7,8 @@ use crate::ColumnName;
 use crate::DbEmbedding;
 use crate::IndexMetadata;
 use crate::KeyspaceName;
+use crate::Percentage;
+use crate::Progress;
 use crate::TableName;
 use anyhow::Context;
 use anyhow::anyhow;
@@ -28,6 +30,7 @@ use scylla_cdc::log_reader::CDCLogReaderBuilder;
 use std::iter;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 use time::Date;
 use time::OffsetDateTime;
@@ -43,20 +46,48 @@ use tracing::warn;
 
 type GetPrimaryKeyColumnsR = Vec<ColumnName>;
 
+impl From<u64> for Percentage {
+    fn from(value: u64) -> Self {
+        Percentage::try_from((value as f64 / u64::MAX as f64) * 100.0).unwrap()
+    }
+}
+
+impl From<u64> for Progress {
+    fn from(value: u64) -> Self {
+        if value == u64::MAX {
+            Progress::Done
+        } else {
+            Progress::InProgress(Percentage::from(value))
+        }
+    }
+}
+
 pub enum DbIndex {
     GetPrimaryKeyColumns {
         tx: oneshot::Sender<GetPrimaryKeyColumnsR>,
+    },
+    FullScanProgress {
+        tx: oneshot::Sender<Progress>,
     },
 }
 
 pub(crate) trait DbIndexExt {
     async fn get_primary_key_columns(&self) -> GetPrimaryKeyColumnsR;
+    async fn full_scan_progress(&self) -> Progress;
 }
 
 impl DbIndexExt for mpsc::Sender<DbIndex> {
     async fn get_primary_key_columns(&self) -> GetPrimaryKeyColumnsR {
         let (tx, rx) = oneshot::channel();
         self.send(DbIndex::GetPrimaryKeyColumns { tx })
+            .await
+            .expect("internal actor should receive request");
+        rx.await.expect("internal actor should send response")
+    }
+
+    async fn full_scan_progress(&self) -> Progress {
+        let (tx, rx) = oneshot::channel();
+        self.send(DbIndex::FullScanProgress { tx })
             .await
             .expect("internal actor should receive request");
         rx.await.expect("internal actor should send response")
@@ -104,14 +135,15 @@ pub(crate) async fn new(
     tokio::spawn(
         async move {
             debug!("starting");
+            let completed_scan_length = Arc::new(AtomicU64::new(0));
 
             while !rx_index.is_closed() {
                 tokio::select! {
-                    _ = statements.initial_scan(tx_embeddings.clone()) => {
+                    _ = statements.initial_scan(tx_embeddings.clone(), completed_scan_length.clone()) => {
                         break;
                     }
                     Some(msg) = rx_index.recv() => {
-                        tokio::spawn(process(Arc::clone(&statements), msg));
+                        tokio::spawn(process(Arc::clone(&statements), msg, completed_scan_length.clone()));
                     }
                 }
             }
@@ -119,7 +151,7 @@ pub(crate) async fn new(
             debug!("finished initial load");
 
             while let Some(msg) = rx_index.recv().await {
-                tokio::spawn(process(Arc::clone(&statements), msg));
+                tokio::spawn(process(Arc::clone(&statements), msg, completed_scan_length.clone()));
             }
 
             cdc_reader.stop();
@@ -131,13 +163,21 @@ pub(crate) async fn new(
     Ok((tx_index, rx_embeddings))
 }
 
-async fn process(statements: Arc<Statements>, msg: DbIndex) {
+async fn process(statements: Arc<Statements>, msg: DbIndex, completed_scan_length: Arc<AtomicU64>) {
     match msg {
         DbIndex::GetPrimaryKeyColumns { tx } => tx
             .send(statements.get_primary_key_columns())
             .unwrap_or_else(|_| {
                 trace!("process: Db::GetPrimaryKeyColumns: unable to send response")
             }),
+        DbIndex::FullScanProgress { tx } => {
+            let completed_scan_length =
+                completed_scan_length.load(std::sync::atomic::Ordering::Relaxed);
+
+            if tx.send(Progress::from(completed_scan_length)).is_err() {
+                trace!("process: Db::FullScanProgress: unable to send response");
+            }
+        }
     }
 }
 
@@ -214,7 +254,11 @@ impl Statements {
     /// token ranges read from a rust driver. At first it prepares ranges, limits concurrent scans
     /// using semaphore, and runs each scan in separate concurrent task using cloned mpsc channel
     /// to send read embeddings into the pipeline.
-    async fn initial_scan(&self, tx: mpsc::Sender<DbEmbedding>) {
+    async fn initial_scan(
+        &self,
+        tx: mpsc::Sender<DbEmbedding>,
+        completed_scan_length: Arc<AtomicU64>,
+    ) {
         let semaphore = Arc::new(Semaphore::new(self.nr_parallel_queries().get()));
 
         for (begin, end) in self.fullscan_ranges() {
@@ -224,12 +268,18 @@ impl Statements {
                 warn!("unable to do initial scan for range ({begin:?}, {end:?}): {err}")
             }) {
                 let tx = tx.clone();
+                let scan_length = completed_scan_length.clone();
                 tokio::spawn(async move {
                     embeddings
                         .for_each(|embedding| async {
                             _ = tx.send(embedding).await;
                         })
                         .await;
+                    //Safety: end > begin, and the range fits into u64
+                    scan_length.fetch_add(
+                        end.value().abs_diff(begin.value() - 1),
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
                     drop(permit);
                 });
             }
@@ -500,5 +550,31 @@ impl CdcConsumerFactory {
             tx,
             gregorian_epoch,
         })))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    use super::*;
+
+    #[test]
+    fn test_percentage_from_u64() {
+        let percentage = Percentage::from(0);
+        assert_eq!(percentage.get(), 0.0);
+        let percentage = Percentage::from(u64::MAX / 2);
+        assert_eq!(percentage.get(), 50.0);
+        let percentage = Percentage::from(u64::MAX);
+        assert_eq!(percentage.get(), 100.0);
+    }
+
+    #[test]
+    fn test_progress_from_u64() {
+        let progress = Progress::from(0);
+        assert!(matches!(progress, Progress::InProgress(p) if p.get() == 0.0));
+        let progress = Progress::from(u64::MAX / 2);
+        assert!(matches!(progress, Progress::InProgress(p) if p.get() == 50.0));
+        let progress = Progress::from(u64::MAX);
+        assert!(matches!(progress, Progress::Done));
     }
 }

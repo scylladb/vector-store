@@ -481,3 +481,49 @@ pub async fn wait_for_shutdown() {
         _ = terminate => {},
     }
 }
+
+#[derive(Clone)]
+pub struct Percentage {
+    value: f64,
+}
+
+impl Percentage {
+    pub fn get(&self) -> f64 {
+        self.value
+    }
+}
+
+impl TryFrom<f64> for Percentage {
+    type Error = String;
+
+    fn try_from(value: f64) -> Result<Self, Self::Error> {
+        if !(0.0..=100.0).contains(&value) {
+            Err(format!(
+                "Percentage must be between 0 and 100, got: {value}"
+            ))
+        } else {
+            Ok(Self { value })
+        }
+    }
+}
+
+#[derive(Clone)]
+pub enum Progress {
+    Done,
+    InProgress(Percentage),
+}
+
+#[cfg(test)]
+mod tests {
+
+    use super::*;
+
+    #[test]
+    fn test_percentage_from_f64() {
+        assert_eq!(Percentage::try_from(50.0).unwrap().get(), 50.0);
+        assert!(Percentage::try_from(-1.0).is_err());
+        assert!(Percentage::try_from(101.0).is_err());
+        assert!(Percentage::try_from(0.0).is_ok());
+        assert!(Percentage::try_from(100.0).is_ok());
+    }
+}

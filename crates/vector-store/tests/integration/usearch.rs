@@ -16,6 +16,7 @@ use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use uuid::Uuid;
 use vector_store::IndexMetadata;
+use vector_store::Percentage;
 
 async fn setup_store() -> (IndexMetadata, HttpClient, DbBasic, impl Sized) {
     let (db_actor, db) = db_basic::new();
@@ -70,6 +71,18 @@ async fn setup_store() -> (IndexMetadata, HttpClient, DbBasic, impl Sized) {
     .unwrap();
 
     (index, HttpClient::new(addr), db, server)
+}
+
+async fn setup_store_and_wait_for_index() -> (IndexMetadata, HttpClient, DbBasic, impl Sized) {
+    let (index, client, db, server) = setup_store().await;
+
+    wait_for(
+        || async { !client.indexes().await.is_empty() },
+        "Waiting for index to be added to the store",
+    )
+    .await;
+
+    (index, client, db, server)
 }
 
 #[tokio::test]
@@ -270,13 +283,7 @@ async fn failed_db_index_create() {
 #[tokio::test]
 async fn ann_returns_bad_request_when_provided_vector_size_is_not_eq_index_dimensions() {
     crate::enable_tracing();
-    let (index, client, _db, _server) = setup_store().await;
-
-    wait_for(
-        || async { !client.indexes().await.is_empty() },
-        "Waiting for index to be added to the store",
-    )
-    .await;
+    let (index, client, _db, _server) = setup_store_and_wait_for_index().await;
 
     let result = client
         .post_ann(
@@ -287,4 +294,28 @@ async fn ann_returns_bad_request_when_provided_vector_size_is_not_eq_index_dimen
         .await;
 
     assert_eq!(result.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn ann_fail_while_building() {
+    crate::enable_tracing();
+    let (index, client, db, _server) = setup_store_and_wait_for_index().await;
+
+    db.set_next_full_scan_progress(vector_store::Progress::InProgress(
+        Percentage::try_from(33.33).unwrap(),
+    ));
+
+    let result = client
+        .post_ann(
+            &index,
+            vec![1.0, 2.0, 3.0].into(),
+            NonZeroUsize::new(1).unwrap().into(),
+        )
+        .await;
+
+    assert_eq!(result.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        result.text().await.unwrap(),
+        "Full scan is in progress, percentage: 33.33%"
+    );
 }

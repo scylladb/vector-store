@@ -110,6 +110,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "Service Unavailable. Indicates that a full scan of the index is in progress and the search cannot be performed at this time.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
           }
         }
       }

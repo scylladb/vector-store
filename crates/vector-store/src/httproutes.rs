@@ -10,6 +10,7 @@ use crate::IndexId;
 use crate::IndexName;
 use crate::KeyspaceName;
 use crate::Limit;
+use crate::Progress;
 use crate::db_index::DbIndexExt;
 use crate::engine::Engine;
 use crate::engine::EngineExt;
@@ -314,6 +315,12 @@ The similarity metric is determined at index creation and cannot be changed per 
             description = "Error while searching embeddings. Possible causes: internal error, or search engine issues.",
             content_type = "application/json",
             body = ErrorMessage
+        ),
+        (
+            status = 503,
+            description = "Service Unavailable. Indicates that a full scan of the index is in progress and the search cannot be performed at this time.",
+            content_type = "application/json",
+            body = ErrorMessage
         )
     )
 )]
@@ -339,6 +346,17 @@ async fn post_index_ann(
         debug!("post_index_ann: {msg}");
         return (StatusCode::NOT_FOUND, msg).into_response();
     };
+
+    let scan_progress = db_index.full_scan_progress().await;
+
+    if let Progress::InProgress(percentage) = scan_progress {
+        let msg = format!(
+            "Full scan is in progress, percentage: {:.2}%",
+            percentage.get()
+        );
+        debug!("post_index_ann: {msg}");
+        return (StatusCode::SERVICE_UNAVAILABLE, msg).into_response();
+    }
 
     let search_result = index.ann(request.embedding, request.limit).await;
     // Record duration in Prometheus
