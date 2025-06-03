@@ -82,7 +82,7 @@ impl EngineExt for mpsc::Sender<Engine> {
 
 pub(crate) async fn new(
     db: mpsc::Sender<Db>,
-    index_factory: impl IndexFactory + Send + 'static,
+    index_factory: Box<dyn IndexFactory + Send>,
 ) -> anyhow::Result<mpsc::Sender<Engine>> {
     let (tx, mut rx) = mpsc::channel(10);
 

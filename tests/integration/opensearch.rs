@@ -38,7 +38,7 @@ async fn simple_create_search_delete_index() {
     };
     let server = mock_opensearch::TestOpenSearchServer::start().await;
 
-    let index_factory = vector_store::new_index_factory(server.base_url()).unwrap();
+    let index_factory = vector_store::new_index_factory(Some(server.base_url())).unwrap();
 
     let (_server_actor, addr) = vector_store::run(
         SocketAddr::from(([127, 0, 0, 1], 0)).into(),

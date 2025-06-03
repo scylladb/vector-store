@@ -6,21 +6,23 @@
 mod db_basic;
 mod httpclient;
 
-#[cfg(not(feature = "opensearch"))]
 mod usearch;
 
-#[cfg(feature = "opensearch")]
 mod mock_opensearch;
-#[cfg(feature = "opensearch")]
 mod opensearch;
 
+use std::sync::Once;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
 
+static INIT_TRACING: Once = Once::new();
+
 fn enable_tracing() {
-    tracing_subscriber::registry()
-        .with(EnvFilter::try_new("info").unwrap())
-        .with(fmt::layer().with_target(false))
-        .init();
+    INIT_TRACING.call_once(|| {
+        tracing_subscriber::registry()
+            .with(EnvFilter::try_new("info").unwrap())
+            .with(fmt::layer().with_target(false))
+            .init();
+    });
 }

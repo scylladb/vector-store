@@ -27,6 +27,7 @@ use std::hash::Hasher;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::str::FromStr;
+use std::sync::Once;
 use time::OffsetDateTime;
 use tokio::signal;
 use tokio::sync::mpsc::Sender;
@@ -431,16 +432,21 @@ pub struct DbEmbedding {
 #[derive(derive_more::From)]
 pub struct HttpServerAddr(SocketAddr);
 
+static INIT_RAYON: Once = Once::new();
+
 pub async fn run(
     addr: HttpServerAddr,
     background_threads: Option<usize>,
     db_actor: Sender<Db>,
-    index_factory: impl IndexFactory + Send + 'static,
+    index_factory: Box<dyn IndexFactory + Send>,
 ) -> anyhow::Result<(impl Sized, SocketAddr)> {
     if let Some(background_threads) = background_threads {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(background_threads)
-            .build_global()?;
+        INIT_RAYON.call_once(|| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(background_threads)
+                .build_global()
+                .expect("Failed to initialize Rayon global thread pool");
+        });
     }
     let engine_actor = engine::new(db_actor, index_factory).await?;
     httpserver::new(addr, engine_actor).await
@@ -450,14 +456,11 @@ pub async fn new_db(uri: ScyllaDbUri) -> anyhow::Result<Sender<Db>> {
     db::new(uri).await
 }
 
-#[cfg(not(feature = "opensearch"))]
-pub fn new_index_factory() -> anyhow::Result<impl IndexFactory> {
-    index::usearch::new_usearch()
-}
-
-#[cfg(feature = "opensearch")]
-pub fn new_index_factory(addr: String) -> anyhow::Result<impl IndexFactory> {
-    index::opensearch::new_opensearch(&addr)
+pub fn new_index_factory(addr: Option<String>) -> anyhow::Result<Box<dyn IndexFactory + Send>> {
+    if let Some(addr) = addr {
+        return Ok(Box::new(index::opensearch::new_opensearch(&addr)?));
+    }
+    Ok(Box::new(index::usearch::new_usearch()?))
 }
 
 pub async fn wait_for_shutdown() {

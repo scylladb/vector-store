@@ -9,8 +9,7 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["dep:usearch"]
-opensearch = ["dep:opensearch"]
+default = []
 
 [dependencies]
 anyhow = "1.0.97"
@@ -21,7 +20,7 @@ derive_more = { version = "2.0.1", features = ["full"] }
 dotenvy = "0.15.7"
 futures = "0.3.31"
 itertools = "0.14.0"
-opensearch = { version = "2.3.0", optional = true }
+opensearch = { version = "2.3.0" }
 rayon = "1.10.0"
 regex = "1.11.1"
 scylla = { version = "1.1.0", features = ["time-03"] }
@@ -34,7 +33,7 @@ tokio = { version = "1.44.1", features = ["full"] }
 tower-http = { version = "0.6.2", features = ["full"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
-usearch = { git = "https://github.com/unum-cloud/usearch.git", rev = "306d6646", optional = true }
+usearch = { git = "https://github.com/unum-cloud/usearch.git", rev = "306d6646" }
 utoipa = { version = "5.3.1", features = ["axum_extras"] }
 utoipa-axum = "0.2.0"
 utoipa-swagger-ui = { version = "9.0.0", features = ["axum"] }

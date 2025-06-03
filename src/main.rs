@@ -37,15 +37,28 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .and_then(|v| v.parse().ok());
 
-    #[cfg(feature = "opensearch")]
-    let index_factory = {
-        let addr = dotenvy::var("OPENSEARCH_ADDRESS").unwrap_or("http://localhost".to_string());
-        let port = dotenvy::var("OPENSEARCH_PORT").unwrap_or("9200".to_string());
-        let addr = format!("{addr}:{port}");
-        vector_store::new_index_factory(addr)?
-    };
-    #[cfg(not(feature = "opensearch"))]
-    let index_factory = vector_store::new_index_factory()?;
+    let indexing_provider =
+        dotenvy::var("SCYLLA_INDEXING_PROVIDER").unwrap_or("usearch".to_string());
+    let indexing_provider = indexing_provider.as_str();
+
+    let index_factory = match indexing_provider {
+        "usearch" => {
+            tracing::info!("Using Usearch index factory");
+            vector_store::new_index_factory(None)
+        }
+        "opensearch" => {
+            let addr = dotenvy::var("OPENSEARCH_ADDRESS").unwrap_or("http://localhost".to_string());
+            let port = dotenvy::var("OPENSEARCH_PORT").unwrap_or("9200".to_string());
+            let opensearch_addr = format!("{addr}:{port}");
+            tracing::info!("Using OpenSearch index factory at {opensearch_addr}");
+            vector_store::new_index_factory(Some(opensearch_addr))
+        }
+        _ => {
+            return Err(anyhow!(
+                "Unknown SCYLLA_INDEXING_PROVIDER: {indexing_provider}"
+            ));
+        }
+    }?;
 
     let db_actor = vector_store::new_db(scylladb_uri).await?;
     let (_server_actor, addr) = vector_store::run(
