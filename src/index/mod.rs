@@ -8,7 +8,6 @@ pub mod factory;
 
 pub(crate) use actor::Index;
 pub(crate) use actor::IndexExt;
-#[cfg(feature = "opensearch")]
+
 pub(crate) mod opensearch;
-#[cfg(not(feature = "opensearch"))]
 pub(crate) mod usearch;

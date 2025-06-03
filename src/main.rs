@@ -37,15 +37,17 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .and_then(|v| v.parse().ok());
 
-    #[cfg(feature = "opensearch")]
-    let index_factory = {
-        let addr = dotenvy::var("OPENSEARCH_ADDRESS").unwrap_or("http://localhost".to_string());
-        let port = dotenvy::var("OPENSEARCH_PORT").unwrap_or("9200".to_string());
-        let addr = format!("{addr}:{port}");
-        vector_store::new_index_factory(addr)?
+    let opensearch_addr = dotenvy::var("OPENSEARCH_ADDRESS").ok();
+    let opensearch_port = dotenvy::var("OPENSEARCH_PORT").ok();
+
+    let index_factory = if let (Some(addr), Some(port)) = (opensearch_addr, opensearch_port) {
+        let opensearch_addr = format!("http://{addr}:{port}");
+        tracing::info!("Using OpenSearch index factory at {opensearch_addr}");
+        vector_store::new_index_factory_opensearch(opensearch_addr)?
+    } else {
+        tracing::info!("Using Usearch index factory");
+        vector_store::new_index_factory_usearch()?
     };
-    #[cfg(not(feature = "opensearch"))]
-    let index_factory = vector_store::new_index_factory()?;
 
     let db_actor = vector_store::new_db(scylladb_uri).await?;
     let (_server_actor, addr) = vector_store::run(
