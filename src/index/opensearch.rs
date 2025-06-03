@@ -3,9 +3,6 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
-// TODO: Please remove if necessary implementation is provided.
-#![allow(dead_code)]
-
 use crate::Connectivity;
 use crate::Dimensions;
 use crate::Distance;
@@ -252,7 +249,6 @@ async fn process(
     opensearch_key: Arc<AtomicU64>,
     client: Arc<OpenSearch>,
 ) {
-    // TODO: Implement the logic for processing the messages
     match msg {
         Index::AddOrReplace {
             primary_key,

@@ -17,7 +17,6 @@ use tokio::time;
 use uuid::Uuid;
 use vector_store::IndexMetadata;
 
-#[cfg(not(feature = "opensearch"))]
 #[tokio::test]
 async fn simple_create_search_delete_index() {
     crate::enable_tracing();
