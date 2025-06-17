@@ -12,13 +12,13 @@ use crate::factory::IndexFactory;
 use crate::index::Index;
 use crate::monitor_indexes;
 use crate::monitor_items;
+use crate::monitor_items::MonitorItems;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tracing::Instrument;
 use tracing::debug;
 use tracing::debug_span;
-use tracing::error;
 use tracing::info;
 use tracing::trace;
 
@@ -51,38 +51,47 @@ pub(crate) trait EngineExt {
 impl EngineExt for mpsc::Sender<Engine> {
     async fn get_index_ids(&self) -> GetIndexIdsR {
         let (tx, rx) = oneshot::channel();
-        if self.send(Engine::GetIndexIds { tx }).await.is_ok() {
-            rx.await.unwrap_or(Vec::new())
-        } else {
-            Vec::new()
-        }
+        self.send(Engine::GetIndexIds { tx })
+            .await
+            .expect("EngineExt::get_index_ids: internal actor should receive request");
+        rx.await
+            .expect("EngineExt::get_index_ids: internal actor should send response")
     }
 
     async fn add_index(&self, metadata: IndexMetadata) {
         self.send(Engine::AddIndex { metadata })
             .await
-            .unwrap_or_else(|err| trace!("EngineExt::add_index: unable to send request: {err}"));
+            .expect("EngineExt::add_index: internal actor should receive request");
     }
 
     async fn del_index(&self, id: IndexId) {
         self.send(Engine::DelIndex { id })
             .await
-            .unwrap_or_else(|err| trace!("EngineExt::del_index: unable to send request: {err}"));
+            .expect("EngineExt::del_index: internal actor should receive request");
     }
 
     async fn get_index(&self, id: IndexId) -> GetIndexR {
         let (tx, rx) = oneshot::channel();
-        if self.send(Engine::GetIndex { id, tx }).await.is_ok() {
-            rx.await.ok().flatten()
-        } else {
-            None
-        }
+        self.send(Engine::GetIndex { id, tx })
+            .await
+            .expect("EngineExt::get_index: internal actor should receive request");
+        rx.await
+            .expect("EngineExt::get_index: internal actor should send response")
     }
 }
 
+type IndexesT = HashMap<
+    IndexId,
+    (
+        mpsc::Sender<Index>,
+        mpsc::Sender<MonitorItems>,
+        mpsc::Sender<DbIndex>,
+    ),
+>;
+
 pub(crate) async fn new(
     db: mpsc::Sender<Db>,
-    index_factory: Box<dyn IndexFactory + Send>,
+    index_factory: Box<dyn IndexFactory + Send + Sync>,
 ) -> anyhow::Result<mpsc::Sender<Engine>> {
     let (tx, mut rx) = mpsc::channel(10);
 
@@ -92,72 +101,18 @@ pub(crate) async fn new(
         async move {
             debug!("starting");
 
-            let mut indexes = HashMap::new();
+            let mut indexes: IndexesT = HashMap::new();
             while let Some(msg) = rx.recv().await {
                 match msg {
-                    Engine::GetIndexIds { tx } => {
-                        tx.send(indexes.keys().cloned().collect())
-                            .unwrap_or_else(|_| {
-                                trace!("Engine::GetIndexIds: unable to send response")
-                            });
-                    }
+                    Engine::GetIndexIds { tx } => get_index_ids(tx, &indexes).await,
 
                     Engine::AddIndex { metadata } => {
-                        let id = metadata.id();
-                        if indexes.contains_key(&id) {
-                            trace!("Engine::AddIndex: trying to replace index with id {id}");
-                            continue;
-                        }
-
-                        info!("creating a new index {id}");
-                        let Ok(index_actor) = index_factory.create_index(
-                            id.clone(),
-                            metadata.dimensions,
-                            metadata.connectivity,
-                            metadata.expansion_add,
-                            metadata.expansion_search,
-                            metadata.space_type,
-                        )
-                        .inspect_err(|err| error!("unable to create an index {id}: {err}")) else {
-                            continue;
-                        };
-
-                        let Ok((db_index, embeddings_stream)) =
-                            db.get_db_index(metadata.clone()).await.inspect_err(|err| {
-                                error!("unable to create a db monitoring task for an index {id}: {err}")
-                            })
-                        else {
-                            continue;
-                        };
-
-                        let Ok(monitor_actor) =
-                            monitor_items::new(id.clone(), embeddings_stream, index_actor.clone())
-                                .await
-                                .inspect_err(|err| {
-                                    error!(
-                                        "unable to create a synchronisation task between a db and an index {id}: {err}"
-                                    )
-                                })
-                        else {
-                            continue;
-                        };
-
-                        indexes.insert(id.clone(), (index_actor, monitor_actor, db_index));
+                        add_index(metadata, &db, index_factory.as_ref(), &mut indexes).await
                     }
 
-                    Engine::DelIndex { id } => {
-                        info!("removing an index {id}");
-                        indexes.remove(&id);
-                    }
+                    Engine::DelIndex { id } => del_index(id, &mut indexes).await,
 
-                    Engine::GetIndex { id, tx } => {
-                        tx.send(
-                            indexes
-                                .get(&id)
-                                .map(|(index, _, db_index)| (index.clone(), db_index.clone())),
-                        )
-                        .unwrap_or_else(|_| trace!("Engine::GetIndex: unable to send response"));
-                    }
+                    Engine::GetIndex { id, tx } => get_index(id, tx, &indexes).await,
                 }
             }
             drop(monitor_actor);
@@ -168,4 +123,72 @@ pub(crate) async fn new(
     );
 
     Ok(tx)
+}
+
+async fn get_index_ids(tx: oneshot::Sender<GetIndexIdsR>, indexes: &IndexesT) {
+    tx.send(indexes.keys().cloned().collect())
+        .unwrap_or_else(|_| trace!("Engine::GetIndexIds: unable to send response"));
+}
+
+async fn add_index(
+    metadata: IndexMetadata,
+    db: &mpsc::Sender<Db>,
+    index_factory: &(dyn IndexFactory + Send + Sync),
+    indexes: &mut IndexesT,
+) {
+    let id = metadata.id();
+    if indexes.contains_key(&id) {
+        trace!("add_index: trying to replace index with id {id}");
+        return;
+    }
+
+    let index_actor = match index_factory.create_index(
+        id.clone(),
+        metadata.dimensions,
+        metadata.connectivity,
+        metadata.expansion_add,
+        metadata.expansion_search,
+        metadata.space_type,
+    ) {
+        Ok(actor) => actor,
+        Err(err) => {
+            debug!("unable to create an index {id}: {err}");
+            return;
+        }
+    };
+
+    let (db_index, embeddings_stream) = match db.get_db_index(metadata.clone()).await {
+        Ok((db_index, embeddings_stream)) => (db_index, embeddings_stream),
+        Err(err) => {
+            debug!("unable to create a db monitoring task for an index {id}: {err}");
+            return;
+        }
+    };
+
+    let monitor_actor = match monitor_items::new(id.clone(), embeddings_stream, index_actor.clone())
+        .await
+    {
+        Ok(actor) => actor,
+        Err(err) => {
+            debug!("unable to create a synchronisation task between a db and an index {id}: {err}");
+            return;
+        }
+    };
+
+    indexes.insert(id.clone(), (index_actor, monitor_actor, db_index));
+    info!("create an index {id}");
+}
+
+async fn del_index(id: IndexId, indexes: &mut IndexesT) {
+    indexes.remove(&id);
+    info!("remove an index {id}");
+}
+
+async fn get_index(id: IndexId, tx: oneshot::Sender<GetIndexR>, indexes: &IndexesT) {
+    tx.send(
+        indexes
+            .get(&id)
+            .map(|(index, _, db_index)| (index.clone(), db_index.clone())),
+    )
+    .unwrap_or_else(|_| trace!("get_index: unable to send response"));
 }
