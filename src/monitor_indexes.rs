@@ -9,9 +9,13 @@ use crate::db::Db;
 use crate::db::DbExt;
 use crate::engine::Engine;
 use crate::engine::EngineExt;
+use futures::StreamExt;
+use futures::stream;
 use scylla::value::CqlTimeuuid;
 use std::collections::HashSet;
 use std::mem;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
@@ -42,7 +46,7 @@ pub(crate) async fn new(
                         if !schema_version.has_changed(&db).await {
                             continue;
                         }
-                        let Ok(mut new_indexes) = get_indexes(&db).await.inspect_err(|err| {
+                        let Ok(new_indexes) = get_indexes(&db).await.inspect_err(|err| {
                             debug!("monitor_indexes: unable to get the list of indexes: {err}");
                         }) else {
                             // there was an error during retrieving indexes, reset schema version
@@ -51,8 +55,15 @@ pub(crate) async fn new(
                             continue;
                         };
                         del_indexes(&engine, indexes.difference(&new_indexes)).await;
-                        add_indexes(&engine, new_indexes.difference(&indexes)).await;
+                        let (mut new_indexes, repeat) = add_indexes(
+                            &engine,
+                            new_indexes.into_iter().filter(|idx| !indexes.contains(idx))
+                        ).await;
                         mem::swap(&mut indexes, &mut new_indexes);
+                        if repeat {
+                            // if we need to repeat the operation, reset schema version
+                            schema_version.reset();
+                        }
                     }
                     _ = rx.recv() => { }
                 }
@@ -147,10 +158,26 @@ async fn get_indexes(db: &Sender<Db>) -> anyhow::Result<HashSet<IndexMetadata>> 
     Ok(indexes)
 }
 
-async fn add_indexes(engine: &Sender<Engine>, idxs: impl Iterator<Item = &IndexMetadata>) {
-    for idx in idxs {
-        engine.add_index(idx.clone()).await;
-    }
+async fn add_indexes(
+    engine: &Sender<Engine>,
+    idxs: impl Iterator<Item = IndexMetadata>,
+) -> (HashSet<IndexMetadata>, bool) {
+    let repeat = AtomicBool::new(false);
+    let added = stream::iter(idxs)
+        .filter_map(|idx| async {
+            engine
+                .add_index(idx.clone())
+                .await
+                .inspect_err(|_| {
+                    // If we fail to add an index, we might need to repeat the operation
+                    repeat.store(true, Ordering::Relaxed);
+                })
+                .ok()
+                .map(|_| idx)
+        })
+        .collect()
+        .await;
+    (added, repeat.load(Ordering::Relaxed))
 }
 
 async fn del_indexes(engine: &Sender<Engine>, idxs: impl Iterator<Item = &IndexMetadata>) {

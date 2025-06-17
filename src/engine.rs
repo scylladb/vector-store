@@ -23,6 +23,7 @@ use tracing::info;
 use tracing::trace;
 
 type GetIndexIdsR = Vec<IndexId>;
+type AddIndexR = anyhow::Result<()>;
 type GetIndexR = Option<(mpsc::Sender<Index>, mpsc::Sender<DbIndex>)>;
 
 pub(crate) enum Engine {
@@ -31,6 +32,7 @@ pub(crate) enum Engine {
     },
     AddIndex {
         metadata: IndexMetadata,
+        tx: oneshot::Sender<AddIndexR>,
     },
     DelIndex {
         id: IndexId,
@@ -43,7 +45,7 @@ pub(crate) enum Engine {
 
 pub(crate) trait EngineExt {
     async fn get_index_ids(&self) -> GetIndexIdsR;
-    async fn add_index(&self, metadata: IndexMetadata);
+    async fn add_index(&self, metadata: IndexMetadata) -> AddIndexR;
     async fn del_index(&self, id: IndexId);
     async fn get_index(&self, id: IndexId) -> GetIndexR;
 }
@@ -58,10 +60,13 @@ impl EngineExt for mpsc::Sender<Engine> {
             .expect("EngineExt::get_index_ids: internal actor should send response")
     }
 
-    async fn add_index(&self, metadata: IndexMetadata) {
-        self.send(Engine::AddIndex { metadata })
+    async fn add_index(&self, metadata: IndexMetadata) -> AddIndexR {
+        let (tx, rx) = oneshot::channel();
+        self.send(Engine::AddIndex { metadata, tx })
             .await
             .expect("EngineExt::add_index: internal actor should receive request");
+        rx.await
+            .expect("EngineExt::add_index: internal actor should send response")
     }
 
     async fn del_index(&self, id: IndexId) {
@@ -106,8 +111,8 @@ pub(crate) async fn new(
                 match msg {
                     Engine::GetIndexIds { tx } => get_index_ids(tx, &indexes).await,
 
-                    Engine::AddIndex { metadata } => {
-                        add_index(metadata, &db, index_factory.as_ref(), &mut indexes).await
+                    Engine::AddIndex { metadata, tx } => {
+                        add_index(metadata, tx, &db, index_factory.as_ref(), &mut indexes).await
                     }
 
                     Engine::DelIndex { id } => del_index(id, &mut indexes).await,
@@ -132,6 +137,7 @@ async fn get_index_ids(tx: oneshot::Sender<GetIndexIdsR>, indexes: &IndexesT) {
 
 async fn add_index(
     metadata: IndexMetadata,
+    tx: oneshot::Sender<AddIndexR>,
     db: &mpsc::Sender<Db>,
     index_factory: &(dyn IndexFactory + Send + Sync),
     indexes: &mut IndexesT,
@@ -139,6 +145,8 @@ async fn add_index(
     let id = metadata.id();
     if indexes.contains_key(&id) {
         trace!("add_index: trying to replace index with id {id}");
+        tx.send(Ok(()))
+            .unwrap_or_else(|_| trace!("add_index: unable to send response"));
         return;
     }
 
@@ -153,6 +161,8 @@ async fn add_index(
         Ok(actor) => actor,
         Err(err) => {
             debug!("unable to create an index {id}: {err}");
+            tx.send(Err(err))
+                .unwrap_or_else(|_| trace!("add_index: unable to send response"));
             return;
         }
     };
@@ -161,6 +171,8 @@ async fn add_index(
         Ok((db_index, embeddings_stream)) => (db_index, embeddings_stream),
         Err(err) => {
             debug!("unable to create a db monitoring task for an index {id}: {err}");
+            tx.send(Err(err))
+                .unwrap_or_else(|_| trace!("add_index: unable to send response"));
             return;
         }
     };
@@ -171,12 +183,16 @@ async fn add_index(
         Ok(actor) => actor,
         Err(err) => {
             debug!("unable to create a synchronisation task between a db and an index {id}: {err}");
+            tx.send(Err(err))
+                .unwrap_or_else(|_| trace!("add_index: unable to send response"));
             return;
         }
     };
 
     indexes.insert(id.clone(), (index_actor, monitor_actor, db_index));
     info!("create an index {id}");
+    tx.send(Ok(()))
+        .unwrap_or_else(|_| trace!("add_index: unable to send response"));
 }
 
 async fn del_index(id: IndexId, indexes: &mut IndexesT) {
