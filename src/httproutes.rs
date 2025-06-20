@@ -14,6 +14,7 @@ use crate::db_index::DbIndexExt;
 use crate::engine::Engine;
 use crate::engine::EngineExt;
 use crate::index::IndexExt;
+use crate::info::Info;
 use anyhow::bail;
 use axum::Router;
 use axum::extract;
@@ -267,8 +268,8 @@ pub struct InfoResponse {
 )]
 async fn get_info() -> response::Json<InfoResponse> {
     response::Json(InfoResponse {
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        service: env!("CARGO_PKG_NAME").to_string(),
+        version: Info::version().to_string(),
+        service: Info::name().to_string(),
     })
 }
 
