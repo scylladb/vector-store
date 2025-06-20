@@ -13,6 +13,7 @@ use vector_store::Embedding;
 use vector_store::IndexId;
 use vector_store::IndexMetadata;
 use vector_store::Limit;
+use vector_store::httproutes::InfoResponse;
 use vector_store::httproutes::PostIndexAnnRequest;
 use vector_store::httproutes::PostIndexAnnResponse;
 
@@ -74,5 +75,16 @@ impl HttpClient {
             .json::<usize>()
             .await
             .ok()
+    }
+
+    pub(crate) async fn info(&self) -> InfoResponse {
+        self.client
+            .get(format!("{}/info", self.url_api))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap()
     }
 }
