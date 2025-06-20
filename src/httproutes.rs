@@ -14,6 +14,7 @@ use crate::db_index::DbIndexExt;
 use crate::engine::Engine;
 use crate::engine::EngineExt;
 use crate::index::IndexExt;
+use crate::info::Info;
 use anyhow::bail;
 use axum::Router;
 use axum::extract;
@@ -56,6 +57,7 @@ pub(crate) fn new(engine: Sender<Engine>) -> Router {
                 .routes(routes!(get_indexes))
                 .routes(routes!(get_index_count))
                 .routes(routes!(post_index_ann))
+                .routes(routes!(get_info))
                 .layer(TraceLayer::new_for_http())
                 .with_state(engine),
         )
@@ -248,6 +250,27 @@ fn to_json(value: CqlValue) -> Value {
 
         _ => unimplemented!(),
     }
+}
+
+#[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
+pub struct InfoResponse {
+    pub version: String,
+    pub service: String,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/info",
+    description = "Get application info",
+    responses(
+        (status = 200, description = "Application info", body = InfoResponse)
+    )
+)]
+async fn get_info() -> response::Json<InfoResponse> {
+    response::Json(InfoResponse {
+        version: Info::version().to_string(),
+        service: Info::name().to_string(),
+    })
 }
 
 #[cfg(test)]
