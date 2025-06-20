@@ -56,6 +56,7 @@ pub(crate) fn new(engine: Sender<Engine>) -> Router {
                 .routes(routes!(get_indexes))
                 .routes(routes!(get_index_count))
                 .routes(routes!(post_index_ann))
+                .routes(routes!(get_info))
                 .layer(TraceLayer::new_for_http())
                 .with_state(engine),
         )
@@ -248,6 +249,27 @@ fn to_json(value: CqlValue) -> Value {
 
         _ => unimplemented!(),
     }
+}
+
+#[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
+pub struct InfoResponse {
+    pub version: String,
+    pub service: String,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/info",
+    description = "Get application info",
+    responses(
+        (status = 200, description = "Application info", body = InfoResponse)
+    )
+)]
+async fn get_info() -> response::Json<InfoResponse> {
+    response::Json(InfoResponse {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        service: env!("CARGO_PKG_NAME").to_string(),
+    })
 }
 
 #[cfg(test)]

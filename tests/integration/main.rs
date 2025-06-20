@@ -11,6 +11,8 @@ mod usearch;
 mod mock_opensearch;
 mod opensearch;
 
+mod info;
+
 use std::sync::Once;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
