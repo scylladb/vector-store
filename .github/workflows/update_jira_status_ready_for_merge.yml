@@ -1,24 +1,65 @@
 name: Update Status - Ready For Merge
+
 on:
   pull_request:
-    types: [ labeled ]
+    types: [labeled]
+
+permissions:
+  pull-requests: read
 
 jobs:
   action-jira-status-update-ready-for-merge:
-    if: ${{ github.event.label.name == 'status/merge candidate' }}
+    if: ${{ github.event.label.name == 'status/merge_candidate' }}
     runs-on: ubuntu-latest
+
     steps:
-      - name: determine associated issue id
+      - name: Extract Jira Ticket IDs
         id: get-jira
         run: |
-          echo "found label status/merge candidate"
-          echo "looking for Jira issue key. label = status/merge candidate"
-          title="${{github.event.pull_request.title}}"
-          echo "PR title [$title]"
-          ticket_id=`echo $title | awk -F" " '{print $1}'`
-          echo "ticket_id [$ticket_id]"
-          if echo $ticket_id | grep -Eqx '[A-Z]+-[0-9]+'; then
-            echo "Updating status to 'ready for merge' in jira"
-            echo "ticket-id=[$ticket_id]" 
-            curl -v -X POST --url "https://scylladb.atlassian.net/rest/api/3/issue/${ticket_id}/transitions" --user $USER_AND_KEY_FOR_JIRA --header "Accept: application/json" --header "Content-Type: application/json" -d "{\"transition\":{\"id\":\"51\"}}"
+          echo "Label 'status/merge candidate' detected. Looking for Jira ticket IDs..."
+
+          title="${{ github.event.pull_request.title }}"
+          body="${{ github.event.pull_request.body }}"
+          body="${body:-}"  # default to empty if null
+
+          echo "PR title: $title"
+          echo "PR body: $body"
+
+          > tickets.txt
+
+          # Extract Jira tickets from title
+          echo "$title" | grep -oE '[A-Z]+-[0-9]+' >> tickets.txt || true
+
+          # Extract all Jira tickets from Fixes lines in body (case-insensitive)
+          echo "$body" | grep -iE '^Fixes[[:space:]]*:[[:space:]]*[A-Z]+-[0-9]+' | \
+          grep -oE '[A-Z]+-[0-9]+' >> tickets.txt || true
+
+          # Deduplicate tickets
+          sort -u tickets.txt > unique_tickets.txt
+
+          if [[ ! -s unique_tickets.txt ]]; then
+            echo "No Jira tickets found in PR title or body. Skipping Jira update."
+            echo "ticket-ids=" >> $GITHUB_OUTPUT
+            exit 0
           fi
+
+          cat unique_tickets.txt
+          tickets_csv=$(paste -sd, unique_tickets.txt)
+          echo "Final Jira ticket list: $tickets_csv"
+          echo "ticket-ids=$tickets_csv" >> $GITHUB_OUTPUT
+
+      - name: Transition Jira Tickets to 'Ready for Merge'
+        if: steps.get-jira.outputs.ticket-ids != ''
+        env:
+          JIRA_AUTH: ${{ secrets.USER_AND_KEY_FOR_JIRA_AUTOMATION }}
+        run: |
+          IFS=',' read -ra tickets <<< "${{ steps.get-jira.outputs.ticket-ids }}"
+          for ticket_id in "${tickets[@]}"; do
+            echo "Transitioning Jira ticket to 'Ready for Merge': $ticket_id"
+            curl --fail -X POST \
+              --url "https://scylladb.atlassian.net/rest/api/3/issue/${ticket_id}/transitions" \
+              --user "$JIRA_AUTH" \
+              --header "Accept: application/json" \
+              --header "Content-Type: application/json" \
+              -d '{"transition": {"id": "131"}}'
+          done
