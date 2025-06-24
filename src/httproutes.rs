@@ -43,27 +43,46 @@ use utoipa_swagger_ui::SwaggerUi;
 
 #[derive(OpenApi)]
 #[openapi(
+     info(
+        title = "ScyllaDB Vector Store API",
+        description = "REST API for ScyllaDB Vector Store - provides vector search and index management",
+        license(
+            name = "LicenseRef-ScyllaDB-Source-Available-1.0"
+        ),
+    ),
     tags(
         (name = "scylla-vector-store", description = "Scylla Vector Store (API will change after design)")
-    )
+    ),
+    components(
+        schemas(
+            KeyspaceName,
+            IndexName
+        )
+    ),
 )]
 // TODO: modify HTTP API after design
 struct ApiDoc;
 
 pub(crate) fn new(engine: Sender<Engine>) -> Router {
-    let (router, api) = OpenApiRouter::with_openapi(ApiDoc::openapi())
+    let (router, api) = new_open_api_router();
+    let router = router.with_state(engine).layer(TraceLayer::new_for_http());
+    router.merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", api))
+}
+
+pub fn api() -> utoipa::openapi::OpenApi {
+    new_open_api_router().1
+}
+
+fn new_open_api_router() -> (Router<Sender<Engine>>, utoipa::openapi::OpenApi) {
+    OpenApiRouter::with_openapi(ApiDoc::openapi())
         .merge(
             OpenApiRouter::new()
                 .routes(routes!(get_indexes))
                 .routes(routes!(get_index_count))
                 .routes(routes!(post_index_ann))
-                .routes(routes!(get_info))
-                .layer(TraceLayer::new_for_http())
-                .with_state(engine),
+                .routes(routes!(get_info)),
         )
-        .split_for_parts();
-
-    router.merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", api))
+        .split_for_parts()
 }
 
 #[utoipa::path(

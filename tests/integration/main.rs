@@ -13,6 +13,8 @@ mod opensearch;
 
 mod info;
 
+mod openapi;
+
 use std::sync::Once;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;

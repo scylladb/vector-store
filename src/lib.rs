@@ -97,6 +97,7 @@ impl SerializeValue for IndexId {
     serde::Deserialize,
     utoipa::ToSchema,
 )]
+/// A keyspace name in a db
 pub struct KeyspaceName(String);
 
 impl SerializeValue for KeyspaceName {
@@ -122,7 +123,7 @@ impl SerializeValue for KeyspaceName {
     derive_more::Display,
     utoipa::ToSchema,
 )]
-/// A table name of the table with vectors in a db
+/// A name of the table with vectors in a db
 pub struct IndexName(String);
 
 impl SerializeValue for IndexName {
@@ -207,7 +208,7 @@ impl Eq for PrimaryKey {}
 #[derive(
     Clone, Debug, serde::Serialize, serde::Deserialize, derive_more::From, utoipa::ToSchema,
 )]
-/// Distance beetwen embeddings
+/// Distance between embeddings
 pub struct Distance(f32);
 
 impl SerializeValue for Distance {

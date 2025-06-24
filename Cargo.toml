@@ -7,9 +7,16 @@
 name = "vector-store"
 version = "0.1.0"
 edition = "2024"
+default-run = "vector-store"
+
+[[bin]]
+name = "generate-openapi"
+path = "src/bin/generate-openapi.rs"
+required-features = ["dev-tools"]
 
 [features]
 default = []
+dev-tools = []
 
 [dependencies]
 anyhow = "1.0.97"

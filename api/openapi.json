@@ -1,0 +1,237 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "ScyllaDB Vector Store API",
+    "description": "REST API for ScyllaDB Vector Store - provides vector search and index management",
+    "license": {
+      "name": "LicenseRef-ScyllaDB-Source-Available-1.0"
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/v1/indexes": {
+      "get": {
+        "description": "Get list of current indexes",
+        "operationId": "get_indexes",
+        "responses": {
+          "200": {
+            "description": "List of indexes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/IndexId"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/indexes/{keyspace}/{index}/ann": {
+      "post": {
+        "description": "Ann search in the index",
+        "operationId": "post_index_ann",
+        "parameters": [
+          {
+            "name": "keyspace",
+            "in": "path",
+            "description": "Keyspace name for the table to search",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/KeyspaceName"
+            }
+          },
+          {
+            "name": "index",
+            "in": "path",
+            "description": "Index to search",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/IndexName"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PostIndexAnnRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Ann search result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PostIndexAnnResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Index not found"
+          }
+        }
+      }
+    },
+    "/api/v1/indexes/{keyspace}/{index}/count": {
+      "get": {
+        "description": "Get a number of elements for a specific index",
+        "operationId": "get_index_count",
+        "parameters": [
+          {
+            "name": "keyspace",
+            "in": "path",
+            "description": "A keyspace name for the index",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/KeyspaceName"
+            }
+          },
+          {
+            "name": "index",
+            "in": "path",
+            "description": "An index name",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/IndexName"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Index count",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/info": {
+      "get": {
+        "description": "Get application info",
+        "operationId": "get_info",
+        "responses": {
+          "200": {
+            "description": "Application info",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InfoResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Distance": {
+        "type": "number",
+        "format": "float",
+        "description": "Distance between embeddings"
+      },
+      "Embedding": {
+        "type": "array",
+        "items": {
+          "type": "number",
+          "format": "float"
+        },
+        "description": "Embedding vector"
+      },
+      "IndexId": {
+        "type": "string",
+        "description": "DB's absolute index/table name (with keyspace) for which index should be build",
+        "example": "vector_benchmark.vector_items"
+      },
+      "IndexName": {
+        "type": "string",
+        "description": "A name of the table with vectors in a db"
+      },
+      "InfoResponse": {
+        "type": "object",
+        "required": [
+          "version",
+          "service"
+        ],
+        "properties": {
+          "service": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "KeyspaceName": {
+        "type": "string",
+        "description": "A keyspace name in a db"
+      },
+      "Limit": {
+        "type": "integer",
+        "format": "int32"
+      },
+      "PostIndexAnnRequest": {
+        "type": "object",
+        "required": [
+          "embedding"
+        ],
+        "properties": {
+          "embedding": {
+            "$ref": "#/components/schemas/Embedding"
+          },
+          "limit": {
+            "$ref": "#/components/schemas/Limit"
+          }
+        }
+      },
+      "PostIndexAnnResponse": {
+        "type": "object",
+        "required": [
+          "primary_keys",
+          "distances"
+        ],
+        "properties": {
+          "distances": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Distance"
+            }
+          },
+          "primary_keys": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {}
+            },
+            "propertyNames": {
+              "type": "string",
+              "description": "Name of the column in a db table"
+            }
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "scylla-vector-store",
+      "description": "Scylla Vector Store (API will change after design)"
+    }
+  ]
+}

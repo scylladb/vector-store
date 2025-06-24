@@ -1,0 +1,2 @@
+[alias]
+openapi = "run --features dev-tools --bin generate-openapi -- api/openapi.json"
