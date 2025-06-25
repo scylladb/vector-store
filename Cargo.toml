@@ -39,6 +39,8 @@ utoipa = { version = "5.3.1", features = ["axum_extras"] }
 utoipa-axum = "0.2.0"
 utoipa-swagger-ui = { version = "9.0.0", features = ["axum"] }
 uuid = "1.16.0"
+prometheus = "0.14"
+
 
 [patch.crates-io]
 scylla = { git = "https://github.com/ewienik/scylla-rust-driver.git", rev = "5fef6ae" }
