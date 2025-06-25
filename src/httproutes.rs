@@ -2,7 +2,8 @@
  * Copyright 2025-present ScyllaDB
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
-
+use crate::metrics::Metrics;
+use std::sync::Arc;
 use crate::ColumnName;
 use crate::Distance;
 use crate::Embedding;
@@ -39,7 +40,7 @@ use utoipa::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 use utoipa_swagger_ui::SwaggerUi;
-
+use axum::routing::get;
 #[derive(OpenApi)]
 #[openapi(
     tags(
@@ -48,8 +49,10 @@ use utoipa_swagger_ui::SwaggerUi;
 )]
 // TODO: modify HTTP API after design
 struct ApiDoc;
-
-pub(crate) fn new(engine: Sender<Engine>) -> Router {
+#[derive(Clone)]
+struct RoutesInnerState { engine: Sender<Engine>, metrics: Arc<Metrics>}
+pub(crate) fn new(engine: Sender<Engine>, metrics: Arc<Metrics>) -> Router {
+    let state = RoutesInnerState { engine, metrics: metrics.clone() };
     let (router, api) = OpenApiRouter::with_openapi(ApiDoc::openapi())
         .merge(
             OpenApiRouter::new()
@@ -57,11 +60,20 @@ pub(crate) fn new(engine: Sender<Engine>) -> Router {
                 .routes(routes!(get_index_count))
                 .routes(routes!(post_index_ann))
                 .layer(TraceLayer::new_for_http())
-                .with_state(engine),
+                .with_state(state)
+
         )
         .split_for_parts();
 
+    let metrics_route = Router::new().route(
+        "/metrics",
+        get({
+            let metrics = metrics.clone();
+            move || metrics.clone().handler()
+        }),
+    );
     router.merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", api))
+    .merge(metrics_route)
 }
 
 #[utoipa::path(
@@ -72,8 +84,8 @@ pub(crate) fn new(engine: Sender<Engine>) -> Router {
         (status = 200, description = "List of indexes", body = [IndexId])
     )
 )]
-async fn get_indexes(State(engine): State<Sender<Engine>>) -> response::Json<Vec<IndexId>> {
-    response::Json(engine.get_index_ids().await)
+async fn get_indexes(State(state): State<RoutesInnerState>) -> response::Json<Vec<IndexId>> {
+    response::Json(state.engine.get_index_ids().await)
 }
 
 #[utoipa::path(
@@ -89,10 +101,10 @@ async fn get_indexes(State(engine): State<Sender<Engine>>) -> response::Json<Vec
     )
 )]
 async fn get_index_count(
-    State(engine): State<Sender<Engine>>,
+    State(state): State<RoutesInnerState>,
     Path((keyspace, index)): Path<(KeyspaceName, IndexName)>,
 ) -> Response {
-    let Some((index, _)) = engine.get_index(IndexId::new(&keyspace, &index)).await else {
+    let Some((index, _)) = state.engine.get_index(IndexId::new(&keyspace, &index)).await else {
         debug!("get_index_size: missing index: {keyspace}/{index}");
         return (StatusCode::NOT_FOUND, "").into_response();
     };
@@ -134,16 +146,30 @@ pub struct PostIndexAnnResponse {
         (status = 404, description = "Index not found")
     )
 )]
+
 async fn post_index_ann(
-    State(engine): State<Sender<Engine>>,
+    State(state): State<RoutesInnerState>,
     Path((keyspace, index)): Path<(KeyspaceName, IndexName)>,
     extract::Json(request): extract::Json<PostIndexAnnRequest>,
 ) -> Response {
-    let Some((index, db_index)) = engine.get_index(IndexId::new(&keyspace, &index)).await else {
+    // Start timing
+    let timer = state.metrics
+            .latency
+            .with_label_values(&[
+                keyspace.as_ref().as_str(),
+                index.as_ref().as_str()
+            ])
+            .start_timer();
+
+    let Some((index, db_index)) = state.engine.get_index(IndexId::new(&keyspace, &index)).await else {
         return (StatusCode::NOT_FOUND, "").into_response();
     };
 
-    match index.ann(request.embedding, request.limit).await {
+    let search_result = index.ann(request.embedding, request.limit).await;
+    // Record duration in Prometheus
+    timer.observe_duration();
+
+    match search_result {
         Err(err) => {
             let msg = format!("index.ann request error: {err}");
             debug!("post_index_ann: {msg}");

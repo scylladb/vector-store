@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+use crate::metrics::Metrics;
 use crate::HttpServerAddr;
 use crate::engine::Engine;
 use crate::httproutes;
@@ -18,6 +19,7 @@ pub(crate) enum HttpServer {}
 pub(crate) async fn new(
     addr: HttpServerAddr,
     engine: Sender<Engine>,
+    metrics: Arc<Metrics>,
 ) -> anyhow::Result<(Sender<HttpServer>, SocketAddr)> {
     let listener = TcpListener::bind(addr.0).await?;
     let addr = listener.local_addr()?;
@@ -37,7 +39,7 @@ pub(crate) async fn new(
     });
 
     tokio::spawn(async move {
-        axum::serve(listener, httproutes::new(engine))
+        axum::serve(listener, httproutes::new(engine, metrics))
             .with_graceful_shutdown(async move {
                 notify.notified().await;
             })
