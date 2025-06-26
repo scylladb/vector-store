@@ -2651,8 +2651,8 @@ dependencies = [
 
 [[package]]
 name = "usearch"
-version = "2.17.2"
-source = "git+https://github.com/unum-cloud/usearch.git?rev=306d6646#306d6646b8f539cee6c3fa11879dd3bc0edfa31f"
+version = "2.17.12"
+source = "git+https://github.com/unum-cloud/usearch.git?rev=68e403a#68e403aef75311313570af5340a2612777d3a986"
 dependencies = [
  "cxx",
  "cxx-build",
