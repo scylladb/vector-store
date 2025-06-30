@@ -10,9 +10,9 @@ pub mod httproutes;
 mod httpserver;
 mod index;
 mod info;
+mod metrics;
 mod monitor_indexes;
 mod monitor_items;
-
 use db::Db;
 use index::factory;
 use index::factory::IndexFactory;
@@ -28,6 +28,7 @@ use std::hash::Hasher;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::sync::Once;
 use time::OffsetDateTime;
 use tokio::signal;
@@ -41,6 +42,8 @@ use utoipa::openapi::Schema;
 use utoipa::openapi::SchemaFormat;
 use utoipa::openapi::schema::Type;
 use uuid::Uuid;
+
+use crate::metrics::Metrics;
 
 #[derive(Clone, derive_more::From, derive_more::Display)]
 pub struct ScyllaDbUri(String);
@@ -453,7 +456,8 @@ pub async fn run(
         });
     }
     let engine_actor = engine::new(db_actor, index_factory).await?;
-    httpserver::new(addr, engine_actor).await
+    let metrics: Arc<Metrics> = Arc::new(metrics::Metrics::new());
+    httpserver::new(addr, engine_actor, metrics).await
 }
 
 pub async fn new_db(uri: ScyllaDbUri) -> anyhow::Result<Sender<Db>> {

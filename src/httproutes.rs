@@ -15,20 +15,29 @@ use crate::engine::Engine;
 use crate::engine::EngineExt;
 use crate::index::IndexExt;
 use crate::info::Info;
+use crate::metrics::Metrics;
 use anyhow::bail;
 use axum::Router;
 use axum::extract;
 use axum::extract::Path;
 use axum::extract::State;
+use axum::http::HeaderMap;
+use axum::http::HeaderValue;
 use axum::http::StatusCode;
+use axum::http::header;
 use axum::response;
 use axum::response::IntoResponse;
 use axum::response::Response;
+use axum::routing::get;
 use itertools::Itertools;
+use prometheus::Encoder;
+use prometheus::ProtobufEncoder;
+use prometheus::TextEncoder;
 use scylla::value::CqlValue;
 use serde_json::Number;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::Arc;
 use time::Date;
 use time::OffsetDateTime;
 use time::Time;
@@ -63,9 +72,23 @@ use utoipa_swagger_ui::SwaggerUi;
 // TODO: modify HTTP API after design
 struct ApiDoc;
 
-pub(crate) fn new(engine: Sender<Engine>) -> Router {
+#[derive(Clone)]
+struct RoutesInnerState {
+    engine: Sender<Engine>,
+    metrics: Arc<Metrics>,
+}
+
+pub(crate) fn new(engine: Sender<Engine>, metrics: Arc<Metrics>) -> Router {
+    let state = RoutesInnerState {
+        engine,
+        metrics: metrics.clone(),
+    };
     let (router, api) = new_open_api_router();
-    let router = router.with_state(engine).layer(TraceLayer::new_for_http());
+    let router = router
+        .route("/metrics", get(get_metrics))
+        .with_state(state)
+        .layer(TraceLayer::new_for_http());
+
     router.merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", api))
 }
 
@@ -73,7 +96,7 @@ pub fn api() -> utoipa::openapi::OpenApi {
     new_open_api_router().1
 }
 
-fn new_open_api_router() -> (Router<Sender<Engine>>, utoipa::openapi::OpenApi) {
+fn new_open_api_router() -> (Router<RoutesInnerState>, utoipa::openapi::OpenApi) {
     OpenApiRouter::with_openapi(ApiDoc::openapi())
         .merge(
             OpenApiRouter::new()
@@ -93,8 +116,8 @@ fn new_open_api_router() -> (Router<Sender<Engine>>, utoipa::openapi::OpenApi) {
         (status = 200, description = "List of indexes", body = [IndexId])
     )
 )]
-async fn get_indexes(State(engine): State<Sender<Engine>>) -> response::Json<Vec<IndexId>> {
-    response::Json(engine.get_index_ids().await)
+async fn get_indexes(State(state): State<RoutesInnerState>) -> response::Json<Vec<IndexId>> {
+    response::Json(state.engine.get_index_ids().await)
 }
 
 #[utoipa::path(
@@ -110,10 +133,14 @@ async fn get_indexes(State(engine): State<Sender<Engine>>) -> response::Json<Vec
     )
 )]
 async fn get_index_count(
-    State(engine): State<Sender<Engine>>,
+    State(state): State<RoutesInnerState>,
     Path((keyspace, index)): Path<(KeyspaceName, IndexName)>,
 ) -> Response {
-    let Some((index, _)) = engine.get_index(IndexId::new(&keyspace, &index)).await else {
+    let Some((index, _)) = state
+        .engine
+        .get_index(IndexId::new(&keyspace, &index))
+        .await
+    else {
         debug!("get_index_size: missing index: {keyspace}/{index}");
         return (StatusCode::NOT_FOUND, "").into_response();
     };
@@ -126,6 +153,39 @@ async fn get_index_count(
 
         Ok(count) => (StatusCode::OK, response::Json(count)).into_response(),
     }
+}
+
+async fn get_metrics(
+    State(state): State<RoutesInnerState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let metric_families = state.metrics.registry.gather();
+
+    // Decide which encoder and content-type to use
+    let use_protobuf = headers
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|accept| accept.contains("application/vnd.google.protobuf"));
+
+    let (content_type, buffer): (&'static str, Vec<u8>) = if use_protobuf {
+        let mut buf = Vec::new();
+        ProtobufEncoder::new()
+            .encode(&metric_families, &mut buf)
+            .ok();
+        (
+            "application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; encoding=delimited",
+            buf,
+        )
+    } else {
+        let mut buf = Vec::new();
+        TextEncoder::new().encode(&metric_families, &mut buf).ok();
+        ("text/plain; version=0.0.4; charset=utf-8", buf)
+    };
+
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+
+    (StatusCode::OK, response_headers, buffer)
 }
 
 #[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
@@ -156,15 +216,31 @@ pub struct PostIndexAnnResponse {
     )
 )]
 async fn post_index_ann(
-    State(engine): State<Sender<Engine>>,
+    State(state): State<RoutesInnerState>,
     Path((keyspace, index)): Path<(KeyspaceName, IndexName)>,
     extract::Json(request): extract::Json<PostIndexAnnRequest>,
 ) -> Response {
-    let Some((index, db_index)) = engine.get_index(IndexId::new(&keyspace, &index)).await else {
+    // Start timing
+    let timer = state
+        .metrics
+        .latency
+        .with_label_values(&[keyspace.as_ref().as_str(), index.as_ref().as_str()])
+        .start_timer();
+
+    let Some((index, db_index)) = state
+        .engine
+        .get_index(IndexId::new(&keyspace, &index))
+        .await
+    else {
+        timer.observe_duration();
         return (StatusCode::NOT_FOUND, "").into_response();
     };
 
-    match index.ann(request.embedding, request.limit).await {
+    let search_result = index.ann(request.embedding, request.limit).await;
+    // Record duration in Prometheus
+    timer.observe_duration();
+
+    match search_result {
         Err(err) => {
             let msg = format!("index.ann request error: {err}");
             debug!("post_index_ann: {msg}");
