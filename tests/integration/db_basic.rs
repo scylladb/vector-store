@@ -115,6 +115,7 @@ impl Keyspace {
 struct DbMock {
     schema_version: CqlTimeuuid,
     keyspaces: HashMap<KeyspaceName, Keyspace>,
+    next_get_db_index_failed: bool,
 }
 
 impl DbMock {
@@ -128,6 +129,7 @@ impl DbBasic {
         Self(Arc::new(RwLock::new(DbMock {
             schema_version: CqlTimeuuid::from(Uuid::new_v4()),
             keyspaces: HashMap::new(),
+            next_get_db_index_failed: false,
         })))
     }
 
@@ -235,6 +237,10 @@ impl DbBasic {
 
         Ok(())
     }
+
+    pub(crate) fn set_next_get_db_index_failed(&self) {
+        self.0.write().unwrap().next_get_db_index_failed = true;
+    }
 }
 
 fn process_db(db: &DbBasic, msg: Db) {
@@ -340,6 +346,11 @@ pub(crate) fn new_db_index(
     db: DbBasic,
     metadata: IndexMetadata,
 ) -> anyhow::Result<(mpsc::Sender<DbIndex>, mpsc::Receiver<DbEmbedding>)> {
+    if db.0.read().unwrap().next_get_db_index_failed {
+        db.0.write().unwrap().next_get_db_index_failed = false;
+        bail!("get_db_index failed");
+    }
+
     let (tx_index, mut rx_index) = mpsc::channel(10);
     let (tx_embeddings, rx_embeddings) = mpsc::channel(10);
     tokio::spawn({

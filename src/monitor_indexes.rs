@@ -9,9 +9,12 @@ use crate::db::Db;
 use crate::db::DbExt;
 use crate::engine::Engine;
 use crate::engine::EngineExt;
+use futures::StreamExt;
+use futures::stream;
 use scylla::value::CqlTimeuuid;
 use std::collections::HashSet;
-use std::mem;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
@@ -42,7 +45,7 @@ pub(crate) async fn new(
                         if !schema_version.has_changed(&db).await {
                             continue;
                         }
-                        let Ok(mut new_indexes) = get_indexes(&db).await.inspect_err(|err| {
+                        let Ok(new_indexes) = get_indexes(&db).await.inspect_err(|err| {
                             debug!("monitor_indexes: unable to get the list of indexes: {err}");
                         }) else {
                             // there was an error during retrieving indexes, reset schema version
@@ -51,8 +54,16 @@ pub(crate) async fn new(
                             continue;
                         };
                         del_indexes(&engine, indexes.difference(&new_indexes)).await;
-                        add_indexes(&engine, new_indexes.difference(&indexes)).await;
-                        mem::swap(&mut indexes, &mut new_indexes);
+                        let AddIndexesR {added, has_failures} = add_indexes(
+                            &engine,
+                            new_indexes.into_iter().filter(|idx| !indexes.contains(idx))
+                        ).await;
+                        indexes.extend(added);
+                        if has_failures {
+                            // if a process has failures we will need to repeat the operation
+                            // so let's reset schema version here
+                            schema_version.reset();
+                        }
                     }
                     _ = rx.recv() => { }
                 }
@@ -147,14 +158,138 @@ async fn get_indexes(db: &Sender<Db>) -> anyhow::Result<HashSet<IndexMetadata>> 
     Ok(indexes)
 }
 
-async fn add_indexes(engine: &Sender<Engine>, idxs: impl Iterator<Item = &IndexMetadata>) {
-    for idx in idxs {
-        engine.add_index(idx.clone()).await;
+struct AddIndexesR {
+    added: HashSet<IndexMetadata>,
+    has_failures: bool,
+}
+
+async fn add_indexes(
+    engine: &Sender<Engine>,
+    idxs: impl Iterator<Item = IndexMetadata>,
+) -> AddIndexesR {
+    let has_failures = AtomicBool::new(false);
+    let added = stream::iter(idxs)
+        .filter_map(|idx| async {
+            engine
+                .add_index(idx.clone())
+                .await
+                .inspect_err(|_| {
+                    has_failures.store(true, Ordering::Relaxed);
+                })
+                .ok()
+                .map(|_| idx)
+        })
+        .collect()
+        .await;
+    AddIndexesR {
+        added,
+        has_failures: has_failures.load(Ordering::Relaxed),
     }
 }
 
 async fn del_indexes(engine: &Sender<Engine>, idxs: impl Iterator<Item = &IndexMetadata>) {
     for idx in idxs {
         engine.del_index(idx.id()).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::anyhow;
+
+    #[tokio::test]
+    async fn schema_version_changed() {
+        let (tx_db, mut rx_db) = mpsc::channel(10);
+
+        let task_db = tokio::spawn(async move {
+            let version1 = CqlTimeuuid::from_bytes([1; 16]);
+            let version2 = CqlTimeuuid::from_bytes([2; 16]);
+
+            // step 1
+            let Some(Db::LatestSchemaVersion { tx }) = rx_db.recv().await else {
+                unreachable!();
+            };
+            tx.send(Err(anyhow!("test issue"))).unwrap();
+
+            // step 2
+            let Some(Db::LatestSchemaVersion { tx }) = rx_db.recv().await else {
+                unreachable!();
+            };
+            tx.send(Ok(None)).unwrap();
+
+            // step 3
+            let Some(Db::LatestSchemaVersion { tx }) = rx_db.recv().await else {
+                unreachable!();
+            };
+            tx.send(Ok(Some(version1))).unwrap();
+
+            // step 4
+            let Some(Db::LatestSchemaVersion { tx }) = rx_db.recv().await else {
+                unreachable!();
+            };
+            tx.send(Err(anyhow!("test issue"))).unwrap();
+
+            // step 5
+            let Some(Db::LatestSchemaVersion { tx }) = rx_db.recv().await else {
+                unreachable!();
+            };
+            tx.send(Ok(Some(version1))).unwrap();
+
+            // step 6
+            let Some(Db::LatestSchemaVersion { tx }) = rx_db.recv().await else {
+                unreachable!();
+            };
+            tx.send(Ok(None)).unwrap();
+
+            // step 7
+            let Some(Db::LatestSchemaVersion { tx }) = rx_db.recv().await else {
+                unreachable!();
+            };
+            tx.send(Ok(Some(version1))).unwrap();
+
+            // step 8
+            let Some(Db::LatestSchemaVersion { tx }) = rx_db.recv().await else {
+                unreachable!();
+            };
+            tx.send(Ok(Some(version1))).unwrap();
+
+            // step 9
+            let Some(Db::LatestSchemaVersion { tx }) = rx_db.recv().await else {
+                unreachable!();
+            };
+            tx.send(Ok(Some(version2))).unwrap();
+        });
+
+        let mut sv = SchemaVersion::new();
+
+        // step 1: Err should not change the schema version
+        assert!(!sv.has_changed(&tx_db).await);
+
+        // step 2: None should not change the schema version
+        assert!(!sv.has_changed(&tx_db).await);
+
+        // step 3: value1 should change the schema version
+        assert!(sv.has_changed(&tx_db).await);
+
+        // step 4: Err should change the schema version
+        assert!(sv.has_changed(&tx_db).await);
+
+        // step 5: value1 should change the schema version
+        assert!(sv.has_changed(&tx_db).await);
+
+        // step 6: None should change the schema version
+        assert!(sv.has_changed(&tx_db).await);
+
+        // step 7: value1 should change the schema version
+        assert!(sv.has_changed(&tx_db).await);
+
+        // step 8: value1 should not change the schema version
+        assert!(!sv.has_changed(&tx_db).await);
+
+        // step 9: value2 should change the schema version
+        assert!(sv.has_changed(&tx_db).await);
+
+        task_db.await.unwrap();
     }
 }

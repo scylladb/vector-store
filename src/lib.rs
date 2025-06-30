@@ -51,6 +51,8 @@ pub struct ScyllaDbUri(String);
     Eq,
     PartialEq,
     Debug,
+    PartialOrd,
+    Ord,
     serde::Deserialize,
     serde::Serialize,
     derive_more::Display,
