@@ -1,0 +1,85 @@
+#!/usr/bin/python3
+
+# Copyright 2025-present ScyllaDB
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
+
+import os
+import sys
+import shlex
+import argparse
+import subprocess
+
+HOME_DIR='/home/ubuntu'
+USER='ubuntu'
+COPY_OR_MOVE='mv'
+
+def run(template_cmd, shell=False):
+    cmd = template_cmd.format(_HOME=HOME_DIR, _USER=USER, _COPY_OR_MOVE=COPY_OR_MOVE)
+    if dry_run:
+        print(cmd)
+        return
+    if verbose:
+        print(cmd)
+    if not shell:
+        cmd = shlex.split(cmd)
+    try:
+        res = subprocess.check_output(cmd, shell=shell)
+        if verbose:
+            print(res)
+        return res
+    except Exception as e:
+        print("Error while running:")
+        print(cmd,end =" ")
+        print(e.output)
+        raise
+
+def chdir(template_dir):
+    dir = template_dir.format(_HOME=HOME_DIR, _USER=USER)
+    if dry_run:
+        print('cd ', dir)
+        return
+    if verbose:
+        print('cd ', dir)
+    os.chdir(dir)
+
+def install():
+    run("apt install -y libssl-dev pkg-config build-essential")
+    run("sudo -u {_USER} -H sh -c 'curl --proto \"=https\" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y'")
+
+def install_vector_store(version):
+    run('sudo -u {_USER} curl -L -o {_HOME}/vector-store.tar.gz  https://github.com/scylladb/vector-store/archive/refs/tags/v{VERSION}.tar.gz'.format(VERSION=version, _HOME=HOME_DIR, _USER=USER))
+    name = 'vector-store-{VERSION}'.format(VERSION=version)
+    run('sudo -u {_USER} tar -xvf {_HOME}/vector-store.tar.gz -C {_HOME}/')
+    run('sudo -u {_USER} {_COPY_OR_MOVE} {_HOME}/{NAME} {_HOME}/vector-store'.format(NAME=name, _HOME=HOME_DIR, _USER=USER, _COPY_OR_MOVE=COPY_OR_MOVE))
+    chdir('{_HOME}/vector-store')
+    run('sudo -u {_USER} {_HOME}/.cargo/bin/cargo b -r')
+
+def install_service():
+    run('cp {_HOME}/vector-store.service /etc/systemd/system/')
+    try:
+        run('cp {_HOME}/vector-store.service /usr/lib/systemd/system/')
+    except Exception as e:
+        print("could not place vector-store file in user/lib/systemd" + str(e))
+        print(e.output)
+    run('systemctl daemon-reload')
+
+if __name__ == '__main__':
+    if os.getuid() > 0:
+        print('Requires root permission.')
+        sys.exit(1)
+    parser = argparse.ArgumentParser(description='Construct a vector store image')
+    parser.add_argument('--version', default="0.1.0", help='Monitoring version to install')
+    parser.add_argument('--cloud', default="aws", choices=['aws','gce'], help='What cloud we are running on')
+    parser.add_argument('--verbose', action='store_true', default=False, help='Verbose trace mode')
+    parser.add_argument('--do-not-move', action='store_true', default=False, help='For testing, do not move files, copy them instead')
+    parser.add_argument('-d', '--dry-run', action='store_true', default=False, help='Dry run mode')
+
+    args = parser.parse_args()
+    dry_run = args.dry_run
+    verbose = args.verbose
+
+    if args.do_not_move:
+        COPY_OR_MOVE='cp'
+    install()
+    install_vector_store(args.version)
+    install_service()
