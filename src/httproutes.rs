@@ -95,6 +95,7 @@ fn new_open_api_router() -> (Router<Sender<Engine>>, utoipa::openapi::OpenApi) {
 }
 
 #[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema, PartialEq, Debug)]
+/// Defines the data type and precision used for storing and processing embedding vectors in the index.
 pub enum Quantization {
     F32,
 }
@@ -144,6 +145,8 @@ async fn get_indexes(State(engine): State<Sender<Engine>>) -> response::Json<Vec
     ),
     responses(
         (status = 200, description = "Number of embeddings in the index.", body = usize, content_type = "application/json"),
+        (status = 404, description = "Index not found"),
+        (status = 500, description = "Counting error"),
     )
 )]
 async fn get_index_count(
@@ -190,7 +193,8 @@ pub struct PostIndexAnnResponse {
     request_body = PostIndexAnnRequest,
     responses(
         (status = 200, description = "Ann search result", body = PostIndexAnnResponse),
-        (status = 404, description = "Index not found")
+        (status = 404, description = "Index not found"),
+        (status = 400, description = "Invalid request, e.g. wrong embedding size"),
     )
 )]
 async fn post_index_ann(
