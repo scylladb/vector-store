@@ -9,6 +9,7 @@ use crate::db_basic::Index;
 use crate::db_basic::Table;
 use crate::httpclient::HttpClient;
 use ::time::OffsetDateTime;
+use reqwest::StatusCode;
 use scylla::value::CqlValue;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
@@ -272,4 +273,93 @@ async fn failed_db_index_create() {
     assert_eq!(indexes.len(), 2);
     assert_contains(&indexes, "vector", "ann");
     assert_contains(&indexes, "vector", "ann3");
+}
+
+#[tokio::test]
+async fn ann_returns_bad_request_when_provided_vector_size_is_not_eq_index_dimensions() {
+    crate::enable_tracing();
+
+    let (db_actor, db) = db_basic::new();
+
+    let index = IndexMetadata {
+        keyspace_name: "vector".to_string().into(),
+        table_name: "items".to_string().into(),
+        index_name: "ann".to_string().into(),
+        target_column: "embedding".to_string().into(),
+        dimensions: NonZeroUsize::new(3).unwrap().into(),
+        connectivity: Default::default(),
+        expansion_add: Default::default(),
+        expansion_search: Default::default(),
+        space_type: Default::default(),
+        version: Uuid::new_v4().into(),
+    };
+
+    let index_factory = vector_store::new_index_factory_usearch().unwrap();
+
+    let (_server_actor, addr) = vector_store::run(
+        SocketAddr::from(([127, 0, 0, 1], 0)).into(),
+        Some(1),
+        db_actor,
+        index_factory,
+    )
+    .await
+    .unwrap();
+
+    let client = HttpClient::new(addr);
+
+    db.add_table(
+        index.keyspace_name.clone(),
+        index.table_name.clone(),
+        Table {
+            primary_keys: vec!["pk".to_string().into(), "ck".to_string().into()],
+            dimensions: [(index.target_column.clone(), index.dimensions)]
+                .into_iter()
+                .collect(),
+        },
+    )
+    .unwrap();
+
+    db.add_index(
+        &index.keyspace_name,
+        index.index_name.clone(),
+        Index {
+            table_name: index.table_name.clone(),
+            target_column: index.target_column.clone(),
+            connectivity: index.connectivity,
+            expansion_add: index.expansion_add,
+            expansion_search: index.expansion_search,
+            space_type: index.space_type,
+        },
+    )
+    .unwrap();
+
+    db.insert_values(
+        &index.keyspace_name,
+        &index.table_name,
+        &index.target_column,
+        vec![(
+            vec![CqlValue::Int(1), CqlValue::Text("one".to_string())].into(),
+            Some(vec![1., 1., 1.].into()),
+            OffsetDateTime::from_unix_timestamp(10).unwrap().into(),
+        )],
+    )
+    .unwrap();
+
+    time::timeout(Duration::from_secs(10), async {
+        while client.count(&index).await != Some(1) {
+            task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let result = client
+        .post_ann(
+            &index,
+            vec![1.0, 2.0].into(), // Only 2 dimensions, should be 3
+            NonZeroUsize::new(1).unwrap().into(),
+        )
+        .await;
+
+    assert_eq!(result.status(), StatusCode::BAD_REQUEST);
 }

@@ -14,6 +14,7 @@ use crate::db_index::DbIndexExt;
 use crate::engine::Engine;
 use crate::engine::EngineExt;
 use crate::index::IndexExt;
+use crate::index::actor::AnnError;
 use crate::info::Info;
 use anyhow::bail;
 use axum::Router;
@@ -209,6 +210,14 @@ async fn post_index_ann(
     };
 
     match index.ann(request.embedding, request.limit).await {
+        Err(AnnError::WrongEmbeddingDimension { expected, actual }) => {
+            let msg = format!(
+                "Invalid embedding dimension: expected {}, got {}",
+                expected, actual
+            );
+            debug!("post_index_ann: {msg}");
+            (StatusCode::BAD_REQUEST, msg).into_response()
+        }
         Err(err) => {
             let msg = format!("index.ann request error: {err}");
             debug!("post_index_ann: {msg}");
