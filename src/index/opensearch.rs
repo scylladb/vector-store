@@ -16,6 +16,7 @@ use crate::PrimaryKey;
 use crate::SpaceType;
 use crate::index::actor::AnnError;
 use crate::index::actor::Index;
+use crate::index::validator::validate_embedding_dimensions;
 use anyhow::anyhow;
 use bimap::BiMap;
 use opensearch::DeleteParts;
@@ -28,7 +29,6 @@ use opensearch::indices::IndicesCreateParts;
 use serde_json::Value;
 use serde_json::json;
 use std::fmt::Display;
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicU64;
@@ -362,22 +362,8 @@ async fn ann(
     limit: Limit,
     client: Arc<OpenSearch>,
 ) {
-    let Some(embedding_len) = NonZeroUsize::new(embedding.0.len()) else {
-        tx_ann
-            .send(Err(AnnError::WrongEmbeddingDimension {
-                expected: dimensions.0.get(),
-                actual: 0,
-            }))
-            .unwrap_or_else(|_| trace!("ann: unable to send error response (zero dimensions)"));
-        return;
-    };
-    if embedding_len != dimensions.0 {
-        tx_ann
-            .send(Err(AnnError::WrongEmbeddingDimension {
-                expected: dimensions.0.get(),
-                actual: embedding_len.get(),
-            }))
-            .unwrap_or_else(|_| trace!("ann: unable to send error response (wrong dimensions)"));
+    if let Err(e) = validate_embedding_dimensions(&embedding, dimensions) {
+        _ = tx_ann.send(Err(e));
         return;
     }
 

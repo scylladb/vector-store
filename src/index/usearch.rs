@@ -17,9 +17,9 @@ use crate::index::actor::AnnError;
 use crate::index::actor::AnnR;
 use crate::index::actor::CountR;
 use crate::index::actor::Index;
+use crate::index::validator::validate_embedding_dimensions;
 use anyhow::anyhow;
 use bimap::BiMap;
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicU64;
@@ -273,26 +273,12 @@ async fn ann(
     dimensions: Dimensions,
     limit: Limit,
 ) {
-    // TODO: fix duplicated code
-    let Some(embedding_len) = NonZeroUsize::new(embedding.0.len()) else {
-        tx_ann
-            .send(Err(AnnError::WrongEmbeddingDimension {
-                expected: dimensions.0.get(),
-                actual: 0,
-            }))
-            .unwrap_or_else(|_| trace!("ann: unable to send error response (zero dimensions)"));
-        return;
-    };
-    if embedding_len != dimensions.0 {
-        tx_ann
-            .send(Err(AnnError::WrongEmbeddingDimension {
-                expected: dimensions.0.get(),
-                actual: embedding_len.get(),
-            }))
-            .unwrap_or_else(|_| trace!("ann: unable to send error response (wrong dimensions)"));
+    if let Err(e) = validate_embedding_dimensions(&embedding, dimensions) {
+        tx_ann.send(Err(e)).unwrap_or_else(|_| {
+            trace!("ann: unable to send error response (embedding validation)")
+        });
         return;
     }
-
     let (tx, rx) = oneshot::channel();
     rayon::spawn(move || {
         _ = tx.send(idx.read().unwrap().search(&embedding.0, limit.0.get()));
@@ -342,6 +328,7 @@ mod tests {
     use super::*;
     use crate::index::IndexExt;
     use scylla::value::CqlValue;
+    use std::num::NonZeroUsize;
     use std::time::Duration;
     use tokio::task;
     use tokio::time;
