@@ -75,15 +75,21 @@ async fn setup_store() -> (IndexMetadata, HttpClient, DbBasic, impl Sized) {
 
     let client = HttpClient::new(addr);
 
+    return (index, client, db, server);
+}
+
+async fn wait_for<F, Fut>(mut condition: F, msg: &str)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
     time::timeout(Duration::from_secs(10), async {
-        while client.indexes().await.is_empty() {
+        while !condition().await {
             task::yield_now().await;
         }
     })
     .await
-    .unwrap();
-
-    return (index, client, db, server);
+    .expect(format!("Timeout on: {}", msg).as_str());
 }
 
 #[tokio::test]
@@ -297,6 +303,12 @@ async fn failed_db_index_create() {
 async fn ann_returns_bad_request_when_provided_vector_size_is_not_eq_index_dimensions() {
     crate::enable_tracing();
     let (index, client, _db, _server) = setup_store().await;
+
+    wait_for(
+        || async { !client.indexes().await.is_empty() },
+        "Waiting for indexes to be scanned by Vector Store",
+    )
+    .await;
 
     let result = client
         .post_ann(
