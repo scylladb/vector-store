@@ -24,7 +24,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/IndexId"
+                    "$ref": "#/components/schemas/IndexInfo"
                   }
                 }
               }
@@ -166,10 +166,25 @@
         },
         "description": "Embedding vector"
       },
-      "IndexId": {
-        "type": "string",
-        "description": "DB's absolute index/table name (with keyspace) for which index should be build",
-        "example": "vector_benchmark.vector_items"
+      "IndexInfo": {
+        "type": "object",
+        "description": "Information about a vector index, such as keyspace, name and quantization.",
+        "required": [
+          "keyspace",
+          "index",
+          "quantization"
+        ],
+        "properties": {
+          "index": {
+            "$ref": "#/components/schemas/IndexName"
+          },
+          "keyspace": {
+            "$ref": "#/components/schemas/KeyspaceName"
+          },
+          "quantization": {
+            "$ref": "#/components/schemas/Quantization"
+          }
+        }
       },
       "IndexName": {
         "type": "string",
@@ -237,6 +252,12 @@
             }
           }
         }
+      },
+      "Quantization": {
+        "type": "string",
+        "enum": [
+          "F32"
+        ]
       }
     }
   },

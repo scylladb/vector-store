@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+use crate::assert::assert_contains;
 use crate::db_basic;
 use crate::db_basic::Index;
 use crate::db_basic::Table;
@@ -108,7 +109,7 @@ async fn simple_create_search_delete_index() {
 
     let indexes = client.indexes().await;
     assert_eq!(indexes.len(), 1);
-    assert_eq!(indexes.first().unwrap().as_ref(), "vector.ann");
+    assert_contains(&indexes, "vector", "ann");
 
     let (primary_keys, distances) = client
         .ann(

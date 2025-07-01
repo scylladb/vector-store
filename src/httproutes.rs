@@ -94,40 +94,36 @@ fn new_open_api_router() -> (Router<Sender<Engine>>, utoipa::openapi::OpenApi) {
         .split_for_parts()
 }
 
-#[derive(utoipa::ToSchema)]
-enum Quantization {
+#[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema, PartialEq, Debug)]
+pub enum Quantization {
     F32,
 }
 
-#[derive(utoipa::ToSchema)]
-/// DB's absolute index/table name (with keyspace) for which index should be build
-pub struct Index {
-    kespace: KeyspaceName,
-    index: IndexName,
-    quantization: Quantization,
+#[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema, PartialEq, Debug)]
+/// Information about a vector index, such as keyspace, name and quantization.
+pub struct IndexInfo {
+    pub keyspace: KeyspaceName,
+    pub index: IndexName,
+    pub quantization: Quantization,
 }
-// pub struct GetIndexesResponse {
-//     pub primary_keys: HashMap<ColumnName, Vec<Value>>,
-//     pub distances: Vec<Distance>,
-// }
-
 #[utoipa::path(
     get,
     path = "/api/v1/indexes",
     tag = "scylla-vector-store-index",
     description = "Get list of current indexes",
     responses(
-        (status = 200, description = "List of indexes", body = [Index])
+        (status = 200, description = "List of indexes", body = [IndexInfo])
     )
 )]
-async fn get_indexes(State(engine): State<Sender<Engine>>) -> response::Json<Vec<Index>> {
+#[axum::debug_handler] // Add this line
+async fn get_indexes(State(engine): State<Sender<Engine>>) -> response::Json<Vec<IndexInfo>> {
     let ids = engine.get_index_ids().await;
     let indexes = ids
         .iter()
-        .map(|id| Index {
-            kespace: id.keyspace(),
+        .map(|id| IndexInfo {
+            keyspace: id.keyspace(),
             index: id.index(),
-            quantization: Quantization::F32, // or fetch actual quantization if available
+            quantization: Quantization::F32, // currently the only supported quantization by Vector Store
         })
         .collect();
     response::Json(indexes)

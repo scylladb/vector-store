@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+use crate::assert::assert_contains;
 use crate::db_basic;
 use crate::db_basic::Index;
 use crate::db_basic::Table;
@@ -106,7 +107,7 @@ async fn simple_create_search_delete_index() {
 
     let indexes = client.indexes().await;
     assert_eq!(indexes.len(), 1);
-    assert_eq!(indexes.first().unwrap().as_ref(), "vector.ann");
+    assert_contains(&indexes, "vector", "ann");
 
     let (primary_keys, distances) = client
         .ann(
@@ -223,11 +224,10 @@ async fn failed_db_index_create() {
     .await
     .expect("Timeout waiting for index creation success");
 
-    let mut indexes = client.indexes().await;
-    indexes.sort();
+    let indexes = client.indexes().await;
     assert_eq!(indexes.len(), 2);
-    assert_eq!(indexes.first().unwrap().as_ref(), "vector.ann");
-    assert_eq!(indexes.last().unwrap().as_ref(), "vector.ann2");
+    assert_contains(&indexes, "vector", "ann");
+    assert_contains(&indexes, "vector", "ann2");
 
     db.add_index(
         &index.keyspace_name,
@@ -251,12 +251,11 @@ async fn failed_db_index_create() {
     .await
     .expect("Timeout waiting for index creation success");
 
-    let mut indexes = client.indexes().await;
-    indexes.sort();
+    let indexes = client.indexes().await;
     assert_eq!(indexes.len(), 3);
-    assert_eq!(indexes.first().unwrap().as_ref(), "vector.ann");
-    assert_eq!(indexes.get(1).unwrap().as_ref(), "vector.ann2");
-    assert_eq!(indexes.last().unwrap().as_ref(), "vector.ann3");
+    assert_contains(&indexes, "vector", "ann");
+    assert_contains(&indexes, "vector", "ann2");
+    assert_contains(&indexes, "vector", "ann3");
 
     db.del_index(&index.keyspace_name, &"ann2".to_string().into())
         .unwrap();
@@ -269,9 +268,8 @@ async fn failed_db_index_create() {
     .await
     .expect("Timeout waiting for index creation success");
 
-    let mut indexes = client.indexes().await;
-    indexes.sort();
+    let indexes = client.indexes().await;
     assert_eq!(indexes.len(), 2);
-    assert_eq!(indexes.first().unwrap().as_ref(), "vector.ann");
-    assert_eq!(indexes.last().unwrap().as_ref(), "vector.ann3");
+    assert_contains(&indexes, "vector", "ann");
+    assert_contains(&indexes, "vector", "ann3");
 }
