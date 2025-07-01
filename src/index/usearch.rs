@@ -13,6 +13,7 @@ use crate::IndexId;
 use crate::Limit;
 use crate::PrimaryKey;
 use crate::SpaceType;
+use crate::index::actor::AnnError;
 use crate::index::actor::AnnR;
 use crate::index::actor::CountR;
 use crate::index::actor::Index;
@@ -272,17 +273,22 @@ async fn ann(
     dimensions: Dimensions,
     limit: Limit,
 ) {
+    // TODO: fix duplicated code
     let Some(embedding_len) = NonZeroUsize::new(embedding.0.len()) else {
         tx_ann
-            .send(Err(anyhow!("ann: embedding dimensions == 0")))
+            .send(Err(AnnError::WrongEmbeddingDimension {
+                expected: dimensions.0.get(),
+                actual: 0,
+            }))
             .unwrap_or_else(|_| trace!("ann: unable to send error response (zero dimensions)"));
         return;
     };
     if embedding_len != dimensions.0 {
         tx_ann
-            .send(Err(anyhow!(
-                "ann: wrong embedding dimensions: {embedding_len} != {dimensions}",
-            )))
+            .send(Err(AnnError::WrongEmbeddingDimension {
+                expected: dimensions.0.get(),
+                actual: embedding_len.get(),
+            }))
             .unwrap_or_else(|_| trace!("ann: unable to send error response (wrong dimensions)"));
         return;
     }
@@ -295,8 +301,11 @@ async fn ann(
     tx_ann
         .send(
             rx.await
-                .map_err(|err| anyhow!("ann: unable to recv matches: {err}"))
-                .and_then(|matches| matches.map_err(|err| anyhow!("ann: search failed: {err}")))
+                .map_err(|err| AnnError::OtherError(anyhow!("ann: unable to recv matches: {err}")))
+                .and_then(|matches| {
+                    matches
+                        .map_err(|err| AnnError::OtherError(anyhow!("ann: search failed: {err}")))
+                })
                 .and_then(|matches| {
                     let primary_keys = {
                         let keys = keys.read().unwrap();
@@ -306,9 +315,11 @@ async fn ann(
                             .map(|key| {
                                 keys.get_by_right(&key.into())
                                     .cloned()
-                                    .ok_or(anyhow!("not defined primary key column {key}"))
+                                    .ok_or(AnnError::OtherError(anyhow!(
+                                        "not defined primary key column {key}"
+                                    )))
                             })
-                            .collect::<anyhow::Result<_>>()?
+                            .collect::<anyhow::Result<_, AnnError>>()?
                     };
                     let distances = matches
                         .distances

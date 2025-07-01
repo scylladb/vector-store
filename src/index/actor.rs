@@ -7,10 +7,41 @@ use crate::Distance;
 use crate::Embedding;
 use crate::Limit;
 use crate::PrimaryKey;
+use std::fmt;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
-pub(crate) type AnnR = anyhow::Result<(Vec<PrimaryKey>, Vec<Distance>)>;
+#[derive(Debug)]
+pub enum AnnError {
+    WrongEmbeddingDimension { expected: usize, actual: usize },
+    OtherError(anyhow::Error),
+}
+
+impl<E> From<E> for AnnError
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    fn from(err: E) -> Self {
+        AnnError::OtherError(anyhow::anyhow!(err))
+    }
+}
+
+impl fmt::Display for AnnError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AnnError::WrongEmbeddingDimension { expected, actual } => {
+                write!(
+                    f,
+                    "Wrong embedding dimension: expected {}, got {}",
+                    expected, actual
+                )
+            }
+            AnnError::OtherError(err) => write!(f, "Other error: {}", err),
+        }
+    }
+}
+
+pub(crate) type AnnR = anyhow::Result<(Vec<PrimaryKey>, Vec<Distance>), AnnError>;
 pub(crate) type CountR = anyhow::Result<usize>;
 
 pub enum Index {

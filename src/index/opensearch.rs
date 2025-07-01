@@ -14,6 +14,7 @@ use crate::IndexId;
 use crate::Limit;
 use crate::PrimaryKey;
 use crate::SpaceType;
+use crate::index::actor::AnnError;
 use crate::index::actor::Index;
 use anyhow::anyhow;
 use bimap::BiMap;
@@ -363,15 +364,19 @@ async fn ann(
 ) {
     let Some(embedding_len) = NonZeroUsize::new(embedding.0.len()) else {
         tx_ann
-            .send(Err(anyhow!("ann: embedding dimensions == 0")))
+            .send(Err(AnnError::WrongEmbeddingDimension {
+                expected: dimensions.0.get(),
+                actual: 0,
+            }))
             .unwrap_or_else(|_| trace!("ann: unable to send error response (zero dimensions)"));
         return;
     };
     if embedding_len != dimensions.0 {
         tx_ann
-            .send(Err(anyhow!(
-                "ann: wrong embedding dimensions: {embedding_len} != {dimensions}",
-            )))
+            .send(Err(AnnError::WrongEmbeddingDimension {
+                expected: dimensions.0.get(),
+                actual: embedding_len.get(),
+            }))
             .unwrap_or_else(|_| trace!("ann: unable to send error response (wrong dimensions)"));
         return;
     }
@@ -399,14 +404,18 @@ async fn ann(
         });
 
     if response.is_err() {
-        _ = tx_ann.send(Err(anyhow!("ann: unable to search for embedding")));
+        _ = tx_ann.send(Err(AnnError::OtherError(anyhow!(
+            "ann: unable to search for embedding"
+        ))));
         return;
     }
 
     let response_body = response.unwrap().json::<Value>().await;
 
     if response_body.is_err() {
-        _ = tx_ann.send(Err(anyhow!("ann: unable to search for embedding")));
+        _ = tx_ann.send(Err(AnnError::OtherError(anyhow!(
+            "ann: unable to search for embedding"
+        ))));
         return;
     }
     let response_body = response_body.unwrap();
@@ -417,7 +426,9 @@ async fn ann(
         .and_then(|hits| hits.as_array());
 
     if hits.is_none() {
-        _ = tx_ann.send(Err(anyhow!("ann: unable to search for embedding")));
+        _ = tx_ann.send(Err(AnnError::OtherError(anyhow!(
+            "ann: unable to search for embedding"
+        ))));
         return;
     }
     let hits = hits
