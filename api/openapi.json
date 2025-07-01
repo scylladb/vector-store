@@ -81,6 +81,9 @@
               }
             }
           },
+          "400": {
+            "description": "Invalid request, wrong embedding data type"
+          },
           "404": {
             "description": "Index not found"
           }
@@ -125,6 +128,12 @@
                 }
               }
             }
+          },
+          "404": {
+            "description": "Index not found"
+          },
+          "500": {
+            "description": "Counting error"
           }
         }
       }
@@ -255,6 +264,7 @@
       },
       "Quantization": {
         "type": "string",
+        "description": "Defines the data type and precision used for storing and processing embedding vectors in the index.",
         "enum": [
           "F32"
         ]
