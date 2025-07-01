@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 use vector_store::ColumnName;
 use vector_store::Distance;
 use vector_store::Embedding;
-use vector_store::IndexId;
+use vector_store::IndexInfo;
 use vector_store::IndexMetadata;
 use vector_store::Limit;
 use vector_store::httproutes::InfoResponse;
@@ -30,7 +30,7 @@ impl HttpClient {
         }
     }
 
-    pub(crate) async fn indexes(&self) -> Vec<IndexId> {
+    pub(crate) async fn indexes(&self) -> Vec<IndexInfo> {
         self.client
             .get(format!("{}/indexes", self.url_api))
             .send()

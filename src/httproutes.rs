@@ -108,16 +108,49 @@ fn new_open_api_router() -> (Router<RoutesInnerState>, utoipa::openapi::OpenApi)
         .split_for_parts()
 }
 
+#[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema, PartialEq, Debug)]
+/// Data type and precision used for storing and processing embedding vectors in the index.
+pub enum Quantization {
+    F32,
+}
+
+#[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema, PartialEq, Debug)]
+/// Information about a vector index, such as keyspace, name and quantization.
+pub struct IndexInfo {
+    pub keyspace: KeyspaceName,
+    pub index: IndexName,
+    pub quantization: Quantization,
+}
+
+impl IndexInfo {
+    pub fn new(keyspace: &str, index: &str) -> Self {
+        IndexInfo {
+            keyspace: String::from(keyspace).into(),
+            index: String::from(index).into(),
+            quantization: Quantization::F32,
+        }
+    }
+}
+
 #[utoipa::path(
     get,
     path = "/api/v1/indexes",
     description = "Get list of current indexes",
     responses(
-        (status = 200, description = "List of indexes", body = [IndexId])
+        (status = 200, description = "List of indexes", body = [IndexInfo])
     )
 )]
-async fn get_indexes(State(state): State<RoutesInnerState>) -> response::Json<Vec<IndexId>> {
-    response::Json(state.engine.get_index_ids().await)
+async fn get_indexes(State(state): State<RoutesInnerState>) -> response::Json<Vec<IndexInfo>> {
+    let ids = state.engine.get_index_ids().await;
+    let indexes = ids
+        .iter()
+        .map(|id| IndexInfo {
+            keyspace: id.keyspace(),
+            index: id.index(),
+            quantization: Quantization::F32, // currently the only supported quantization by Vector Store
+        })
+        .collect();
+    response::Json(indexes)
 }
 
 #[utoipa::path(

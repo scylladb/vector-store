@@ -108,7 +108,7 @@ async fn simple_create_search_delete_index() {
 
     let indexes = client.indexes().await;
     assert_eq!(indexes.len(), 1);
-    assert_eq!(indexes.first().unwrap().as_ref(), "vector.ann");
+    assert_eq!(indexes[0], vector_store::IndexInfo::new("vector", "ann"));
 
     let (primary_keys, distances) = client
         .ann(

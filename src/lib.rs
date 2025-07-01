@@ -45,25 +45,15 @@ use uuid::Uuid;
 
 use crate::metrics::Metrics;
 
+pub use httproutes::IndexInfo;
+pub use httproutes::Quantization;
+
 #[derive(Clone, derive_more::From, derive_more::Display)]
 pub struct ScyllaDbUri(String);
 
 #[derive(
-    Clone,
-    Hash,
-    Eq,
-    PartialEq,
-    Debug,
-    PartialOrd,
-    Ord,
-    serde::Deserialize,
-    serde::Serialize,
-    derive_more::Display,
-    derive_more::AsRef,
-    utoipa::ToSchema,
+    Clone, Hash, Eq, PartialEq, Debug, PartialOrd, Ord, derive_more::Display, derive_more::AsRef,
 )]
-/// DB's absolute index/table name (with keyspace) for which index should be build
-#[schema(example = "vector_benchmark.vector_items")]
 pub struct IndexId(String);
 
 impl IndexId {
@@ -100,6 +90,7 @@ impl SerializeValue for IndexId {
     derive_more::Display,
     derive_more::From,
     serde::Deserialize,
+    serde::Serialize,
     utoipa::ToSchema,
 )]
 /// A keyspace name in a db
