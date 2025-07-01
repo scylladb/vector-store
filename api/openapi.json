@@ -14,11 +14,11 @@
         "tags": [
           "scylla-vector-store-index"
         ],
-        "description": "Get list of current indexes",
+        "description": "Returns the list of indexes managed by the Vector Store node. The list includes indexes in any state (initializing, available/built, destroying). Due to synchronization delays, it may temporarily differ from the list of vector indexes inside ScyllaDB.",
         "operationId": "get_indexes",
         "responses": {
           "200": {
-            "description": "List of indexes",
+            "description": "List of indexes.",
             "content": {
               "application/json": {
                 "schema": {
@@ -92,13 +92,13 @@
         "tags": [
           "scylla-vector-store-index"
         ],
-        "description": "Get a number of elements for a specific index",
+        "description": "Returns the number of embeddings indexed by a specific vector index. Reflects only available embeddings and excludes any 'tombstones' (elements marked for deletion but still present in the index structure).",
         "operationId": "get_index_count",
         "parameters": [
           {
             "name": "keyspace",
             "in": "path",
-            "description": "A keyspace name for the index",
+            "description": "The name of the ScyllaDB keyspace containing the index.",
             "required": true,
             "schema": {
               "$ref": "#/components/schemas/KeyspaceName"
@@ -107,7 +107,7 @@
           {
             "name": "index",
             "in": "path",
-            "description": "An index name",
+            "description": "The name of the ScyllaDB vector index.",
             "required": true,
             "schema": {
               "$ref": "#/components/schemas/IndexName"
@@ -116,9 +116,9 @@
         ],
         "responses": {
           "200": {
-            "description": "Index count",
+            "description": "Number of embeddings in the index.",
             "content": {
-              "text/plain": {
+              "application/json": {
                 "schema": {
                   "type": "integer",
                   "minimum": 0
@@ -188,7 +188,7 @@
       },
       "IndexName": {
         "type": "string",
-        "description": "A name of the table with vectors in a db"
+        "description": "A name of the vector index in a db."
       },
       "InfoResponse": {
         "type": "object",
@@ -207,7 +207,7 @@
       },
       "KeyspaceName": {
         "type": "string",
-        "description": "A keyspace name in a db"
+        "description": "A keyspace name in a db."
       },
       "Limit": {
         "type": "integer",

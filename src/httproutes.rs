@@ -110,9 +110,11 @@ pub struct IndexInfo {
     get,
     path = "/api/v1/indexes",
     tag = "scylla-vector-store-index",
-    description = "Get list of current indexes",
+    description = "Returns the list of indexes managed by the Vector Store node. \
+    The list includes indexes in any state (initializing, available/built, destroying). \
+    Due to synchronization delays, it may temporarily differ from the list of vector indexes inside ScyllaDB.",
     responses(
-        (status = 200, description = "List of indexes", body = [IndexInfo])
+        (status = 200, description = "List of indexes.", body = [IndexInfo])
     )
 )]
 #[axum::debug_handler] // Add this line
@@ -133,13 +135,15 @@ async fn get_indexes(State(engine): State<Sender<Engine>>) -> response::Json<Vec
     get,
     path = "/api/v1/indexes/{keyspace}/{index}/count",
     tag = "scylla-vector-store-index",
-    description = "Get a number of elements for a specific index",
+    description = "Returns the number of embeddings indexed by a specific vector index. \
+    Reflects only available embeddings and excludes any 'tombstones' \
+    (elements marked for deletion but still present in the index structure).",
     params(
-        ("keyspace" = KeyspaceName, Path, description = "A keyspace name for the index"),
-        ("index" = IndexName, Path, description = "An index name")
+        ("keyspace" = KeyspaceName, Path, description = "The name of the ScyllaDB keyspace containing the index."),
+        ("index" = IndexName, Path, description = "The name of the ScyllaDB vector index.")
     ),
     responses(
-        (status = 200, description = "Index count", body = usize)
+        (status = 200, description = "Number of embeddings in the index.", body = usize, content_type = "application/json"),
     )
 )]
 async fn get_index_count(
