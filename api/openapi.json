@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "ScyllaDB Vector Store API",
-    "description": "REST API for ScyllaDB Vector Store - provides vector search and index management",
+    "description": "REST API for ScyllaDB Vector Store nodes. Provides capabilities for executing vector search queries, managing indexes, and checking status of Vector Store nodes.",
     "license": {
       "name": "LicenseRef-ScyllaDB-Source-Available-1.0"
     },
@@ -11,6 +11,9 @@
   "paths": {
     "/api/v1/indexes": {
       "get": {
+        "tags": [
+          "scylla-vector-store-index"
+        ],
         "description": "Get list of current indexes",
         "operationId": "get_indexes",
         "responses": {
@@ -32,6 +35,9 @@
     },
     "/api/v1/indexes/{keyspace}/{index}/ann": {
       "post": {
+        "tags": [
+          "scylla-vector-store-index"
+        ],
         "description": "Ann search in the index",
         "operationId": "post_index_ann",
         "parameters": [
@@ -83,6 +89,9 @@
     },
     "/api/v1/indexes/{keyspace}/{index}/count": {
       "get": {
+        "tags": [
+          "scylla-vector-store-index"
+        ],
         "description": "Get a number of elements for a specific index",
         "operationId": "get_index_count",
         "parameters": [
@@ -122,6 +131,9 @@
     },
     "/api/v1/info": {
       "get": {
+        "tags": [
+          "scylla-vector-store-info"
+        ],
         "description": "Get application info",
         "operationId": "get_info",
         "responses": {
@@ -230,8 +242,12 @@
   },
   "tags": [
     {
-      "name": "scylla-vector-store",
-      "description": "Scylla Vector Store (API will change after design)"
+      "name": "scylla-vector-store-index",
+      "description": "Operations for managing ScyllaDB Vector Store indexes, including listing, counting, and searching."
+    },
+    {
+      "name": "scylla-vector-store-info",
+      "description": "Endpoints providing general information and status about the ScyllaDB Vector Store service."
     }
   ]
 }

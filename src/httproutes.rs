@@ -45,13 +45,22 @@ use utoipa_swagger_ui::SwaggerUi;
 #[openapi(
      info(
         title = "ScyllaDB Vector Store API",
-        description = "REST API for ScyllaDB Vector Store - provides vector search and index management",
+        description = "REST API for ScyllaDB Vector Store nodes. Provides capabilities for executing vector search queries, \
+        managing indexes, and checking status of Vector Store nodes.",
         license(
             name = "LicenseRef-ScyllaDB-Source-Available-1.0"
         ),
     ),
     tags(
-        (name = "scylla-vector-store", description = "Scylla Vector Store (API will change after design)")
+        (
+            name = "scylla-vector-store-index",
+            description = "Operations for managing ScyllaDB Vector Store indexes, including listing, counting, and searching."
+        ),
+        (
+            name = "scylla-vector-store-info",
+            description = "Endpoints providing general information and status about the ScyllaDB Vector Store service."
+        )
+
     ),
     components(
         schemas(
@@ -88,6 +97,7 @@ fn new_open_api_router() -> (Router<Sender<Engine>>, utoipa::openapi::OpenApi) {
 #[utoipa::path(
     get,
     path = "/api/v1/indexes",
+    tag = "scylla-vector-store-index",
     description = "Get list of current indexes",
     responses(
         (status = 200, description = "List of indexes", body = [IndexId])
@@ -100,6 +110,7 @@ async fn get_indexes(State(engine): State<Sender<Engine>>) -> response::Json<Vec
 #[utoipa::path(
     get,
     path = "/api/v1/indexes/{keyspace}/{index}/count",
+    tag = "scylla-vector-store-index",
     description = "Get a number of elements for a specific index",
     params(
         ("keyspace" = KeyspaceName, Path, description = "A keyspace name for the index"),
@@ -144,6 +155,7 @@ pub struct PostIndexAnnResponse {
 #[utoipa::path(
     post,
     path = "/api/v1/indexes/{keyspace}/{index}/ann",
+    tag = "scylla-vector-store-index",
     description = "Ann search in the index",
     params(
         ("keyspace" = KeyspaceName, Path, description = "Keyspace name for the table to search"),
@@ -280,6 +292,7 @@ pub struct InfoResponse {
 #[utoipa::path(
     get,
     path = "/api/v1/info",
+    tag = "scylla-vector-store-info",
     description = "Get application info",
     responses(
         (status = 200, description = "Application info", body = InfoResponse)
