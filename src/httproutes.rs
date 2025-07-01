@@ -145,6 +145,7 @@ async fn get_indexes(State(engine): State<Sender<Engine>>) -> response::Json<Vec
     ),
     responses(
         (status = 200, description = "Number of embeddings in the index.", body = usize, content_type = "application/json"),
+        // TODO: implement 404
         (status = 404, description = "Index not found. Possible causes: index does not exist, or is not built yet."),
         (status = 500, description = "Counting error. Possible causes: internal error, or database issues."),
     )

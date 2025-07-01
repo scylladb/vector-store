@@ -72,7 +72,7 @@
         },
         "responses": {
           "200": {
-            "description": "Ann search result",
+            "description": "Ann search result.",
             "content": {
               "application/json": {
                 "schema": {
@@ -82,10 +82,13 @@
             }
           },
           "400": {
-            "description": "Invalid request, wrong embedding data type"
+            "description": "Bad request. Possible causes: invalid embedding size, malformed input, or missing required fields."
           },
           "404": {
-            "description": "Index not found"
+            "description": "Index not found. Possible causes: index does not exist, or is not built yet."
+          },
+          "500": {
+            "description": "Ann search error. Possible causes: internal error, or search engine issues."
           }
         }
       }
@@ -130,10 +133,10 @@
             }
           },
           "404": {
-            "description": "Index not found"
+            "description": "Index not found. Possible causes: index does not exist, or is not built yet."
           },
           "500": {
-            "description": "Counting error"
+            "description": "Counting error. Possible causes: internal error, or database issues."
           }
         }
       }
