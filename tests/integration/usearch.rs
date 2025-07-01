@@ -73,9 +73,7 @@ async fn setup_store() -> (IndexMetadata, HttpClient, DbBasic, impl Sized) {
     .await
     .unwrap();
 
-    let client = HttpClient::new(addr);
-
-    return (index, client, db, server);
+    (index, HttpClient::new(addr), db, server)
 }
 
 async fn wait_for<F, Fut>(mut condition: F, msg: &str)
@@ -89,7 +87,7 @@ where
         }
     })
     .await
-    .expect(format!("Timeout on: {}", msg).as_str());
+    .unwrap_or_else(|_| panic!("Timeout on: {}", msg))
 }
 
 #[tokio::test]
