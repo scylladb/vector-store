@@ -146,11 +146,11 @@
         "tags": [
           "scylla-vector-store-info"
         ],
-        "description": "Get application info",
+        "description": "Returns information about the Vector Store service serving this API.",
         "operationId": "get_info",
         "responses": {
           "200": {
-            "description": "Application info",
+            "description": "Vector Store service information.",
             "content": {
               "application/json": {
                 "schema": {
@@ -168,7 +168,7 @@
       "Distance": {
         "type": "number",
         "format": "float",
-        "description": "Distance between embeddings"
+        "description": "Distance between embedding vectors measured using the distance function defined while creating the index."
       },
       "Embedding": {
         "type": "array",
@@ -176,7 +176,7 @@
           "type": "number",
           "format": "float"
         },
-        "description": "Embedding vector"
+        "description": "The embedding vector to use for the Approximate Nearest Neighbor search. The format of data must match the quantization of the index."
       },
       "IndexInfo": {
         "type": "object",
@@ -260,7 +260,7 @@
             },
             "propertyNames": {
               "type": "string",
-              "description": "Name of the column in a db table"
+              "description": "Name of the column in a db table."
             }
           }
         }

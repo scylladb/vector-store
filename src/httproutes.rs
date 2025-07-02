@@ -334,9 +334,9 @@ pub struct InfoResponse {
     get,
     path = "/api/v1/info",
     tag = "scylla-vector-store-info",
-    description = "Get application info",
+    description = "Returns information about the Vector Store service serving this API.",
     responses(
-        (status = 200, description = "Application info", body = InfoResponse)
+        (status = 200, description = "Vector Store service information.", body = InfoResponse)
     )
 )]
 async fn get_info() -> response::Json<InfoResponse> {
