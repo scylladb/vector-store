@@ -18,7 +18,7 @@
         "operationId": "get_indexes",
         "responses": {
           "200": {
-            "description": "List of indexes.",
+            "description": "Successful operation. Returns an array of index information representing all indexes managed by the Vector Store.",
             "content": {
               "application/json": {
                 "schema": {
@@ -29,6 +29,9 @@
                 }
               }
             }
+          },
+          "500": {
+            "description": "Internal server error. Possible causes: database issues or unexpected failures."
           }
         }
       }
@@ -38,13 +41,13 @@
         "tags": [
           "scylla-vector-store-index"
         ],
-        "description": "Ann search in the index",
+        "description": "Performs an Approximate Nearest Neighbor (ANN) search using the specified index. Returns the vectors most similar to the provided embedding. The maximum number of results is controlled by the optional 'limit' parameter in the payload. The similarity metric is determined at index creation and cannot be changed per query.",
         "operationId": "post_index_ann",
         "parameters": [
           {
             "name": "keyspace",
             "in": "path",
-            "description": "Keyspace name for the table to search",
+            "description": "Name of the ScyllaDB keyspace containing the searched table.",
             "required": true,
             "schema": {
               "$ref": "#/components/schemas/KeyspaceName"
@@ -53,7 +56,7 @@
           {
             "name": "index",
             "in": "path",
-            "description": "Index to search",
+            "description": "The name of the ScyllaDB vector index within the specified keyspace to perform the search on.",
             "required": true,
             "schema": {
               "$ref": "#/components/schemas/IndexName"
@@ -72,7 +75,7 @@
         },
         "responses": {
           "200": {
-            "description": "Ann search result.",
+            "description": "Successful ANN search. Returns a list of primary keys and their corresponding distances for the most similar vectors found.",
             "content": {
               "application/json": {
                 "schema": {
@@ -122,7 +125,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Number of embeddings in the index.",
+            "description": "Successful count operation. Returns the total number of embeddings currently stored in the index.",
             "content": {
               "application/json": {
                 "schema": {

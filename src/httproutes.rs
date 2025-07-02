@@ -96,7 +96,7 @@ fn new_open_api_router() -> (Router<Sender<Engine>>, utoipa::openapi::OpenApi) {
 }
 
 #[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema, PartialEq, Debug)]
-/// Defines the data type and precision used for storing and processing embedding vectors in the index.
+/// Data type and precision used for storing and processing embedding vectors in the index.
 pub enum Quantization {
     F32,
 }
@@ -116,7 +116,12 @@ pub struct IndexInfo {
     The list includes indexes in any state (initializing, available/built, destroying). \
     Due to synchronization delays, it may temporarily differ from the list of vector indexes inside ScyllaDB.",
     responses(
-        (status = 200, description = "List of indexes.", body = [IndexInfo])
+        (
+            status = 200,
+            description = "Successful operation. Returns an array of index information representing all indexes managed by the Vector Store.",
+            body = [IndexInfo]
+        ),
+        (status = 500, description = "Internal server error. Possible causes: database issues or unexpected failures."),
     )
 )]
 #[axum::debug_handler] // Add this line
@@ -145,7 +150,12 @@ async fn get_indexes(State(engine): State<Sender<Engine>>) -> response::Json<Vec
         ("index" = IndexName, Path, description = "The name of the ScyllaDB vector index.")
     ),
     responses(
-        (status = 200, description = "Number of embeddings in the index.", body = usize, content_type = "application/json"),
+        (
+            status = 200,
+            description = "Successful count operation. Returns the total number of embeddings currently stored in the index.",
+            body = usize,
+            content_type = "application/json"
+        ),
         (status = 404, description = "Index not found. Possible causes: index does not exist, or is not built yet."),
         (status = 500, description = "Counting error. Possible causes: internal error, or database issues."),
     )
@@ -186,15 +196,21 @@ pub struct PostIndexAnnResponse {
     post,
     path = "/api/v1/indexes/{keyspace}/{index}/ann",
     tag = "scylla-vector-store-index",
-    description = "Ann search in the index",
+    description = "Performs an Approximate Nearest Neighbor (ANN) search using the specified index. \
+Returns the vectors most similar to the provided embedding. \
+The maximum number of results is controlled by the optional 'limit' parameter in the payload. \
+The similarity metric is determined at index creation and cannot be changed per query.",
     params(
-        ("keyspace" = KeyspaceName, Path, description = "Keyspace name for the table to search"),
-        ("index" = IndexName, Path, description = "Index to search")
+        ("keyspace" = KeyspaceName, Path, description = "Name of the ScyllaDB keyspace containing the searched table."),
+        ("index" = IndexName, Path, description = "The name of the ScyllaDB vector index within the specified keyspace to perform the search on.")
     ),
     request_body = PostIndexAnnRequest,
     responses(
-        (status = 200, description = "Ann search result.", body = PostIndexAnnResponse),
-        // TODO: implement 404
+        (
+            status = 200,
+            description = "Successful ANN search. Returns a list of primary keys and their corresponding distances for the most similar vectors found.",
+            body = PostIndexAnnResponse
+        ),
         (status = 400, description = "Bad request. Possible causes: invalid embedding size, malformed input, or missing required fields."),
         (status = 404, description = "Index not found. Possible causes: index does not exist, or is not built yet."),
         (status = 500, description = "Ann search error. Possible causes: internal error, or search engine issues."),
