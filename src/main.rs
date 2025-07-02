@@ -27,30 +27,26 @@ async fn main() -> anyhow::Result<()> {
         info::Info::version()
     );
 
-    let scylla_usearch_addr = dotenvy::var("SCYLLA_USEARCH_URI")
+    let vector_store_addr = dotenvy::var("VECTOR_STORE_URI")
         .unwrap_or("127.0.0.1:6080".to_string())
         .to_socket_addrs()?
         .next()
-        .ok_or(anyhow!(
-            "Unable to parse SCYLLA_USEARCH_URI env (host:port)"
-        ))?
+        .ok_or(anyhow!("Unable to parse VECTOR_STORE_URI env (host:port)"))?
         .into();
 
-    let scylladb_uri = dotenvy::var("SCYLLADB_URI")
+    let scylladb_uri = dotenvy::var("VECTOR_STORE_SCYLLADB_URI")
         .unwrap_or("127.0.0.1:9042".to_string())
         .into();
 
-    let background_threads = dotenvy::var("SCYLLA_USEARCH_BACKGROUND_THREADS")
+    let background_threads = dotenvy::var("VECTOR_STORE_THREADS")
         .ok()
         .and_then(|v| v.parse().ok());
 
-    let opensearch_addr = dotenvy::var("OPENSEARCH_ADDRESS").ok();
-    let opensearch_port = dotenvy::var("OPENSEARCH_PORT").ok();
+    let opensearch_addr = dotenvy::var("VECTOR_STORE_OPENSEARCH_URI").ok();
 
-    let index_factory = if let (Some(addr), Some(port)) = (opensearch_addr, opensearch_port) {
-        let opensearch_addr = format!("http://{addr}:{port}");
-        tracing::info!("Using OpenSearch index factory at {opensearch_addr}");
-        vector_store::new_index_factory_opensearch(opensearch_addr)?
+    let index_factory = if let Some(addr) = opensearch_addr {
+        tracing::info!("Using OpenSearch index factory at {addr}");
+        vector_store::new_index_factory_opensearch(addr)?
     } else {
         tracing::info!("Using Usearch index factory");
         vector_store::new_index_factory_usearch()?
@@ -58,7 +54,7 @@ async fn main() -> anyhow::Result<()> {
 
     let db_actor = vector_store::new_db(scylladb_uri).await?;
     let (_server_actor, addr) = vector_store::run(
-        scylla_usearch_addr,
+        vector_store_addr,
         background_threads,
         db_actor,
         index_factory,

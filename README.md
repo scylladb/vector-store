@@ -7,12 +7,14 @@ This is an indexing service for ScyllaDB for vector searching functionality.
 All configuration of the Vector Store is done using environment variables. The
 service supports also `.env` files. Supported parameters:
 
-- `SCYLLADB_URI`: `ip:port`,  a listening port of ScyllaDB server, default
+- `VECTOR_STORE_SCYLLADB_URI`: `ip:port`, a connection endpoint to ScyllaDB server, default
   `127.0.0.1:9042`
-- `SCYLLA_USEARCH_URI`: `ip:port`,  a listening port of HTTP API, default
+- `VECTOR_STORE_URI`: `ip:port`, a bind address and a listening port of HTTP API, default
   `127.0.0.1:6080`
-- `SCYLLA_USEARCH_BACKGROUND_THREADS`: `unsigned integer`, how many cores
-  should be used for usearch indexing, default all cores
+- `VECTOR_STORE_OPENSEARCH_URI`: `ip:port`, a connection endpoint to OpenSearch instance HTTP API,
+  if not set the service uses USearch library for indexing
+- `VECTOR_STORE_THREADS`: `unsigned integer`, how many threads
+  should be used for Vector Store indexing, default number of cores
 
 ## Development builds
 
