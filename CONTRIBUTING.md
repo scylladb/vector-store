@@ -1,43 +1,68 @@
-# Contributing to vector-store
+# Contributing to Vector Store
 
-## Pre-review checklist
+Thank you for your interest in contributing! To help us maintain a high-quality codebase, please follow the guidelines below.
 
-Before submitting a PR with your patch for review, make sure it will satisfy
-the following requirements:
+## Pre-Review Checklist
 
-- Your patch is split into commits. Each commit introduces one, logically
-  coherent change to the codebase.
-- Commit messages should clearly explain what is being changed in the commit,
-  and what is the reason for the change.
-- New features and bug fixes are covered with tests.
-- Every commit in your patch compiles, passes static checks and passes all
-  tests.
-- The description of your PR explains the reason and motivation for the patch.
-- If patch fixes an issue, there should be a Fixes: #XYZ line at the end of
-  PR's description.
+Before submitting a pull request (PR), ensure your contribution meets these requirements:
 
-In case any of those requirements can't be met, please include the reason for
-this in your PR's description. A maintainer can make an exception and merge the
-PR if the reason is justified.
+- **Single Commit:** PR should consist of a single commit. If patch requires multiple logical changes, split them into separate PRs.
+- **Commit Quality:** Each commit should introduce one logically coherent change. Commit messages must clearly describe what is being changed and why.
+- **Commit Issue Closing Reference** If commit fixes/closes an issue, add a `Fixes: #XYZ` line at the end of commit message.
+- **Commit Issue References:** For related issues or discussions that are not directly fixed by the commit, add a `Reference: #XYZ` line at the end of commit message.
+- **Testing:** All new features and bug fixes must include appropriate tests.
+- **PR Checks:** Every PR must pass all CI checks, including compilation, test execution, formatting, and static code analysis.
+- **PR Description:** Clearly explain the motivation and reasoning behind your changes in the PR description.
 
-Review and merging
+If you cannot meet any of these requirements, explain why in your PR description. Maintainers may grant exceptions if justified.
 
-After submitting a PR which meets all criteria from the previous section, it
-will be reviewed by one or more maintainers. When the maintainers become
-satisfied with your contribution, one of them will merge it.
+## Review and Merging
 
-Currently, the list of people maintaining the driver include:
+After submitting a compliant PR, it will be reviewed by one or more maintainers. Once approved, a maintainer will merge your contribution.
 
+**Current maintainers:**
 - Paweł Pery (@ewienik)
 
-## Static checks
+## Static Checks
 
-TODO
+To ensure code quality, we use several static analysis tools. All static checks must pass before merging.
+
+**Install required Rust components:**
+```sh
+rustup component add rustfmt clippy
+```
+
+**Verify installation:**
+```sh
+rustc --version
+cargo fmt --version
+cargo clippy --version
+```
+
+**Run static checks:**
+
+- **Format Check:** Verify code formatting (without making changes):
+  ```sh
+  cargo fmt --all -- --check
+  ```
+- **Clippy Lint:** Run the Rust linter:
+  ```sh
+  cargo clippy --all-targets
+  ```
+
+Static checks run automatically in CI. All warnings are treated as errors (`RUSTFLAGS=-Dwarnings`). These checks must pass before merging.
 
 ## Testing
 
-TODO
+The project includes unit and integration tests to ensure correctness.
 
-## CI
+**Run all tests with verbose output:**
+```sh
+cargo test --verbose
+```
 
-TODO
+## Continuous Integration (CI)
+
+We use GitHub Actions for CI, configured in `rust.yml`.
+
+**All checks must pass before a pull request can be merged.**
