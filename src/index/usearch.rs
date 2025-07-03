@@ -13,12 +13,13 @@ use crate::IndexId;
 use crate::Limit;
 use crate::PrimaryKey;
 use crate::SpaceType;
+use crate::index::actor::AnnError;
 use crate::index::actor::AnnR;
 use crate::index::actor::CountR;
 use crate::index::actor::Index;
+use crate::index::validator::validate_embedding_dimensions;
 use anyhow::anyhow;
 use bimap::BiMap;
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicU64;
@@ -272,21 +273,12 @@ async fn ann(
     dimensions: Dimensions,
     limit: Limit,
 ) {
-    let Some(embedding_len) = NonZeroUsize::new(embedding.0.len()) else {
-        tx_ann
-            .send(Err(anyhow!("ann: embedding dimensions == 0")))
-            .unwrap_or_else(|_| trace!("ann: unable to send error response (zero dimensions)"));
-        return;
-    };
-    if embedding_len != dimensions.0 {
-        tx_ann
-            .send(Err(anyhow!(
-                "ann: wrong embedding dimensions: {embedding_len} != {dimensions}",
-            )))
-            .unwrap_or_else(|_| trace!("ann: unable to send error response (wrong dimensions)"));
+    if let Err(e) = validate_embedding_dimensions(&embedding, dimensions) {
+        tx_ann.send(Err(e)).unwrap_or_else(|_| {
+            trace!("ann: unable to send error response (embedding validation)")
+        });
         return;
     }
-
     let (tx, rx) = oneshot::channel();
     rayon::spawn(move || {
         _ = tx.send(idx.read().unwrap().search(&embedding.0, limit.0.get()));
@@ -295,8 +287,11 @@ async fn ann(
     tx_ann
         .send(
             rx.await
-                .map_err(|err| anyhow!("ann: unable to recv matches: {err}"))
-                .and_then(|matches| matches.map_err(|err| anyhow!("ann: search failed: {err}")))
+                .map_err(|err| AnnError::OtherError(anyhow!("ann: unable to recv matches: {err}")))
+                .and_then(|matches| {
+                    matches
+                        .map_err(|err| AnnError::OtherError(anyhow!("ann: search failed: {err}")))
+                })
                 .and_then(|matches| {
                     let primary_keys = {
                         let keys = keys.read().unwrap();
@@ -306,9 +301,11 @@ async fn ann(
                             .map(|key| {
                                 keys.get_by_right(&key.into())
                                     .cloned()
-                                    .ok_or(anyhow!("not defined primary key column {key}"))
+                                    .ok_or(AnnError::OtherError(anyhow!(
+                                        "not defined primary key column {key}"
+                                    )))
                             })
-                            .collect::<anyhow::Result<_>>()?
+                            .collect::<anyhow::Result<_, AnnError>>()?
                     };
                     let distances = matches
                         .distances
@@ -331,6 +328,7 @@ mod tests {
     use super::*;
     use crate::index::IndexExt;
     use scylla::value::CqlValue;
+    use std::num::NonZeroUsize;
     use std::time::Duration;
     use tokio::task;
     use tokio::time;

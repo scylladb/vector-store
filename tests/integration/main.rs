@@ -16,6 +16,9 @@ mod info;
 mod openapi;
 
 use std::sync::Once;
+use std::time::Duration;
+use tokio::task;
+use tokio::time;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
@@ -29,4 +32,18 @@ fn enable_tracing() {
             .with(fmt::layer().with_target(false))
             .init();
     });
+}
+
+async fn wait_for<F, Fut>(mut condition: F, msg: &str)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    time::timeout(Duration::from_secs(5), async {
+        while !condition().await {
+            task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("Timeout on: {msg}"))
 }

@@ -84,6 +84,9 @@
               }
             }
           },
+          "400": {
+            "description": "Bad request. Possible causes: invalid embedding size, malformed input, or missing required fields."
+          },
           "404": {
             "description": "Index not found. Possible causes: index does not exist, or is not built yet."
           },

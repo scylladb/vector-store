@@ -8,13 +8,11 @@ use crate::db_basic::Index;
 use crate::db_basic::Table;
 use crate::httpclient::HttpClient;
 use crate::mock_opensearch;
+use crate::wait_for;
 use ::time::OffsetDateTime;
 use scylla::value::CqlValue;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
-use std::time::Duration;
-use tokio::task;
-use tokio::time;
 use uuid::Uuid;
 use vector_store::IndexMetadata;
 
@@ -98,13 +96,11 @@ async fn simple_create_search_delete_index() {
     )
     .unwrap();
 
-    time::timeout(Duration::from_secs(10), async {
-        while client.count(&index).await != Some(3) {
-            task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    wait_for(
+        || async { client.count(&index).await == Some(3) },
+        "Waiting for index to be added to the store",
+    )
+    .await;
 
     let indexes = client.indexes().await;
     assert_eq!(indexes.len(), 1);
@@ -128,11 +124,9 @@ async fn simple_create_search_delete_index() {
     db.del_index(&index.keyspace_name, &index.index_name)
         .unwrap();
 
-    time::timeout(Duration::from_secs(10), async {
-        while !client.indexes().await.is_empty() {
-            task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    wait_for(
+        || async { client.indexes().await.is_empty() },
+        "Waiting for index to be removed from the store",
+    )
+    .await;
 }
