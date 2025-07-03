@@ -4,23 +4,20 @@
  */
 
 use crate::db_basic;
+use crate::db_basic::DbBasic;
 use crate::db_basic::Index;
 use crate::db_basic::Table;
 use crate::httpclient::HttpClient;
+use crate::wait_for;
 use ::time::OffsetDateTime;
+use reqwest::StatusCode;
 use scylla::value::CqlValue;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
-use std::time::Duration;
-use tokio::task;
-use tokio::time;
 use uuid::Uuid;
 use vector_store::IndexMetadata;
 
-#[tokio::test]
-async fn simple_create_search_delete_index() {
-    crate::enable_tracing();
-
+async fn setup_store() -> (IndexMetadata, HttpClient, DbBasic, impl Sized) {
     let (db_actor, db) = db_basic::new();
 
     let index = IndexMetadata {
@@ -36,18 +33,6 @@ async fn simple_create_search_delete_index() {
         version: Uuid::new_v4().into(),
     };
 
-    let index_factory = vector_store::new_index_factory_usearch().unwrap();
-
-    let (_server_actor, addr) = vector_store::run(
-        SocketAddr::from(([127, 0, 0, 1], 0)).into(),
-        Some(1),
-        db_actor,
-        index_factory,
-    )
-    .await
-    .unwrap();
-    let client = HttpClient::new(addr);
-
     db.add_table(
         index.keyspace_name.clone(),
         index.table_name.clone(),
@@ -59,6 +44,7 @@ async fn simple_create_search_delete_index() {
         },
     )
     .unwrap();
+
     db.add_index(
         &index.keyspace_name,
         index.index_name.clone(),
@@ -72,6 +58,27 @@ async fn simple_create_search_delete_index() {
         },
     )
     .unwrap();
+
+    let index_factory = vector_store::new_index_factory_usearch().unwrap();
+
+    let (server, addr) = vector_store::run(
+        SocketAddr::from(([127, 0, 0, 1], 0)).into(),
+        Some(1),
+        db_actor,
+        index_factory,
+    )
+    .await
+    .unwrap();
+
+    (index, HttpClient::new(addr), db, server)
+}
+
+#[tokio::test]
+async fn simple_create_search_delete_index() {
+    crate::enable_tracing();
+
+    let (index, client, db, _server) = setup_store().await;
+
     db.insert_values(
         &index.keyspace_name,
         &index.table_name,
@@ -96,13 +103,11 @@ async fn simple_create_search_delete_index() {
     )
     .unwrap();
 
-    time::timeout(Duration::from_secs(10), async {
-        while client.count(&index).await != Some(3) {
-            task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    wait_for(
+        || async { client.count(&index).await == Some(3) },
+        "Waiting for 3 vectors to be indexed",
+    )
+    .await;
 
     let indexes = client.indexes().await;
     assert_eq!(indexes.len(), 1);
@@ -126,13 +131,11 @@ async fn simple_create_search_delete_index() {
     db.del_index(&index.keyspace_name, &index.index_name)
         .unwrap();
 
-    time::timeout(Duration::from_secs(10), async {
-        while !client.indexes().await.is_empty() {
-            task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    wait_for(
+        || async { client.indexes().await.is_empty() },
+        "Waiting for all indexes to be removed from the store",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -193,13 +196,11 @@ async fn failed_db_index_create() {
     )
     .unwrap();
 
-    time::timeout(Duration::from_secs(5), async {
-        while client.indexes().await.is_empty() {
-            task::yield_now().await;
-        }
-    })
-    .await
-    .expect("Timeout waiting for index creation success");
+    wait_for(
+        || async { !client.indexes().await.is_empty() },
+        "Waiting for index to be added to the store",
+    )
+    .await;
 
     db.add_index(
         &index.keyspace_name,
@@ -215,13 +216,11 @@ async fn failed_db_index_create() {
     )
     .unwrap();
 
-    time::timeout(Duration::from_secs(5), async {
-        while client.indexes().await.len() != 2 {
-            task::yield_now().await;
-        }
-    })
-    .await
-    .expect("Timeout waiting for index creation success");
+    wait_for(
+        || async { client.indexes().await.len() == 2 },
+        "Waiting for 2nd index to be added to the store",
+    )
+    .await;
 
     let indexes = client.indexes().await;
     assert_eq!(indexes.len(), 2);
@@ -242,13 +241,11 @@ async fn failed_db_index_create() {
     )
     .unwrap();
 
-    time::timeout(Duration::from_secs(5), async {
-        while client.indexes().await.len() != 3 {
-            task::yield_now().await;
-        }
-    })
-    .await
-    .expect("Timeout waiting for index creation success");
+    wait_for(
+        || async { client.indexes().await.len() == 3 },
+        "Waiting for 3rd index to be added to the store",
+    )
+    .await;
 
     let indexes = client.indexes().await;
     assert_eq!(indexes.len(), 3);
@@ -259,16 +256,36 @@ async fn failed_db_index_create() {
     db.del_index(&index.keyspace_name, &"ann2".to_string().into())
         .unwrap();
 
-    time::timeout(Duration::from_secs(5), async {
-        while client.indexes().await.len() != 2 {
-            task::yield_now().await;
-        }
-    })
-    .await
-    .expect("Timeout waiting for index creation success");
+    wait_for(
+        || async { client.indexes().await.len() == 2 },
+        "Waiting for index to be removed from the store",
+    )
+    .await;
 
     let indexes = client.indexes().await;
     assert_eq!(indexes.len(), 2);
     assert!(indexes.contains(&vector_store::IndexInfo::new("vector", "ann")));
     assert!(indexes.contains(&vector_store::IndexInfo::new("vector", "ann3")));
+}
+
+#[tokio::test]
+async fn ann_returns_bad_request_when_provided_vector_size_is_not_eq_index_dimensions() {
+    crate::enable_tracing();
+    let (index, client, _db, _server) = setup_store().await;
+
+    wait_for(
+        || async { !client.indexes().await.is_empty() },
+        "Waiting for index to be added to the store",
+    )
+    .await;
+
+    let result = client
+        .post_ann(
+            &index,
+            vec![1.0, 2.0].into(), // Only 2 dimensions, should be 3 (index.dimensions)
+            NonZeroUsize::new(1).unwrap().into(),
+        )
+        .await;
+
+    assert_eq!(result.status(), StatusCode::BAD_REQUEST);
 }

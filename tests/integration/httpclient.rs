@@ -48,7 +48,21 @@ impl HttpClient {
         limit: Limit,
     ) -> (HashMap<ColumnName, Vec<Value>>, Vec<Distance>) {
         let resp = self
-            .client
+            .post_ann(index, embedding, limit)
+            .await
+            .json::<PostIndexAnnResponse>()
+            .await
+            .unwrap();
+        (resp.primary_keys, resp.distances)
+    }
+
+    pub(crate) async fn post_ann(
+        &self,
+        index: &IndexMetadata,
+        embedding: Embedding,
+        limit: Limit,
+    ) -> reqwest::Response {
+        self.client
             .post(format!(
                 "{}/indexes/{}/{}/ann",
                 self.url_api, index.keyspace_name, index.index_name
@@ -57,10 +71,6 @@ impl HttpClient {
             .send()
             .await
             .unwrap()
-            .json::<PostIndexAnnResponse>()
-            .await
-            .unwrap();
-        (resp.primary_keys, resp.distances)
     }
 
     pub(crate) async fn count(&self, index: &IndexMetadata) -> Option<usize> {
