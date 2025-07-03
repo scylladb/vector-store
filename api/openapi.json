@@ -161,6 +161,27 @@
           }
         }
       }
+    },
+    "/api/v1/status": {
+      "get": {
+        "tags": [
+          "scylla-vector-store-info"
+        ],
+        "description": "Returns the current operational status of the Vector Store node.",
+        "operationId": "get_status",
+        "responses": {
+          "200": {
+            "description": "Successful operation. Returns the current operational status of the Vector Store node.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Status"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -270,6 +291,24 @@
         "description": "Data type and precision used for storing and processing embedding vectors in the index.",
         "enum": [
           "F32"
+        ]
+      },
+      "Status": {
+        "type": "string",
+        "description": "Operational status of the Vector Store node.",
+        "enum": [
+          "INITIALIZING",
+          "CONNECTING_TO_DB",
+          "DISCOVERING_INDEXES",
+          "INDEXING_EMBEDDINGS",
+          "SERVING"
+        ],
+        "x-enum-descriptions": [
+          "The node is starting up.",
+          "The node is establishing a connection to ScyllaDB.",
+          "The node is discovering available vector indexes in ScyllaDB.",
+          "The node is indexing embeddings into the discovered vector indexes.",
+          "The node has completed the initial database scan and built the indexes defined at that time. It is now monitoring the database for changes."
         ]
       }
     }

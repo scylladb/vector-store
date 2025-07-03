@@ -49,6 +49,7 @@ use utoipa::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 use utoipa_swagger_ui::SwaggerUi;
+use vector_store_macros::ToEnumSchema;
 
 #[derive(OpenApi)]
 #[openapi(
@@ -112,7 +113,8 @@ fn new_open_api_router() -> (Router<RoutesInnerState>, utoipa::openapi::OpenApi)
                 .routes(routes!(get_indexes))
                 .routes(routes!(get_index_count))
                 .routes(routes!(post_index_ann))
-                .routes(routes!(get_info)),
+                .routes(routes!(get_info))
+                .routes(routes!(get_status)),
         )
         .split_for_parts()
 }
@@ -436,6 +438,35 @@ async fn get_info() -> response::Json<InfoResponse> {
         version: Info::version().to_string(),
         service: Info::name().to_string(),
     })
+}
+
+#[derive(ToEnumSchema, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")] // This line makes all variants uppercase in the schema
+/// Operational status of the Vector Store node.
+enum Status {
+    /// The node is starting up.
+    Initializing,
+    /// The node is establishing a connection to ScyllaDB.
+    ConnectingToDb,
+    /// The node is discovering available vector indexes in ScyllaDB.
+    DiscoveringIndexes,
+    /// The node is indexing embeddings into the discovered vector indexes.
+    IndexingEmbeddings,
+    /// The node has completed the initial database scan and built the indexes defined at that time. It is now monitoring the database for changes.
+    Serving,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/status",
+    tag = "scylla-vector-store-info",
+    description = "Returns the current operational status of the Vector Store node.",
+    responses(
+        (status = 200, description = "Successful operation. Returns the current operational status of the Vector Store node.", body = Status),
+    )
+)]
+async fn get_status() -> Response {
+    (StatusCode::NOT_IMPLEMENTED, "").into_response()
 }
 
 #[cfg(test)]
