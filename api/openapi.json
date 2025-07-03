@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "ScyllaDB Vector Store API",
-    "description": "REST API for ScyllaDB Vector Store - provides vector search and index management",
+    "description": "REST API for ScyllaDB Vector Store nodes. Provides capabilities for executing vector search queries, managing indexes, and checking status of Vector Store nodes.",
     "license": {
       "name": "LicenseRef-ScyllaDB-Source-Available-1.0"
     },
@@ -11,11 +11,14 @@
   "paths": {
     "/api/v1/indexes": {
       "get": {
-        "description": "Get list of current indexes",
+        "tags": [
+          "scylla-vector-store-index"
+        ],
+        "description": "Returns the list of indexes managed by the Vector Store node. The list includes indexes in any state (initializing, available/built, destroying). Due to synchronization delays, it may temporarily differ from the list of vector indexes inside ScyllaDB.",
         "operationId": "get_indexes",
         "responses": {
           "200": {
-            "description": "List of indexes",
+            "description": "Successful operation. Returns an array of index information representing all indexes managed by the Vector Store.",
             "content": {
               "application/json": {
                 "schema": {
@@ -26,19 +29,25 @@
                 }
               }
             }
+          },
+          "500": {
+            "description": "Internal server error. Possible causes: database issues or unexpected failures."
           }
         }
       }
     },
     "/api/v1/indexes/{keyspace}/{index}/ann": {
       "post": {
-        "description": "Ann search in the index",
+        "tags": [
+          "scylla-vector-store-index"
+        ],
+        "description": "Performs an Approximate Nearest Neighbor (ANN) search using the specified index. Returns the vectors most similar to the provided embedding. The maximum number of results is controlled by the optional 'limit' parameter in the payload. The similarity metric is determined at index creation and cannot be changed per query.",
         "operationId": "post_index_ann",
         "parameters": [
           {
             "name": "keyspace",
             "in": "path",
-            "description": "Keyspace name for the table to search",
+            "description": "The name of the ScyllaDB keyspace containing the vector index.",
             "required": true,
             "schema": {
               "$ref": "#/components/schemas/KeyspaceName"
@@ -47,7 +56,7 @@
           {
             "name": "index",
             "in": "path",
-            "description": "Index to search",
+            "description": "The name of the ScyllaDB vector index within the specified keyspace to perform the search on.",
             "required": true,
             "schema": {
               "$ref": "#/components/schemas/IndexName"
@@ -66,7 +75,7 @@
         },
         "responses": {
           "200": {
-            "description": "Ann search result",
+            "description": "Successful ANN search. Returns a list of primary keys and their corresponding distances for the most similar vectors found.",
             "content": {
               "application/json": {
                 "schema": {
@@ -76,20 +85,26 @@
             }
           },
           "404": {
-            "description": "Index not found"
+            "description": "Index not found. Possible causes: index does not exist, or is not built yet."
+          },
+          "500": {
+            "description": "Ann search error. Possible causes: internal error, or search engine issues."
           }
         }
       }
     },
     "/api/v1/indexes/{keyspace}/{index}/count": {
       "get": {
-        "description": "Get a number of elements for a specific index",
+        "tags": [
+          "scylla-vector-store-index"
+        ],
+        "description": "Returns the number of embeddings indexed by a specific vector index. Reflects only available embeddings and excludes any 'tombstones' (elements marked for deletion but still present in the index structure).",
         "operationId": "get_index_count",
         "parameters": [
           {
             "name": "keyspace",
             "in": "path",
-            "description": "A keyspace name for the index",
+            "description": "The name of the ScyllaDB keyspace containing the vector index.",
             "required": true,
             "schema": {
               "$ref": "#/components/schemas/KeyspaceName"
@@ -98,7 +113,7 @@
           {
             "name": "index",
             "in": "path",
-            "description": "An index name",
+            "description": "The name of the ScyllaDB vector index within the specified keyspace to count embeddings for.",
             "required": true,
             "schema": {
               "$ref": "#/components/schemas/IndexName"
@@ -107,26 +122,35 @@
         ],
         "responses": {
           "200": {
-            "description": "Index count",
+            "description": "Successful count operation. Returns the total number of embeddings currently stored in the index.",
             "content": {
-              "text/plain": {
+              "application/json": {
                 "schema": {
                   "type": "integer",
                   "minimum": 0
                 }
               }
             }
+          },
+          "404": {
+            "description": "Index not found. Possible causes: index does not exist, or is not built yet."
+          },
+          "500": {
+            "description": "Counting error. Possible causes: internal error, or database issues."
           }
         }
       }
     },
     "/api/v1/info": {
       "get": {
-        "description": "Get application info",
+        "tags": [
+          "scylla-vector-store-info"
+        ],
+        "description": "Returns information about the Vector Store service serving this API.",
         "operationId": "get_info",
         "responses": {
           "200": {
-            "description": "Application info",
+            "description": "Vector Store service information.",
             "content": {
               "application/json": {
                 "schema": {
@@ -144,7 +168,7 @@
       "Distance": {
         "type": "number",
         "format": "float",
-        "description": "Distance between embeddings"
+        "description": "Distance between embedding vectors measured using the distance function defined while creating the index."
       },
       "Embedding": {
         "type": "array",
@@ -152,7 +176,7 @@
           "type": "number",
           "format": "float"
         },
-        "description": "Embedding vector"
+        "description": "The embedding vector to use for the Approximate Nearest Neighbor search. The format of data must match the quantization of the index."
       },
       "IndexInfo": {
         "type": "object",
@@ -176,7 +200,7 @@
       },
       "IndexName": {
         "type": "string",
-        "description": "A name of the table with vectors in a db"
+        "description": "A name of the vector index in a db."
       },
       "InfoResponse": {
         "type": "object",
@@ -195,7 +219,7 @@
       },
       "KeyspaceName": {
         "type": "string",
-        "description": "A keyspace name in a db"
+        "description": "A keyspace name in a db."
       },
       "Limit": {
         "type": "integer",
@@ -236,7 +260,7 @@
             },
             "propertyNames": {
               "type": "string",
-              "description": "Name of the column in a db table"
+              "description": "Name of the column in a db table."
             }
           }
         }
@@ -252,8 +276,12 @@
   },
   "tags": [
     {
-      "name": "scylla-vector-store",
-      "description": "Scylla Vector Store (API will change after design)"
+      "name": "scylla-vector-store-index",
+      "description": "Operations for managing ScyllaDB Vector Store indexes, including listing, counting, and searching."
+    },
+    {
+      "name": "scylla-vector-store-info",
+      "description": "Endpoints providing general information and status about the ScyllaDB Vector Store service."
     }
   ]
 }

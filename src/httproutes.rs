@@ -54,13 +54,22 @@ use utoipa_swagger_ui::SwaggerUi;
 #[openapi(
      info(
         title = "ScyllaDB Vector Store API",
-        description = "REST API for ScyllaDB Vector Store - provides vector search and index management",
+        description = "REST API for ScyllaDB Vector Store nodes. Provides capabilities for executing vector search queries, \
+        managing indexes, and checking status of Vector Store nodes.",
         license(
             name = "LicenseRef-ScyllaDB-Source-Available-1.0"
         ),
     ),
     tags(
-        (name = "scylla-vector-store", description = "Scylla Vector Store (API will change after design)")
+        (
+            name = "scylla-vector-store-index",
+            description = "Operations for managing ScyllaDB Vector Store indexes, including listing, counting, and searching."
+        ),
+        (
+            name = "scylla-vector-store-info",
+            description = "Endpoints providing general information and status about the ScyllaDB Vector Store service."
+        )
+
     ),
     components(
         schemas(
@@ -135,9 +144,17 @@ impl IndexInfo {
 #[utoipa::path(
     get,
     path = "/api/v1/indexes",
-    description = "Get list of current indexes",
+    tag = "scylla-vector-store-index",
+    description = "Returns the list of indexes managed by the Vector Store node. \
+    The list includes indexes in any state (initializing, available/built, destroying). \
+    Due to synchronization delays, it may temporarily differ from the list of vector indexes inside ScyllaDB.",
     responses(
-        (status = 200, description = "List of indexes", body = [IndexInfo])
+        (
+            status = 200,
+            description = "Successful operation. Returns an array of index information representing all indexes managed by the Vector Store.",
+            body = [IndexInfo]
+        ),
+        (status = 500, description = "Internal server error. Possible causes: database issues or unexpected failures."),
     )
 )]
 async fn get_indexes(State(state): State<RoutesInnerState>) -> response::Json<Vec<IndexInfo>> {
@@ -156,13 +173,23 @@ async fn get_indexes(State(state): State<RoutesInnerState>) -> response::Json<Ve
 #[utoipa::path(
     get,
     path = "/api/v1/indexes/{keyspace}/{index}/count",
-    description = "Get a number of elements for a specific index",
+    tag = "scylla-vector-store-index",
+    description = "Returns the number of embeddings indexed by a specific vector index. \
+    Reflects only available embeddings and excludes any 'tombstones' \
+    (elements marked for deletion but still present in the index structure).",
     params(
-        ("keyspace" = KeyspaceName, Path, description = "A keyspace name for the index"),
-        ("index" = IndexName, Path, description = "An index name")
+        ("keyspace" = KeyspaceName, Path, description = "The name of the ScyllaDB keyspace containing the vector index."),
+        ("index" = IndexName, Path, description = "The name of the ScyllaDB vector index within the specified keyspace to count embeddings for.")
     ),
     responses(
-        (status = 200, description = "Index count", body = usize)
+        (
+            status = 200,
+            description = "Successful count operation. Returns the total number of embeddings currently stored in the index.",
+            body = usize,
+            content_type = "application/json"
+        ),
+        (status = 404, description = "Index not found. Possible causes: index does not exist, or is not built yet."),
+        (status = 500, description = "Counting error. Possible causes: internal error, or database issues."),
     )
 )]
 async fn get_index_count(
@@ -237,15 +264,24 @@ pub struct PostIndexAnnResponse {
 #[utoipa::path(
     post,
     path = "/api/v1/indexes/{keyspace}/{index}/ann",
-    description = "Ann search in the index",
+    tag = "scylla-vector-store-index",
+    description = "Performs an Approximate Nearest Neighbor (ANN) search using the specified index. \
+Returns the vectors most similar to the provided embedding. \
+The maximum number of results is controlled by the optional 'limit' parameter in the payload. \
+The similarity metric is determined at index creation and cannot be changed per query.",
     params(
-        ("keyspace" = KeyspaceName, Path, description = "Keyspace name for the table to search"),
-        ("index" = IndexName, Path, description = "Index to search")
+        ("keyspace" = KeyspaceName, Path, description = "The name of the ScyllaDB keyspace containing the vector index."),
+        ("index" = IndexName, Path, description = "The name of the ScyllaDB vector index within the specified keyspace to perform the search on.")
     ),
     request_body = PostIndexAnnRequest,
     responses(
-        (status = 200, description = "Ann search result", body = PostIndexAnnResponse),
-        (status = 404, description = "Index not found")
+        (
+            status = 200,
+            description = "Successful ANN search. Returns a list of primary keys and their corresponding distances for the most similar vectors found.",
+            body = PostIndexAnnResponse
+        ),
+        (status = 404, description = "Index not found. Possible causes: index does not exist, or is not built yet."),
+        (status = 500, description = "Ann search error. Possible causes: internal error, or search engine issues."),
     )
 )]
 async fn post_index_ann(
@@ -389,9 +425,10 @@ pub struct InfoResponse {
 #[utoipa::path(
     get,
     path = "/api/v1/info",
-    description = "Get application info",
+    tag = "scylla-vector-store-info",
+    description = "Returns information about the Vector Store service serving this API.",
     responses(
-        (status = 200, description = "Application info", body = InfoResponse)
+        (status = 200, description = "Vector Store service information.", body = InfoResponse)
     )
 )]
 async fn get_info() -> response::Json<InfoResponse> {

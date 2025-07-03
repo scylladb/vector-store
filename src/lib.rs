@@ -93,7 +93,7 @@ impl SerializeValue for IndexId {
     serde::Serialize,
     utoipa::ToSchema,
 )]
-/// A keyspace name in a db
+/// A keyspace name in a db.
 pub struct KeyspaceName(String);
 
 impl SerializeValue for KeyspaceName {
@@ -119,7 +119,7 @@ impl SerializeValue for KeyspaceName {
     derive_more::Display,
     utoipa::ToSchema,
 )]
-/// A name of the table with vectors in a db
+/// A name of the vector index in a db.
 pub struct IndexName(String);
 
 impl SerializeValue for IndexName {
@@ -171,7 +171,7 @@ impl SerializeValue for TableName {
     derive_more::Display,
     utoipa::ToSchema,
 )]
-/// Name of the column in a db table
+/// Name of the column in a db table.
 pub struct ColumnName(String);
 
 impl SerializeValue for ColumnName {
@@ -204,7 +204,7 @@ impl Eq for PrimaryKey {}
 #[derive(
     Clone, Debug, serde::Serialize, serde::Deserialize, derive_more::From, utoipa::ToSchema,
 )]
-/// Distance between embeddings
+/// Distance between embedding vectors measured using the distance function defined while creating the index.
 pub struct Distance(f32);
 
 impl SerializeValue for Distance {
@@ -344,7 +344,7 @@ struct ParamM(usize);
     derive_more::From,
     utoipa::ToSchema,
 )]
-/// Embedding vector
+/// The embedding vector to use for the Approximate Nearest Neighbor search. The format of data must match the quantization of the index.
 pub struct Embedding(Vec<f32>);
 
 #[derive(
