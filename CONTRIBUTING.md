@@ -66,3 +66,36 @@ cargo test --verbose
 We use GitHub Actions for CI, configured in `rust.yml`.
 
 **All checks must pass before a pull request can be merged.**
+
+## OpenAPI Specification
+
+Vector Store exposes an HTTP REST API, documented in the OpenAPI specification file at `api/openapi.json`.
+
+**Important:** Do not manually edit `api/openapi.json`. This file is generated directly from the source code.
+To update the OpenAPI specification based on your code changes, run the following command:
+
+```sh
+cargo openapi
+```
+
+The `api/openapi.json` file must always be synchronized with the actual API definition in the source code.
+This synchronization is enforced by an integration test in our CI pipeline.
+
+When modifying or extending the Vector Store REST API, please follow this convention:
+
+- **Explicit Index References:** Always refer to an index by explicitly specifying both the keyspace name and the index name, rather than using a qualified index name.
+
+  **Good:**
+  ```json
+  {
+    "keyspace": "somekeyspace",
+    "index": "someindex"
+  }
+  ```
+
+  **Bad:**
+  ```json
+  {
+    "index": "somekeyspace.someindex"
+  }
+  ```
