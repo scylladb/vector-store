@@ -189,10 +189,11 @@ impl DbExt for mpsc::Sender<Db> {
 
     async fn is_valid_index(&self, metadata: IndexMetadata) -> IsValidIndexR {
         let (tx, rx) = oneshot::channel();
-        if self.send(Db::IsValidIndex { metadata, tx }).await.is_err() {
-            return false;
-        };
-        rx.await.is_ok()
+        self.send(Db::IsValidIndex { metadata, tx })
+            .await
+            .expect("DbExt::is_valid_index: internal actor should receive request");
+        rx.await
+            .expect("DbExt::is_valid_index: internal actor should send response")
     }
 }
 
@@ -474,12 +475,12 @@ impl Statements {
         };
 
         // check a table
-        if keyspace.tables.contains_key(metadata.table_name.as_ref()) {
+        if !keyspace.tables.contains_key(metadata.table_name.as_ref()) {
             return false;
         }
 
         // check a cdc log table
-        if keyspace
+        if !keyspace
             .tables
             .contains_key(&format!("{}_scylla_cdc_log", metadata.table_name))
         {
