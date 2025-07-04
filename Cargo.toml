@@ -31,7 +31,7 @@ opensearch = { version = "2.3.0" }
 rayon = "1.10.0"
 regex = "1.11.1"
 scylla = { version = "1.2.0", features = ["time-03"] }
-scylla-cdc = "0.4.0"
+scylla-cdc = { git = "https://github.com/QuerthDP/scylla-cdc-rust.git", rev = "9b0345d99df4bead1dd684f6c1c1658a6d518eea" }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 thiserror = "2.0.12"
