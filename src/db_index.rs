@@ -25,6 +25,7 @@ use scylla_cdc::consumer::CDCRow;
 use scylla_cdc::consumer::Consumer;
 use scylla_cdc::consumer::ConsumerFactory;
 use scylla_cdc::log_reader::CDCLogReaderBuilder;
+use scylla_cdc::log_reader::LogTableType;
 use std::iter;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -83,6 +84,7 @@ pub(crate) async fn new(
             &metadata,
             tx_embeddings.clone(),
         )?))
+        .log_table(LogTableType::VSC)
         .build()
         .await?;
 
