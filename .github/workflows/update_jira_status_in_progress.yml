@@ -1,0 +1,61 @@
+name: Update Status - In Progress
+
+on:
+  pull_request:
+    types: [opened]  # Triggers for both draft and non-draft PRs
+
+permissions:
+  pull-requests: read
+
+jobs:
+  action-jira-status-update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Extract Jira Ticket IDs
+        id: get-jira
+        run: |
+          echo "Searching for Jira ticket IDs in PR title and body..."
+
+          title="${{ github.event.pull_request.title }}"
+          body="${{ github.event.pull_request.body }}"
+
+          echo "PR title: $title"
+          echo "PR body: $body"
+
+          > tickets.txt
+
+          # Extract Jira keys from title
+          echo "$title" | grep -oE '[A-Z]+-[0-9]+' >> tickets.txt || true
+
+          # Extract Jira keys from body (especially from Fixes lines)
+          echo "$body" | grep -iE '^Fixes[[:space:]]*:[[:space:]]*[A-Z]+-[0-9]+' | \
+          grep -oE '[A-Z]+-[0-9]+' >> tickets.txt || true
+
+          sort -u tickets.txt > unique_tickets.txt
+          echo "tickets found:"
+          cat unique_tickets.txt
+
+          if [[ ! -s unique_tickets.txt ]]; then
+            echo "No Jira tickets found in PR title or body. Skipping Jira update."
+            echo "ticket-ids=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          tickets_csv=$(paste -sd, unique_tickets.txt)
+          echo "ticket-ids=$tickets_csv" >> $GITHUB_OUTPUT
+
+      - name: Transition Jira Tickets to 'In Progress'
+        if: steps.get-jira.outputs.ticket-ids != ''
+        env:
+          JIRA_AUTH: ${{ secrets.USER_AND_KEY_FOR_JIRA_AUTOMATION }}
+        run: |
+          IFS=',' read -ra tickets <<< "${{ steps.get-jira.outputs.ticket-ids }}"
+          for ticket_id in "${tickets[@]}"; do
+            echo "Transitioning Jira ticket: $ticket_id"
+            curl --fail -X POST \
+              --url "https://scylladb.atlassian.net/rest/api/3/issue/${ticket_id}/transitions" \
+              --user "$JIRA_AUTH" \
+              --header "Accept: application/json" \
+              --header "Content-Type: application/json" \
+              -d '{"transition": {"id": "111"}}'
