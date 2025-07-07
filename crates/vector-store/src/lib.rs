@@ -13,7 +13,11 @@ mod info;
 mod metrics;
 mod monitor_indexes;
 mod monitor_items;
+
+use crate::metrics::Metrics;
 use db::Db;
+pub use httproutes::IndexInfo;
+pub use httproutes::Quantization;
 use index::factory;
 use index::factory::IndexFactory;
 use scylla::cluster::metadata::ColumnType;
@@ -42,11 +46,6 @@ use utoipa::openapi::Schema;
 use utoipa::openapi::SchemaFormat;
 use utoipa::openapi::schema::Type;
 use uuid::Uuid;
-
-use crate::metrics::Metrics;
-
-pub use httproutes::IndexInfo;
-pub use httproutes::Quantization;
 
 #[derive(Clone, derive_more::From, derive_more::Display)]
 pub struct ScyllaDbUri(String);

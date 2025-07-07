@@ -30,6 +30,7 @@ use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::routing::get;
 use itertools::Itertools;
+use macros::ToEnumSchema;
 use prometheus::Encoder;
 use prometheus::ProtobufEncoder;
 use prometheus::TextEncoder;
@@ -49,7 +50,6 @@ use utoipa::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 use utoipa_swagger_ui::SwaggerUi;
-use vector_store_macros::ToEnumSchema;
 
 #[derive(OpenApi)]
 #[openapi(

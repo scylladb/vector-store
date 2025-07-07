@@ -1,0 +1,52 @@
+# Copyright 2025-present ScyllaDB
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
+
+# TODO: review and limit dependencies and features
+
+[package]
+name = "vector-store"
+version = "0.1.0"
+edition = "2024"
+default-run = "vector-store"
+
+[[bin]]
+name = "generate-openapi"
+path = "src/bin/generate-openapi.rs"
+required-features = ["dev-tools"]
+
+[features]
+default = []
+dev-tools = []
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+bimap.workspace = true
+derive_more.workspace = true
+dotenvy.workspace = true
+futures.workspace = true
+itertools.workspace = true
+macros.workspace = true
+opensearch.workspace = true
+prometheus.workspace = true
+rayon.workspace = true
+regex.workspace = true
+scylla.workspace = true
+scylla-cdc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+usearch.workspace = true
+utoipa.workspace = true
+utoipa-axum.workspace = true
+utoipa-swagger-ui.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+reqwest.workspace = true

@@ -2,8 +2,14 @@
 fn openapi_json_is_synced() {
     let expected_json = serde_json::to_value(vector_store::httproutes::api()).unwrap();
 
-    let file_json: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string("api/openapi.json").unwrap()).unwrap();
+    let file_json: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(format!(
+            "{}/../../api/openapi.json",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap(),
+    )
+    .unwrap();
 
     assert_eq!(
         file_json, expected_json,

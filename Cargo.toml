@@ -1,24 +1,12 @@
 # Copyright 2025-present ScyllaDB
 # SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 
-# TODO: review and limit dependencies and features
+[workspace]
+members = ["crates/*"]
+default-members = ["crates/vector-store"]
+resolver = "3"
 
-[package]
-name = "vector-store"
-version = "0.1.0"
-edition = "2024"
-default-run = "vector-store"
-
-[[bin]]
-name = "generate-openapi"
-path = "src/bin/generate-openapi.rs"
-required-features = ["dev-tools"]
-
-[features]
-default = []
-dev-tools = []
-
-[dependencies]
+[workspace.dependencies]
 anyhow = "1.0.97"
 async-trait = "0.1.88"
 axum = { version = "0.8.1", features = ["macros"] }
@@ -27,13 +15,19 @@ derive_more = { version = "2.0.1", features = ["full"] }
 dotenvy = "0.15.7"
 futures = "0.3.31"
 itertools = "0.14.0"
+macros = { path = "crates/macros" }
 opensearch = { version = "2.3.0" }
+proc-macro2 = "1.0"
+prometheus = "0.14"
+quote = "1.0"
 rayon = "1.10.0"
 regex = "1.11.1"
+reqwest = { version = "0.12.15", features = ["json"] }
 scylla = { version = "1.2.0", features = ["time-03"] }
 scylla-cdc = "0.4.0"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
+syn = { version = "2.0", features = ["full"] }
 thiserror = "2.0.12"
 time = { version = "0.3.41", features = ["formatting"] }
 tokio = { version = "1.44.1", features = ["full"] }
@@ -45,8 +39,3 @@ utoipa = { version = "5.3.1", features = ["axum_extras"] }
 utoipa-axum = "0.2.0"
 utoipa-swagger-ui = { version = "9.0.0", features = ["axum"] }
 uuid = "1.16.0"
-prometheus = "0.14"
-vector-store-macros = { path = "./vector-store-macros" }
-
-[dev-dependencies]
-reqwest = { version = "0.12.15", features = ["json"] }

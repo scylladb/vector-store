@@ -1328,6 +1328,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "matchers"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2813,6 +2822,7 @@ dependencies = [
  "dotenvy",
  "futures",
  "itertools 0.14.0",
+ "macros",
  "opensearch",
  "prometheus",
  "rayon",
@@ -2833,16 +2843,6 @@ dependencies = [
  "utoipa-axum",
  "utoipa-swagger-ui",
  "uuid",
- "vector-store-macros",
-]
-
-[[package]]
-name = "vector-store-macros"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
 ]
 
 [[package]]
