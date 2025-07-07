@@ -479,10 +479,10 @@ impl Statements {
             return false;
         }
 
-        // check a cdc log table
+        // check a vsc log table
         if !keyspace
             .tables
-            .contains_key(&format!("{}_scylla_cdc_log", metadata.table_name))
+            .contains_key(&format!("{}_scylla_vsc_log", metadata.table_name))
         {
             return false;
         }
