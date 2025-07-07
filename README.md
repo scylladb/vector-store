@@ -18,13 +18,16 @@ service supports also `.env` files. Supported parameters:
 
 ## Development builds
 
+You need to install [Rust
+environment](https://www.rust-lang.org/tools/install). To install all
+components run `rustup install` in the main directory of the repository.
+
 Development workflow is similar to the typical `Cargo` development in Rust.
 
 ```
 $ cargo b [-r]
 $ cargo r [-r]
 ```
-
 
 ## Docker image
 
