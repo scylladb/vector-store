@@ -24,7 +24,7 @@ rayon = "1.10.0"
 regex = "1.11.1"
 reqwest = { version = "0.12.15", features = ["json"] }
 scylla = { version = "1.2.0", features = ["time-03"] }
-scylla-cdc = "0.4.0"
+scylla-cdc = { git = "https://github.com/QuerthDP/scylla-cdc-rust.git", rev = "d454411c54ce18685f8c187a0d752ae5112b630f" }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 syn = { version = "2.0", features = ["full"] }
