@@ -8,14 +8,12 @@ use crate::db_basic::DbBasic;
 use crate::db_basic::Index;
 use crate::db_basic::Table;
 use crate::httpclient::HttpClient;
+use crate::wait_for;
 use ::time::OffsetDateTime;
 use reqwest::StatusCode;
 use scylla::value::CqlValue;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
-use std::time::Duration;
-use tokio::task;
-use tokio::time;
 use uuid::Uuid;
 use vector_store::IndexMetadata;
 
@@ -104,13 +102,11 @@ async fn simple_create_search_delete_index() {
     )
     .unwrap();
 
-    time::timeout(Duration::from_secs(10), async {
-        while client.count(&index).await != Some(3) {
-            task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    wait_for(
+        || async { client.count(&index).await == Some(3) },
+        "Waiting for 3 vectors to be indexed",
+    )
+    .await;
 
     let indexes = client.indexes().await;
     assert_eq!(indexes.len(), 1);
@@ -134,13 +130,11 @@ async fn simple_create_search_delete_index() {
     db.del_index(&index.keyspace_name, &index.index_name)
         .unwrap();
 
-    time::timeout(Duration::from_secs(10), async {
-        while !client.indexes().await.is_empty() {
-            task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    wait_for(
+        || async { client.indexes().await.is_empty() },
+        "Waiting for all indexes to be removed from the store",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -201,13 +195,11 @@ async fn failed_db_index_create() {
     )
     .unwrap();
 
-    time::timeout(Duration::from_secs(5), async {
-        while client.indexes().await.is_empty() {
-            task::yield_now().await;
-        }
-    })
-    .await
-    .expect("Timeout waiting for index creation success");
+    wait_for(
+        || async { !client.indexes().await.is_empty() },
+        "Waiting for index to be added to the store",
+    )
+    .await;
 
     db.add_index(
         &index.keyspace_name,
@@ -223,13 +215,11 @@ async fn failed_db_index_create() {
     )
     .unwrap();
 
-    time::timeout(Duration::from_secs(5), async {
-        while client.indexes().await.len() != 2 {
-            task::yield_now().await;
-        }
-    })
-    .await
-    .expect("Timeout waiting for index creation success");
+    wait_for(
+        || async { client.indexes().await.len() == 2 },
+        "Waiting for 2nd index to be added to the store",
+    )
+    .await;
 
     let indexes = client.indexes().await;
     assert_eq!(indexes.len(), 2);
@@ -250,13 +240,11 @@ async fn failed_db_index_create() {
     )
     .unwrap();
 
-    time::timeout(Duration::from_secs(5), async {
-        while client.indexes().await.len() != 3 {
-            task::yield_now().await;
-        }
-    })
-    .await
-    .expect("Timeout waiting for index creation success");
+    wait_for(
+        || async { client.indexes().await.len() == 3 },
+        "Waiting for 3rd index to be added to the store",
+    )
+    .await;
 
     let indexes = client.indexes().await;
     assert_eq!(indexes.len(), 3);
@@ -267,13 +255,11 @@ async fn failed_db_index_create() {
     db.del_index(&index.keyspace_name, &"ann2".to_string().into())
         .unwrap();
 
-    time::timeout(Duration::from_secs(5), async {
-        while client.indexes().await.len() != 2 {
-            task::yield_now().await;
-        }
-    })
-    .await
-    .expect("Timeout waiting for index creation success");
+    wait_for(
+        || async { client.indexes().await.len() == 2 },
+        "Waiting for index to be removed from the store",
+    )
+    .await;
 
     let indexes = client.indexes().await;
     assert_eq!(indexes.len(), 2);
@@ -286,13 +272,11 @@ async fn ann_returns_bad_request_when_provided_vector_size_is_not_eq_index_dimen
     crate::enable_tracing();
     let (index, client, _db, _server) = setup_store().await;
 
-    time::timeout(Duration::from_secs(5), async {
-        while client.indexes().await.is_empty() {
-            task::yield_now().await;
-        }
-    })
-    .await
-    .expect("Waiting for index to be added to the store");
+    wait_for(
+        || async { !client.indexes().await.is_empty() },
+        "Waiting for index to be added to the store",
+    )
+    .await;
 
     let result = client
         .post_ann(
