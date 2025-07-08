@@ -15,6 +15,7 @@ use crate::Limit;
 use crate::PrimaryKey;
 use crate::SpaceType;
 use crate::index::actor::Index;
+use crate::index::validator;
 use anyhow::anyhow;
 use bimap::BiMap;
 use opensearch::DeleteParts;
@@ -27,7 +28,6 @@ use opensearch::indices::IndicesCreateParts;
 use serde_json::Value;
 use serde_json::json;
 use std::fmt::Display;
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicU64;
@@ -361,19 +361,10 @@ async fn ann(
     limit: Limit,
     client: Arc<OpenSearch>,
 ) {
-    let Some(embedding_len) = NonZeroUsize::new(embedding.0.len()) else {
-        tx_ann
-            .send(Err(anyhow!("ann: embedding dimensions == 0")))
-            .unwrap_or_else(|_| trace!("ann: unable to send error response (zero dimensions)"));
-        return;
-    };
-    if embedding_len != dimensions.0 {
-        tx_ann
-            .send(Err(anyhow!(
-                "ann: wrong embedding dimensions: {embedding_len} != {dimensions}",
-            )))
-            .unwrap_or_else(|_| trace!("ann: unable to send error response (wrong dimensions)"));
-        return;
+    if let Err(err) = validator::embedding_dimensions(&embedding, dimensions) {
+        return tx_ann
+            .send(Err(err))
+            .unwrap_or_else(|_| trace!("ann: unable to send response"));
     }
 
     let response = client

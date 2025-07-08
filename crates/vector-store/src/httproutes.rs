@@ -14,6 +14,7 @@ use crate::db_index::DbIndexExt;
 use crate::engine::Engine;
 use crate::engine::EngineExt;
 use crate::index::IndexExt;
+use crate::index::validator;
 use crate::info::Info;
 use crate::metrics::Metrics;
 use anyhow::bail;
@@ -282,6 +283,7 @@ The similarity metric is determined at index creation and cannot be changed per 
             description = "Successful ANN search. Returns a list of primary keys and their corresponding distances for the most similar vectors found.",
             body = PostIndexAnnResponse
         ),
+        (status = 400, description = "Bad request. Possible causes: invalid embedding size, malformed input, or missing required fields."),
         (status = 404, description = "Index not found. Possible causes: index does not exist, or is not built yet."),
         (status = 500, description = "Ann search error. Possible causes: internal error, or search engine issues."),
     )
@@ -312,12 +314,14 @@ async fn post_index_ann(
     timer.observe_duration();
 
     match search_result {
-        Err(err) => {
-            let msg = format!("index.ann request error: {err}");
-            debug!("post_index_ann: {msg}");
-            (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
-        }
-
+        Err(err) => match err.downcast_ref::<validator::Error>() {
+            Some(err) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
+            None => {
+                let msg = format!("index.ann request error: {err}");
+                debug!("post_index_ann: {msg}");
+                (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
+            }
+        },
         Ok((primary_keys, distances)) => {
             if primary_keys.len() != distances.len() {
                 let msg = format!(

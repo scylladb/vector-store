@@ -4,10 +4,12 @@
  */
 
 use crate::db_basic;
+use crate::db_basic::DbBasic;
 use crate::db_basic::Index;
 use crate::db_basic::Table;
 use crate::httpclient::HttpClient;
 use ::time::OffsetDateTime;
+use reqwest::StatusCode;
 use scylla::value::CqlValue;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
@@ -17,10 +19,7 @@ use tokio::time;
 use uuid::Uuid;
 use vector_store::IndexMetadata;
 
-#[tokio::test]
-async fn simple_create_search_delete_index() {
-    crate::enable_tracing();
-
+async fn setup_store() -> (IndexMetadata, HttpClient, DbBasic, impl Sized) {
     let (db_actor, db) = db_basic::new();
 
     let index = IndexMetadata {
@@ -35,18 +34,6 @@ async fn simple_create_search_delete_index() {
         space_type: Default::default(),
         version: Uuid::new_v4().into(),
     };
-
-    let index_factory = vector_store::new_index_factory_usearch().unwrap();
-
-    let (_server_actor, addr) = vector_store::run(
-        SocketAddr::from(([127, 0, 0, 1], 0)).into(),
-        Some(1),
-        db_actor,
-        index_factory,
-    )
-    .await
-    .unwrap();
-    let client = HttpClient::new(addr);
 
     db.add_table(
         index.keyspace_name.clone(),
@@ -72,6 +59,27 @@ async fn simple_create_search_delete_index() {
         },
     )
     .unwrap();
+
+    let index_factory = vector_store::new_index_factory_usearch().unwrap();
+
+    let (server, addr) = vector_store::run(
+        SocketAddr::from(([127, 0, 0, 1], 0)).into(),
+        Some(1),
+        db_actor,
+        index_factory,
+    )
+    .await
+    .unwrap();
+
+    (index, HttpClient::new(addr), db, server)
+}
+
+#[tokio::test]
+async fn simple_create_search_delete_index() {
+    crate::enable_tracing();
+
+    let (index, client, db, _server) = setup_store().await;
+
     db.insert_values(
         &index.keyspace_name,
         &index.table_name,
@@ -271,4 +279,28 @@ async fn failed_db_index_create() {
     assert_eq!(indexes.len(), 2);
     assert!(indexes.contains(&vector_store::IndexInfo::new("vector", "ann")));
     assert!(indexes.contains(&vector_store::IndexInfo::new("vector", "ann3")));
+}
+
+#[tokio::test]
+async fn ann_returns_bad_request_when_provided_vector_size_is_not_eq_index_dimensions() {
+    crate::enable_tracing();
+    let (index, client, _db, _server) = setup_store().await;
+
+    time::timeout(Duration::from_secs(5), async {
+        while client.indexes().await.is_empty() {
+            task::yield_now().await;
+        }
+    })
+    .await
+    .expect("Waiting for index to be added to the store");
+
+    let result = client
+        .post_ann(
+            &index,
+            vec![1.0, 2.0].into(), // Only 2 dimensions, should be 3 (index.dimensions)
+            NonZeroUsize::new(1).unwrap().into(),
+        )
+        .await;
+
+    assert_eq!(result.status(), StatusCode::BAD_REQUEST);
 }
