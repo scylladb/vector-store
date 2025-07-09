@@ -29,9 +29,6 @@
                 }
               }
             }
-          },
-          "500": {
-            "description": "Internal server error. Possible causes: database issues or unexpected failures."
           }
         }
       }
@@ -85,13 +82,34 @@
             }
           },
           "400": {
-            "description": "Bad request. Possible causes: invalid embedding size, malformed input, or missing required fields."
+            "description": "Bad request. Possible causes: invalid embedding size, malformed input, or missing required fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
           },
           "404": {
-            "description": "Index not found. Possible causes: index does not exist, or is not built yet."
+            "description": "Index not found. Possible causes: index does not exist, or is not built yet.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
           },
           "500": {
-            "description": "Ann search error. Possible causes: internal error, or search engine issues."
+            "description": "Error while searching embeddings. Possible causes: internal error, or search engine issues.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
           }
         }
       }
@@ -136,10 +154,24 @@
             }
           },
           "404": {
-            "description": "Index not found. Possible causes: index does not exist, or is not built yet."
+            "description": "Index not found. Possible causes: index does not exist, or is not built yet.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
           },
           "500": {
-            "description": "Counting error. Possible causes: internal error, or database issues."
+            "description": "Error while counting embeddings. Possible causes: internal error, or issues accessing the database.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
           }
         }
       }
@@ -201,6 +233,10 @@
           "format": "float"
         },
         "description": "The embedding vector to use for the Approximate Nearest Neighbor search. The format of data must match the quantization of the index."
+      },
+      "ErrorMessage": {
+        "type": "string",
+        "description": "A human-readable description of the error that occurred."
       },
       "IndexInfo": {
         "type": "object",

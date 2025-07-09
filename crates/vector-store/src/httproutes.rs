@@ -156,8 +156,7 @@ impl IndexInfo {
             status = 200,
             description = "Successful operation. Returns an array of index information representing all indexes managed by the Vector Store.",
             body = [IndexInfo]
-        ),
-        (status = 500, description = "Internal server error. Possible causes: database issues or unexpected failures."),
+        )
     )
 )]
 async fn get_indexes(State(state): State<RoutesInnerState>) -> response::Json<Vec<IndexInfo>> {
@@ -172,6 +171,10 @@ async fn get_indexes(State(state): State<RoutesInnerState>) -> response::Json<Ve
         .collect();
     response::Json(indexes)
 }
+
+/// A human-readable description of the error that occurred.
+#[derive(utoipa::ToSchema)]
+struct ErrorMessage(#[allow(dead_code)] String);
 
 #[utoipa::path(
     get,
@@ -191,8 +194,18 @@ async fn get_indexes(State(state): State<RoutesInnerState>) -> response::Json<Ve
             body = usize,
             content_type = "application/json"
         ),
-        (status = 404, description = "Index not found. Possible causes: index does not exist, or is not built yet."),
-        (status = 500, description = "Counting error. Possible causes: internal error, or database issues."),
+        (
+            status = 404,
+            description = "Index not found. Possible causes: index does not exist, or is not built yet.",
+            content_type = "application/json",
+            body = ErrorMessage
+        ),
+        (
+            status = 500,
+            description = "Error while counting embeddings. Possible causes: internal error, or issues accessing the database.",
+            content_type = "application/json",
+            body = ErrorMessage
+        )
     )
 )]
 async fn get_index_count(
@@ -204,8 +217,9 @@ async fn get_index_count(
         .get_index(IndexId::new(&keyspace, &index))
         .await
     else {
-        debug!("get_index_size: missing index: {keyspace}/{index}");
-        return (StatusCode::NOT_FOUND, "").into_response();
+        let msg = format!("missing index: {keyspace}/{index}");
+        debug!("get_index_count: {msg}");
+        return (StatusCode::NOT_FOUND, msg).into_response();
     };
     match index.count().await {
         Err(err) => {
@@ -283,9 +297,24 @@ The similarity metric is determined at index creation and cannot be changed per 
             description = "Successful ANN search. Returns a list of primary keys and their corresponding distances for the most similar vectors found.",
             body = PostIndexAnnResponse
         ),
-        (status = 400, description = "Bad request. Possible causes: invalid embedding size, malformed input, or missing required fields."),
-        (status = 404, description = "Index not found. Possible causes: index does not exist, or is not built yet."),
-        (status = 500, description = "Ann search error. Possible causes: internal error, or search engine issues."),
+        (
+            status = 400,
+            description = "Bad request. Possible causes: invalid embedding size, malformed input, or missing required fields.",
+            content_type = "application/json",
+            body = ErrorMessage
+        ),
+        (
+            status = 404,
+            description = "Index not found. Possible causes: index does not exist, or is not built yet.",
+            content_type = "application/json",
+            body = ErrorMessage
+        ),
+        (
+            status = 500,
+            description = "Error while searching embeddings. Possible causes: internal error, or search engine issues.",
+            content_type = "application/json",
+            body = ErrorMessage
+        )
     )
 )]
 async fn post_index_ann(
@@ -306,7 +335,9 @@ async fn post_index_ann(
         .await
     else {
         timer.observe_duration();
-        return (StatusCode::NOT_FOUND, "").into_response();
+        let msg = format!("missing index: {keyspace}/{index}");
+        debug!("post_index_ann: {msg}");
+        return (StatusCode::NOT_FOUND, msg).into_response();
     };
 
     let search_result = index.ann(request.embedding, request.limit).await;
