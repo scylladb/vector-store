@@ -1,4 +1,4 @@
-name: Update Status - in review
+name: Update Jira Status - in review
 
 on:
   pull_request:
@@ -14,11 +14,14 @@ jobs:
     steps:
       - name: Extract Jira Ticket IDs
         id: get-jira
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           echo "Searching for Jira ticket IDs in PR title and body..."
 
-          title="${{ github.event.pull_request.title }}"
-          body="${{ github.event.pull_request.body }}"
+          title="$PR_TITLE"
+          body="$PR_BODY"
 
           echo "PR title: $title"
           echo "PR body: $body"
@@ -34,6 +37,7 @@ jobs:
 
           # Deduplicate and show final list
           sort -u tickets.txt > unique_tickets.txt
+          echo "tickets found:"
           cat unique_tickets.txt
           
           if [[ ! -s unique_tickets.txt ]]; then
@@ -42,7 +46,8 @@ jobs:
             exit 0  # Exit gracefully
           fi
 
-          tickets_csv=$(paste -sd, unique_tickets.txt)
+          # Use tr+sed instead of paste for portability
+          tickets_csv=$(tr '\n' ',' < unique_tickets.txt | sed 's/,$//')
           echo "Final ticket list: $tickets_csv"
           echo "ticket-ids=$tickets_csv" >> $GITHUB_OUTPUT
 
