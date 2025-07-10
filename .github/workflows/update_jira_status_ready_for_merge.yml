@@ -1,4 +1,4 @@
-name: Update Status - Ready For Merge
+name: Update Jira Status - Ready For Merge
 
 on:
   pull_request:
@@ -15,12 +15,14 @@ jobs:
     steps:
       - name: Extract Jira Ticket IDs
         id: get-jira
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           echo "Label 'status/merge candidate' detected. Looking for Jira ticket IDs..."
 
-          title="${{ github.event.pull_request.title }}"
-          body="${{ github.event.pull_request.body }}"
-          body="${body:-}"  # default to empty if null
+          title="$PR_TITLE"
+          body="${PR_BODY:-}"  # default to empty if null
 
           echo "PR title: $title"
           echo "PR body: $body"
@@ -44,7 +46,8 @@ jobs:
           fi
 
           cat unique_tickets.txt
-          tickets_csv=$(paste -sd, unique_tickets.txt)
+          # Use tr+sed instead of paste for portability
+          tickets_csv=$(tr '\n' ',' < unique_tickets.txt | sed 's/,$//')
           echo "Final Jira ticket list: $tickets_csv"
           echo "ticket-ids=$tickets_csv" >> $GITHUB_OUTPUT
 
