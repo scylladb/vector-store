@@ -1,4 +1,4 @@
-name: Update Status - In Progress
+name: Update Jira Status - In Progress
 
 on:
   pull_request:
@@ -14,11 +14,14 @@ jobs:
     steps:
       - name: Extract Jira Ticket IDs
         id: get-jira
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           echo "Searching for Jira ticket IDs in PR title and body..."
 
-          title="${{ github.event.pull_request.title }}"
-          body="${{ github.event.pull_request.body }}"
+          title="$PR_TITLE"
+          body="$PR_BODY"
 
           echo "PR title: $title"
           echo "PR body: $body"
@@ -42,7 +45,8 @@ jobs:
             exit 0
           fi
 
-          tickets_csv=$(paste -sd, unique_tickets.txt)
+          # 'paste' might not be installed, safer to use tr+sed
+          tickets_csv=$(tr '\n' ',' < unique_tickets.txt | sed 's/,$//')
           echo "ticket-ids=$tickets_csv" >> $GITHUB_OUTPUT
 
       - name: Transition Jira Tickets to 'In Progress'
