@@ -122,7 +122,7 @@ pub(crate) async fn new(
             }
             drop(monitor_actor);
 
-            debug!("starting");
+            debug!("finished");
         }
         .instrument(debug_span!("engine")),
     );
