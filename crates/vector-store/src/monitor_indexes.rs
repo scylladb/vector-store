@@ -53,7 +53,7 @@ pub(crate) async fn new(
                             schema_version.reset();
                             continue;
                         };
-                        del_indexes(&engine, indexes.difference(&new_indexes)).await;
+                        del_indexes(&engine, indexes.extract_if(|idx| !new_indexes.contains(idx))).await;
                         let AddIndexesR {added, has_failures} = add_indexes(
                             &engine,
                             new_indexes.into_iter().filter(|idx| !indexes.contains(idx))
@@ -187,7 +187,7 @@ async fn add_indexes(
     }
 }
 
-async fn del_indexes(engine: &Sender<Engine>, idxs: impl Iterator<Item = &IndexMetadata>) {
+async fn del_indexes(engine: &Sender<Engine>, idxs: impl Iterator<Item = IndexMetadata>) {
     for idx in idxs {
         engine.del_index(idx.id()).await;
     }
