@@ -7,13 +7,14 @@ pub mod db;
 pub mod db_index;
 mod engine;
 pub mod httproutes;
-mod httpserver;
+pub mod httpserver;
 mod index;
 mod info;
 mod metrics;
 mod monitor_indexes;
 mod monitor_items;
 
+use crate::httpserver::ServerMsg;
 use crate::metrics::Metrics;
 use db::Db;
 pub use httproutes::IndexInfo;
@@ -434,9 +435,7 @@ static INIT_RAYON: Once = Once::new();
 pub async fn run(
     addr: HttpServerAddr,
     background_threads: Option<usize>,
-    db_actor: Sender<Db>,
-    index_factory: Box<dyn IndexFactory + Send + Sync>,
-) -> anyhow::Result<(impl Sized, SocketAddr)> {
+) -> anyhow::Result<(Sender<ServerMsg>, SocketAddr)> {
     if let Some(background_threads) = background_threads {
         INIT_RAYON.call_once(|| {
             rayon::ThreadPoolBuilder::new()
@@ -445,9 +444,31 @@ pub async fn run(
                 .expect("Failed to initialize Rayon global thread pool");
         });
     }
-    let engine_actor = engine::new(db_actor, index_factory).await?;
     let metrics: Arc<Metrics> = Arc::new(metrics::Metrics::new());
-    httpserver::new(addr, engine_actor, metrics).await
+    httpserver::new(addr, metrics).await
+}
+
+pub async fn set_engine(
+    server: &Sender<ServerMsg>,
+    index_factory: Box<dyn IndexFactory + Send + Sync>,
+    db: Sender<Db>,
+) -> anyhow::Result<()> {
+    server
+        .send(ServerMsg::SetEngine(
+            engine::new(db, index_factory, server.clone()).await?,
+        ))
+        .await
+        .map_err(|_| anyhow::anyhow!("Failed to set engine in the HTTP server"))
+}
+
+pub async fn change_state(
+    server: &Sender<ServerMsg>,
+    state: httproutes::Status,
+) -> anyhow::Result<()> {
+    server
+        .send(ServerMsg::ChangeState(state))
+        .await
+        .map_err(|_| anyhow::anyhow!("Failed to change state in the HTTP server"))
 }
 
 pub async fn new_db(uri: ScyllaDbUri) -> anyhow::Result<Sender<Db>> {

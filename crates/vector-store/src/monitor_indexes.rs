@@ -5,10 +5,12 @@
 
 use crate::IndexMetadata;
 use crate::SpaceType;
+use crate::change_state;
 use crate::db::Db;
 use crate::db::DbExt;
 use crate::engine::Engine;
 use crate::engine::EngineExt;
+use crate::httpserver::ServerMsg;
 use futures::StreamExt;
 use futures::stream;
 use scylla::value::CqlTimeuuid;
@@ -29,6 +31,7 @@ pub(crate) enum MonitorIndexes {}
 pub(crate) async fn new(
     db: Sender<Db>,
     engine: Sender<Engine>,
+    server_actor: Sender<ServerMsg>,
 ) -> anyhow::Result<Sender<MonitorIndexes>> {
     let (tx, mut rx) = mpsc::channel(10);
     tokio::spawn(
@@ -45,6 +48,12 @@ pub(crate) async fn new(
                         if !schema_version.has_changed(&db).await {
                             continue;
                         }
+                        let _ = change_state(
+                            &server_actor,
+                            crate::httproutes::Status::DiscoveringIndexes,
+                        ).await.map_err(|err| {
+                            warn!("monitor_indexes: unable to change state: {err}");
+                        });
                         let Ok(new_indexes) = get_indexes(&db).await.inspect_err(|err| {
                             debug!("monitor_indexes: unable to get the list of indexes: {err}");
                         }) else {
@@ -54,6 +63,12 @@ pub(crate) async fn new(
                             continue;
                         };
                         del_indexes(&engine, indexes.difference(&new_indexes)).await;
+                        let _ = change_state(
+                            &server_actor,
+                            crate::httproutes::Status::IndexingEmbeddings,
+                        ).await.map_err(|err| {
+                            warn!("monitor_indexes: unable to change state: {err}");
+                        });
                         let AddIndexesR {added, has_failures} = add_indexes(
                             &engine,
                             new_indexes.into_iter().filter(|idx| !indexes.contains(idx))

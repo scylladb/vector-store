@@ -12,8 +12,8 @@ use crate::KeyspaceName;
 use crate::Limit;
 use crate::Progress;
 use crate::db_index::DbIndexExt;
-use crate::engine::Engine;
 use crate::engine::EngineExt;
+use crate::httpserver::WrapEngine;
 use crate::index::IndexExt;
 use crate::index::validator;
 use crate::info::Info;
@@ -45,7 +45,7 @@ use time::Date;
 use time::OffsetDateTime;
 use time::Time;
 use time::format_description::well_known::Iso8601;
-use tokio::sync::mpsc::Sender;
+use tokio::sync::Mutex;
 use tower_http::trace::TraceLayer;
 use tracing::debug;
 use utoipa::OpenApi;
@@ -86,14 +86,20 @@ struct ApiDoc;
 
 #[derive(Clone)]
 struct RoutesInnerState {
-    engine: Sender<Engine>,
+    engine: WrapEngine,
     metrics: Arc<Metrics>,
+    node_state: Arc<Mutex<Status>>,
 }
 
-pub(crate) fn new(engine: Sender<Engine>, metrics: Arc<Metrics>) -> Router {
+pub(crate) fn new(
+    engine: WrapEngine,
+    metrics: Arc<Metrics>,
+    node_state: Arc<Mutex<Status>>,
+) -> Router {
     let state = RoutesInnerState {
         engine,
         metrics: metrics.clone(),
+        node_state,
     };
     let (router, api) = new_open_api_router();
     let router = router
@@ -157,12 +163,30 @@ impl IndexInfo {
             status = 200,
             description = "Successful operation. Returns an array of index information representing all indexes managed by the Vector Store.",
             body = [IndexInfo]
+        ),
+        (
+            status = 503,
+            description = "Service Unavailable. Indicates that the Vector Store node is not ready to serve requests",
+            content_type = "application/json",
+            body = ErrorMessage
         )
     )
 )]
-async fn get_indexes(State(state): State<RoutesInnerState>) -> response::Json<Vec<IndexInfo>> {
-    let ids = state.engine.get_index_ids().await;
-    let indexes = ids
+async fn get_indexes(State(state): State<RoutesInnerState>) -> Response {
+    let engine = state.engine.read().await;
+    if engine.is_none() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Vector Store node is not ready to serve requests",
+        )
+            .into_response();
+    }
+
+    let indexes: Vec<_> = engine
+        .as_ref()
+        .unwrap()
+        .get_index_ids()
+        .await
         .iter()
         .map(|id| IndexInfo {
             keyspace: id.keyspace(),
@@ -170,7 +194,7 @@ async fn get_indexes(State(state): State<RoutesInnerState>) -> response::Json<Ve
             quantization: Quantization::F32, // currently the only supported quantization by Vector Store
         })
         .collect();
-    response::Json(indexes)
+    (StatusCode::OK, response::Json(indexes)).into_response()
 }
 
 /// A human-readable description of the error that occurred.
@@ -206,6 +230,12 @@ struct ErrorMessage(#[allow(dead_code)] String);
             description = "Error while counting embeddings. Possible causes: internal error, or issues accessing the database.",
             content_type = "application/json",
             body = ErrorMessage
+        ),
+        (
+            status = 503,
+            description = "Service Unavailable. Indicates that the Vector Store node is not ready to serve requests",
+            content_type = "application/json",
+            body = ErrorMessage
         )
     )
 )]
@@ -213,8 +243,17 @@ async fn get_index_count(
     State(state): State<RoutesInnerState>,
     Path((keyspace, index)): Path<(KeyspaceName, IndexName)>,
 ) -> Response {
-    let Some((index, _)) = state
-        .engine
+    let engine = state.engine.read().await;
+    if engine.is_none() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Vector Store node is not ready to serve requests",
+        )
+            .into_response();
+    }
+    let Some((index, _)) = engine
+        .as_ref()
+        .unwrap()
         .get_index(IndexId::new(&keyspace, &index))
         .await
     else {
@@ -318,7 +357,7 @@ The similarity metric is determined at index creation and cannot be changed per 
         ),
         (
             status = 503,
-            description = "Service Unavailable. Indicates that a full scan of the index is in progress and the search cannot be performed at this time.",
+            description = "Service Unavailable. Indicates that the Vector Store node is not ready to serve requests or that a full scan of the index is in progress and the search cannot be performed at this time.",
             content_type = "application/json",
             body = ErrorMessage
         )
@@ -330,14 +369,23 @@ async fn post_index_ann(
     extract::Json(request): extract::Json<PostIndexAnnRequest>,
 ) -> Response {
     // Start timing
+    let engine = state.engine.read().await;
+    if engine.is_none() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Vector Store node is not ready to serve requests",
+        )
+            .into_response();
+    }
     let timer = state
         .metrics
         .latency
         .with_label_values(&[keyspace.as_ref().as_str(), index.as_ref().as_str()])
         .start_timer();
 
-    let Some((index, db_index)) = state
-        .engine
+    let Some((index, db_index)) = engine
+        .as_ref()
+        .unwrap()
         .get_index(IndexId::new(&keyspace, &index))
         .await
     else {
@@ -493,10 +541,10 @@ async fn get_info() -> response::Json<InfoResponse> {
     })
 }
 
-#[derive(ToEnumSchema, serde::Deserialize, serde::Serialize)]
+#[derive(ToEnumSchema, serde::Deserialize, serde::Serialize, Clone, PartialEq, Eq, Debug)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")] // This line makes all variants uppercase in the schema
 /// Operational status of the Vector Store node.
-enum Status {
+pub enum Status {
     /// The node is starting up.
     Initializing,
     /// The node is establishing a connection to ScyllaDB.
@@ -518,8 +566,33 @@ enum Status {
         (status = 200, description = "Successful operation. Returns the current operational status of the Vector Store node.", body = Status),
     )
 )]
-async fn get_status() -> Response {
-    (StatusCode::NOT_IMPLEMENTED, "").into_response()
+async fn get_status(State(state): State<RoutesInnerState>) -> Response {
+    let mut status = state.node_state.lock().await;
+    if *status == Status::IndexingEmbeddings {
+        let ids = state
+            .engine
+            .read()
+            .await
+            .as_ref()
+            .unwrap()
+            .get_index_ids()
+            .await;
+
+        for id in ids {
+            let engine = state.engine.read().await.clone();
+            if let Some(index) = engine.unwrap().get_index(id).await {
+                if matches!(index.1.full_scan_progress().await, Progress::InProgress(..)) {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        response::Json(Status::IndexingEmbeddings),
+                    )
+                        .into_response();
+                }
+            }
+        }
+        *status = Status::Serving;
+    }
+    (StatusCode::OK, response::Json(status.clone())).into_response()
 }
 
 #[cfg(test)]

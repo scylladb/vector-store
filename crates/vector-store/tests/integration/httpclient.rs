@@ -97,4 +97,15 @@ impl HttpClient {
             .await
             .unwrap()
     }
+
+    pub(crate) async fn status(&self) -> vector_store::httproutes::Status {
+        self.client
+            .get(format!("{}/status", self.url_api))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap()
+    }
 }

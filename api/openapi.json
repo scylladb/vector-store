@@ -29,6 +29,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "Service Unavailable. Indicates that the Vector Store node is not ready to serve requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
           }
         }
       }
@@ -112,7 +122,7 @@
             }
           },
           "503": {
-            "description": "Service Unavailable. Indicates that a full scan of the index is in progress and the search cannot be performed at this time.",
+            "description": "Service Unavailable. Indicates that the Vector Store node is not ready to serve requests or that a full scan of the index is in progress and the search cannot be performed at this time.",
             "content": {
               "application/json": {
                 "schema": {
@@ -175,6 +185,16 @@
           },
           "500": {
             "description": "Error while counting embeddings. Possible causes: internal error, or issues accessing the database.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable. Indicates that the Vector Store node is not ready to serve requests",
             "content": {
               "application/json": {
                 "schema": {

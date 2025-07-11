@@ -14,11 +14,14 @@ use reqwest::StatusCode;
 use scylla::value::CqlValue;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
+use tokio::sync::mpsc::Sender;
 use uuid::Uuid;
 use vector_store::IndexMetadata;
 use vector_store::Percentage;
+use vector_store::change_state;
+use vector_store::httpserver::ServerMsg;
 
-async fn setup_store() -> (IndexMetadata, HttpClient, DbBasic, impl Sized) {
+async fn setup_store() -> (IndexMetadata, HttpClient, DbBasic, Sender<ServerMsg>) {
     let (db_actor, db) = db_basic::new();
 
     let index = IndexMetadata {
@@ -61,19 +64,19 @@ async fn setup_store() -> (IndexMetadata, HttpClient, DbBasic, impl Sized) {
 
     let index_factory = vector_store::new_index_factory_usearch().unwrap();
 
-    let (server, addr) = vector_store::run(
-        SocketAddr::from(([127, 0, 0, 1], 0)).into(),
-        Some(1),
-        db_actor,
-        index_factory,
-    )
-    .await
-    .unwrap();
+    let (server, addr) = vector_store::run(SocketAddr::from(([127, 0, 0, 1], 0)).into(), Some(1))
+        .await
+        .unwrap();
+
+    vector_store::set_engine(&server, index_factory, db_actor)
+        .await
+        .unwrap();
 
     (index, HttpClient::new(addr), db, server)
 }
 
-async fn setup_store_and_wait_for_index() -> (IndexMetadata, HttpClient, DbBasic, impl Sized) {
+async fn setup_store_and_wait_for_index() -> (IndexMetadata, HttpClient, DbBasic, Sender<ServerMsg>)
+{
     let (index, client, db, server) = setup_store().await;
 
     wait_for(
@@ -171,14 +174,14 @@ async fn failed_db_index_create() {
 
     let index_factory = vector_store::new_index_factory_usearch().unwrap();
 
-    let (_server_actor, addr) = vector_store::run(
-        SocketAddr::from(([127, 0, 0, 1], 0)).into(),
-        Some(1),
-        db_actor,
-        index_factory,
-    )
-    .await
-    .unwrap();
+    let (server_actor, addr) =
+        vector_store::run(SocketAddr::from(([127, 0, 0, 1], 0)).into(), Some(1))
+            .await
+            .unwrap();
+
+    vector_store::set_engine(&server_actor, index_factory, db_actor)
+        .await
+        .unwrap();
     let client = HttpClient::new(addr);
 
     db.set_next_get_db_index_failed();
@@ -318,4 +321,44 @@ async fn ann_fail_while_building() {
         result.text().await.unwrap(),
         "Full scan is in progress, percentage: 33.33%"
     );
+}
+
+#[tokio::test]
+async fn status_returns_expected_values() {
+    crate::enable_tracing();
+    let (_index, client, db, server) = setup_store_and_wait_for_index().await;
+
+    let result = client.status().await;
+    assert_eq!(result, vector_store::httproutes::Status::Initializing);
+    change_state(&server, vector_store::httproutes::Status::ConnectingToDb)
+        .await
+        .unwrap();
+    let result = client.status().await;
+    assert_eq!(result, vector_store::httproutes::Status::ConnectingToDb);
+    change_state(
+        &server,
+        vector_store::httproutes::Status::DiscoveringIndexes,
+    )
+    .await
+    .unwrap();
+    let result = client.status().await;
+    assert_eq!(result, vector_store::httproutes::Status::DiscoveringIndexes);
+    // Simulate a full scan in progress
+    // If the full scan wasn't in progress, the status would change to Serving
+    db.set_next_full_scan_progress(vector_store::Progress::InProgress(
+        Percentage::try_from(33.33).unwrap(),
+    ));
+    change_state(
+        &server,
+        vector_store::httproutes::Status::IndexingEmbeddings,
+    )
+    .await
+    .unwrap();
+    let result = client.status().await;
+    assert_eq!(result, vector_store::httproutes::Status::IndexingEmbeddings);
+    change_state(&server, vector_store::httproutes::Status::Serving)
+        .await
+        .unwrap();
+    let result = client.status().await;
+    assert_eq!(result, vector_store::httproutes::Status::Serving);
 }

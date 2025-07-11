@@ -9,6 +9,7 @@ use crate::db::Db;
 use crate::db::DbExt;
 use crate::db_index::DbIndex;
 use crate::factory::IndexFactory;
+use crate::httpserver::ServerMsg;
 use crate::index::Index;
 use crate::monitor_indexes;
 use crate::monitor_items;
@@ -26,7 +27,7 @@ type GetIndexIdsR = Vec<IndexId>;
 type AddIndexR = anyhow::Result<()>;
 type GetIndexR = Option<(mpsc::Sender<Index>, mpsc::Sender<DbIndex>)>;
 
-pub(crate) enum Engine {
+pub enum Engine {
     GetIndexIds {
         tx: oneshot::Sender<GetIndexIdsR>,
     },
@@ -97,10 +98,11 @@ type IndexesT = HashMap<
 pub(crate) async fn new(
     db: mpsc::Sender<Db>,
     index_factory: Box<dyn IndexFactory + Send + Sync>,
+    server_actor: mpsc::Sender<ServerMsg>,
 ) -> anyhow::Result<mpsc::Sender<Engine>> {
     let (tx, mut rx) = mpsc::channel(10);
 
-    let monitor_actor = monitor_indexes::new(db.clone(), tx.clone()).await?;
+    let monitor_actor = monitor_indexes::new(db.clone(), tx.clone(), server_actor).await?;
 
     tokio::spawn(
         async move {

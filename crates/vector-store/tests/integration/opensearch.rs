@@ -38,14 +38,13 @@ async fn simple_create_search_delete_index() {
 
     let index_factory = vector_store::new_index_factory_opensearch(server.base_url()).unwrap();
 
-    let (_server_actor, addr) = vector_store::run(
-        SocketAddr::from(([127, 0, 0, 1], 0)).into(),
-        Some(1),
-        db_actor,
-        index_factory,
-    )
-    .await
-    .unwrap();
+    let (server_actor, addr) =
+        vector_store::run(SocketAddr::from(([127, 0, 0, 1], 0)).into(), Some(1))
+            .await
+            .unwrap();
+    vector_store::set_engine(&server_actor, index_factory, db_actor)
+        .await
+        .unwrap();
     let client = HttpClient::new(addr);
 
     db.add_table(

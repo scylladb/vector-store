@@ -8,6 +8,9 @@ use std::net::ToSocketAddrs;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
+use vector_store::change_state;
+use vector_store::httproutes;
+use vector_store::set_engine;
 mod info;
 
 // Index creating/querying is CPU bound task, so that vector-store uses rayon ThreadPool for them.
@@ -42,6 +45,9 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .and_then(|v| v.parse().ok());
 
+    let (server_actor, addr) = vector_store::run(vector_store_addr, background_threads).await?;
+    tracing::info!("listening on {addr}");
+
     let opensearch_addr = dotenvy::var("VECTOR_STORE_OPENSEARCH_URI").ok();
 
     let index_factory = if let Some(addr) = opensearch_addr {
@@ -52,15 +58,10 @@ async fn main() -> anyhow::Result<()> {
         vector_store::new_index_factory_usearch()?
     };
 
+    change_state(&server_actor, httproutes::Status::ConnectingToDb).await?;
     let db_actor = vector_store::new_db(scylladb_uri).await?;
-    let (_server_actor, addr) = vector_store::run(
-        vector_store_addr,
-        background_threads,
-        db_actor,
-        index_factory,
-    )
-    .await?;
-    tracing::info!("listening on {addr}");
+
+    set_engine(&server_actor, index_factory, db_actor).await?;
     vector_store::wait_for_shutdown().await;
 
     Ok(())
