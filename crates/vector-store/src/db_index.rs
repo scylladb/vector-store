@@ -10,6 +10,9 @@ use crate::KeyspaceName;
 use crate::Percentage;
 use crate::Progress;
 use crate::TableName;
+use crate::node_state::Event;
+use crate::node_state::NodeState;
+use crate::node_state::NodeStateExt;
 use anyhow::Context;
 use anyhow::anyhow;
 use anyhow::bail;
@@ -37,6 +40,7 @@ use time::OffsetDateTime;
 use time::Time;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
 use tracing::Instrument;
 use tracing::debug;
@@ -97,6 +101,7 @@ impl DbIndexExt for mpsc::Sender<DbIndex> {
 pub(crate) async fn new(
     db_session: Arc<Session>,
     metadata: IndexMetadata,
+    node_state: Sender<NodeState>,
 ) -> anyhow::Result<(mpsc::Sender<DbIndex>, mpsc::Receiver<DbEmbedding>)> {
     let id = metadata.id();
 
@@ -117,7 +122,7 @@ pub(crate) async fn new(
         .build()
         .await?;
 
-    let statements = Arc::new(Statements::new(db_session, metadata).await?);
+    let statements = Arc::new(Statements::new(db_session, metadata.clone()).await?);
 
     tokio::spawn(
         async move {
@@ -140,6 +145,9 @@ pub(crate) async fn new(
             while !rx_index.is_closed() {
                 tokio::select! {
                     _ = statements.initial_scan(tx_embeddings.clone(), completed_scan_length.clone()) => {
+                        node_state
+                            .send_event(Event::FullScanFinished(metadata))
+                            .await;
                         break;
                     }
                     Some(msg) = rx_index.recv() => {
@@ -267,7 +275,7 @@ impl Statements {
             if let Ok(embeddings) = self.range_scan_stream(begin, end).await.inspect_err(|err| {
                 warn!("unable to do initial scan for range ({begin:?}, {end:?}): {err}")
             }) {
-                let tx = tx.clone();
+                let tx: Sender<DbEmbedding> = tx.clone();
                 let scan_length = completed_scan_length.clone();
                 tokio::spawn(async move {
                     embeddings

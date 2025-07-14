@@ -16,6 +16,7 @@ use vector_store::Limit;
 use vector_store::httproutes::InfoResponse;
 use vector_store::httproutes::PostIndexAnnRequest;
 use vector_store::httproutes::PostIndexAnnResponse;
+use vector_store::node_state::Status;
 
 pub(crate) struct HttpClient {
     client: Client,
@@ -90,6 +91,17 @@ impl HttpClient {
     pub(crate) async fn info(&self) -> InfoResponse {
         self.client
             .get(format!("{}/info", self.url_api))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap()
+    }
+
+    pub(crate) async fn status(&self) -> Status {
+        self.client
+            .get(format!("{}/status", self.url_api))
             .send()
             .await
             .unwrap()

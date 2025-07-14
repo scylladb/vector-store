@@ -9,6 +9,9 @@ use crate::db::Db;
 use crate::db::DbExt;
 use crate::engine::Engine;
 use crate::engine::EngineExt;
+use crate::node_state::Event;
+use crate::node_state::NodeState;
+use crate::node_state::NodeStateExt;
 use futures::StreamExt;
 use futures::stream;
 use scylla::value::CqlTimeuuid;
@@ -29,6 +32,7 @@ pub(crate) enum MonitorIndexes {}
 pub(crate) async fn new(
     db: Sender<Db>,
     engine: Sender<Engine>,
+    node_state: Sender<NodeState>,
 ) -> anyhow::Result<Sender<MonitorIndexes>> {
     let (tx, mut rx) = mpsc::channel(10);
     tokio::spawn(
@@ -45,6 +49,9 @@ pub(crate) async fn new(
                         if !schema_version.has_changed(&db).await {
                             continue;
                         }
+                        node_state.send_event(
+                            Event::DiscoveringIndexes,
+                        ).await;
                         let Ok(new_indexes) = get_indexes(&db).await.inspect_err(|err| {
                             debug!("monitor_indexes: unable to get the list of indexes: {err}");
                         }) else {
@@ -53,6 +60,9 @@ pub(crate) async fn new(
                             schema_version.reset();
                             continue;
                         };
+                        node_state.send_event(
+                            Event::IndexesDiscovered(new_indexes.clone()),
+                        ).await;
                         del_indexes(&engine, indexes.difference(&new_indexes)).await;
                         let AddIndexesR {added, has_failures} = add_indexes(
                             &engine,

@@ -9,10 +9,12 @@ use std::net::SocketAddr;
 
 #[tokio::test]
 async fn get_applicaiton_info() {
-    let (db_actor, _) = db_basic::new();
+    let node_state = vector_store::new_node_state().await;
+    let (db_actor, _) = db_basic::new(node_state.clone());
     let (_server_actor, addr) = vector_store::run(
         SocketAddr::from(([127, 0, 0, 1], 0)).into(),
         Some(1),
+        node_state,
         db_actor,
         vector_store::new_index_factory_usearch().unwrap(),
     )

@@ -13,8 +13,10 @@ mod info;
 mod metrics;
 mod monitor_indexes;
 mod monitor_items;
+pub mod node_state;
 
 use crate::metrics::Metrics;
+use crate::node_state::NodeState;
 use db::Db;
 pub use httproutes::IndexInfo;
 pub use httproutes::Quantization;
@@ -434,6 +436,7 @@ static INIT_RAYON: Once = Once::new();
 pub async fn run(
     addr: HttpServerAddr,
     background_threads: Option<usize>,
+    node_state: Sender<NodeState>,
     db_actor: Sender<Db>,
     index_factory: Box<dyn IndexFactory + Send + Sync>,
 ) -> anyhow::Result<(impl Sized, SocketAddr)> {
@@ -445,13 +448,22 @@ pub async fn run(
                 .expect("Failed to initialize Rayon global thread pool");
         });
     }
-    let engine_actor = engine::new(db_actor, index_factory).await?;
     let metrics: Arc<Metrics> = Arc::new(metrics::Metrics::new());
-    httpserver::new(addr, engine_actor, metrics).await
+    httpserver::new(
+        addr,
+        node_state.clone(),
+        engine::new(db_actor, index_factory, node_state).await?,
+        metrics,
+    )
+    .await
 }
 
-pub async fn new_db(uri: ScyllaDbUri) -> anyhow::Result<Sender<Db>> {
-    db::new(uri).await
+pub async fn new_db(uri: ScyllaDbUri, node_state: Sender<NodeState>) -> anyhow::Result<Sender<Db>> {
+    db::new(uri, node_state).await
+}
+
+pub async fn new_node_state() -> Sender<NodeState> {
+    node_state::new().await
 }
 
 pub fn new_index_factory_usearch() -> anyhow::Result<Box<dyn IndexFactory + Send + Sync>> {

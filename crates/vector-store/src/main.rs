@@ -42,6 +42,8 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .and_then(|v| v.parse().ok());
 
+    let node_state = vector_store::new_node_state().await;
+
     let opensearch_addr = dotenvy::var("VECTOR_STORE_OPENSEARCH_URI").ok();
 
     let index_factory = if let Some(addr) = opensearch_addr {
@@ -52,15 +54,18 @@ async fn main() -> anyhow::Result<()> {
         vector_store::new_index_factory_usearch()?
     };
 
-    let db_actor = vector_store::new_db(scylladb_uri).await?;
+    let db_actor = vector_store::new_db(scylladb_uri, node_state.clone()).await?;
+
     let (_server_actor, addr) = vector_store::run(
         vector_store_addr,
         background_threads,
+        node_state,
         db_actor,
         index_factory,
     )
     .await?;
     tracing::info!("listening on {addr}");
+
     vector_store::wait_for_shutdown().await;
 
     Ok(())

@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::Sender;
 use uuid::Uuid;
 use vector_store::ColumnName;
 use vector_store::Connectivity;
@@ -33,18 +34,20 @@ use vector_store::TableName;
 use vector_store::Timestamp;
 use vector_store::db::Db;
 use vector_store::db_index::DbIndex;
+use vector_store::node_state::Event;
+use vector_store::node_state::NodeState;
 
 #[derive(Clone)]
 pub(crate) struct DbBasic(Arc<RwLock<DbMock>>);
 
-pub(crate) fn new() -> (mpsc::Sender<Db>, DbBasic) {
+pub(crate) fn new(node_state: Sender<NodeState>) -> (mpsc::Sender<Db>, DbBasic) {
     let (tx, mut rx) = mpsc::channel(10);
     let db = DbBasic::new();
     tokio::spawn({
         let db = db.clone();
         async move {
             while let Some(msg) = rx.recv().await {
-                process_db(&db, msg);
+                process_db(&db, msg, node_state.clone());
             }
         }
     });
@@ -250,10 +253,10 @@ impl DbBasic {
     }
 }
 
-fn process_db(db: &DbBasic, msg: Db) {
+fn process_db(db: &DbBasic, msg: Db, node_state: Sender<NodeState>) {
     match msg {
         Db::GetDbIndex { metadata, tx } => tx
-            .send(new_db_index(db.clone(), metadata))
+            .send(new_db_index(db.clone(), metadata, node_state.clone()))
             .map_err(|_| anyhow!("Db::GetDbIndex: unable to send response"))
             .unwrap(),
 
@@ -352,6 +355,7 @@ fn process_db(db: &DbBasic, msg: Db) {
 pub(crate) fn new_db_index(
     db: DbBasic,
     metadata: IndexMetadata,
+    node_state: Sender<NodeState>,
 ) -> anyhow::Result<(mpsc::Sender<DbIndex>, mpsc::Receiver<DbEmbedding>)> {
     if db.0.read().unwrap().next_get_db_index_failed {
         db.0.write().unwrap().next_get_db_index_failed = false;
@@ -363,6 +367,12 @@ pub(crate) fn new_db_index(
     tokio::spawn({
         async move {
             let mut items = initial_scan(&db, &metadata);
+            node_state
+                .send(NodeState::SendEvent(Event::FullScanFinished(
+                    metadata.clone(),
+                )))
+                .await
+                .unwrap();
             while !rx_index.is_closed() {
                 tokio::select! {
                     item = items.next() => {

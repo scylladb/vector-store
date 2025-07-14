@@ -14,12 +14,22 @@ use reqwest::StatusCode;
 use scylla::value::CqlValue;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
+use tokio::sync::mpsc::Sender;
 use uuid::Uuid;
 use vector_store::IndexMetadata;
 use vector_store::Percentage;
+use vector_store::node_state::NodeState;
 
-async fn setup_store() -> (IndexMetadata, HttpClient, DbBasic, impl Sized) {
-    let (db_actor, db) = db_basic::new();
+async fn setup_store() -> (
+    IndexMetadata,
+    HttpClient,
+    DbBasic,
+    impl Sized,
+    Sender<NodeState>,
+) {
+    let node_state = vector_store::new_node_state().await;
+
+    let (db_actor, db) = db_basic::new(node_state.clone());
 
     let index = IndexMetadata {
         keyspace_name: "vector".to_string().into(),
@@ -64,17 +74,24 @@ async fn setup_store() -> (IndexMetadata, HttpClient, DbBasic, impl Sized) {
     let (server, addr) = vector_store::run(
         SocketAddr::from(([127, 0, 0, 1], 0)).into(),
         Some(1),
+        node_state.clone(),
         db_actor,
         index_factory,
     )
     .await
     .unwrap();
 
-    (index, HttpClient::new(addr), db, server)
+    (index, HttpClient::new(addr), db, server, node_state)
 }
 
-async fn setup_store_and_wait_for_index() -> (IndexMetadata, HttpClient, DbBasic, impl Sized) {
-    let (index, client, db, server) = setup_store().await;
+async fn setup_store_and_wait_for_index() -> (
+    IndexMetadata,
+    HttpClient,
+    DbBasic,
+    impl Sized,
+    Sender<NodeState>,
+) {
+    let (index, client, db, server, node_state) = setup_store().await;
 
     wait_for(
         || async { !client.indexes().await.is_empty() },
@@ -82,14 +99,14 @@ async fn setup_store_and_wait_for_index() -> (IndexMetadata, HttpClient, DbBasic
     )
     .await;
 
-    (index, client, db, server)
+    (index, client, db, server, node_state)
 }
 
 #[tokio::test]
 async fn simple_create_search_delete_index() {
     crate::enable_tracing();
 
-    let (index, client, db, _server) = setup_store().await;
+    let (index, client, db, _server, _node_state) = setup_store().await;
 
     db.insert_values(
         &index.keyspace_name,
@@ -154,7 +171,8 @@ async fn simple_create_search_delete_index() {
 async fn failed_db_index_create() {
     crate::enable_tracing();
 
-    let (db_actor, db) = db_basic::new();
+    let node_state = vector_store::new_node_state().await;
+    let (db_actor, db) = db_basic::new(node_state.clone());
 
     let index = IndexMetadata {
         keyspace_name: "vector".to_string().into(),
@@ -174,11 +192,13 @@ async fn failed_db_index_create() {
     let (_server_actor, addr) = vector_store::run(
         SocketAddr::from(([127, 0, 0, 1], 0)).into(),
         Some(1),
+        node_state,
         db_actor,
         index_factory,
     )
     .await
     .unwrap();
+
     let client = HttpClient::new(addr);
 
     db.set_next_get_db_index_failed();
@@ -283,7 +303,7 @@ async fn failed_db_index_create() {
 #[tokio::test]
 async fn ann_returns_bad_request_when_provided_vector_size_is_not_eq_index_dimensions() {
     crate::enable_tracing();
-    let (index, client, _db, _server) = setup_store_and_wait_for_index().await;
+    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index().await;
 
     let result = client
         .post_ann(
@@ -299,7 +319,7 @@ async fn ann_returns_bad_request_when_provided_vector_size_is_not_eq_index_dimen
 #[tokio::test]
 async fn ann_fail_while_building() {
     crate::enable_tracing();
-    let (index, client, db, _server) = setup_store_and_wait_for_index().await;
+    let (index, client, db, _server, _node_state) = setup_store_and_wait_for_index().await;
 
     db.set_next_full_scan_progress(vector_store::Progress::InProgress(
         Percentage::try_from(33.33).unwrap(),
@@ -318,4 +338,13 @@ async fn ann_fail_while_building() {
         result.text().await.unwrap(),
         "Full scan is in progress, percentage: 33.33%"
     );
+}
+
+#[tokio::test]
+async fn status_is_serving_after_creation() {
+    crate::enable_tracing();
+    let (_index, client, _db, _server, _node_state) = setup_store_and_wait_for_index().await;
+
+    let result = client.status().await;
+    assert_eq!(result, vector_store::node_state::Status::Serving);
 }

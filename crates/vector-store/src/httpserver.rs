@@ -7,6 +7,7 @@ use crate::HttpServerAddr;
 use crate::engine::Engine;
 use crate::httproutes;
 use crate::metrics::Metrics;
+use crate::node_state::NodeState;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -18,6 +19,7 @@ pub(crate) enum HttpServer {}
 
 pub(crate) async fn new(
     addr: HttpServerAddr,
+    state: Sender<NodeState>,
     engine: Sender<Engine>,
     metrics: Arc<Metrics>,
 ) -> anyhow::Result<(Sender<HttpServer>, SocketAddr)> {
@@ -37,11 +39,11 @@ pub(crate) async fn new(
             notify.notify_one();
         }
     });
-
     tokio::spawn(async move {
-        axum::serve(listener, httproutes::new(engine, metrics))
+        axum::serve(listener, httproutes::new(engine, metrics, state))
             .with_graceful_shutdown(async move {
                 notify.notified().await;
+                tracing::info!("HTTP server shutting down");
             })
             .await
             .expect("failed to run web server");

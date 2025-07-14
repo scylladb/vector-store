@@ -19,8 +19,8 @@ use vector_store::IndexMetadata;
 #[tokio::test]
 async fn simple_create_search_delete_index() {
     crate::enable_tracing();
-
-    let (db_actor, db) = db_basic::new();
+    let node_state = vector_store::new_node_state().await;
+    let (db_actor, db) = db_basic::new(node_state.clone());
 
     let index = IndexMetadata {
         keyspace_name: "vector".to_string().into(),
@@ -41,11 +41,13 @@ async fn simple_create_search_delete_index() {
     let (_server_actor, addr) = vector_store::run(
         SocketAddr::from(([127, 0, 0, 1], 0)).into(),
         Some(1),
+        node_state,
         db_actor,
         index_factory,
     )
     .await
     .unwrap();
+
     let client = HttpClient::new(addr);
 
     db.add_table(

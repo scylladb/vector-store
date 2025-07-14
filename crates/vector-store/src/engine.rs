@@ -13,8 +13,10 @@ use crate::index::Index;
 use crate::monitor_indexes;
 use crate::monitor_items;
 use crate::monitor_items::MonitorItems;
+use crate::node_state::NodeState;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
 use tracing::Instrument;
 use tracing::debug;
@@ -97,10 +99,11 @@ type IndexesT = HashMap<
 pub(crate) async fn new(
     db: mpsc::Sender<Db>,
     index_factory: Box<dyn IndexFactory + Send + Sync>,
+    node_state: Sender<NodeState>,
 ) -> anyhow::Result<mpsc::Sender<Engine>> {
     let (tx, mut rx) = mpsc::channel(10);
 
-    let monitor_actor = monitor_indexes::new(db.clone(), tx.clone()).await?;
+    let monitor_actor = monitor_indexes::new(db.clone(), tx.clone(), node_state).await?;
 
     tokio::spawn(
         async move {

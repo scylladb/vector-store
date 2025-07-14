@@ -19,6 +19,9 @@ use crate::SpaceType;
 use crate::TableName;
 use crate::db_index;
 use crate::db_index::DbIndex;
+use crate::node_state::Event;
+use crate::node_state::NodeState;
+use crate::node_state::NodeStateExt;
 use anyhow::Context;
 use futures::TryStreamExt;
 use regex::Regex;
@@ -29,8 +32,11 @@ use scylla::value::CqlTimeuuid;
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
+use tokio::time::sleep;
 use tracing::Instrument;
 use tracing::debug_span;
 use tracing::trace;
@@ -197,13 +203,24 @@ impl DbExt for mpsc::Sender<Db> {
     }
 }
 
-pub(crate) async fn new(uri: ScyllaDbUri) -> anyhow::Result<mpsc::Sender<Db>> {
-    let statements = Arc::new(Statements::new(uri).await?);
+pub(crate) async fn new(
+    uri: ScyllaDbUri,
+    node_state: Sender<NodeState>,
+) -> anyhow::Result<mpsc::Sender<Db>> {
     let (tx, mut rx) = mpsc::channel(10);
     tokio::spawn(
         async move {
+            node_state.send_event(Event::ConnectingToDb).await;
+            let mut statements = Statements::new(uri.clone()).await;
+            while statements.is_err() {
+                tracing::error!("Failed to create statements, retrying");
+                sleep(Duration::from_secs(1)).await;
+                statements = Statements::new(uri.clone()).await;
+            }
+            node_state.send_event(Event::ConnectedToDb).await;
+            let statements = Arc::new(statements.unwrap());
             while let Some(msg) = rx.recv().await {
-                tokio::spawn(process(Arc::clone(&statements), msg));
+                tokio::spawn(process(statements.clone(), msg, node_state.clone()));
             }
         }
         .instrument(debug_span!("db")),
@@ -211,10 +228,10 @@ pub(crate) async fn new(uri: ScyllaDbUri) -> anyhow::Result<mpsc::Sender<Db>> {
     Ok(tx)
 }
 
-async fn process(statements: Arc<Statements>, msg: Db) {
+async fn process(statements: Arc<Statements>, msg: Db, node_state: Sender<NodeState>) {
     match msg {
         Db::GetDbIndex { metadata, tx } => tx
-            .send(statements.get_db_index(metadata).await)
+            .send(statements.get_db_index(metadata, node_state.clone()).await)
             .unwrap_or_else(|_| trace!("process: Db::GetDbIndex: unable to send response")),
 
         Db::LatestSchemaVersion { tx } => tx
@@ -314,8 +331,12 @@ impl Statements {
         })
     }
 
-    async fn get_db_index(&self, metadata: IndexMetadata) -> GetDbIndexR {
-        db_index::new(Arc::clone(&self.session), metadata).await
+    async fn get_db_index(
+        &self,
+        metadata: IndexMetadata,
+        node_state: Sender<NodeState>,
+    ) -> GetDbIndexR {
+        db_index::new(Arc::clone(&self.session), metadata, node_state).await
     }
 
     const ST_LATEST_SCHEMA_VERSION: &str = "

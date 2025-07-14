@@ -18,6 +18,8 @@ use crate::index::IndexExt;
 use crate::index::validator;
 use crate::info::Info;
 use crate::metrics::Metrics;
+use crate::node_state::NodeState;
+use crate::node_state::NodeStateExt;
 use anyhow::bail;
 use axum::Router;
 use axum::extract;
@@ -88,12 +90,18 @@ struct ApiDoc;
 struct RoutesInnerState {
     engine: Sender<Engine>,
     metrics: Arc<Metrics>,
+    node_state: Sender<NodeState>,
 }
 
-pub(crate) fn new(engine: Sender<Engine>, metrics: Arc<Metrics>) -> Router {
+pub(crate) fn new(
+    engine: Sender<Engine>,
+    metrics: Arc<Metrics>,
+    node_state: Sender<NodeState>,
+) -> Router {
     let state = RoutesInnerState {
         engine,
         metrics: metrics.clone(),
+        node_state,
     };
     let (router, api) = new_open_api_router();
     let router = router
@@ -160,9 +168,11 @@ impl IndexInfo {
         )
     )
 )]
-async fn get_indexes(State(state): State<RoutesInnerState>) -> response::Json<Vec<IndexInfo>> {
-    let ids = state.engine.get_index_ids().await;
-    let indexes = ids
+async fn get_indexes(State(state): State<RoutesInnerState>) -> Response {
+    let indexes: Vec<_> = state
+        .engine
+        .get_index_ids()
+        .await
         .iter()
         .map(|id| IndexInfo {
             keyspace: id.keyspace(),
@@ -170,7 +180,7 @@ async fn get_indexes(State(state): State<RoutesInnerState>) -> response::Json<Ve
             quantization: Quantization::F32, // currently the only supported quantization by Vector Store
         })
         .collect();
-    response::Json(indexes)
+    (StatusCode::OK, response::Json(indexes)).into_response()
 }
 
 /// A human-readable description of the error that occurred.
@@ -509,6 +519,30 @@ enum Status {
     Serving,
 }
 
+impl From<crate::node_state::Status> for Status {
+    fn from(status: crate::node_state::Status) -> Self {
+        match status {
+            crate::node_state::Status::Initializing => Status::Initializing,
+            crate::node_state::Status::ConnectingToDb => Status::ConnectingToDb,
+            crate::node_state::Status::DiscoveringIndexes => Status::DiscoveringIndexes,
+            crate::node_state::Status::IndexingEmbeddings => Status::IndexingEmbeddings,
+            crate::node_state::Status::Serving => Status::Serving,
+        }
+    }
+}
+
+impl From<Status> for crate::node_state::Status {
+    fn from(status: Status) -> Self {
+        match status {
+            Status::Initializing => crate::node_state::Status::Initializing,
+            Status::ConnectingToDb => crate::node_state::Status::ConnectingToDb,
+            Status::DiscoveringIndexes => crate::node_state::Status::DiscoveringIndexes,
+            Status::IndexingEmbeddings => crate::node_state::Status::IndexingEmbeddings,
+            Status::Serving => crate::node_state::Status::Serving,
+        }
+    }
+}
+
 #[utoipa::path(
     get,
     path = "/api/v1/status",
@@ -518,8 +552,12 @@ enum Status {
         (status = 200, description = "Successful operation. Returns the current operational status of the Vector Store node.", body = Status),
     )
 )]
-async fn get_status() -> Response {
-    (StatusCode::NOT_IMPLEMENTED, "").into_response()
+async fn get_status(State(state): State<RoutesInnerState>) -> Response {
+    (
+        StatusCode::OK,
+        response::Json(Status::from(state.node_state.get_status().await)),
+    )
+        .into_response()
 }
 
 #[cfg(test)]
