@@ -1,0 +1,13 @@
+[Unit]
+Description=Vector Rust Service
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/vector-store/
+ExecStart=/home/ubuntu/vector-store/target/release/vector-store
+Restart=on-failure
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target
