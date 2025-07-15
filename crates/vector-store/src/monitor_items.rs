@@ -5,11 +5,13 @@
 
 use crate::DbEmbedding;
 use crate::IndexId;
+use crate::Metrics;
 use crate::PrimaryKey;
 use crate::Timestamp;
 use crate::index::Index;
 use crate::index::IndexExt;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
@@ -23,10 +25,12 @@ pub(crate) async fn new(
     id: IndexId,
     mut embeddings: Receiver<DbEmbedding>,
     index: Sender<Index>,
+    metrics: Arc<Metrics>,
 ) -> anyhow::Result<Sender<MonitorItems>> {
     // The value was taken from initial benchmarks
     const CHANNEL_SIZE: usize = 10;
     let (tx, mut rx) = mpsc::channel(CHANNEL_SIZE);
+    let id_for_span = id.clone();
 
     tokio::spawn(
         async move {
@@ -40,7 +44,7 @@ pub(crate) async fn new(
                         let Some(embedding) = embedding else {
                             break;
                         };
-                        add(&mut timestamps, &index, embedding).await;
+                        add(&mut timestamps, &index, embedding, &metrics, &id_for_span).await;
                     }
                     _ = rx.recv() => { }
                 }
@@ -57,6 +61,8 @@ async fn add(
     timestamps: &mut HashMap<PrimaryKey, Timestamp>,
     index: &Sender<Index>,
     embedding: DbEmbedding,
+    metrics: &Metrics,
+    id: &IndexId,
 ) {
     let mut modify = true;
     timestamps
@@ -76,11 +82,33 @@ async fn add(
         } else {
             index.remove(primary_key).await;
         }
+        let id = id.clone();
+        let metrics = metrics.clone();
+        let index = index.clone();
+        tokio::spawn(async move {
+            match index.count().await {
+                Ok(count) => {
+                    metrics
+                        .size
+                        .with_label_values(&[
+                            &id.keyspace().as_ref().as_str(),
+                            &id.index().as_ref().as_str(),
+                        ])
+                        .set(count as f64);
+                }
+                Err(err) => {
+                    let msg = format!("index.count request error: {err}");
+                    debug!("get_index_count: {msg}");
+                }
+            }
+        });
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::metrics::Metrics;
+
     use super::*;
     use scylla::value::CqlValue;
     use time::OffsetDateTime;
@@ -89,10 +117,12 @@ mod tests {
     async fn flow() {
         let (tx_embeddings, rx_embeddings) = mpsc::channel(10);
         let (tx_index, mut rx_index) = mpsc::channel(10);
+        let metrics: Arc<Metrics> = Arc::new(Metrics::new());
         let _actor = new(
             IndexId::new(&"vector".to_string().into(), &"store".to_string().into()),
             rx_embeddings,
             tx_index,
+            metrics,
         )
         .await
         .unwrap();
@@ -167,42 +197,71 @@ mod tests {
         assert_eq!(primary_key, vec![CqlValue::Int(1)].into());
         assert_eq!(embedding, vec![1.].into());
 
-        let Some(Index::AddOrReplace {
-            primary_key,
-            embedding,
-        }) = rx_index.recv().await
-        else {
-            unreachable!();
+        let (primary_key, embedding) = loop {
+            match rx_index.recv().await {
+                Some(Index::AddOrReplace {
+                    primary_key,
+                    embedding,
+                }) => break (primary_key, embedding),
+                Some(Index::Count { .. }) => continue, // skip all Count messages
+                Some(_msg) => panic!("Unexpected message"),
+                None => panic!("Channel closed before AddOrReplace was received"),
+            }
         };
         assert_eq!(primary_key, vec![CqlValue::Int(2)].into());
         assert_eq!(embedding, vec![2.].into());
 
-        let Some(Index::AddOrReplace {
-            primary_key,
-            embedding,
-        }) = rx_index.recv().await
-        else {
-            unreachable!();
+        let (primary_key, embedding) = loop {
+            match rx_index.recv().await {
+                Some(Index::AddOrReplace {
+                    primary_key,
+                    embedding,
+                }) => break (primary_key, embedding),
+                Some(Index::Count { .. }) => continue, // skip all Count messages
+                Some(_msg) => panic!("Unexpected message"),
+                None => panic!("Channel closed before AddOrReplace was received"),
+            }
         };
         assert_eq!(primary_key, vec![CqlValue::Int(2)].into());
         assert_eq!(embedding, vec![4.].into());
 
-        let Some(Index::Remove { primary_key }) = rx_index.recv().await else {
-            unreachable!();
+        let primary_key = loop {
+            match rx_index.recv().await {
+                Some(Index::Remove { primary_key }) => break primary_key,
+                Some(_other) => {
+                    continue;
+                }
+                None => panic!("Channel closed unexpectedly"),
+            }
         };
         assert_eq!(primary_key, vec![CqlValue::Int(1)].into());
 
-        let Some(Index::AddOrReplace {
-            primary_key,
-            embedding,
-        }) = rx_index.recv().await
-        else {
-            unreachable!();
+        let (primary_key, embedding) = loop {
+            match rx_index.recv().await {
+                Some(Index::AddOrReplace {
+                    primary_key,
+                    embedding,
+                }) => break (primary_key, embedding),
+                Some(Index::Count { .. }) => continue, // skip all Count messages
+                Some(_msg) => panic!("Unexpected message"),
+                None => panic!("Channel closed before AddOrReplace was received"),
+            }
         };
         assert_eq!(primary_key, vec![CqlValue::Int(1)].into());
         assert_eq!(embedding, vec![6.].into());
 
         drop(tx_embeddings);
-        assert!(rx_index.recv().await.is_none());
+        loop {
+            match rx_index.recv().await {
+                None => break, // Channel closed, test passed
+                Some(Index::Count { .. }) => {
+                    // Count is OK, just skip and continue
+                    continue;
+                }
+                Some(_msg) => {
+                    panic!("Unexpected leftover message");
+                }
+            }
+        }
     }
 }
