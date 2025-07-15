@@ -2,6 +2,7 @@
  * Copyright 2025-present ScyllaDB
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
+use prometheus::GaugeVec;
 use prometheus::HistogramVec;
 use prometheus::Registry;
 
@@ -9,6 +10,7 @@ use prometheus::Registry;
 pub struct Metrics {
     pub registry: Registry,
     pub latency: HistogramVec,
+    pub size: GaugeVec,
 }
 
 impl Metrics {
@@ -45,8 +47,19 @@ impl Metrics {
         )
         .unwrap();
 
-        registry.register(Box::new(latency.clone())).unwrap();
+        let size = GaugeVec::new(
+            prometheus::Opts::new("index_size", "Number of Vector per index"),
+            &["keyspace", "index_name"],
+        )
+        .unwrap();
 
-        Self { registry, latency }
+        registry.register(Box::new(latency.clone())).unwrap();
+        registry.register(Box::new(size.clone())).unwrap();
+
+        Self {
+            registry,
+            latency,
+            size,
+        }
     }
 }

@@ -445,8 +445,8 @@ pub async fn run(
                 .expect("Failed to initialize Rayon global thread pool");
         });
     }
-    let engine_actor = engine::new(db_actor, index_factory).await?;
     let metrics: Arc<Metrics> = Arc::new(metrics::Metrics::new());
+    let engine_actor = engine::new(db_actor, index_factory, metrics.clone()).await?;
     httpserver::new(addr, engine_actor, metrics).await
 }
 
