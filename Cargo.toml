@@ -20,6 +20,7 @@ dotenvy = "0.15.7"
 futures = "0.3.31"
 itertools = "0.14.0"
 macros = { path = "crates/macros" }
+ntest = "0.9.3"
 opensearch = { version = "2.3.0" }
 proc-macro2 = "1.0"
 prometheus = "0.14"

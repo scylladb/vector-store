@@ -28,6 +28,7 @@ dotenvy.workspace = true
 futures.workspace = true
 itertools.workspace = true
 macros.workspace = true
+ntest.workspace = true
 opensearch.workspace = true
 prometheus.workspace = true
 rayon.workspace = true
