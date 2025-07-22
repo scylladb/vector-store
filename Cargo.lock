@@ -3031,6 +3031,7 @@ name = "vector-search-validator"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "futures",
  "tokio",
  "tracing",
  "tracing-subscriber",
