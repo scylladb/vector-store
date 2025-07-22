@@ -3155,10 +3155,12 @@ dependencies = [
  "clap",
  "futures",
  "hickory-server",
+ "httpclient",
  "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "vector-store",
 ]
 
 [[package]]
