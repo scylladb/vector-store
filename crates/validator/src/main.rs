@@ -6,6 +6,7 @@
 mod dns;
 mod scylla_cluster;
 mod tests;
+mod vector_store_cluster;
 
 use clap::Parser;
 use dns::DnsExt;
@@ -39,6 +40,8 @@ struct Args {
     verbose: bool,
 
     scylla: PathBuf,
+
+    vector_store: PathBuf,
 }
 
 async fn file_exists(path: &Path) -> bool {
@@ -107,6 +110,7 @@ async fn main() {
     let services_subnet = Arc::new(ServicesSubnet::new(args.base_ip));
     let dns = dns::new(args.dns_ip).await;
     let db = scylla_cluster::new(args.scylla, args.scylla_default_conf, args.verbose).await;
+    let vs = vector_store_cluster::new(args.vector_store, args.verbose).await;
 
     info!(
         "{} version: {}",
@@ -124,6 +128,7 @@ async fn main() {
                 services_subnet,
                 dns,
                 db,
+                vs,
             },
             test_cases,
             Arc::new(HashMap::new())

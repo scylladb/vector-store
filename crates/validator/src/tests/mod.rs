@@ -8,6 +8,7 @@ mod crud;
 use crate::ServicesSubnet;
 use crate::dns::Dns;
 use crate::scylla_cluster::ScyllaCluster;
+use crate::vector_store_cluster::VectorStoreCluster;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use futures::stream;
@@ -30,6 +31,7 @@ pub(crate) struct TestActors {
     pub(crate) services_subnet: Arc<ServicesSubnet>,
     pub(crate) dns: mpsc::Sender<Dns>,
     pub(crate) db: mpsc::Sender<ScyllaCluster>,
+    pub(crate) vs: mpsc::Sender<VectorStoreCluster>,
 }
 
 type TestFuture = BoxFuture<'static, ()>;
