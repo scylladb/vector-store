@@ -23,6 +23,7 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
+use vector_store_cluster::VectorStoreClusterExt;
 
 #[derive(Debug, Parser)]
 #[clap(version)]
@@ -119,6 +120,7 @@ async fn main() {
     );
     info!("dns version: {}", dns.version().await);
     info!("scylla version: {}", db.version().await);
+    info!("vector-store version: {}", vs.version().await);
 
     let test_cases = tests::register().await;
 
