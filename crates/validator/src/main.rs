@@ -3,7 +3,12 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+mod tests;
+
 use clap::Parser;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tests::TestActors;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
@@ -31,4 +36,9 @@ async fn main() {
         env!("CARGO_PKG_NAME"),
         env!("CARGO_PKG_VERSION")
     );
+
+    let test_cases = tests::register().await;
+
+    // TODO: implement a filter using cmdline arguments
+    assert!(tests::run(TestActors {}, test_cases, Arc::new(HashMap::new())).await);
 }
