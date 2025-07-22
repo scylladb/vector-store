@@ -1,0 +1,39 @@
+#!/bin/bash
+
+set -e
+
+usage() {
+    echo "usage: $0 <docker-scylla-bin-path> <vector-store-bin-path> <vector-search-validator-bin-path>"
+    exit 1
+}
+
+scylla=$1
+[[ -x $scylla ]] || usage
+
+vector_store=$(realpath $2)
+[[ -x $vector_store ]] || usage
+
+validator=$(realpath $3)
+[[ -x $validator ]] || usage
+
+shift 3
+
+dns_ip=127.0.1.1
+base_ip=127.0.2
+
+tmp_resolv_conf=$(mktemp /tmp/resolv.conf.XXXXXX)
+echo "nameserver $dns_ip" > $tmp_resolv_conf
+
+sudo unshare -n -m /bin/bash <<EOF
+mount --bind $tmp_resolv_conf /etc/resolv.conf
+ip link set lo up
+ip addr add $dns_ip/32 dev lo
+for i in {1..10}; do
+    ip addr add $base_ip.\$i/32 dev lo
+done
+cat /etc/resolv.conf
+$validator --dns-ip $dns_ip --base-ip $base_ip.1 $scylla $vector_store $@
+EOF
+
+rm $tmp_resolv_conf
+

@@ -1,0 +1,32 @@
+#!/bin/bash
+
+set -e
+
+usage() {
+    echo "usage: $0 <docker-scylla-tag> <vector-store-bin-path> <vector-search-validator-bin-path>"
+    exit 1
+}
+
+scylla_tag=$1
+[[ -n $scylla_tag ]] || usage
+
+vector_store=$(realpath $2)
+[[ -x $vector_store ]] || usage
+
+validator=$(realpath $3)
+[[ -x $validator ]] || usage
+
+shift 3
+
+dns_ip=127.0.1.1
+base_ip=127.0.2.1
+
+docker run --rm \
+    --dns=$dns_ip \
+    --dns-search=. \
+    --volume="$vector_store:/vector-store" \
+    --volume="$validator:/vector-search-validator" \
+    --network=none \
+    --entrypoint=/vector-search-validator \
+    $scylla_tag \
+    --dns-ip $dns_ip --base-ip $base_ip --scylla-default-conf /etc/scylla/scylla.yaml /usr/bin/scylla /vector-store $@

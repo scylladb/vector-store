@@ -1,0 +1,28 @@
+#!/bin/bash
+
+set -e
+
+repo=$(dirname "${BASH_SOURCE[0]}")
+repo=$(realpath $repo)
+
+rust_version=$(grep channel $repo/rust-toolchain.toml | cut -d '"' -f 2)
+
+user_cargo_home=$CARGO_HOME
+[[ -z $user_cargo_home ]] && [[ -d "$HOME/.cargo" ]] && user_cargo_home="$HOME/.cargo"
+
+docker_cargo_home=$(docker run --rm rust:$rust_version sh -c 'echo $CARGO_HOME')
+
+tmp_rust_toolchain=$(mktemp /tmp/rust-toolchain.XXXXXX)
+grep -v components $repo/rust-toolchain.toml > $tmp_rust_toolchain
+
+docker run --rm \
+    --user "$(id -u)":"$(id -g)" \
+    -v "$repo":"$repo" \
+    -v "$user_cargo_home/git":"$docker_cargo_home/git" \
+    -v "$user_cargo_home/registry":"$docker_cargo_home/registry" \
+    -v $tmp_rust_toolchain:"$repo/rust-toolchain.toml" \
+    -w "$repo" \
+    rust:$rust_version \
+    "$@"
+
+rm $tmp_rust_toolchain
