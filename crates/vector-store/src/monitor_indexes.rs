@@ -12,6 +12,7 @@ use crate::engine::EngineExt;
 use crate::node_state::Event;
 use crate::node_state::NodeState;
 use crate::node_state::NodeStateExt;
+use anyhow::bail;
 use futures::StreamExt;
 use futures::stream;
 use scylla::value::CqlTimeuuid;
@@ -159,8 +160,9 @@ async fn get_indexes(db: &Sender<Db>) -> anyhow::Result<HashSet<IndexMetadata>> 
         };
 
         if !db.is_valid_index(metadata.clone()).await {
-            debug!("get_indexes: not valid index {}", metadata.id());
-            continue;
+            let msg = format!("get_indexes: not valid index {}", metadata.id());
+            debug!(msg);
+            bail!(msg);
         }
 
         indexes.insert(metadata);
@@ -530,5 +532,86 @@ mod tests {
             1,
             "index2 should be removed once"
         );
+    }
+
+    #[tokio::test]
+    #[ntest::timeout(5_000)]
+    async fn get_indexes_failed_while_index_is_invalid() {
+        let valid_indexes: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(vec![]));
+        let set_valid_indexes = |v| {
+            *valid_indexes.lock().unwrap() = v;
+        };
+
+        let mut mock_db = MockSimDb::new();
+
+        mock_db.expect_get_indexes().returning({
+            move |tx| {
+                async move {
+                    let index = || DbCustomIndex {
+                        keyspace: "ks".to_string().into(),
+                        index: "idx".to_string().into(),
+                        table: "tbl".to_string().into(),
+                        target_column: "embedding".to_string().into(),
+                    };
+                    tx.send(Ok(vec![index(), index(), index()])).unwrap();
+                }
+                .boxed()
+            }
+        });
+
+        mock_db.expect_get_index_version().returning({
+            move |_, _, tx| {
+                async move {
+                    tx.send(Ok(Some(Uuid::new_v4().into()))).unwrap();
+                }
+                .boxed()
+            }
+        });
+
+        mock_db
+            .expect_get_index_target_type()
+            .returning(move |_, _, _, tx| {
+                async move {
+                    tx.send(Ok(Some(NonZeroUsize::new(3).unwrap().into())))
+                        .unwrap();
+                }
+                .boxed()
+            });
+
+        mock_db
+            .expect_get_index_params()
+            .returning(move |_, _, _, tx| {
+                async move {
+                    tx.send(Ok(Some((
+                        Default::default(),
+                        Default::default(),
+                        Default::default(),
+                        Default::default(),
+                    ))))
+                    .unwrap();
+                }
+                .boxed()
+            });
+
+        mock_db.expect_is_valid_index().returning({
+            let valid_indexes = Arc::clone(&valid_indexes);
+            move |_, tx| {
+                let valid_indexes = Arc::clone(&valid_indexes);
+                async move {
+                    tx.send(valid_indexes.lock().unwrap().remove(0)).unwrap();
+                }
+                .boxed()
+            }
+        });
+
+        let db = db::tests::new(mock_db);
+
+        // all indexes are valid
+        set_valid_indexes(vec![true, true, true]);
+        assert!(get_indexes(&db).await.is_ok());
+
+        // second index is invalid
+        set_valid_indexes(vec![true, false, true]);
+        assert!(get_indexes(&db).await.is_err());
     }
 }
