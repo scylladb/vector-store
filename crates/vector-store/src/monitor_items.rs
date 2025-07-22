@@ -78,8 +78,24 @@ async fn add(
     if modify {
         let primary_key = embedding.primary_key;
         if let Some(embedding) = embedding.embedding {
+            metrics
+                .modified
+                .with_label_values(&[
+                    id.keyspace().as_ref().as_str(),
+                    id.index().as_ref().as_str(),
+                    "update",
+                ])
+                .inc();
             index.add_or_replace(primary_key, embedding).await;
         } else {
+            metrics
+                .modified
+                .with_label_values(&[
+                    id.keyspace().as_ref().as_str(),
+                    id.index().as_ref().as_str(),
+                    "remove",
+                ])
+                .inc();
             index.remove(primary_key).await;
         }
         metrics.mark_dirty(

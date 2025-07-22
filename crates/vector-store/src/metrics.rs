@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 use dashmap::DashSet;
+use prometheus::CounterVec;
 use prometheus::GaugeVec;
 use prometheus::HistogramVec;
 use prometheus::Registry;
@@ -13,6 +14,7 @@ pub struct Metrics {
     pub registry: Registry,
     pub latency: HistogramVec,
     pub size: GaugeVec,
+    pub modified: CounterVec,
     dirty_indexes: Arc<DashSet<(String, String)>>,
 }
 
@@ -56,13 +58,21 @@ impl Metrics {
         )
         .unwrap();
 
+        let modified: CounterVec = CounterVec::new(
+            prometheus::Opts::new("index_modified", "Number of modified items per index"),
+            &["keyspace", "index_name", "operation"],
+        )
+        .unwrap();
+
         registry.register(Box::new(latency.clone())).unwrap();
         registry.register(Box::new(size.clone())).unwrap();
+        registry.register(Box::new(modified.clone())).unwrap();
 
         Self {
             registry,
             latency,
             size,
+            modified,
             dirty_indexes: Arc::new(DashSet::new()),
         }
     }
