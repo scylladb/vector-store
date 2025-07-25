@@ -38,6 +38,7 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
 use tokio::time::sleep;
 use tracing::Instrument;
+use tracing::debug;
 use tracing::debug_span;
 use tracing::trace;
 use uuid::Uuid;
@@ -486,17 +487,24 @@ impl Statements {
 
     async fn is_valid_index(&self, metadata: IndexMetadata) -> IsValidIndexR {
         let Ok(version_begin) = self.session.await_schema_agreement().await else {
+            debug!("is_valid_index: schema not agreed for {}", metadata.id());
             return false;
         };
         let cluster_state = self.session.get_cluster_state();
 
         // check a keyspace
         let Some(keyspace) = cluster_state.get_keyspace(metadata.keyspace_name.as_ref()) else {
+            debug!(
+                "is_valid_index: no keyspace in a cluster state for {}",
+                metadata.id()
+            );
+            self.session.refresh_metadata().await.unwrap_or(());
             return false;
         };
 
         // check a table
         if !keyspace.tables.contains_key(metadata.table_name.as_ref()) {
+            debug!("is_valid_index: no table for {}", metadata.id());
             return false;
         }
 
@@ -505,11 +513,16 @@ impl Statements {
             .tables
             .contains_key(&format!("{}_scylla_cdc_log", metadata.table_name))
         {
+            debug!("is_valid_index: no cdc log for {}", metadata.id());
             return false;
         }
 
         // check if schema version changed
         let Ok(Some(version_end)) = self.session.check_schema_agreement().await else {
+            debug!(
+                "is_valid_index: schema not agreed for {} finally",
+                metadata.id()
+            );
             return false;
         };
         version_begin == version_end
