@@ -201,7 +201,7 @@ async fn wait_for_ready(state: &State) -> bool {
     };
 
     loop {
-        if matches!(client.status().await, Status::Serving) {
+        if matches!(client.status().await, Ok(Status::Serving)) {
             return true;
         }
         time::sleep(Duration::from_millis(100)).await;
