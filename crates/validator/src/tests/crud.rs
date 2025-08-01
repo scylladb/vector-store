@@ -7,6 +7,9 @@ use crate::dns::DnsExt;
 use crate::scylla_cluster::ScyllaClusterExt;
 use crate::tests::*;
 use crate::vector_store_cluster::VectorStoreClusterExt;
+use httpclient::HttpClient;
+use scylla::client::session_builder::SessionBuilder;
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::info;
 
@@ -15,7 +18,11 @@ pub(crate) async fn new() -> TestCase {
     TestCase::empty()
         .with_init(timeout, init)
         .with_cleanup(timeout, cleanup)
-        .with_test("dummy", timeout, dummy)
+        .with_test(
+            "simple_create_drop_index",
+            timeout,
+            simple_create_drop_index,
+        )
 }
 
 const VS_NAME: &str = "vs";
@@ -62,7 +69,64 @@ async fn cleanup(actors: TestActors) {
     info!("finished");
 }
 
-async fn dummy(_actors: TestActors) {
+async fn simple_create_drop_index(actors: TestActors) {
     info!("started");
+
+    let session = Arc::new(
+        SessionBuilder::new()
+            .known_node(actors.services_subnet.ip(DB_OCTET).to_string())
+            .build()
+            .await
+            .expect("failed to create session"),
+    );
+    let client = HttpClient::new((actors.services_subnet.ip(VS_OCTET), VS_PORT).into());
+
+    session.query_unpaged(
+        "CREATE KEYSPACE ks WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}",
+        (),
+    ).await.expect("failed to create a keyspace");
+
+    session
+        .use_keyspace("ks", false)
+        .await
+        .expect("failed to use a keyspace");
+
+    session
+        .query_unpaged(
+            "
+            CREATE TABLE tbl (id BIGINT PRIMARY KEY, embedding VECTOR<FLOAT, 3>)
+            WITH cdc = {'enabled': true }
+            ",
+            (),
+        )
+        .await
+        .expect("failed to create a table");
+
+    session
+        .query_unpaged(
+            "CREATE INDEX idx ON tbl(embedding) USING 'vector_index'",
+            (),
+        )
+        .await
+        .expect("failed to create an index");
+
+    while client.indexes().await.is_empty() {}
+    let indexes = client.indexes().await;
+    assert_eq!(indexes.len(), 1);
+    assert_eq!(indexes[0].keyspace.as_ref(), "ks");
+    assert_eq!(indexes[0].index.as_ref(), "idx");
+
+    session
+        .query_unpaged("DROP INDEX idx", ())
+        .await
+        .expect("failed to drop an index");
+
+    while !client.indexes().await.is_empty() {}
+
+    session
+        .query_unpaged("DROP KEYSPACE ks", ())
+        .await
+        .expect("failed to drop a keyspace");
+
     info!("finished");
 }

@@ -5,7 +5,8 @@
 
 use crate::IndexMetadata;
 use std::collections::HashSet;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
@@ -70,6 +71,10 @@ pub(crate) async fn new() -> mpsc::Sender<NodeState> {
                         status = Status::DiscoveringIndexes;
                     }
                     Event::IndexesDiscovered(indexes) => {
+                        if indexes.is_empty() {
+                            status = Status::Serving;
+                            continue;
+                        }
                         if status == Status::DiscoveringIndexes {
                             status = Status::IndexingEmbeddings;
                             idxs = indexes;
@@ -106,6 +111,7 @@ mod tests {
     use crate::IndexName;
     use crate::KeyspaceName;
     use crate::TableName;
+
     #[tokio::test]
     async fn test_node_state_changes_as_expected() {
         let node_state = new().await;
@@ -152,5 +158,23 @@ mod tests {
         node_state.send_event(Event::FullScanFinished(idx2)).await;
         status = node_state.get_status().await;
         assert_eq!(status, Status::Serving);
+    }
+
+    #[tokio::test]
+    async fn no_indexes_discovered() {
+        let node_state = new().await;
+
+        assert_eq!(node_state.get_status().await, Status::Initializing);
+
+        node_state.send_event(Event::ConnectingToDb).await;
+        assert_eq!(node_state.get_status().await, Status::ConnectingToDb);
+
+        node_state.send_event(Event::DiscoveringIndexes).await;
+        assert_eq!(node_state.get_status().await, Status::DiscoveringIndexes);
+
+        node_state
+            .send_event(Event::IndexesDiscovered(HashSet::new()))
+            .await;
+        assert_eq!(node_state.get_status().await, Status::Serving);
     }
 }

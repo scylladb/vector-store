@@ -3157,6 +3157,7 @@ dependencies = [
  "futures",
  "hickory-server",
  "httpclient",
+ "scylla",
  "tempfile",
  "tokio",
  "tracing",
