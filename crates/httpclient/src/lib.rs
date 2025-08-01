@@ -112,14 +112,13 @@ impl HttpClient {
             .unwrap()
     }
 
-    pub async fn status(&self) -> Status {
-        self.client
+    pub async fn status(&self) -> anyhow::Result<Status> {
+        Ok(self
+            .client
             .get(format!("{}/status", self.url_api))
             .send()
-            .await
-            .unwrap()
+            .await?
             .json()
-            .await
-            .unwrap()
+            .await?)
     }
 }

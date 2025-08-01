@@ -19,6 +19,7 @@ use uuid::Uuid;
 use vector_store::IndexMetadata;
 use vector_store::Percentage;
 use vector_store::Vector;
+use vector_store::httproutes::Status;
 use vector_store::node_state::NodeState;
 
 async fn setup_store() -> (
@@ -347,7 +348,7 @@ async fn status_is_serving_after_creation() {
     let (_index, client, _db, _server, _node_state) = setup_store_and_wait_for_index().await;
 
     let result = client.status().await;
-    assert_eq!(result, vector_store::httproutes::Status::Serving);
+    assert_eq!(result.unwrap(), Status::Serving);
 }
 
 #[tokio::test]

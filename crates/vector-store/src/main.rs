@@ -4,11 +4,16 @@
  */
 
 use anyhow::anyhow;
+use clap::Parser;
 use std::net::ToSocketAddrs;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
 mod info;
+
+#[derive(Parser)]
+#[clap(version)]
+struct Args {}
 
 // Index creating/querying is CPU bound task, so that vector-store uses rayon ThreadPool for them.
 // From the start there was no need (network traffic seems to be not so high) to support more than
@@ -20,6 +25,8 @@ async fn main() -> anyhow::Result<()> {
         .with(EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new("info"))?)
         .with(fmt::layer().with_target(false))
         .init();
+
+    _ = Args::parse();
 
     tracing::info!(
         "Starting {} version {}",
