@@ -2929,7 +2929,7 @@ dependencies = [
 [[package]]
 name = "usearch"
 version = "2.17.12"
-source = "git+https://github.com/unum-cloud/usearch.git?rev=68e403a#68e403aef75311313570af5340a2612777d3a986"
+source = "git+https://github.com/knowack1/usearch.git?rev=17320ee#17320eedcdb4c736db94cc2aeace4021e7281449"
 dependencies = [
  "cxx",
  "cxx-build",
