@@ -49,6 +49,8 @@ use utoipa::openapi::SchemaFormat;
 use utoipa::openapi::schema::Type;
 use uuid::Uuid;
 
+pub type EngineType = index::factory::Type;
+
 #[derive(Clone, derive_more::From, derive_more::Display)]
 pub struct ScyllaDbUri(String);
 

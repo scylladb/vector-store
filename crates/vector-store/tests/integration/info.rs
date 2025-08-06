@@ -8,7 +8,7 @@ use httpclient::HttpClient;
 use std::net::SocketAddr;
 
 #[tokio::test]
-async fn get_applicaiton_info() {
+async fn get_application_info() {
     let node_state = vector_store::new_node_state().await;
     let (db_actor, _) = db_basic::new(node_state.clone());
     let (_server_actor, addr) = vector_store::run(
@@ -26,4 +26,7 @@ async fn get_applicaiton_info() {
 
     assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
     assert_eq!(info.service, env!("CARGO_PKG_NAME"));
+
+    assert_eq!(info.engine.version, usearch::version());
+    assert_eq!(info.engine.engine_type, vector_store::EngineType::Usearch);
 }

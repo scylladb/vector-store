@@ -13,6 +13,7 @@ use crate::Limit;
 use crate::PrimaryKey;
 use crate::SpaceType;
 use crate::Vector;
+use crate::factory::Type;
 use crate::index::actor::AnnR;
 use crate::index::actor::CountR;
 use crate::index::actor::Index;
@@ -54,6 +55,14 @@ impl IndexFactory for UsearchIndexFactory {
             expansion_search,
             space_type,
         )
+    }
+
+    fn get_type(&self) -> Type {
+        Type::Usearch
+    }
+
+    fn get_version(&self) -> String {
+        usearch::version().into()
     }
 }
 
