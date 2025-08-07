@@ -14,6 +14,7 @@ use crate::Vector;
 use crate::db_index::DbIndexExt;
 use crate::engine::Engine;
 use crate::engine::EngineExt;
+use crate::engine::EngineInfo;
 use crate::index::IndexExt;
 use crate::index::validator;
 use crate::info::Info;
@@ -496,10 +497,11 @@ fn to_json(value: CqlValue) -> Value {
     }
 }
 
-#[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
+#[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 pub struct InfoResponse {
     pub version: String,
     pub service: String,
+    pub engine: EngineInfo,
 }
 
 #[utoipa::path(
@@ -511,15 +513,16 @@ pub struct InfoResponse {
         (status = 200, description = "Vector Store service information.", body = InfoResponse)
     )
 )]
-async fn get_info() -> response::Json<InfoResponse> {
+async fn get_info(State(state): State<RoutesInnerState>) -> response::Json<InfoResponse> {
     response::Json(InfoResponse {
         version: Info::version().to_string(),
         service: Info::name().to_string(),
+        engine: state.engine.get_engine_info().await,
     })
 }
 
 #[derive(ToEnumSchema, serde::Deserialize, serde::Serialize, PartialEq, Debug)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")] // This line makes all variants uppercase in the schema
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 /// Operational status of the Vector Store node.
 pub enum Status {
     /// The node is starting up.

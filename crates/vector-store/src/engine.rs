@@ -10,6 +10,7 @@ use crate::db::Db;
 use crate::db::DbExt;
 use crate::db_index::DbIndex;
 use crate::factory::IndexFactory;
+use crate::factory::Type;
 use crate::index::Index;
 use crate::monitor_indexes;
 use crate::monitor_items;
@@ -29,6 +30,16 @@ use tracing::trace;
 type GetIndexIdsR = Vec<IndexId>;
 type AddIndexR = anyhow::Result<()>;
 type GetIndexR = Option<(mpsc::Sender<Index>, mpsc::Sender<DbIndex>)>;
+type GetEngineInfoR = EngineInfo;
+
+#[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
+pub struct EngineInfo {
+    #[serde(rename = "type")]
+    /// The type of the search engine used by the Vector Store.
+    pub engine_type: Type,
+    /// The version of the search engine.
+    pub version: String,
+}
 
 pub(crate) enum Engine {
     GetIndexIds {
@@ -45,6 +56,10 @@ pub(crate) enum Engine {
         id: IndexId,
         tx: oneshot::Sender<GetIndexR>,
     },
+
+    GetEngineInfo {
+        tx: oneshot::Sender<GetEngineInfoR>,
+    },
 }
 
 pub(crate) trait EngineExt {
@@ -52,6 +67,7 @@ pub(crate) trait EngineExt {
     async fn add_index(&self, metadata: IndexMetadata) -> AddIndexR;
     async fn del_index(&self, id: IndexId);
     async fn get_index(&self, id: IndexId) -> GetIndexR;
+    async fn get_engine_info(&self) -> GetEngineInfoR;
 }
 
 impl EngineExt for mpsc::Sender<Engine> {
@@ -86,6 +102,15 @@ impl EngineExt for mpsc::Sender<Engine> {
             .expect("EngineExt::get_index: internal actor should receive request");
         rx.await
             .expect("EngineExt::get_index: internal actor should send response")
+    }
+
+    async fn get_engine_info(&self) -> GetEngineInfoR {
+        let (tx, rx) = oneshot::channel();
+        self.send(Engine::GetEngineInfo { tx })
+            .await
+            .expect("EngineExt::get_engine_info: internal actor should receive request");
+        rx.await
+            .expect("EngineExt::get_engine_info: internal actor should send response")
     }
 }
 
@@ -132,6 +157,9 @@ pub(crate) async fn new(
                     Engine::DelIndex { id } => del_index(id, &mut indexes).await,
 
                     Engine::GetIndex { id, tx } => get_index(id, tx, &indexes).await,
+                    Engine::GetEngineInfo { tx } => {
+                        get_engine_info(tx, index_factory.as_ref()).await
+                    }
                 }
             }
             drop(monitor_actor);
@@ -226,6 +254,17 @@ async fn get_index(id: IndexId, tx: oneshot::Sender<GetIndexR>, indexes: &Indexe
     .unwrap_or_else(|_| trace!("get_index: unable to send response"));
 }
 
+async fn get_engine_info(
+    tx: oneshot::Sender<GetEngineInfoR>,
+    index_factory: &(dyn IndexFactory + Send + Sync),
+) {
+    tx.send(GetEngineInfoR {
+        engine_type: index_factory.get_type(),
+        version: index_factory.get_version(),
+    })
+    .unwrap_or_else(|_| trace!("get_engine_info: unable to send response"));
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -251,6 +290,11 @@ pub(crate) mod tests {
             id: IndexId,
             tx: oneshot::Sender<GetIndexR>,
         ) -> impl Future<Output = ()> + Send + 'static;
+
+        fn get_engine_info(
+            &self,
+            tx: oneshot::Sender<GetEngineInfoR>,
+        ) -> impl Future<Output = ()> + Send + 'static;
     }
 
     pub(crate) fn new(sim: impl SimEngine + Send + 'static) -> mpsc::Sender<Engine> {
@@ -273,6 +317,7 @@ pub(crate) mod tests {
                         Engine::AddIndex { metadata, tx } => sim.add_index(metadata, tx).await,
                         Engine::DelIndex { id } => sim.del_index(id).await,
                         Engine::GetIndex { id, tx } => sim.get_index(id, tx).await,
+                        Engine::GetEngineInfo { tx } => sim.get_engine_info(tx).await,
                     }
                 }
 

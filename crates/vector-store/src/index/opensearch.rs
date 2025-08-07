@@ -14,6 +14,7 @@ use crate::Limit;
 use crate::PrimaryKey;
 use crate::SpaceType;
 use crate::Vector;
+use crate::factory::Type;
 use crate::index::actor::Index;
 use crate::index::validator;
 use anyhow::anyhow;
@@ -88,6 +89,14 @@ impl IndexFactory for OpenSearchIndexFactory {
             space_type,
             self.client.clone(),
         )
+    }
+
+    fn get_type(&self) -> Type {
+        Type::OpenSearch
+    }
+
+    fn get_version(&self) -> String {
+        String::new()
     }
 }
 

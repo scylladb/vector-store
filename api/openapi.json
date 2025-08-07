@@ -243,6 +243,23 @@
         "format": "float",
         "description": "Distance between vectors measured using the distance function defined while creating the index."
       },
+      "EngineInfo": {
+        "type": "object",
+        "required": [
+          "type",
+          "version"
+        ],
+        "properties": {
+          "type": {
+            "$ref": "#/components/schemas/Type",
+            "description": "The type of the search engine used by the Vector Store."
+          },
+          "version": {
+            "type": "string",
+            "description": "The version of the search engine."
+          }
+        }
+      },
       "ErrorMessage": {
         "type": "string",
         "description": "A human-readable description of the error that occurred."
@@ -275,9 +292,13 @@
         "type": "object",
         "required": [
           "version",
-          "service"
+          "service",
+          "engine"
         ],
         "properties": {
+          "engine": {
+            "$ref": "#/components/schemas/EngineInfo"
+          },
           "service": {
             "type": "string"
           },
@@ -348,6 +369,13 @@
           "The node is establishing a connection to ScyllaDB.",
           "The node is discovering available vector indexes in ScyllaDB.",
           "The node is making initial indexes discovering and vector data indexing."
+        ]
+      },
+      "Type": {
+        "type": "string",
+        "enum": [
+          "OPEN_SEARCH",
+          "USEARCH"
         ]
       },
       "Vector": {
