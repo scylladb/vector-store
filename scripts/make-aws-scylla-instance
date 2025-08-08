@@ -1,0 +1,40 @@
+#!/bin/bash
+
+set -e
+
+envs=$1
+[[ -f $envs ]] || (echo envs file not provided ; exit 1)
+source $envs
+
+idx=$2
+[[ -z $idx ]] && (echo idx not provided ; exit 1)
+
+ip_ext=DB_IP_${idx}_EXT
+ip_ext=${!ip_ext}
+
+cat $LOCAL_SSH_PUB_KEY | ssh -i $AWS_SSH_KEY ubuntu@$ip_ext "cat >> /home/ubuntu/.ssh/authorized_keys"
+
+ssh ubuntu@$ip_ext bash <<EOF
+set -e
+sudo apt update
+sudo apt install -y docker.io
+sudo usermod -a -G docker ubuntu
+EOF
+
+ssh ubuntu@$ip_ext bash <<EOF
+set -e
+
+echo 104857600 | sudo tee /proc/sys/fs/aio-max-nr
+
+docker pull $SCYLLA_DOCKER_IMAGE
+
+disk=nvme1n1
+[[ -n \$(ls /dev/\${disk}p* 2>/dev/null) ]] && disk=nvme0n1
+[[ -n \$(ls /dev/\${disk}p* 2>/dev/null) ]] && (echo "Disk already partitioned" ; exit 1)
+sudo mkdir -p /mnt/data
+sudo parted /dev/\$disk --script mklabel gpt mkpart P1 ext4 1MB 100%
+sudo mkfs.ext4 -F /dev/\${disk}p1
+sudo mount -t auto -v /dev/\${disk}p1 /mnt/data
+sudo mkdir /mnt/data/scylla
+sudo chmod a+w /mnt/data/scylla
+EOF

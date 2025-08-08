@@ -1,0 +1,38 @@
+#!/bin/bash
+
+set -e
+
+envs=$1
+[[ -f $envs ]] || (echo envs file not provided ; exit 1)
+source $envs
+
+idx=$2
+[[ -z $idx ]] && (echo idx not provided ; exit 1)
+
+ip_ext=VS_IP_${idx}_EXT
+ip_ext=${!ip_ext}
+
+cat $LOCAL_SSH_PUB_KEY | ssh -i $AWS_SSH_KEY ubuntu@$ip_ext "cat >> /home/ubuntu/.ssh/authorized_keys"
+
+ssh ubuntu@$ip_ext bash <<EOF
+set -e
+sudo apt update
+sudo apt install -y docker.io
+sudo usermod -a -G docker ubuntu
+EOF
+
+ssh ubuntu@$ip_ext bash <<EOF
+set -e
+
+echo 104857600 | sudo tee /proc/sys/fs/aio-max-nr
+
+cpu_path=/sys/devices/system/cpu
+cpus=\$(nproc)
+cstates=\$(ls \$cpu_path/cpu0/cpuidle | grep state | wc -l)
+for cpu in \$(seq 0 \$((cpus - 1))); do
+    for cstate in \$(seq 2 \$((cstates - 1))); do
+        echo 1 | sudo tee \$cpu_path/cpu\${cpu}/cpuidle/state\${cstate}/disable > /dev/null
+    done
+done
+
+EOF

@@ -1,0 +1,24 @@
+#!/bin/bash
+
+set -e
+
+envs=$1
+[[ -f $envs ]] || (echo envs file not provided ; exit 1)
+source $envs
+
+idx=$2
+[[ -z $idx ]] && (echo idx not provided ; exit 1)
+
+vs=$3
+
+ip_ext=VS_IP_${idx}_EXT
+ip_ext=${!ip_ext}
+ip_int=VS_IP_${idx}_INT
+ip_int=${!ip_int}
+ip_db=DB_IP_${idx}_INT
+ip_db=${!ip_db}
+
+ssh ubuntu@$ip_ext killall vector-store || true
+ssh ubuntu@$ip_ext killall -9 vector-store || true
+[[ -x $vs ]] && scp $vs ubuntu@$ip_ext:~/vector-store
+ssh ubuntu@$ip_ext VECTOR_STORE_URI=$ip_int:6080 VECTOR_STORE_SCYLLADB_URI=$ip_db:9042 /home/ubuntu/vector-store

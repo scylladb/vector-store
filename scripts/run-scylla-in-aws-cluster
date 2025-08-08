@@ -1,0 +1,41 @@
+#!/bin/bash
+
+set -e
+
+envs=$1
+[[ -f $envs ]] || (echo envs file not provided ; exit 1)
+source $envs
+
+idx=$2
+[[ -z $idx ]] && (echo idx not provided ; exit 1)
+
+ip_ext=DB_IP_${idx}_EXT
+ip_ext=${!ip_ext}
+ip_int=DB_IP_${idx}_INT
+ip_int=${!ip_int}
+ip_vs=VS_IP_${idx}_INT
+ip_vs=${!ip_vs}
+
+[[ $idx -gt 0 ]] && seeds="--seeds=$DB_IP_0_INT"
+
+ssh ubuntu@$ip_ext docker run --rm -d \
+    --name scylla \
+    -v /mnt/data/scylla:/var/lib/scylla \
+    -p 7000:7000 \
+    -p 7001:7001 \
+    -p 7199:7199 \
+    -p 9042:9042 \
+    -p 9160:9160 \
+    -p 10000:10000 \
+    -p 19042:19042 \
+    $SCYLLA_DOCKER_IMAGE \
+        --vector-store-uri http://$ip_vs:6080 \
+        --batch-size-warn-threshold-in-kb=1024 \
+        --broadcast-address $ip_int \
+        --broadcast-rpc-address $ip_int \
+        $seeds
+
+
+#$SSH "docker run --name scylla --rm -d --network=host scylladb/$tag $seeds"
+#$SSH "docker run --name scylla --rm -d --network=host scylladb/$tag --endpoint-snitch GossipingPropertyFileSnitch --dc dc --rack rack$rack $seeds"
+#$bin --workdir $workdir --memory 2GB --developer-mode true --vector-store-uri http://127.0.$rack.1:6080 --listen-address 127.0.$rack.1 --rpc-address 127.0.$rack.1 --api-address 127.0.$rack.1 --endpoint-snitch RackInferringSnitch --seed-provider-parameters seeds=127.0.1.1,127.0.2.1,127.0.3.1

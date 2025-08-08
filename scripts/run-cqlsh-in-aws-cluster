@@ -1,0 +1,17 @@
+#!/bin/bash
+
+set -e
+
+envs=$1
+[[ -f $envs ]] || (echo envs file not provided ; exit 1)
+source $envs
+
+idx=$2
+[[ -z $idx ]] && (echo idx not provided ; exit 1)
+
+shift 2
+
+ip_ext=DB_IP_${idx}_EXT
+ip_ext=${!ip_ext}
+
+ssh ubuntu@$ip_ext docker exec -t scylla cqlsh "$@"
