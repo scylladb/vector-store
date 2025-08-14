@@ -24,6 +24,7 @@ pub(crate) async fn new(
     state: Sender<NodeState>,
     engine: Sender<Engine>,
     metrics: Arc<Metrics>,
+    index_engine_version: String,
 ) -> anyhow::Result<(Sender<HttpServer>, SocketAddr)> {
     let listener = TcpListener::bind(addr.0).await?;
     let addr = listener.local_addr()?;
@@ -47,13 +48,16 @@ pub(crate) async fn new(
         }
     });
     tokio::spawn(async move {
-        axum::serve(listener, httproutes::new(engine, metrics, state))
-            .with_graceful_shutdown(async move {
-                notify.notified().await;
-                tracing::info!("HTTP server shutting down");
-            })
-            .await
-            .expect("failed to run web server");
+        axum::serve(
+            listener,
+            httproutes::new(engine, metrics, state, index_engine_version),
+        )
+        .with_graceful_shutdown(async move {
+            notify.notified().await;
+            tracing::info!("HTTP server shutting down");
+        })
+        .await
+        .expect("failed to run web server");
     });
 
     Ok((tx, addr))

@@ -243,6 +243,18 @@
         "format": "float",
         "description": "Distance between vectors measured using the distance function defined while creating the index."
       },
+      "EngineVersion": {
+        "type": "object",
+        "required": [
+          "version"
+        ],
+        "properties": {
+          "version": {
+            "type": "string",
+            "description": "The version of the underlying search engine."
+          }
+        }
+      },
       "ErrorMessage": {
         "type": "string",
         "description": "A human-readable description of the error that occurred."
@@ -275,14 +287,21 @@
         "type": "object",
         "required": [
           "version",
-          "service"
+          "service",
+          "engine"
         ],
         "properties": {
+          "engine": {
+            "$ref": "#/components/schemas/EngineVersion",
+            "description": "Information about the underlying search engine."
+          },
           "service": {
-            "type": "string"
+            "type": "string",
+            "description": "The name of the Vector Store service."
           },
           "version": {
-            "type": "string"
+            "type": "string",
+            "description": "The version of the Vector Store service."
           }
         }
       },
