@@ -274,10 +274,15 @@
       "InfoResponse": {
         "type": "object",
         "required": [
-          "version",
-          "service"
+          "engine",
+          "service",
+          "version"
         ],
         "properties": {
+          "engine": {
+            "type": "string",
+            "description": "Information about the underlying search engine."
+          },
           "service": {
             "type": "string"
           },

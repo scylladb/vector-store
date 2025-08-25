@@ -89,6 +89,10 @@ impl IndexFactory for OpenSearchIndexFactory {
             self.client.clone(),
         )
     }
+
+    fn index_engine_version(&self) -> String {
+        "opensearch".into()
+    }
 }
 
 pub fn new_opensearch(addr: &str) -> Result<OpenSearchIndexFactory, anyhow::Error> {

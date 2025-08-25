@@ -55,6 +55,10 @@ impl IndexFactory for UsearchIndexFactory {
             space_type,
         )
     }
+
+    fn index_engine_version(&self) -> String {
+        format!("usearch-{}", usearch::version())
+    }
 }
 
 pub fn new_usearch() -> anyhow::Result<UsearchIndexFactory> {

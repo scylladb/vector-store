@@ -94,17 +94,20 @@ struct RoutesInnerState {
     engine: Sender<Engine>,
     metrics: Arc<Metrics>,
     node_state: Sender<NodeState>,
+    index_engine_version: String,
 }
 
 pub(crate) fn new(
     engine: Sender<Engine>,
     metrics: Arc<Metrics>,
     node_state: Sender<NodeState>,
+    index_engine_version: String,
 ) -> Router {
     let state = RoutesInnerState {
         engine,
         metrics: metrics.clone(),
         node_state,
+        index_engine_version,
     };
     let (router, api) = new_open_api_router();
     let router = router
@@ -508,8 +511,10 @@ fn to_json(value: CqlValue) -> Value {
 
 #[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
 pub struct InfoResponse {
-    pub version: String,
+    /// Information about the underlying search engine.
+    pub engine: String,
     pub service: String,
+    pub version: String,
 }
 
 #[utoipa::path(
@@ -521,10 +526,11 @@ pub struct InfoResponse {
         (status = 200, description = "Vector Store service information.", body = InfoResponse)
     )
 )]
-async fn get_info() -> response::Json<InfoResponse> {
+async fn get_info(State(state): State<RoutesInnerState>) -> response::Json<InfoResponse> {
     response::Json(InfoResponse {
         version: Info::version().to_string(),
         service: Info::name().to_string(),
+        engine: state.index_engine_version.clone(),
     })
 }
 
