@@ -508,7 +508,9 @@ fn to_json(value: CqlValue) -> Value {
 
 #[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
 pub struct InfoResponse {
+    /// The version of the Vector Store service.
     pub version: String,
+    /// The name of the Vector Store service.
     pub service: String,
 }
 
