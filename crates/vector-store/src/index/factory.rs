@@ -22,4 +22,5 @@ pub trait IndexFactory {
         expansion_search: ExpansionSearch,
         space_type: SpaceType,
     ) -> anyhow::Result<mpsc::Sender<Index>>;
+    fn index_engine_version(&self) -> String;
 }

@@ -21,7 +21,7 @@ use db::Db;
 pub use httproutes::DataType;
 pub use httproutes::IndexInfo;
 use index::factory;
-use index::factory::IndexFactory;
+pub use index::factory::IndexFactory;
 use scylla::cluster::metadata::ColumnType;
 use scylla::serialize::SerializationError;
 use scylla::serialize::value::SerializeValue;
@@ -455,11 +455,13 @@ pub async fn run(
         });
     }
     let metrics: Arc<Metrics> = Arc::new(metrics::Metrics::new());
+    let index_engine_version = index_factory.index_engine_version();
     httpserver::new(
         addr,
         node_state.clone(),
         engine::new(db_actor, index_factory, node_state, metrics.clone()).await?,
         metrics,
+        index_engine_version,
     )
     .await
 }
