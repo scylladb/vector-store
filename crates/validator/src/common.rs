@@ -11,6 +11,9 @@ use httpclient::HttpClient;
 use scylla::client::session::Session;
 use scylla::client::session_builder::SessionBuilder;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::task;
+use tokio::time;
 use tracing::info;
 
 const VS_NAME: &str = "vs";
@@ -67,4 +70,18 @@ pub(crate) async fn prepare_connection(actors: TestActors) -> (Arc<Session>, Htt
     );
     let client = HttpClient::new((actors.services_subnet.ip(VS_OCTET), VS_PORT).into());
     (session, client)
+}
+
+pub(crate) async fn wait_for<F, Fut>(mut condition: F, msg: &str)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    time::timeout(Duration::from_secs(5), async {
+        while !condition().await {
+            task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("Timeout on: {msg}"))
 }
