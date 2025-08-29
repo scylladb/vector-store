@@ -87,6 +87,20 @@ impl HttpClient {
             .unwrap()
     }
 
+    pub async fn count_from_info(&self, info: &IndexInfo) -> Option<usize> {
+        self.client
+            .get(format!(
+                "{}/indexes/{}/{}/count",
+                self.url_api, info.keyspace, info.index
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json::<usize>()
+            .await
+            .ok()
+    }
+
     pub async fn count(&self, index: &IndexMetadata) -> Option<usize> {
         self.client
             .get(format!(

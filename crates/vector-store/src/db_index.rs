@@ -142,9 +142,14 @@ pub(crate) async fn new(
             debug!("starting");
             let completed_scan_length = Arc::new(AtomicU64::new(0));
 
+            let mut initial_scan = Box::pin(statements.initial_scan(
+                tx_embeddings.clone(),
+                completed_scan_length.clone(),
+            ));
+
             while !rx_index.is_closed() {
                 tokio::select! {
-                    _ = statements.initial_scan(tx_embeddings.clone(), completed_scan_length.clone()) => {
+                    _ = &mut initial_scan => {
                         node_state
                             .send_event(Event::FullScanFinished(metadata))
                             .await;

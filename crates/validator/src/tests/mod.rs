@@ -4,6 +4,7 @@
  */
 
 mod crud;
+mod full_scan;
 
 use crate::ServicesSubnet;
 use crate::dns::Dns;
@@ -191,10 +192,13 @@ async fn run_single(span: Span, timeout: Duration, future: TestFuture) -> bool {
 
 /// Returns a vector of all known test cases to be run. Each test case is registered with a name
 pub(crate) async fn register() -> Vec<(String, TestCase)> {
-    vec![("crud", crud::new().await)]
-        .into_iter()
-        .map(|(name, test_case)| (name.to_string(), test_case))
-        .collect::<Vec<_>>()
+    vec![
+        ("crud", crud::new().await),
+        ("full_scan", full_scan::new().await),
+    ]
+    .into_iter()
+    .map(|(name, test_case)| (name.to_string(), test_case))
+    .collect::<Vec<_>>()
 }
 
 /// Runs all test cases, filtering them based on the provided filter map.
