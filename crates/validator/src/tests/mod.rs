@@ -85,6 +85,11 @@ impl TestCase {
         }
     }
 
+    /// Returns a reference to the tests in this test case.
+    pub(crate) fn tests(&self) -> &Vec<(String, Duration, TestFn)> {
+        &self.tests
+    }
+
     /// Add an initialization function to the test case.
     fn with_init<F, R>(mut self, timeout: Duration, test_fn: F) -> Self
     where

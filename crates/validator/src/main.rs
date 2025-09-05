@@ -13,12 +13,14 @@ use clap::Parser;
 use dns::DnsExt;
 use scylla_cluster::ScyllaClusterExt;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::net::Ipv4Addr;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tests::TestActors;
+use tests::TestCase;
 use tokio::fs;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -52,6 +54,13 @@ struct Args {
     /// Path to the Vector Store executable.
     #[arg(value_name = "PATH")]
     vector_store: PathBuf,
+
+    /// Filters to select specific tests to run.
+    /// The syntax is as follows:
+    ///     `<partially_matching_test_file_name>::<partially_matching_test_case_name>`
+    /// Without specifying `::`, the filter will try to match both the file and test names.
+    #[arg(value_name = "FILTER")]
+    filters: Vec<String>,
 }
 
 async fn file_exists(path: &Path) -> bool {
@@ -102,6 +111,87 @@ fn validate_different_subnet(dns_ip: Ipv4Addr, base_ip: Ipv4Addr) {
     );
 }
 
+fn fetch_matching_tests(filter: &str, test_case: &TestCase) -> HashSet<String> {
+    let matching_tests: HashSet<String> = test_case
+        .tests()
+        .iter()
+        .filter_map(|(test_name, _, _)| {
+            if !filter.is_empty() && test_name.contains(filter) {
+                Some(test_name.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    matching_tests
+}
+
+fn update_filter_map(
+    filter_map: &mut HashMap<String, HashSet<String>>,
+    file_name: &str,
+    matching_tests: HashSet<String>,
+) {
+    // If this file already has some tests selected, merge them
+    filter_map
+        .entry(file_name.to_string())
+        .and_modify(|existing| {
+            if !existing.is_empty() {
+                existing.extend(matching_tests.iter().cloned());
+            }
+        })
+        .or_insert(matching_tests);
+}
+
+/// Parse command line filters into the expected filter format for test execution.
+/// Returns a HashMap where:
+/// - Key: test file name (e.g., "crud", "full_scan")
+/// - Value: HashSet of specific test names within that file (empty means run all tests in file)
+fn parse_test_filters(
+    filters: &[String],
+    test_cases: &[(String, TestCase)],
+) -> HashMap<String, HashSet<String>> {
+    if filters.is_empty() {
+        return HashMap::new(); // Run all tests
+    }
+
+    let mut filter_map: HashMap<String, HashSet<String>> = HashMap::new();
+
+    for filter in filters {
+        // Check for <file>::<test> syntax
+        let parts: Vec<&str> = filter.splitn(2, "::").collect();
+        if parts.len() == 2 {
+            // Found `::`, split into file and test parts
+            let file_part = parts[0];
+            let test_part = parts[1];
+
+            for (file_name, test_case) in test_cases {
+                if file_part.is_empty() || file_name.contains(file_part) {
+                    let matching_tests = fetch_matching_tests(test_part, test_case);
+                    // If test_part is empty, run all tests in file
+                    if !matching_tests.is_empty() || test_part.is_empty() {
+                        update_filter_map(&mut filter_map, file_name, matching_tests);
+                    }
+                }
+            }
+        } else {
+            // Not found `::`, check for matching both file and test case name
+            let filter = parts[0];
+
+            for (file_name, test_case) in test_cases {
+                if file_name.contains(filter) {
+                    filter_map.entry(file_name.to_string()).or_default();
+                }
+                let matching_tests = fetch_matching_tests(filter, test_case);
+                if !matching_tests.is_empty() {
+                    update_filter_map(&mut filter_map, file_name, matching_tests);
+                }
+            }
+        }
+    }
+
+    filter_map
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     tracing_subscriber::registry()
@@ -132,6 +222,7 @@ async fn main() {
     info!("vector-store version: {}", vs.version().await);
 
     let test_cases = tests::register().await;
+    let filter_map = parse_test_filters(&args.filters, &test_cases);
 
     assert!(
         tests::run(
@@ -142,7 +233,7 @@ async fn main() {
                 vs,
             },
             test_cases,
-            Arc::new(HashMap::new())
+            Arc::new(filter_map)
         )
         .await
     );
