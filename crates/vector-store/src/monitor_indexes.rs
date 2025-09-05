@@ -114,7 +114,7 @@ async fn get_indexes(db: &Sender<Db>) -> anyhow::Result<HashSet<IndexMetadata>> 
     let mut indexes = HashSet::new();
     for idx in db.get_indexes().await?.into_iter() {
         let Some(version) = db
-            .get_index_version(idx.keyspace.clone(), idx.index.clone())
+            .get_index_version(idx.keyspace.clone(), idx.table.clone(), idx.index.clone())
             .await
             .inspect_err(|err| warn!("unable to get index version: {err}"))?
         else {
@@ -431,7 +431,7 @@ mod tests {
 
         mock_db.expect_get_index_version().returning({
             let state = state.clone();
-            move |_, index, tx| {
+            move |_, _, index, tx| {
                 let state = state.clone();
                 async move {
                     // Return a version for all indexes
@@ -560,7 +560,7 @@ mod tests {
         });
 
         mock_db.expect_get_index_version().returning({
-            move |_, _, tx| {
+            move |_, _, _, tx| {
                 async move {
                     tx.send(Ok(Some(Uuid::new_v4().into()))).unwrap();
                 }
