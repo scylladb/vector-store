@@ -238,3 +238,82 @@ async fn main() {
         .await
     );
 }
+
+#[cfg(test)]
+pub(crate) mod validator_tests {
+    use super::*;
+
+    fn make_test_cases() -> Vec<(String, TestCase)> {
+        vec![
+            (
+                "crud".to_string(),
+                TestCase::make_dummy_test_cases(&["simple_create", "drop_index"]),
+            ),
+            (
+                "full_scan".to_string(),
+                TestCase::make_dummy_test_cases(&["scan_index", "scan_all"]),
+            ),
+            (
+                "other".to_string(),
+                TestCase::make_dummy_test_cases(&["misc", "simple_misc"]),
+            ),
+        ]
+    }
+
+    #[test]
+    fn test_empty_filters_runs_all() {
+        let test_cases = make_test_cases();
+        let filters: Vec<String> = vec![];
+        let result = parse_test_filters(&filters, &test_cases);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_file_partial_match() {
+        let test_cases = make_test_cases();
+        let filters = vec!["crud".to_string()];
+        let result = parse_test_filters(&filters, &test_cases);
+        assert!(result.contains_key("crud"));
+        assert!(result["crud"].is_empty());
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_test_case_partial_match() {
+        let test_cases = make_test_cases();
+        let filters = vec!["simple".to_string()];
+        let result = parse_test_filters(&filters, &test_cases);
+        assert!(result["crud"].contains("simple_create"));
+        assert!(result["other"].contains("simple_misc"));
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_file_and_test_case_syntax() {
+        let test_cases = make_test_cases();
+        let filters = vec!["crud::simple".to_string()];
+        let result = parse_test_filters(&filters, &test_cases);
+        assert!(result["crud"].contains("simple_create"));
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_file_and_empty_test_case_syntax() {
+        let test_cases = make_test_cases();
+        let filters = vec!["crud::".to_string()];
+        let result = parse_test_filters(&filters, &test_cases);
+        assert!(result.contains_key("crud"));
+        assert!(result["crud"].is_empty());
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_empty_file_and_test_case_syntax() {
+        let test_cases = make_test_cases();
+        let filters = vec!["::simple".to_string()];
+        let result = parse_test_filters(&filters, &test_cases);
+        assert!(result["crud"].contains("simple_create"));
+        assert!(result["other"].contains("simple_misc"));
+        assert_eq!(result.len(), 2);
+    }
+}

@@ -164,6 +164,19 @@ impl TestCase {
 
         stats
     }
+
+    #[cfg(test)]
+    pub(crate) fn make_dummy_test_cases(test_names: &[&str]) -> Self {
+        let mut tc = TestCase::empty();
+        for &name in test_names {
+            tc = tc.with_test(
+                name.to_string(),
+                std::time::Duration::ZERO,
+                |_actors| async {},
+            );
+        }
+        tc
+    }
 }
 
 /// Wraps a test function into a `TestFn` type, which is a boxed future that can be stored in a
