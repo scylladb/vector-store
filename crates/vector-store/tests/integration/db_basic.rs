@@ -305,6 +305,7 @@ fn process_db(db: &DbBasic, msg: Db, node_state: Sender<NodeState>) {
         }
         Db::GetIndexVersion {
             keyspace,
+            table: _,
             index,
             tx,
         } => tx

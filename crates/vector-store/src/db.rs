@@ -74,6 +74,7 @@ pub enum Db {
 
     GetIndexVersion {
         keyspace: KeyspaceName,
+        table: TableName,
         index: IndexName,
         tx: oneshot::Sender<GetIndexVersionR>,
     },
@@ -112,8 +113,12 @@ pub(crate) trait DbExt {
 
     async fn get_indexes(&self) -> GetIndexesR;
 
-    async fn get_index_version(&self, keyspace: KeyspaceName, index: IndexName)
-    -> GetIndexVersionR;
+    async fn get_index_version(
+        &self,
+        keyspace: KeyspaceName,
+        table: TableName,
+        index: IndexName,
+    ) -> GetIndexVersionR;
 
     async fn get_index_target_type(
         &self,
@@ -154,11 +159,13 @@ impl DbExt for mpsc::Sender<Db> {
     async fn get_index_version(
         &self,
         keyspace: KeyspaceName,
+        table: TableName,
         index: IndexName,
     ) -> GetIndexVersionR {
         let (tx, rx) = oneshot::channel();
         self.send(Db::GetIndexVersion {
             keyspace,
+            table,
             index,
             tx,
         })
@@ -259,10 +266,11 @@ async fn process(statements: Arc<Statements>, msg: Db, node_state: Sender<NodeSt
 
         Db::GetIndexVersion {
             keyspace,
+            table,
             index,
             tx,
         } => tx
-            .send(statements.get_index_version(keyspace, index).await)
+            .send(statements.get_index_version(keyspace, table, index).await)
             .unwrap_or_else(|_| trace!("process: Db::GetIndexVersion: unable to send response")),
 
         Db::GetIndexTargetType {
@@ -415,26 +423,12 @@ impl Statements {
             .await?)
     }
 
-    async fn get_index_version(
-        &self,
-        _keyspace: KeyspaceName,
-        _index: IndexName,
-    ) -> GetIndexVersionR {
-        Ok(Some(Uuid::from_u128(0).into()))
-    }
-
     const ST_GET_INDEX_TARGET_TYPE: &str = "
         SELECT type
         FROM system_schema.columns
         WHERE keyspace_name = ? AND table_name = ? AND column_name = ?
         ";
     const RE_GET_INDEX_TARGET_TYPE: &str = r"^vector<float, (?<dimensions>\d+)>$";
-
-    const ST_GET_INDEX_OPTIONS: &str = "
-        SELECT options
-        FROM system_schema.indexes
-        WHERE keyspace_name = ? AND table_name = ? AND index_name = ?
-        ";
 
     async fn get_index_target_type(
         &self,
@@ -460,6 +454,36 @@ impl Statements {
             .and_then(|dimensions| {
                 NonZeroUsize::new(dimensions).map(|dimensions| dimensions.into())
             }))
+    }
+
+    const ST_GET_INDEX_OPTIONS: &str = "
+        SELECT options
+        FROM system_schema.indexes
+        WHERE keyspace_name = ? AND table_name = ? AND index_name = ?
+        ";
+
+    async fn get_index_version(
+        &self,
+        keyspace: KeyspaceName,
+        table: TableName,
+        index: IndexName,
+    ) -> GetIndexVersionR {
+        let options = self
+            .session
+            .execute_iter(self.st_get_index_options.clone(), (keyspace, table, index))
+            .await?
+            .rows_stream::<(BTreeMap<String, String>,)>()?
+            .try_next()
+            .await?
+            .map(|(options,)| options);
+        Ok(options.map(|mut options| {
+            IndexVersion(
+                options
+                    .remove("version")
+                    .and_then(|s| s.parse::<Uuid>().ok())
+                    .unwrap_or_default(),
+            )
+        }))
     }
 
     async fn get_index_params(
@@ -576,6 +600,7 @@ pub(crate) mod tests {
         fn get_index_version(
             &self,
             keyspace: KeyspaceName,
+            table: TableName,
             index: IndexName,
             tx: oneshot::Sender<GetIndexVersionR>,
         ) -> impl Future<Output = ()> + Send + 'static;
@@ -624,9 +649,10 @@ pub(crate) mod tests {
 
                         Db::GetIndexVersion {
                             keyspace,
+                            table,
                             index,
                             tx,
-                        } => sim.get_index_version(keyspace, index, tx).await,
+                        } => sim.get_index_version(keyspace, table, index, tx).await,
 
                         Db::GetIndexTargetType {
                             keyspace,
