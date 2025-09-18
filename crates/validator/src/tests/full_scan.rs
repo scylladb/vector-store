@@ -44,7 +44,7 @@ async fn full_scan_is_completed_when_responding_to_messages_concurrently(actors:
             .expect("failed to insert data");
     }
 
-    let index = create_index(&session, &client, &table, "embedding").await;
+    let index = create_index(&session, &client, &table, "embedding", None).await;
 
     let result = session
         .query_unpaged(
