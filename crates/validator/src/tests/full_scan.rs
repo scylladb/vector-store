@@ -16,11 +16,11 @@ pub(crate) async fn new() -> TestCase {
         .with_test(
             "full_scan_is_completed_when_responding_to_messages_concurrently",
             timeout,
-            full_scan_is_completed_when_responding_to_messages_concurrently,
+            test_full_scan_is_completed_when_responding_to_messages_concurrently,
         )
 }
 
-async fn full_scan_is_completed_when_responding_to_messages_concurrently(actors: TestActors) {
+async fn test_full_scan_is_completed_when_responding_to_messages_concurrently(actors: TestActors) {
     info!("started");
 
     let (session, client) = prepare_connection(&actors).await;

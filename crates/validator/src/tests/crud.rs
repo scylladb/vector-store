@@ -16,16 +16,16 @@ pub(crate) async fn new() -> TestCase {
         .with_test(
             "simple_create_drop_index",
             timeout,
-            simple_create_drop_index,
+            test_simple_create_drop_index,
         )
         .with_test(
             "simple_create_drop_multiple_indexes",
             timeout,
-            simple_create_drop_multiple_indexes,
+            test_simple_create_drop_multiple_indexes,
         )
 }
 
-async fn simple_create_drop_index(actors: TestActors) {
+async fn test_simple_create_drop_index(actors: TestActors) {
     info!("started");
 
     let (session, client) = prepare_connection(&actors).await;
@@ -57,7 +57,7 @@ async fn simple_create_drop_index(actors: TestActors) {
     info!("finished");
 }
 
-async fn simple_create_drop_multiple_indexes(actors: TestActors) {
+async fn test_simple_create_drop_multiple_indexes(actors: TestActors) {
     info!("started");
 
     let (session, client) = prepare_connection(&actors).await;

@@ -18,11 +18,11 @@ pub(crate) async fn new() -> TestCase {
         .with_test(
             "reconnect_doesnt_break_fullscan",
             timeout,
-            reconnect_doesnt_break_fullscan,
+            test_reconnect_doesnt_break_fullscan,
         )
 }
 
-async fn reconnect_doesnt_break_fullscan(actors: TestActors) {
+async fn test_reconnect_doesnt_break_fullscan(actors: TestActors) {
     info!("started");
 
     let (session, client) = prepare_connection(&actors).await;

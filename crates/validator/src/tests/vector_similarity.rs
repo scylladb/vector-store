@@ -17,17 +17,17 @@ pub(crate) async fn new() -> TestCase {
         .with_test(
             "vector_similarity_function_with_single_column_partition_key",
             timeout,
-            vector_similarity_function_with_single_column_partition_key,
+            test_vector_similarity_function_with_single_column_partition_key,
         )
         .with_test(
             "vector_similarity_function_with_clustering_key",
             timeout,
-            vector_similarity_function_with_clustering_key,
+            test_vector_similarity_function_with_clustering_key,
         )
         .with_test(
             "vector_similarity_function_with_multi_column_partition_key",
             timeout,
-            vector_similarity_function_with_multi_column_partition_key,
+            test_vector_similarity_function_with_multi_column_partition_key,
         )
 }
 
@@ -57,7 +57,7 @@ async fn assert_similarity_function_results(session: &Session, table: &str, key_
     }
 }
 
-async fn vector_similarity_function_with_single_column_partition_key(actors: TestActors) {
+async fn test_vector_similarity_function_with_single_column_partition_key(actors: TestActors) {
     info!("started");
 
     let (session, client) = prepare_connection(&actors).await;
@@ -104,7 +104,7 @@ async fn vector_similarity_function_with_single_column_partition_key(actors: Tes
     info!("finished");
 }
 
-async fn vector_similarity_function_with_clustering_key(actors: TestActors) {
+async fn test_vector_similarity_function_with_clustering_key(actors: TestActors) {
     info!("started");
 
     let (session, client) = prepare_connection(&actors).await;
@@ -156,7 +156,7 @@ async fn vector_similarity_function_with_clustering_key(actors: TestActors) {
     info!("finished");
 }
 
-async fn vector_similarity_function_with_multi_column_partition_key(actors: TestActors) {
+async fn test_vector_similarity_function_with_multi_column_partition_key(actors: TestActors) {
     info!("started");
 
     let (session, client) = prepare_connection(&actors).await;
