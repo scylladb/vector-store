@@ -16,16 +16,16 @@ pub(crate) async fn new() -> TestCase {
         .with_test(
             "simple_create_drop_index",
             timeout,
-            simple_create_drop_index,
+            test_simple_create_drop_index,
         )
         .with_test(
             "simple_create_drop_multiple_indexes",
             timeout,
-            simple_create_drop_multiple_indexes,
+            test_simple_create_drop_multiple_indexes,
         )
 }
 
-async fn simple_create_drop_index(actors: TestActors) {
+async fn test_simple_create_drop_index(actors: TestActors) {
     info!("started");
 
     let (session, client) = prepare_connection(&actors).await;
@@ -38,7 +38,7 @@ async fn simple_create_drop_index(actors: TestActors) {
     )
     .await;
 
-    let index = create_index(&session, &client, &table, "embedding").await;
+    let index = create_index(&session, &client, &table, "embedding", None).await;
 
     assert_eq!(index.keyspace.as_ref(), &keyspace);
 
@@ -57,7 +57,7 @@ async fn simple_create_drop_index(actors: TestActors) {
     info!("finished");
 }
 
-async fn simple_create_drop_multiple_indexes(actors: TestActors) {
+async fn test_simple_create_drop_multiple_indexes(actors: TestActors) {
     info!("started");
 
     let (session, client) = prepare_connection(&actors).await;
@@ -71,7 +71,7 @@ async fn simple_create_drop_multiple_indexes(actors: TestActors) {
     .await;
 
     // Create index on column v1
-    let index1 = create_index(&session, &client, &table, "v1").await;
+    let index1 = create_index(&session, &client, &table, "v1", None).await;
 
     // Wait for the full scan to complete and check if ANN query succeeds on v1
     wait_for(
@@ -99,7 +99,7 @@ async fn simple_create_drop_multiple_indexes(actors: TestActors) {
         .expect_err("ANN query should fail when index does not exist");
 
     // Create index on column v2
-    let index2 = create_index(&session, &client, &table, "v2").await;
+    let index2 = create_index(&session, &client, &table, "v2", None).await;
 
     // Check if ANN query on v1 still succeeds
     session
