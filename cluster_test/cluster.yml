@@ -1,0 +1,10 @@
+cluster:
+  - scylla: [ip1, ip2, ip3]
+    vector: ipX
+    client: [ipY, ipZ]
+    az: us-east-1a
+  - scylla: [ip4, ip5]
+    vector: ipW
+    client: [ipA, ipB]
+    az: us-east-1b
+  - monitor: ipM
