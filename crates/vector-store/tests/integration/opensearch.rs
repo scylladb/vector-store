@@ -109,7 +109,8 @@ async fn simple_create_search_delete_index() {
 
     let (primary_keys, distances) = client
         .ann(
-            &index,
+            &index.keyspace_name,
+            &index.index_name,
             vec![2.1, -2., 2.].into(),
             NonZeroUsize::new(1).unwrap().into(),
         )

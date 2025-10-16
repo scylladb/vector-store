@@ -6,13 +6,16 @@
 use crate::INDEX;
 use crate::KEYSPACE;
 use crate::MetricType;
+use crate::Query;
 use crate::TABLE;
 use futures::Stream;
 use futures::StreamExt;
+use futures::TryStreamExt;
 use scylla::client::execution_profile::ExecutionProfile;
 use scylla::client::session::Session;
 use scylla::client::session_builder::SessionBuilder;
 use scylla::statement::Consistency;
+use scylla::statement::prepared::PreparedStatement;
 use std::net::SocketAddr;
 use std::pin::pin;
 use std::sync::Arc;
@@ -28,6 +31,7 @@ pub(crate) struct Scylla(Arc<State>);
 
 struct State {
     session: Session,
+    st_search: Option<PreparedStatement>,
 }
 
 impl Scylla {
@@ -43,7 +47,15 @@ impl Scylla {
             .build()
             .await
             .unwrap();
-        Self(Arc::new(State { session }))
+
+        let st_search = session
+            .prepare(format!(
+                "SELECT {VECTOR_ID} FROM {KEYSPACE}.{TABLE} ORDER BY {VECTOR} ANN OF ? LIMIT ?"
+            ))
+            .await
+            .ok();
+
+        Self(Arc::new(State { session, st_search }))
     }
 
     pub(crate) async fn create_table(&self, dimension: usize) {
@@ -159,5 +171,24 @@ impl Scylla {
             });
         }
         _ = semaphore.acquire_many(concurrency as u32).await.unwrap();
+    }
+
+    pub(crate) async fn search(&self, query: &Query) -> f64 {
+        let found = self
+            .0
+            .session
+            .execute_iter(
+                self.0.st_search.as_ref().unwrap().clone(),
+                (&query.query, query.neighbors.len() as i32),
+            )
+            .await
+            .unwrap()
+            .rows_stream::<(i64,)>()
+            .unwrap()
+            .map_ok(|(vector_id,)| vector_id)
+            .try_collect()
+            .await
+            .unwrap();
+        query.neighbors.intersection(&found).count() as f64 / query.neighbors.len() as f64
     }
 }
