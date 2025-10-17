@@ -49,7 +49,7 @@ async fn reconnect_doesnt_break_fullscan(actors: TestActors) {
             .expect("failed to insert a row");
     }
 
-    let index = create_index(&session, &client, &table, "embedding").await;
+    let index = create_index(&session, &client, &table, "embedding", None).await;
 
     let result = session
         .query_unpaged(
