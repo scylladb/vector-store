@@ -13,7 +13,7 @@ pub(crate) async fn new() -> TestCase {
         .with_init(timeout, crate::common::init)
         .with_cleanup(timeout, crate::common::cleanup)
         .with_test(
-            "test_serialization_deserialization_all_types",
+            "serialization_deserialization_all_types",
             timeout,
             test_serialization_deserialization_all_types,
         )

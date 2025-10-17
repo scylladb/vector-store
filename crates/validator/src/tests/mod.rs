@@ -8,6 +8,7 @@ mod crud;
 mod full_scan;
 mod reconnect;
 mod serde;
+mod vector_similarity;
 
 use crate::ServicesSubnet;
 use crate::dns::Dns;
@@ -221,6 +222,7 @@ pub(crate) async fn register() -> Vec<(String, TestCase)> {
         ("full_scan", full_scan::new().await),
         ("reconnect", reconnect::new().await),
         ("serde", serde::new().await),
+        ("vector_similarity", vector_similarity::new().await),
     ]
     .into_iter()
     .map(|(name, test_case)| (name.to_string(), test_case))
