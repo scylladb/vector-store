@@ -20,6 +20,11 @@ pub(crate) async fn new() -> TestCase {
             ann_query_returns_expected_results,
         )
         .with_test(
+            "ann_query_returns_expected_results_multicolumn_pk",
+            timeout,
+            ann_query_returns_expected_results_multicolumn_pk,
+        )
+        .with_test(
             "ann_query_respects_limit",
             timeout,
             ann_query_respects_limit,
@@ -95,6 +100,70 @@ async fn ann_query_returns_expected_results(actors: TestActors) {
         let expected = embeddings.get(&pk).unwrap();
         assert_eq!(&v, expected, "Returned vector does not match for pk={pk}");
     }
+
+    // Drop keyspace
+    session
+        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
+        .await
+        .expect("failed to drop a keyspace");
+
+    info!("finished");
+}
+
+async fn ann_query_returns_expected_results_multicolumn_pk(actors: TestActors) {
+    info!("started");
+
+    let (session, client) = prepare_connection(&actors).await;
+
+    let keyspace = create_keyspace(&session).await;
+    let table = create_table(
+        &session,
+        "pk TEXT, ck TEXT, v VECTOR<FLOAT, 3>, PRIMARY KEY (pk, ck)",
+        None,
+    )
+    .await;
+
+    let data: [(&'static str, &'static str, Vec<f32>); 2] = [
+        ("pk-1", "ck-1", vec![0.0, 0.0, 0.0]),
+        ("pk-1", "ck-2", vec![0.0, 0.0, 1.0]),
+    ];
+    for (pk, ck, v) in &data {
+        session
+            .query_unpaged(
+                format!("INSERT INTO {table} (pk, ck, v) VALUES (?, ?, ?)"),
+                (pk, ck, v),
+            )
+            .await
+            .expect("failed to insert data");
+    }
+    create_index(&session, &client, &table, "v").await;
+
+    let result = wait_for_value(
+        || async {
+            let result = get_opt_query_results(
+                format!("SELECT pk FROM {table} ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 3"),
+                &session,
+            )
+            .await;
+            result.filter(|r| r.rows_num() == 2)
+        },
+        "Waiting for ANN query to return 2 rows",
+        Duration::from_secs(5),
+    )
+    .await;
+    let rows: HashSet<String> = result
+        .rows::<(String,)>()
+        .expect("failed to get rows")
+        .map(|row| row.expect("failed to get row").0)
+        .collect();
+
+    // Assert that the values returned are from pk column.
+    assert_eq!(
+        rows,
+        [("pk-1".to_string()), ("pk-2".to_string()),]
+            .into_iter()
+            .collect::<HashSet<String>>()
+    );
 
     // Drop keyspace
     session
