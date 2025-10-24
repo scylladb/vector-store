@@ -29,6 +29,11 @@ pub(crate) async fn new() -> TestCase {
             timeout,
             ann_query_respects_limit_over_1000_vectors,
         )
+        .with_test(
+            "ann_query_returns_rows_identified_by_composite_primary_key",
+            timeout,
+            ann_query_returns_rows_identified_by_composite_primary_key,
+        )
 }
 
 async fn ann_query_returns_expected_results(actors: TestActors) {
@@ -227,6 +232,73 @@ async fn ann_query_respects_limit_over_1000_vectors(actors: TestActors) {
         )
         .await
         .expect_err("LIMIT over 1000 should fail");
+
+    // Drop keyspace
+    session
+        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
+        .await
+        .expect("failed to drop a keyspace");
+
+    info!("finished");
+}
+
+async fn ann_query_returns_rows_identified_by_composite_primary_key(actors: TestActors) {
+    info!("started");
+
+    let (session, client) = prepare_connection(&actors).await;
+    let keyspace = create_keyspace(&session).await;
+    let table = create_table(
+        &session,
+        "pk TEXT, ck TEXT, v VECTOR<FLOAT, 3>, PRIMARY KEY (pk, ck)",
+        None,
+    )
+    .await;
+    let data: [(&'static str, &'static str, Vec<f32>); 4] = [
+        ("pk-1", "ck-1", vec![0.0, 0.0, 0.0]),
+        ("pk-1", "ck-2", vec![1.0, 1.0, 1.0]),
+        ("pk-2", "ck-1", vec![0.0, 0.0, 0.0]),
+        ("pk-2", "ck-2", vec![1.0, 1.0, 1.0]),
+    ];
+    for (pk, ck, v) in &data {
+        session
+            .query_unpaged(
+                format!("INSERT INTO {table} (pk, ck, v) VALUES (?, ?, ?)"),
+                (pk, ck, v),
+            )
+            .await
+            .expect("failed to insert data");
+    }
+    create_index(&session, &client, &table, "v").await;
+
+    let result = wait_for_value(
+        || async {
+            let result = get_opt_query_results(
+                format!("SELECT pk, ck FROM {table} ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 2"),
+                &session,
+            )
+            .await;
+            result.filter(|r| r.rows_num() == 2)
+        },
+        "Waiting for ANN query to return 2 rows",
+        Duration::from_secs(5),
+    )
+    .await;
+    let rows: HashSet<(String, String)> = result
+        .rows::<(String, String)>()
+        .expect("failed to get rows")
+        .map(|row| row.expect("failed to get row"))
+        .collect();
+
+    // Assert that we have the expected rows, ('pk-1', 'ck-1') and ('pk-2', 'ck-1'), as they have the closest vectors.
+    assert_eq!(
+        rows,
+        [
+            ("pk-1".to_string(), "ck-1".to_string()),
+            ("pk-2".to_string(), "ck-1".to_string()),
+        ]
+        .into_iter()
+        .collect::<HashSet<(String, String)>>()
+    );
 
     // Drop keyspace
     session
