@@ -97,6 +97,23 @@ where
     .unwrap_or_else(|_| panic!("Timeout on: {msg}"))
 }
 
+pub(crate) async fn wait_for_value<F, Fut, T>(mut poll_fn: F, msg: &str, timeout: Duration) -> T
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Option<T>>,
+{
+    time::timeout(timeout, async {
+        loop {
+            if let Some(value) = poll_fn().await {
+                return value;
+            }
+            time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("Timeout on: {msg}"))
+}
+
 pub(crate) async fn get_query_results(query: String, session: &Session) -> QueryRowsResult {
     session
         .query_unpaged(query, ())
@@ -104,6 +121,18 @@ pub(crate) async fn get_query_results(query: String, session: &Session) -> Query
         .expect("failed to run query")
         .into_rows_result()
         .expect("failed to get rows")
+}
+
+pub(crate) async fn get_opt_query_results(
+    query: String,
+    session: &Session,
+) -> Option<QueryRowsResult> {
+    session
+        .query_unpaged(query, ())
+        .await
+        .ok()?
+        .into_rows_result()
+        .ok()
 }
 
 pub(crate) async fn create_keyspace(session: &Session) -> String {
