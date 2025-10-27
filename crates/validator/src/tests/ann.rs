@@ -17,17 +17,17 @@ pub(crate) async fn new() -> TestCase {
         .with_test(
             "ann_query_returns_expected_results",
             timeout,
-            ann_query_returns_expected_results,
+            test_ann_query_returns_expected_results,
         )
         .with_test(
             "ann_query_respects_limit",
             timeout,
-            ann_query_respects_limit,
+            test_ann_query_respects_limit,
         )
         .with_test(
             "ann_query_respects_limit_over_1000_vectors",
             timeout,
-            ann_query_respects_limit_over_1000_vectors,
+            test_ann_query_respects_limit_over_1000_vectors,
         )
         .with_test(
             "ann_query_returns_rows_identified_by_composite_primary_key",
@@ -36,7 +36,7 @@ pub(crate) async fn new() -> TestCase {
         )
 }
 
-async fn ann_query_returns_expected_results(actors: TestActors) {
+async fn test_ann_query_returns_expected_results(actors: TestActors) {
     info!("started");
 
     let (session, client) = prepare_connection(&actors).await;
@@ -66,7 +66,7 @@ async fn ann_query_returns_expected_results(actors: TestActors) {
             .expect("failed to insert data");
     }
 
-    let index = create_index(&session, &client, &table, "v").await;
+    let index = create_index(&session, &client, &table, "v", None).await;
 
     wait_for(
         || async { client.count(&index.keyspace, &index.index).await == Some(1000) },
@@ -105,7 +105,7 @@ async fn ann_query_returns_expected_results(actors: TestActors) {
     info!("finished");
 }
 
-async fn ann_query_respects_limit(actors: TestActors) {
+async fn test_ann_query_respects_limit(actors: TestActors) {
     info!("started");
 
     let (session, client) = prepare_connection(&actors).await;
@@ -126,7 +126,7 @@ async fn ann_query_respects_limit(actors: TestActors) {
     }
 
     // Create index
-    let index = create_index(&session, &client, &table, "v").await;
+    let index = create_index(&session, &client, &table, "v", None).await;
 
     wait_for(
         || async { client.count(&index.keyspace, &index.index).await == Some(10) },
@@ -174,7 +174,7 @@ async fn ann_query_respects_limit(actors: TestActors) {
     info!("finished");
 }
 
-async fn ann_query_respects_limit_over_1000_vectors(actors: TestActors) {
+async fn test_ann_query_respects_limit_over_1000_vectors(actors: TestActors) {
     info!("started");
 
     let (session, client) = prepare_connection(&actors).await;
@@ -194,7 +194,7 @@ async fn ann_query_respects_limit_over_1000_vectors(actors: TestActors) {
             .expect("failed to insert data");
     }
 
-    let index = create_index(&session, &client, &table, "v").await;
+    let index = create_index(&session, &client, &table, "v", None).await;
 
     wait_for(
         || async { client.count(&index.keyspace, &index.index).await == Some(1111) },
