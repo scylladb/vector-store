@@ -83,6 +83,7 @@ pub(crate) async fn setup_store() -> (
                 node_state,
                 db_actor,
                 index_factory,
+                None,
             )
             .await
             .unwrap();
@@ -214,6 +215,7 @@ async fn failed_db_index_create() {
         node_state,
         db_actor,
         index_factory,
+        None,
     )
     .await
     .unwrap();

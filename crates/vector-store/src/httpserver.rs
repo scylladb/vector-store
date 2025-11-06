@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+use crate::Config;
 use crate::HttpServerConfig;
 use crate::engine::Engine;
 use crate::httproutes;
@@ -16,6 +17,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
+use tokio::sync::watch;
 
 pub(crate) enum HttpServer {}
 
@@ -45,6 +47,7 @@ pub(crate) async fn new(
     engine: Sender<Engine>,
     metrics: Arc<Metrics>,
     index_engine_version: String,
+    mut config_rx: Option<watch::Receiver<Arc<Config>>>,
 ) -> anyhow::Result<(Sender<HttpServer>, SocketAddr)> {
     // minimal size as channel is used as a lifetime guard
     const CHANNEL_SIZE: usize = 1;
@@ -53,6 +56,8 @@ pub(crate) async fn new(
     let handle = Handle::new();
     let tls_config = load_tls_config(&config).await?;
     let protocol = protocol(&tls_config);
+
+    let initial_addr = config.addr;
 
     tokio::spawn({
         let handle = handle.clone();
@@ -63,6 +68,29 @@ pub(crate) async fn new(
             handle.graceful_shutdown(Some(std::time::Duration::from_secs(10)));
         }
     });
+
+    // Spawn task to monitor config changes for vector_store_addr
+    if let Some(mut config_rx) = config_rx.take() {
+        tokio::spawn(async move {
+            loop {
+                if config_rx.changed().await.is_err() {
+                    break;
+                }
+                let new_config = config_rx.borrow();
+                if initial_addr != new_config.vector_store_addr {
+                    tracing::warn!(
+                        "Configuration change detected that requires server restart:\n  \
+                        Vector store address: {} -> {}",
+                        initial_addr,
+                        new_config.vector_store_addr
+                    );
+                    tracing::warn!(
+                        "This change has been stored but will not take effect until the server is restarted."
+                    );
+                }
+            }
+        });
+    }
 
     tokio::spawn({
         let handle = handle.clone();

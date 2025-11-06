@@ -27,18 +27,59 @@ impl ConfigManager {
 
     /// Reload configuration from environment variables.
     /// This will notify all watchers of the configuration change.
+    /// Also checks for changes that require a server restart and logs warnings.
     pub async fn reload_config<F>(&self, env: F) -> anyhow::Result<()>
     where
         F: Fn(&'static str) -> Result<String, std::env::VarError>,
     {
+        // Get old config before reload
+        let old_config = self.config_tx.borrow().clone();
+
         // Load new configuration
-        let new_config = load_config(env).await?;
+        let new_config = Arc::new(load_config(env).await?);
+
+        // Check for restart-required changes
+        self.check_restart_required_changes(&old_config, &new_config);
 
         // Update the config atomically - watch will notify all receivers
-        self.config_tx.send(Arc::new(new_config))?;
+        self.config_tx.send(new_config)?;
 
         tracing::info!("Configuration reloaded successfully");
         Ok(())
+    }
+
+    /// Check for configuration changes that require a server restart and log warnings.
+    /// Note: vector_store_addr and opensearch_addr checks are now handled by their
+    /// respective actors (httpserver and opensearch).
+    fn check_restart_required_changes(&self, old_config: &Config, new_config: &Config) {
+        let mut changes = Vec::new();
+
+        // Check disable_colors
+        if old_config.disable_colors != new_config.disable_colors {
+            changes.push(format!(
+                "Log coloring disabled: {} -> {}",
+                old_config.disable_colors, new_config.disable_colors
+            ));
+        }
+
+        // Check threads
+        if old_config.threads != new_config.threads {
+            changes.push(format!(
+                "Thread count: {:?} -> {:?}",
+                old_config.threads, new_config.threads
+            ));
+        }
+
+        // Log all changes if any were detected
+        if !changes.is_empty() {
+            tracing::warn!(
+                "Configuration changes detected that require server restart:\n  {}",
+                changes.join("\n  ")
+            );
+            tracing::warn!(
+                "These changes have been stored but will not take effect until the server is restarted."
+            );
+        }
     }
 
     /// Start listening for SIGHUP signals and reload configuration when received.

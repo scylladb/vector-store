@@ -43,6 +43,7 @@ async fn simple_create_search_delete_index() {
         node_state,
         db_actor,
         index_factory,
+        None,
     )
     .await
     .unwrap();

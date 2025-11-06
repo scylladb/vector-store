@@ -98,6 +98,7 @@ fn main() -> anyhow::Result<()> {
         let node_state = vector_store::new_node_state().await;
 
         let opensearch_addr = config.opensearch_addr.clone();
+        let initial_opensearch_addr = opensearch_addr.clone();
 
         let index_factory = if let Some(addr) = opensearch_addr {
             tracing::info!("Using OpenSearch index factory at {addr}");
@@ -110,9 +111,47 @@ fn main() -> anyhow::Result<()> {
         let credentials = config.credentials.clone();
         let db_actor = vector_store::new_db(scylladb_uri, node_state.clone(), credentials).await?;
 
-        let (_server_actor, addr) =
-            vector_store::run(http_server_config, node_state, db_actor, index_factory).await?;
+        // Clone config_rx for httpserver monitoring
+        let config_rx_clone = Some(config_rx.clone());
+
+        let (_server_actor, addr) = vector_store::run(
+            http_server_config,
+            node_state,
+            db_actor,
+            index_factory,
+            config_rx_clone,
+        )
+        .await?;
         tracing::info!("listening on {addr}");
+
+        // Spawn task to monitor config changes for opensearch_addr
+        let mut config_rx_opensearch = config_rx.clone();
+        tokio::spawn(async move {
+            loop {
+                if config_rx_opensearch.changed().await.is_err() {
+                    break;
+                }
+                let new_config = config_rx_opensearch.borrow();
+                if initial_opensearch_addr != new_config.opensearch_addr {
+                    let old_display = initial_opensearch_addr
+                        .as_deref()
+                        .unwrap_or("None (using Usearch)");
+                    let new_display = new_config
+                        .opensearch_addr
+                        .as_deref()
+                        .unwrap_or("None (using Usearch)");
+                    tracing::warn!(
+                        "Configuration change detected that requires server restart:\n  \
+                        OpenSearch address: {} -> {}",
+                        old_display,
+                        new_display
+                    );
+                    tracing::warn!(
+                        "This change has been stored but will not take effect until the server is restarted."
+                    );
+                }
+            }
+        });
 
         // Spawn SIGHUP handler for config reloading
         tokio::spawn(async move {
