@@ -81,7 +81,7 @@ fn main() -> anyhow::Result<()> {
     );
 
     // Create ConfigManager for reload capability
-    let (_config_manager, config_rx) = ConfigManager::new(loaded_config);
+    let (config_manager, config_rx) = ConfigManager::new(loaded_config);
     let config = config_rx.borrow().clone();
 
     let vector_store_addr = config.vector_store_addr;
@@ -113,6 +113,11 @@ fn main() -> anyhow::Result<()> {
         let (_server_actor, addr) =
             vector_store::run(http_server_config, node_state, db_actor, index_factory).await?;
         tracing::info!("listening on {addr}");
+
+        // Spawn SIGHUP handler for config reloading
+        tokio::spawn(async move {
+            config_manager.handle_sighup(dotenvy_to_std_var).await;
+        });
 
         vector_store::wait_for_shutdown().await;
 

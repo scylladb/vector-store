@@ -40,6 +40,47 @@ impl ConfigManager {
         tracing::info!("Configuration reloaded successfully");
         Ok(())
     }
+
+    /// Start listening for SIGHUP signals and reload configuration when received.
+    /// This function runs in a loop and should be spawned in a separate task.
+    ///
+    /// # Arguments
+    /// * `env` - Function to read environment variables
+    ///
+    /// # Example
+    /// ```no_run
+    /// let (config_manager, config_rx) = ConfigManager::new(config);
+    ///
+    /// tokio::spawn(async move {
+    ///     config_manager.handle_sighup(dotenvy_to_std_var).await;
+    /// });
+    /// ```
+    pub async fn handle_sighup<F>(self, env: F)
+    where
+        F: Fn(&'static str) -> Result<String, std::env::VarError>,
+    {
+        let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+            .expect("failed to install SIGHUP handler");
+
+        loop {
+            sighup.recv().await;
+            tracing::info!("Received SIGHUP signal, reloading configuration...");
+
+            // Re-read the .env file to pick up any changes
+            if let Err(e) = dotenvy::from_filename_override(".env") {
+                tracing::debug!("No .env file found or error reading it: {}", e);
+            }
+
+            match self.reload_config(&env).await {
+                Ok(()) => {
+                    tracing::info!("Configuration reloaded successfully");
+                }
+                Err(e) => {
+                    tracing::error!("Failed to reload configuration: {}", e);
+                }
+            }
+        }
+    }
 }
 
 async fn credentials<F>(env: F) -> anyhow::Result<Option<vector_store::Credentials>>
