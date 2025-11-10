@@ -81,8 +81,8 @@ fn main() -> anyhow::Result<()> {
     );
 
     // Create ConfigManager for reload capability
-    let config_manager = ConfigManager::new(loaded_config);
-    let config = config_manager.config();
+    let (_config_manager, config_rx) = ConfigManager::new(loaded_config);
+    let config = config_rx.borrow().clone();
 
     let vector_store_addr = config.vector_store_addr;
 

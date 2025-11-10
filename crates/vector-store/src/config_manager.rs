@@ -8,25 +8,37 @@ use anyhow::bail;
 use secrecy::ExposeSecret;
 use std::net::ToSocketAddrs;
 use std::sync::Arc;
-use std::sync::RwLock;
+use tokio::sync::watch;
 use vector_store::Config;
 
 pub struct ConfigManager {
-    config: Arc<RwLock<Arc<Config>>>,
+    config_tx: watch::Sender<Arc<Config>>,
 }
 
 impl ConfigManager {
-    pub fn new(config: Config) -> Self {
-        Self {
-            config: Arc::new(RwLock::new(Arc::new(config))),
-        }
+    /// Create a new ConfigManager and return it along with a receiver
+    /// for configuration change notifications.
+    /// The receiver can be cloned to share with multiple consumers.
+    pub fn new(config: Config) -> (Self, watch::Receiver<Arc<Config>>) {
+        let (config_tx, config_rx) = watch::channel(Arc::new(config));
+
+        (Self { config_tx }, config_rx)
     }
 
-    /// Get a read-only reference to the current configuration.
-    /// Returns an Arc<Config> which can be freely cloned and shared,
-    /// but cannot be used to modify the configuration.
-    pub fn config(&self) -> Arc<Config> {
-        Arc::clone(&self.config.read().unwrap())
+    /// Reload configuration from environment variables.
+    /// This will notify all watchers of the configuration change.
+    pub async fn reload_config<F>(&self, env: F) -> anyhow::Result<()>
+    where
+        F: Fn(&'static str) -> Result<String, std::env::VarError>,
+    {
+        // Load new configuration
+        let new_config = load_config(env).await?;
+
+        // Update the config atomically - watch will notify all receivers
+        self.config_tx.send(Arc::new(new_config))?;
+
+        tracing::info!("Configuration reloaded successfully");
+        Ok(())
     }
 }
 
@@ -303,5 +315,83 @@ mod tests {
             creds.certificate_path,
             Some(std::path::PathBuf::from("/path/to/cert.pem"))
         );
+    }
+
+    #[tokio::test]
+    async fn config_manager_reload_notifies_watchers() {
+        let initial_config = Config {
+            vector_store_addr: "127.0.0.1:6080".parse().unwrap(),
+            scylladb_uri: "127.0.0.1:9042".to_string(),
+            threads: None,
+            opensearch_addr: None,
+            credentials: None,
+            disable_colors: false,
+        };
+
+        let (config_manager, mut config_rx) = ConfigManager::new(initial_config);
+
+        // Get initial config
+        let initial = config_rx.borrow().clone();
+        assert_eq!(initial.vector_store_addr.to_string(), "127.0.0.1:6080");
+        assert_eq!(initial.scylladb_uri, "127.0.0.1:9042");
+
+        // Reload config with different environment values
+        let env = mock_env(HashMap::from([
+            ("VECTOR_STORE_URI", "192.168.1.100:7070".into()),
+            ("VECTOR_STORE_SCYLLADB_URI", "192.168.1.200:9043".into()),
+        ]));
+        config_manager.reload_config(env).await.unwrap();
+
+        // Wait for change notification
+        config_rx.changed().await.unwrap();
+
+        // Verify new config values
+        let updated = config_rx.borrow();
+        assert_eq!(updated.vector_store_addr.to_string(), "192.168.1.100:7070");
+        assert_eq!(updated.scylladb_uri, "192.168.1.200:9043");
+    }
+
+    #[tokio::test]
+    async fn config_manager_multiple_watchers() {
+        let initial_config = Config::default();
+        let (config_manager, config_rx) = ConfigManager::new(initial_config);
+
+        // Clone receivers for multiple watchers
+        let mut rx1 = config_rx.clone();
+        let mut rx2 = config_rx.clone();
+        let mut rx3 = config_rx;
+
+        // Spawn tasks to wait for changes
+        let task1 = tokio::spawn(async move {
+            rx1.changed().await.unwrap();
+            rx1.borrow().vector_store_addr.to_string()
+        });
+        let task2 = tokio::spawn(async move {
+            rx2.changed().await.unwrap();
+            rx2.borrow().vector_store_addr.to_string()
+        });
+        let task3 = tokio::spawn(async move {
+            rx3.changed().await.unwrap();
+            rx3.borrow().vector_store_addr.to_string()
+        });
+
+        // Give tasks time to start waiting
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        // Reload config
+        let env = mock_env(HashMap::from([(
+            "VECTOR_STORE_URI",
+            "192.168.1.100:8080".into(),
+        )]));
+        config_manager.reload_config(env).await.unwrap();
+
+        // Verify all watchers received the update
+        let addr1 = task1.await.unwrap();
+        let addr2 = task2.await.unwrap();
+        let addr3 = task3.await.unwrap();
+
+        assert_eq!(addr1, "192.168.1.100:8080");
+        assert_eq!(addr2, "192.168.1.100:8080");
+        assert_eq!(addr3, "192.168.1.100:8080");
     }
 }
