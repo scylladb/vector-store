@@ -58,6 +58,29 @@ use uuid::Uuid;
 pub struct ScyllaDbUri(String);
 
 #[derive(Clone, Debug)]
+pub struct Config {
+    pub vector_store_addr: std::net::SocketAddr,
+    pub scylladb_uri: String,
+    pub threads: Option<usize>,
+    pub opensearch_addr: Option<String>,
+    pub credentials: Option<Credentials>,
+    pub disable_colors: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            vector_store_addr: "127.0.0.1:6080".parse().unwrap(),
+            scylladb_uri: "127.0.0.1:9042".to_string(),
+            threads: None,
+            opensearch_addr: None,
+            credentials: None,
+            disable_colors: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct Credentials {
     pub username: Option<String>,
     pub password: Option<secrecy::SecretString>,
