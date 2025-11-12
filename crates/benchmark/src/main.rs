@@ -12,6 +12,7 @@ use crate::db::Scylla;
 use clap::Parser;
 use clap::Subcommand;
 use clap::ValueEnum;
+use futures::future;
 use itertools::Itertools;
 use std::cmp;
 use std::net::SocketAddr;
@@ -21,7 +22,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::SystemTime;
 use tokio::sync::Notify;
-use tokio::sync::oneshot;
 use tokio::time;
 use tokio::time::Instant;
 use tracing::info;
@@ -93,12 +93,29 @@ enum Command {
         scylla: SocketAddr,
     },
 
-    Search {
+    SearchCql {
         #[clap(long)]
         data_dir: PathBuf,
 
         #[clap(long)]
         scylla: SocketAddr,
+
+        #[clap(long, value_parser = clap::value_parser!(u32).range(1..=100))]
+        limit: u32,
+
+        #[clap(long)]
+        duration: humantime::Duration,
+
+        #[clap(long, value_parser = clap::value_parser!(u32).range(1..=1_000_000))]
+        concurrency: u32,
+
+        #[clap(long)]
+        from: Option<humantime::Timestamp>,
+    },
+
+    SearchHttp {
+        #[clap(long)]
+        data_dir: PathBuf,
 
         #[clap(long)]
         vector_store: Vec<SocketAddr>,
@@ -185,10 +202,9 @@ async fn main() {
             info!("Drop Index took {duration:.2?}");
         }
 
-        Command::Search {
+        Command::SearchCql {
             data_dir,
             scylla,
-            vector_store,
             limit,
             duration,
             concurrency,
@@ -198,7 +214,64 @@ async fn main() {
             let queries = Arc::new(dataset.queries(limit as usize).await);
             let notify = Arc::new(Notify::new());
             let scylla = Scylla::new(scylla).await;
+
+            let start = from
+                .map(SystemTime::from)
+                .unwrap_or_else(|| SystemTime::now() + Duration::from_secs(2));
+            let stop = start + Duration::from(duration);
+
+            let tasks = (0..concurrency)
+                .map(|_| {
+                    let queries = Arc::clone(&queries);
+                    let notify = Arc::clone(&notify);
+                    let scylla = scylla.clone();
+                    tokio::spawn(async move {
+                        let mut measurement = SearchMeasure::new();
+                        notify.notified().await;
+                        while SystemTime::now() < stop {
+                            let query = random(&queries);
+                            let (duration, recall) = measure_duration(scylla.search(query)).await;
+                            measurement.record(duration, recall);
+                        }
+                        measurement
+                    })
+                })
+                .collect_vec();
+
+            let wait_for_start = start.duration_since(SystemTime::now()).unwrap();
+            info!("Synchronizing search cql tasks to start after {wait_for_start:.2?}");
+            time::sleep_until(Instant::now() + wait_for_start).await;
+
+            info!("Starting search cql tasks");
+            let (duration, measurements) = measure_duration(async {
+                notify.notify_waiters();
+                future::join_all(tasks).await
+            })
+            .await;
+
+            info!("Gathering measurements");
+            let mut measurement = SearchMeasure::new();
+            measurements.into_iter().for_each(|measure| {
+                measurement.append(&measure.unwrap());
+            });
+
+            measurement.log(duration, None);
+        }
+
+        Command::SearchHttp {
+            data_dir,
+            vector_store,
+            limit,
+            duration,
+            concurrency,
+            from,
+        } => {
+            let dataset = data::new(data_dir).await;
+            let queries = Arc::new(dataset.queries(limit as usize).await);
+            let notify = Arc::new(Notify::new());
+            assert!(!vector_store.is_empty());
             let clients = Arc::new(vs::new_http_clients(vector_store));
+            let clients_len = clients.len();
 
             let start = from
                 .map(SystemTime::from)
@@ -207,138 +280,65 @@ async fn main() {
 
             let tasks: Vec<_> = (0..concurrency)
                 .map(|no| {
-                    let (tx, rx) = oneshot::channel();
                     let queries = Arc::clone(&queries);
                     let notify = Arc::clone(&notify);
-                    let scylla = scylla.clone();
                     let clients = Arc::clone(&clients);
                     tokio::spawn(async move {
                         let mut count = 0;
-                        let mut histogram = vec![Histogram::new(); cmp::max(clients.len(), 1)];
-                        let mut duration_min = Duration::MAX;
-                        let mut duration_max = Duration::ZERO;
-                        let mut recall_min = 1.0f64;
-                        let mut recall_max = 0.0f64;
-                        let mut recall_sum = 0.0f64;
+                        let mut measurements = vec![SearchMeasure::without_recall(); clients_len];
                         notify.notified().await;
                         while SystemTime::now() < stop {
                             let query = random(&queries);
-                            let (idx, duration, recall) = if clients.is_empty() {
-                                let (duration, recall) =
-                                    measure_duration(scylla.search(query)).await;
-                                (0, duration, recall)
-                            } else {
-                                let idx = (no as usize + count) % clients.len();
-                                let client = &clients[idx];
-                                (
-                                    idx,
-                                    measure_duration(async {
-                                        client
-                                            .ann(
-                                                &KEYSPACE.to_string().into(),
-                                                &INDEX.to_string().into(),
-                                                query.query.clone().into(),
-                                                NonZeroUsize::new(query.neighbors.len())
-                                                    .unwrap()
-                                                    .into(),
-                                            )
-                                            .await
-                                    })
+                            let idx = (no as usize + count) % clients_len;
+                            let client = &clients[idx];
+                            let (duration, _) = measure_duration(async {
+                                client
+                                    .ann(
+                                        &KEYSPACE.to_string().into(),
+                                        &INDEX.to_string().into(),
+                                        query.query.clone().into(),
+                                        NonZeroUsize::new(query.neighbors.len()).unwrap().into(),
+                                    )
                                     .await
-                                    .0,
-                                    0.0,
-                                )
-                            };
+                            })
+                            .await;
                             count += 1;
-                            histogram[idx].record(duration);
-                            duration_min = cmp::min(duration, duration_min);
-                            duration_max = cmp::max(duration, duration_max);
-                            recall_min = recall_min.min(recall);
-                            recall_max = recall_max.max(recall);
-                            recall_sum += recall;
+                            measurements[idx].record_without_recall(duration);
                         }
-                        _ = tx.send((
-                            count,
-                            histogram,
-                            duration_min,
-                            duration_max,
-                            recall_min,
-                            recall_max,
-                            recall_sum,
-                        ));
-                    });
-                    rx
+                        measurements
+                    })
                 })
                 .collect_vec();
 
             let wait_for_start = start.duration_since(SystemTime::now()).unwrap();
-            info!("Synchronizing search tasks to start after {wait_for_start:.2?}");
+            info!("Synchronizing search http tasks to start after {wait_for_start:.2?}");
             time::sleep_until(Instant::now() + wait_for_start).await;
 
-            info!("Starting search tasks");
-            let mut count = 0;
-            let mut histograms = vec![Histogram::new(); cmp::max(clients.len(), 1)];
-            let mut duration_min = Duration::MAX;
-            let mut duration_max = Duration::ZERO;
-            let mut recall_min = 1.0f64;
-            let mut recall_max = 0.0f64;
-            let mut recall_sum = 0.0f64;
-            let (duration, _) = measure_duration(async {
+            info!("Starting search http tasks");
+            let (duration, measurements) = measure_duration(async {
                 notify.notify_waiters();
-                for rx in tasks.into_iter() {
-                    let (
-                        task_count,
-                        task_histogram,
-                        task_duration_min,
-                        task_duration_max,
-                        task_recall_min,
-                        task_recall_max,
-                        task_recall_sum,
-                    ) = rx.await.unwrap();
-                    count += task_count;
-                    histograms.iter_mut().zip(task_histogram.iter()).for_each(
-                        |(histogram, task_histogram)| {
-                            histogram.append(task_histogram);
-                        },
-                    );
-                    duration_min = cmp::min(task_duration_min, duration_min);
-                    duration_max = cmp::max(task_duration_max, duration_max);
-                    recall_min = recall_min.min(task_recall_min);
-                    recall_max = recall_max.max(task_recall_max);
-                    recall_sum += task_recall_sum;
-                }
+                future::join_all(tasks).await
             })
             .await;
-            let histogram = histograms.iter().fold(Histogram::new(), |mut a, b| {
-                a.append(b);
-                a
-            });
-            info!("queries: {count}");
-            info!("QPS: {:.2}", count as f64 / duration.as_secs_f64());
-            info!("latency min: {:.1?}", duration_min);
-            info!("latency P01: {:.1?}", histogram.percentile(01.0));
-            info!("latency P10: {:.1?}", histogram.percentile(10.0));
-            info!("latency P25: {:.1?}", histogram.percentile(25.0));
-            info!("latency P50: {:.1?}", histogram.percentile(50.0));
-            info!("latency P75: {:.1?}", histogram.percentile(75.0));
-            info!("latency P90: {:.1?}", histogram.percentile(90.0));
-            info!("latency P99: {:.1?}", histogram.percentile(99.0));
-            info!("latency max: {:.1?}", duration_max);
-            info!("recall min: {:.1?}", recall_min * 100.0);
-            info!("recall avg: {:.1?}", recall_sum * 100.0 / count as f64);
-            info!("recall max: {:.1?}", recall_max * 100.0);
-            if histograms.len() > 1 {
-                histograms
+
+            info!("Gathering measurements");
+            let mut measure_overall = SearchMeasure::without_recall();
+            let mut measure_clients = vec![SearchMeasure::without_recall(); clients_len];
+            measurements
+                .into_iter()
+                .flat_map(|measurements| measurements.unwrap().into_iter().enumerate())
+                .for_each(|(idx, measurement)| {
+                    measure_overall.append(&measurement);
+                    measure_clients[idx].append(&measurement);
+                });
+
+            measure_overall.log(duration, None);
+            if clients_len > 1 {
+                measure_clients
                     .into_iter()
                     .enumerate()
-                    .for_each(|(i, histogram)| {
-                        info!("latency for {i} P01: {:.1?}", histogram.percentile(01.0));
-                        info!("latency for {i} P10: {:.1?}", histogram.percentile(10.0));
-                        info!("latency for {i} P25: {:.1?}", histogram.percentile(25.0));
-                        info!("latency for {i} P50: {:.1?}", histogram.percentile(50.0));
-                        info!("latency for {i} P75: {:.1?}", histogram.percentile(75.0));
-                        info!("latency for {i} P90: {:.1?}", histogram.percentile(90.0));
-                        info!("latency for {i} P99: {:.1?}", histogram.percentile(99.0));
+                    .for_each(|(i, measure)| {
+                        measure.log(duration, Some(&i.to_string()));
                     });
             }
         }
@@ -419,5 +419,99 @@ impl Histogram {
             *a += b;
         }
         self.count += other.count;
+    }
+}
+
+#[derive(Clone)]
+struct SearchMeasure {
+    count: usize,
+    histogram: Histogram,
+    latency_min: Duration,
+    latency_max: Duration,
+    with_recall: bool,
+    recall_min: f64,
+    recall_max: f64,
+    recall_sum: f64,
+}
+
+impl SearchMeasure {
+    fn new() -> Self {
+        Self {
+            count: 0,
+            histogram: Histogram::new(),
+            latency_min: Duration::MAX,
+            latency_max: Duration::ZERO,
+            with_recall: true,
+            recall_min: 0.0,
+            recall_max: 0.0,
+            recall_sum: 0.0,
+        }
+    }
+
+    fn without_recall() -> Self {
+        let mut sm = Self::new();
+        sm.with_recall = false;
+        sm
+    }
+
+    fn record_without_recall(&mut self, latency: Duration) {
+        self.count += 1;
+        self.histogram.record(latency);
+        self.latency_min = cmp::min(self.latency_min, latency);
+        self.latency_max = cmp::max(self.latency_max, latency);
+    }
+
+    fn record(&mut self, latency: Duration, recall: f64) {
+        self.count += 1;
+        self.histogram.record(latency);
+        self.latency_min = cmp::min(self.latency_min, latency);
+        self.latency_max = cmp::max(self.latency_max, latency);
+        self.recall_min = self.recall_min.min(recall);
+        self.recall_max = self.recall_max.max(recall);
+        self.recall_sum += recall;
+    }
+
+    fn append(&mut self, other: &Self) {
+        self.count += other.count;
+        self.histogram.append(&other.histogram);
+        self.latency_min = cmp::min(self.latency_min, other.latency_min);
+        self.latency_max = cmp::max(self.latency_max, other.latency_max);
+        if self.with_recall && other.with_recall {
+            self.recall_min = self.recall_min.min(other.recall_min);
+            self.recall_max = self.recall_max.max(other.recall_max);
+            self.recall_sum += other.recall_sum;
+        }
+    }
+
+    fn log(&self, duration: Duration, label: Option<&str>) {
+        let label = label
+            .map(|label| format!(" for {label}"))
+            .unwrap_or_default();
+        if label.is_empty() {
+            info!("duration: {:.1?}", duration);
+        }
+        info!("queries{label}: {}", self.count);
+        info!(
+            "QPS{label}: {:.1}",
+            self.count as f64 / duration.as_secs_f64()
+        );
+        info!("latency min{label}: {:.1?}", self.latency_min);
+        for percentile in [1, 10, 25, 50, 75, 90, 99] {
+            info!(
+                "latency P{:.02}{label}: {:.1?}",
+                percentile,
+                self.histogram.percentile(percentile as f64)
+            );
+        }
+        info!("latency max{label}: {:.1?}", self.latency_max);
+
+        if self.with_recall {
+            info!("recall min{label}: {:.1}", self.recall_min * 100.0);
+            info!(
+                "recall avg{label}: {:.1}",
+                self.recall_sum * 100.0 / self.count as f64
+            );
+            info!("recall max{label}: {:.1}", self.recall_max * 100.0);
+        }
     }
 }
