@@ -4,6 +4,7 @@
  */
 
 use crate::ColumnName;
+use crate::Config;
 use crate::Connectivity;
 use crate::Credentials;
 use crate::DbCustomIndex;
@@ -41,9 +42,11 @@ use std::io::Cursor;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::RwLock;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
+use tokio::sync::watch;
 use tokio::time::sleep;
 use tracing::Instrument;
 use tracing::debug;
@@ -227,26 +230,162 @@ pub(crate) async fn new(
     uri: ScyllaDbUri,
     node_state: Sender<NodeState>,
     credentials: Option<Credentials>,
+    mut config_rx: Option<watch::Receiver<Arc<Config>>>,
 ) -> anyhow::Result<mpsc::Sender<Db>> {
     let (tx, mut rx) = mpsc::channel(10);
     tokio::spawn(
         async move {
+            // Use shared state for URI and credentials so they can be updated by config monitoring
+            let current_uri = Arc::new(RwLock::new(uri.0.clone()));
+            let current_credentials = Arc::new(RwLock::new(credentials.clone()));
+
+            // Initial connection with current URI and credentials
             node_state.send_event(Event::ConnectingToDb).await;
-            let mut statements = Statements::new(uri.clone(), credentials.clone()).await;
+            let uri_str = current_uri.read().await.clone();
+            let creds = current_credentials.read().await.clone();
+            let mut statements = Statements::new(ScyllaDbUri(uri_str.clone()), creds.clone()).await;
+
+            // Retry loop that's responsive to config changes
             while statements.is_err() {
+                let uri_str = current_uri.read().await.clone();
                 tracing::error!(
                     "Failed to connect to ScyllaDB (error: {}) at {}, retrying in {}s",
                     statements.err().unwrap(),
-                    uri.0,
+                    uri_str,
                     RECONNECT_TIMEOUT.as_secs()
                 );
-                sleep(RECONNECT_TIMEOUT).await;
-                statements = Statements::new(uri.clone(), credentials.clone()).await;
+
+                // Use select to be responsive to config changes during reconnection attempts
+                if let Some(ref mut rx) = config_rx {
+                    tokio::select! {
+                        _ = sleep(RECONNECT_TIMEOUT) => {},
+                        result = rx.changed() => {
+                            if result.is_ok() {
+                                let config = rx.borrow_and_update().clone();
+                                let old_uri = current_uri.read().await.clone();
+
+                                // Update URI if changed
+                                if config.scylladb_uri != old_uri {
+                                    info!("Config changed during initial connection: ScyllaDB URI changed from {} to {}",
+                                          old_uri, config.scylladb_uri);
+                                    *current_uri.write().await = config.scylladb_uri.clone();
+                                }
+
+                                // Update credentials if changed
+                                let old_creds = current_credentials.read().await.clone();
+                                let creds_changed = match (&config.credentials, &old_creds) {
+                                    (None, None) => false,
+                                    (Some(_), None) | (None, Some(_)) => true,
+                                    (Some(new_creds), Some(old_creds)) => {
+                                        new_creds.username != old_creds.username
+                                            || new_creds.certificate_path != old_creds.certificate_path
+                                            || match (&new_creds.password, &old_creds.password) {
+                                                (None, None) => false,
+                                                (Some(_), None) | (None, Some(_)) => true,
+                                                (Some(new_pass), Some(old_pass)) => {
+                                                    new_pass.expose_secret() != old_pass.expose_secret()
+                                                }
+                                            }
+                                    }
+                                };
+
+                                if creds_changed {
+                                    info!("Config changed during initial connection: ScyllaDB credentials changed");
+                                    *current_credentials.write().await = config.credentials.clone();
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    sleep(RECONNECT_TIMEOUT).await;
+                }
+
+                let uri_str = current_uri.read().await.clone();
+                let creds = current_credentials.read().await.clone();
+                statements = Statements::new(ScyllaDbUri(uri_str), creds).await;
             }
             node_state.send_event(Event::ConnectedToDb).await;
-            let statements = Arc::new(statements.unwrap());
+
+            // Use RwLock to share statements between the main loop and config monitoring task
+            let statements = Arc::new(RwLock::new(Arc::new(statements.unwrap())));
+
+            // Spawn config monitoring task if config_rx is provided
+            if let Some(mut config_rx) = config_rx {
+                let statements_clone = statements.clone();
+                let node_state_clone = node_state.clone();
+                let current_uri_clone = current_uri.clone();
+                let current_credentials_clone = current_credentials.clone();
+
+                tokio::spawn(async move {
+                    while config_rx.changed().await.is_ok() {
+                        let config = config_rx.borrow_and_update().clone();
+
+                        let old_uri = current_uri_clone.read().await.clone();
+                        let old_credentials = current_credentials_clone.read().await.clone();
+
+                        // Check if credentials or URI changed
+                        let uri_changed = config.scylladb_uri != old_uri;
+                        let credentials_changed = match (&config.credentials, &old_credentials) {
+                            (None, None) => false,
+                            (Some(_), None) | (None, Some(_)) => true,
+                            (Some(new_creds), Some(old_creds)) => {
+                                new_creds.username != old_creds.username
+                                    || new_creds.certificate_path != old_creds.certificate_path
+                                    // SecretString doesn't implement PartialEq, so we compare exposed secrets
+                                    || match (&new_creds.password, &old_creds.password) {
+                                        (None, None) => false,
+                                        (Some(_), None) | (None, Some(_)) => true,
+                                        (Some(new_pass), Some(old_pass)) => {
+                                            new_pass.expose_secret() != old_pass.expose_secret()
+                                        }
+                                    }
+                            }
+                        };
+
+                        if uri_changed || credentials_changed {
+                            if uri_changed {
+                                warn!("ScyllaDB URI changed from {} to {}, reconnecting...",
+                                      old_uri, config.scylladb_uri);
+                                *current_uri_clone.write().await = config.scylladb_uri.clone();
+                            }
+                            if credentials_changed {
+                                warn!("ScyllaDB credentials changed, reconnecting...");
+                                *current_credentials_clone.write().await = config.credentials.clone();
+                            }
+
+                            // Attempt reconnection with new config
+                            node_state_clone.send_event(Event::ConnectingToDb).await;
+                            let new_uri_str = current_uri_clone.read().await.clone();
+                            let new_creds = current_credentials_clone.read().await.clone();
+                            let new_uri = ScyllaDbUri(new_uri_str.clone());
+                            let mut new_statements = Statements::new(new_uri, new_creds.clone()).await;
+
+                            while new_statements.is_err() {
+                                tracing::error!(
+                                    "Failed to reconnect to ScyllaDB (error: {}) at {}, retrying in {}s",
+                                    new_statements.err().unwrap(),
+                                    new_uri_str,
+                                    RECONNECT_TIMEOUT.as_secs()
+                                );
+                                sleep(RECONNECT_TIMEOUT).await;
+                                let retry_uri_str = current_uri_clone.read().await.clone();
+                                let retry_creds = current_credentials_clone.read().await.clone();
+                                let retry_uri = ScyllaDbUri(retry_uri_str);
+                                new_statements = Statements::new(retry_uri, retry_creds).await;
+                            }
+
+                            // Update the shared statements
+                            *statements_clone.write().await = Arc::new(new_statements.unwrap());
+                            node_state_clone.send_event(Event::ConnectedToDb).await;
+                            info!("Successfully reconnected to ScyllaDB");
+                        }
+                    }
+                });
+            }
+
             while let Some(msg) = rx.recv().await {
-                tokio::spawn(process(statements.clone(), msg, node_state.clone()));
+                let current_statements = statements.read().await.clone();
+                tokio::spawn(process(current_statements, msg, node_state.clone()));
             }
         }
         .instrument(debug_span!("db")),

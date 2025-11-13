@@ -109,7 +109,12 @@ fn main() -> anyhow::Result<()> {
         };
 
         let credentials = config.credentials.clone();
-        let db_actor = vector_store::new_db(scylladb_uri, node_state.clone(), credentials).await?;
+
+        // Clone config_rx for db monitoring
+        let config_rx_db = Some(config_rx.clone());
+        let db_actor =
+            vector_store::new_db(scylladb_uri, node_state.clone(), credentials, config_rx_db)
+                .await?;
 
         // Clone config_rx for httpserver monitoring
         let config_rx_clone = Some(config_rx.clone());
