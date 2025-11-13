@@ -17,6 +17,7 @@ async fn run_vs(
         node_state,
         db_actor,
         index_factory,
+        None,
     )
     .await
     .unwrap();

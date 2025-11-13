@@ -43,6 +43,7 @@ use tokio::runtime::Handle;
 use tokio::signal;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc::Sender;
+use tokio::sync::watch;
 use tokio::task;
 use utoipa::PartialSchema;
 use utoipa::ToSchema;
@@ -56,6 +57,29 @@ use uuid::Uuid;
 
 #[derive(Clone, derive_more::From, derive_more::Display)]
 pub struct ScyllaDbUri(String);
+
+#[derive(Clone, Debug)]
+pub struct Config {
+    pub vector_store_addr: std::net::SocketAddr,
+    pub scylladb_uri: String,
+    pub threads: Option<usize>,
+    pub opensearch_addr: Option<String>,
+    pub credentials: Option<Credentials>,
+    pub disable_colors: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            vector_store_addr: "127.0.0.1:6080".parse().unwrap(),
+            scylladb_uri: "127.0.0.1:9042".to_string(),
+            threads: None,
+            opensearch_addr: None,
+            credentials: None,
+            disable_colors: false,
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Credentials {
@@ -493,6 +517,7 @@ pub async fn run(
     node_state: Sender<NodeState>,
     db_actor: Sender<Db>,
     index_factory: Box<dyn IndexFactory + Send + Sync>,
+    config_rx: Option<watch::Receiver<Arc<Config>>>,
 ) -> anyhow::Result<(impl Sized, SocketAddr)> {
     let metrics: Arc<Metrics> = Arc::new(metrics::Metrics::new());
     let index_engine_version = index_factory.index_engine_version();
@@ -502,6 +527,7 @@ pub async fn run(
         engine::new(db_actor, index_factory, node_state, metrics.clone()).await?,
         metrics,
         index_engine_version,
+        config_rx,
     )
     .await
 }
@@ -510,8 +536,9 @@ pub async fn new_db(
     uri: ScyllaDbUri,
     node_state: Sender<NodeState>,
     credentials: Option<Credentials>,
+    config_rx: Option<watch::Receiver<Arc<Config>>>,
 ) -> anyhow::Result<Sender<Db>> {
-    db::new(uri, node_state, credentials).await
+    db::new(uri, node_state, credentials, config_rx).await
 }
 
 pub async fn new_node_state() -> Sender<NodeState> {

@@ -27,7 +27,7 @@ async fn run_server(
         tls: tls_config,
     };
 
-    vector_store::run(server_config, node_state, db_actor, index_factory)
+    vector_store::run(server_config, node_state, db_actor, index_factory, None)
         .await
         .unwrap()
 }
