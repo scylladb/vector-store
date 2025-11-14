@@ -28,7 +28,9 @@ pub(crate) const VS_PORT: u16 = 6080;
 pub(crate) const DB_PORT: u16 = 9042;
 
 pub(crate) const VS_OCTET: u8 = 1;
-pub(crate) const DB_OCTET: u8 = 2;
+pub(crate) const DB_OCTET_1: u8 = 2;
+pub(crate) const DB_OCTET_2: u8 = 3;
+pub(crate) const DB_OCTET_3: u8 = 4;
 
 pub async fn get_default_vs_url(actors: &TestActors) -> String {
     format!(
@@ -39,8 +41,16 @@ pub async fn get_default_vs_url(actors: &TestActors) -> String {
     )
 }
 
+pub fn get_default_db_ips(actors: &TestActors) -> Vec<Ipv4Addr> {
+    vec![
+        actors.services_subnet.ip(DB_OCTET_1),
+        actors.services_subnet.ip(DB_OCTET_2),
+        actors.services_subnet.ip(DB_OCTET_3),
+    ]
+}
+
 pub fn get_default_db_ip(actors: &TestActors) -> Ipv4Addr {
-    actors.services_subnet.ip(DB_OCTET)
+    actors.services_subnet.ip(DB_OCTET_1)
 }
 
 pub async fn init(actors: TestActors) {
@@ -52,11 +62,11 @@ pub async fn init(actors: TestActors) {
 
     let vs_url = get_default_vs_url(&actors).await;
 
-    let db_ip = get_default_db_ip(&actors);
+    let db_ips = get_default_db_ips(&actors);
+    let db_ip = db_ips[0]; // Use the first DB node for vector store connection
 
-    actors.db.start(vs_url, db_ip, None).await;
+    actors.db.start(vs_url, db_ips, None).await;
     assert!(actors.db.wait_for_ready().await);
-
     actors
         .vs
         .start((vs_ip, VS_PORT).into(), (db_ip, DB_PORT).into())
@@ -77,7 +87,7 @@ pub async fn cleanup(actors: TestActors) {
 pub async fn prepare_connection(actors: &TestActors) -> (Arc<Session>, HttpClient) {
     let session = Arc::new(
         SessionBuilder::new()
-            .known_node(actors.services_subnet.ip(DB_OCTET).to_string())
+            .known_node(actors.services_subnet.ip(DB_OCTET_1).to_string())
             .build()
             .await
             .expect("failed to create session"),
@@ -155,9 +165,9 @@ pub async fn get_opt_query_results(query: String, session: &Session) -> Option<Q
 pub async fn create_keyspace(session: &Session) -> String {
     let keyspace = format!("ks_{}", Uuid::new_v4().simple());
 
-    // Create keyspace
+    // Create keyspace with replication factor 3 for the 3-node cluster
     session.query_unpaged(
-        format!("CREATE KEYSPACE {keyspace} WITH replication = {{'class': 'NetworkTopologyStrategy', 'replication_factor': 1}}"),
+        format!("CREATE KEYSPACE {keyspace} WITH replication = {{'class': 'NetworkTopologyStrategy', 'replication_factor': 3}}"),
         (),
     ).await.expect("failed to create a keyspace");
 
