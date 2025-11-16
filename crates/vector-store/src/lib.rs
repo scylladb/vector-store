@@ -44,6 +44,7 @@ use tokio::signal;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
+use tokio::sync::watch;
 use tokio::task;
 use utoipa::PartialSchema;
 use utoipa::ToSchema;
@@ -522,6 +523,7 @@ pub async fn run(
     node_state: Sender<NodeState>,
     db_actor: Sender<Db>,
     index_factory: Box<dyn IndexFactory + Send + Sync>,
+    config_rx: watch::Receiver<Arc<Config>>,
 ) -> anyhow::Result<(impl Sized, SocketAddr)> {
     let metrics: Arc<Metrics> = Arc::new(metrics::Metrics::new());
     let index_engine_version = index_factory.index_engine_version();
@@ -531,6 +533,7 @@ pub async fn run(
         engine::new(db_actor, index_factory, node_state, metrics.clone()).await?,
         metrics,
         index_engine_version,
+        config_rx,
     )
     .await
 }

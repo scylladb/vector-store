@@ -13,6 +13,8 @@ use httpclient::HttpClient;
 use scylla::value::CqlValue;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
+use tokio::sync::watch;
 use uuid::Uuid;
 use vector_store::IndexMetadata;
 
@@ -38,11 +40,14 @@ async fn simple_create_search_delete_index() {
 
     let index_factory = vector_store::new_index_factory_opensearch(server.base_url()).unwrap();
 
+    let (_config_tx, config_rx) = watch::channel(Arc::new(vector_store::Config::default()));
+
     let (_server_actor, addr) = vector_store::run(
         SocketAddr::from(([127, 0, 0, 1], 0)).into(),
         node_state,
         db_actor,
         index_factory,
+        config_rx,
     )
     .await
     .unwrap();

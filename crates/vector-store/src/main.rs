@@ -113,8 +113,14 @@ fn main() -> anyhow::Result<()> {
         let credentials = config.credentials.clone();
         let db_actor = vector_store::new_db(scylladb_uri, node_state.clone(), credentials).await?;
 
-        let (_server_actor, addr) =
-            vector_store::run(http_server_config, node_state, db_actor, index_factory).await?;
+        let (_server_actor, addr) = vector_store::run(
+            http_server_config,
+            node_state,
+            db_actor,
+            index_factory,
+            config_rx.clone(),
+        )
+        .await?;
         tracing::info!("listening on {addr}");
 
         vector_store::wait_for_shutdown().await;

@@ -6,7 +6,9 @@
 use crate::db_basic;
 use rcgen::CertifiedKey;
 use std::io::Write;
+use std::sync::Arc;
 use tempfile::NamedTempFile;
+use tokio::sync::watch;
 
 fn create_temp_file<C: AsRef<[u8]>>(content: C) -> NamedTempFile {
     let mut file = NamedTempFile::new().unwrap();
@@ -17,7 +19,7 @@ fn create_temp_file<C: AsRef<[u8]>>(content: C) -> NamedTempFile {
 async fn run_server(
     addr: core::net::SocketAddr,
     tls_config: Option<vector_store::TlsConfig>,
-) -> (impl Sized, core::net::SocketAddr) {
+) -> (impl Sized, core::net::SocketAddr, impl Sized) {
     let node_state = vector_store::new_node_state().await;
     let (db_actor, _db) = db_basic::new(node_state.clone());
     let index_factory = vector_store::new_index_factory_usearch().unwrap();
@@ -27,9 +29,19 @@ async fn run_server(
         tls: tls_config,
     };
 
-    vector_store::run(server_config, node_state, db_actor, index_factory)
-        .await
-        .unwrap()
+    let (_config_tx, config_rx) = watch::channel(Arc::new(vector_store::Config::default()));
+
+    let (server, addr) = vector_store::run(
+        server_config,
+        node_state,
+        db_actor,
+        index_factory,
+        config_rx,
+    )
+    .await
+    .unwrap();
+    
+    (server, addr, _config_tx)
 }
 
 #[tokio::test]
@@ -47,7 +59,7 @@ async fn test_https_server_responds() {
     let cert_file = create_temp_file(cert.pem().as_bytes());
     let key_file = create_temp_file(signing_key.serialize_pem().as_bytes());
 
-    let (_server, addr) = run_server(
+    let (_server, addr, _config_tx) = run_server(
         addr,
         Some(vector_store::TlsConfig {
             cert_path: cert_file.path().to_path_buf(),
