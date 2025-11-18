@@ -110,7 +110,7 @@ impl DbIndexExt for mpsc::Sender<DbIndex> {
 }
 
 pub(crate) async fn new(
-    db_session: Arc<Session>,
+    session_rx: tokio::sync::watch::Receiver<Arc<Session>>,
     metadata: IndexMetadata,
     node_state: Sender<NodeState>,
 ) -> anyhow::Result<(
@@ -124,6 +124,8 @@ pub(crate) async fn new(
     let (tx_index, mut rx_index) = mpsc::channel(CHANNEL_SIZE);
     let (tx_embeddings, rx_embeddings) = mpsc::channel(CHANNEL_SIZE);
 
+    let db_session = session_rx.borrow().clone();
+
     let (mut cdc_reader, cdc_handler) = CDCLogReaderBuilder::new()
         .session(Arc::clone(&db_session))
         .keyspace(metadata.keyspace_name.as_ref())
@@ -136,7 +138,7 @@ pub(crate) async fn new(
         .build()
         .await?;
 
-    let statements = Arc::new(Statements::new(db_session, metadata.clone()).await?);
+    let statements = Arc::new(Statements::new(session_rx.clone(), metadata.clone()).await?);
 
     tokio::spawn(
         async move {
@@ -214,13 +216,17 @@ async fn process(statements: Arc<Statements>, msg: DbIndex, completed_scan_lengt
 }
 
 struct Statements {
-    session: Arc<Session>,
+    session_rx: tokio::sync::watch::Receiver<Arc<Session>>,
     primary_key_columns: Vec<ColumnName>,
     st_range_scan: PreparedStatement,
 }
 
 impl Statements {
-    async fn new(session: Arc<Session>, metadata: IndexMetadata) -> anyhow::Result<Self> {
+    async fn new(
+        session_rx: tokio::sync::watch::Receiver<Arc<Session>>,
+        metadata: IndexMetadata,
+    ) -> anyhow::Result<Self> {
+        let session = session_rx.borrow().clone();
         session.await_schema_agreement().await?;
 
         let cluster_state = session.get_cluster_state();
@@ -256,7 +262,7 @@ impl Statements {
                 .await
                 .context("range_scan_query")?,
 
-            session,
+            session_rx,
         })
     }
 
@@ -370,7 +376,8 @@ impl Statements {
 
     fn nr_shards_in_cluster(&self) -> NonZeroUsize {
         NonZeroUsize::try_from(
-            self.session
+            self.session_rx
+                .borrow()
                 .get_cluster_state()
                 .get_nodes_info()
                 .iter()
@@ -403,7 +410,8 @@ impl Statements {
 
         let tokens = iter::once(Token::new(TOKEN_MIN))
             .chain(
-                self.session
+                self.session_rx
+                    .borrow()
                     .get_cluster_state()
                     .replica_locator()
                     .ring()
@@ -433,8 +441,8 @@ impl Statements {
     ) -> anyhow::Result<BoxStream<'static, DbEmbedding>> {
         // last two columns are embedding and writetime
         let columns_len_expected = self.primary_key_columns.len() + 2;
-        Ok(self
-            .session
+        let session = self.session_rx.borrow().clone();
+        Ok(session
             .execute_iter(self.st_range_scan.clone(), (begin.value(), end.value()))
             .await?
             .rows_stream::<Row>()?

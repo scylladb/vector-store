@@ -542,8 +542,9 @@ pub async fn new_db(
     uri: ScyllaDbUri,
     node_state: Sender<NodeState>,
     credentials: Option<Credentials>,
+    config_rx: watch::Receiver<Arc<Config>>,
 ) -> anyhow::Result<Sender<Db>> {
-    db::new(uri, node_state, credentials).await
+    db::new(uri, node_state, credentials, config_rx).await
 }
 
 pub async fn new_node_state() -> Sender<NodeState> {
