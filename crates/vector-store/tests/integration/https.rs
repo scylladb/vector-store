@@ -6,7 +6,10 @@
 use crate::db_basic;
 use rcgen::CertifiedKey;
 use std::io::Write;
+use std::sync::Arc;
 use tempfile::NamedTempFile;
+use tokio::sync::watch;
+use vector_store::Config;
 
 fn create_temp_file<C: AsRef<[u8]>>(content: C) -> NamedTempFile {
     let mut file = NamedTempFile::new().unwrap();
@@ -20,7 +23,8 @@ async fn run_server(
 ) -> (impl Sized, core::net::SocketAddr) {
     let node_state = vector_store::new_node_state().await;
     let (db_actor, _db) = db_basic::new(node_state.clone());
-    let index_factory = vector_store::new_index_factory_usearch().unwrap();
+    let (_, rx) = watch::channel(Arc::new(Config::default()));
+    let index_factory = vector_store::new_index_factory_usearch(rx).unwrap();
 
     let server_config = vector_store::HttpServerConfig {
         addr,

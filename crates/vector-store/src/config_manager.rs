@@ -5,6 +5,7 @@
 
 use anyhow::anyhow;
 use anyhow::bail;
+use itertools::Itertools;
 use secrecy::ExposeSecret;
 use std::net::ToSocketAddrs;
 use std::sync::Arc;
@@ -266,6 +267,12 @@ where
         config.opensearch_addr = Some(opensearch_addr);
     }
 
+    config.usearch_simulator = env("VECTOR_STORE_USEARCH_SIMULATOR")
+        .ok()
+        .map(|v| v.split(':').map(|s| s.parse::<humantime::Duration>()).map_ok(|v| v.into()).collect::<Result<Vec<_>, _>>().map_err(|err| {
+            anyhow!("Unable to parse VECTOR_STORE_USEARCH_SIMULATOR env (search_us:add_us:delete_us:...): {err}")
+        })).transpose()?;
+
     config.credentials = credentials(env).await?;
 
     Ok(config)
@@ -435,6 +442,7 @@ mod tests {
             threads: None,
             opensearch_addr: None,
             credentials: None,
+            usearch_simulator: None,
             disable_colors: false,
         };
 

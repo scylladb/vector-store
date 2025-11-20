@@ -3,8 +3,11 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+use crate::Config;
 use crate::Dimensions;
+use crate::Distance;
 use crate::IndexFactory;
+use crate::IndexId;
 use crate::Limit;
 use crate::PrimaryKey;
 use crate::SpaceType;
@@ -19,23 +22,33 @@ use crate::memory::Memory;
 use crate::memory::MemoryExt;
 use anyhow::anyhow;
 use bimap::BiMap;
+use std::collections::HashSet;
+use std::iter;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
+use std::time::Instant;
+use tokio::sync::Notify;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
+use tokio::sync::watch;
 use tracing::Instrument;
 use tracing::debug;
 use tracing::debug_span;
 use tracing::error;
+use tracing::info;
 use tracing::trace;
 use usearch::IndexOptions;
 use usearch::MetricKind;
 use usearch::ScalarKind;
 
-pub struct UsearchIndexFactory(Arc<Semaphore>);
+pub struct UsearchIndexFactory {
+    semaphore: Arc<Semaphore>,
+    mode: Mode,
+}
 
 impl IndexFactory for UsearchIndexFactory {
     fn create_index(
@@ -43,16 +56,285 @@ impl IndexFactory for UsearchIndexFactory {
         index: IndexConfiguration,
         memory: mpsc::Sender<Memory>,
     ) -> anyhow::Result<mpsc::Sender<Index>> {
-        new(index, Arc::clone(&self.0), memory)
+        match &self.mode {
+            Mode::Usearch => {
+                let options = IndexOptions {
+                    dimensions: index.dimensions.0.get(),
+                    connectivity: index.connectivity.0,
+                    expansion_add: index.expansion_add.0,
+                    expansion_search: index.expansion_search.0,
+                    metric: index.space_type.into(),
+                    quantization: ScalarKind::F32,
+                    ..Default::default()
+                };
+
+                let idx = Arc::new(RwLock::new(usearch::Index::new(&options)?));
+                new(
+                    idx,
+                    index.id,
+                    index.dimensions,
+                    Arc::clone(&self.semaphore),
+                    memory,
+                )
+            }
+            Mode::Simulator { config, config_rx } => {
+                let sim = Simulator::new(config.clone(), config_rx.clone(), index.id.clone());
+                new(
+                    sim,
+                    index.id,
+                    index.dimensions,
+                    Arc::clone(&self.semaphore),
+                    memory,
+                )
+            }
+        }
     }
 
     fn index_engine_version(&self) -> String {
-        format!("usearch-{}", usearch::version())
+        match self.mode {
+            Mode::Usearch => format!("usearch-{}", usearch::version()),
+            Mode::Simulator { .. } => "usearch-simulator".to_string(),
+        }
     }
 }
 
-pub fn new_usearch(semaphore: Arc<Semaphore>) -> anyhow::Result<UsearchIndexFactory> {
-    Ok(UsearchIndexFactory(semaphore))
+pub fn new_usearch(
+    semaphore: Arc<Semaphore>,
+    mut config_rx: watch::Receiver<Arc<Config>>,
+) -> anyhow::Result<UsearchIndexFactory> {
+    let config = config_rx.borrow_and_update().clone();
+    Ok(UsearchIndexFactory {
+        semaphore,
+        mode: if config.usearch_simulator.is_none() {
+            Mode::Usearch
+        } else {
+            Mode::Simulator { config, config_rx }
+        },
+    })
+}
+
+enum Mode {
+    Usearch,
+    Simulator {
+        config: Arc<Config>,
+        config_rx: watch::Receiver<Arc<Config>>,
+    },
+}
+
+trait UsearchIndex {
+    fn reserve(&self, size: usize) -> anyhow::Result<()>;
+    fn size(&self) -> usize;
+    fn capacity(&self) -> usize;
+    fn add(&self, key: Key, vector: &Vector) -> anyhow::Result<()>;
+    fn remove(&self, key: Key) -> anyhow::Result<()>;
+    fn search(
+        &self,
+        vector: &Vector,
+        limit: Limit,
+    ) -> anyhow::Result<impl Iterator<Item = (Key, Distance)>>;
+
+    fn stop(&self);
+}
+
+impl UsearchIndex for RwLock<usearch::Index> {
+    fn reserve(&self, size: usize) -> anyhow::Result<()> {
+        Ok(self.write().unwrap().reserve(size)?)
+    }
+
+    fn capacity(&self) -> usize {
+        self.read().unwrap().capacity()
+    }
+
+    fn size(&self) -> usize {
+        self.read().unwrap().size()
+    }
+
+    fn add(&self, key: Key, vector: &Vector) -> anyhow::Result<()> {
+        Ok(self.read().unwrap().add(key.0, &vector.0)?)
+    }
+
+    fn remove(&self, key: Key) -> anyhow::Result<()> {
+        Ok(self.read().unwrap().remove(key.0).map(|_| ())?)
+    }
+
+    fn search(
+        &self,
+        vector: &Vector,
+        limit: Limit,
+    ) -> anyhow::Result<impl Iterator<Item = (Key, Distance)>> {
+        let matches = self.read().unwrap().search(&vector.0, limit.0.get())?;
+        Ok(matches
+            .keys
+            .into_iter()
+            .zip(matches.distances)
+            .map(|(key, distance)| (key.into(), distance.into())))
+    }
+
+    fn stop(&self) {}
+}
+
+struct Simulator {
+    config: Arc<Config>,
+    search: Duration,
+    add_remove: Duration,
+    reserve: Duration,
+    keys: RwLock<HashSet<Key>>,
+    notify: Arc<Notify>,
+}
+
+impl Simulator {
+    const SEARCH_IDX: usize = 0;
+    const ADD_REMOVE_IDX: usize = 1;
+    const RESERVE_IDX: usize = 2;
+
+    fn new(
+        config: Arc<Config>,
+        mut config_rx: watch::Receiver<Arc<Config>>,
+        id: IndexId,
+    ) -> Arc<RwLock<Self>> {
+        let mut sim = Self {
+            config: Arc::new(Config::default()),
+            search: Duration::ZERO,
+            add_remove: Duration::ZERO,
+            reserve: Duration::ZERO,
+            keys: RwLock::new(HashSet::new()),
+            notify: Arc::new(Notify::new()),
+        };
+        sim.update(config);
+        let notify = Arc::clone(&sim.notify);
+        let sim = Arc::new(RwLock::new(sim));
+
+        tokio::spawn(
+            {
+                let sim = Arc::clone(&sim);
+                async move {
+                    loop {
+                        tokio::select! {
+                            _ = config_rx.changed() => {
+                                let config = config_rx.borrow_and_update().clone();
+                                sim.write().unwrap().update(config);
+                            }
+                            _ = notify.notified() => {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            .instrument(debug_span!("simulator", "{}", id)),
+        );
+
+        sim
+    }
+
+    fn update(&mut self, config: Arc<Config>) {
+        if self.config.usearch_simulator == config.usearch_simulator {
+            return;
+        }
+        self.search = *config
+            .usearch_simulator
+            .as_ref()
+            .and_then(|vec| vec.get(Self::SEARCH_IDX))
+            .unwrap_or(&Duration::ZERO);
+        self.add_remove = *config
+            .usearch_simulator
+            .as_ref()
+            .and_then(|vec| vec.get(Self::ADD_REMOVE_IDX))
+            .unwrap_or(&Duration::ZERO);
+        self.reserve = *config
+            .usearch_simulator
+            .as_ref()
+            .and_then(|vec| vec.get(Self::RESERVE_IDX))
+            .unwrap_or(&Duration::ZERO);
+        info!(
+            "usearch simulator config updated: search = {:?}, add_remove = {:?}, reserve = {:?}",
+            self.search, self.add_remove, self.reserve
+        );
+        self.config = config;
+    }
+
+    fn wait(&self, start: Instant, duration: Duration) {
+        while start.elapsed() < duration {}
+    }
+
+    fn wait_reserve(&self, start: Instant) {
+        self.wait(start, self.reserve);
+    }
+
+    fn wait_add_remove(&self, start: Instant) {
+        self.wait(start, self.add_remove);
+    }
+
+    fn wait_search(&self, start: Instant) {
+        self.wait(start, self.search);
+    }
+}
+
+impl UsearchIndex for RwLock<Simulator> {
+    fn reserve(&self, size: usize) -> anyhow::Result<()> {
+        let start = Instant::now();
+
+        // we need simulate write lock similar to real usearch index
+        #[allow(clippy::readonly_write_lock)]
+        let sim = self.write().unwrap();
+        {
+            let mut keys = sim.keys.write().unwrap();
+            let len = keys.len();
+            keys.reserve(size - len);
+        }
+
+        sim.wait_reserve(start);
+        Ok(())
+    }
+
+    fn capacity(&self) -> usize {
+        self.read().unwrap().keys.read().unwrap().capacity()
+    }
+
+    fn size(&self) -> usize {
+        self.read().unwrap().keys.read().unwrap().len()
+    }
+
+    fn add(&self, key: Key, _: &Vector) -> anyhow::Result<()> {
+        let start = Instant::now();
+
+        let sim = self.read().unwrap();
+        sim.keys.write().unwrap().insert(key);
+
+        sim.wait_add_remove(start);
+        Ok(())
+    }
+
+    fn remove(&self, key: Key) -> anyhow::Result<()> {
+        let start = Instant::now();
+
+        let sim = self.read().unwrap();
+        sim.keys.write().unwrap().remove(&key);
+
+        sim.wait_add_remove(start);
+        Ok(())
+    }
+
+    fn search(
+        &self,
+        _: &Vector,
+        limit: Limit,
+    ) -> anyhow::Result<impl Iterator<Item = (Key, Distance)>> {
+        let start = Instant::now();
+
+        let sim = self.read().unwrap();
+        let len = sim.keys.read().unwrap().len() as u64;
+        let keys: Vec<_> = iter::repeat_with(|| rand::random_range(0..len))
+            .map(Key)
+            .filter(|key| sim.keys.read().unwrap().contains(key))
+            .take(limit.0.get())
+            .collect();
+
+        sim.wait_search(start);
+        Ok(keys.into_iter().map(|key| (key, 0.0.into())))
+    }
+
+    fn stop(&self) {}
 }
 
 // Initial and incremental number for the index vectors reservation.
@@ -87,23 +369,14 @@ impl From<SpaceType> for MetricKind {
     }
 }
 
-pub(crate) fn new(
-    index: IndexConfiguration,
+fn new(
+    idx: Arc<impl UsearchIndex + Send + Sync + 'static>,
+    id: IndexId,
+    dimensions: Dimensions,
     semaphore: Arc<Semaphore>,
     memory: mpsc::Sender<Memory>,
 ) -> anyhow::Result<mpsc::Sender<Index>> {
-    let options = IndexOptions {
-        dimensions: index.dimensions.0.get(),
-        connectivity: index.connectivity.0,
-        expansion_add: index.expansion_add.0,
-        expansion_search: index.expansion_search.0,
-        metric: index.space_type.into(),
-        quantization: ScalarKind::F32,
-        ..Default::default()
-    };
-
-    let idx = Arc::new(RwLock::new(usearch::Index::new(&options)?));
-    idx.write().unwrap().reserve(RESERVE_INCREMENT)?;
+    idx.reserve(RESERVE_INCREMENT)?;
 
     // TODO: The value of channel size was taken from initial benchmarks. Needs more testing
     const CHANNEL_SIZE: usize = 10;
@@ -132,15 +405,17 @@ pub(crate) fn new(
                             .can_allocate()
                             .await
                             .unwrap_or(Allocate::CannotAllocate);
-                        process(msg, index.dimensions, idx, keys, usearch_key, allocate);
+                        process(msg, dimensions, idx, keys, usearch_key, allocate);
                         drop(permit);
                     }
                 });
             }
 
+            idx.stop();
+
             debug!("finished");
         }
-        .instrument(debug_span!("usearch", "{}", index.id)),
+        .instrument(debug_span!("usearch", "{}", id)),
     );
 
     Ok(tx)
@@ -149,7 +424,7 @@ pub(crate) fn new(
 fn process(
     msg: Index,
     dimensions: Dimensions,
-    idx: Arc<RwLock<usearch::Index>>,
+    idx: Arc<impl UsearchIndex>,
     keys: Arc<RwLock<BiMap<PrimaryKey, Key>>>,
     usearch_key: Arc<AtomicU64>,
     allocate: Allocate,
@@ -185,7 +460,7 @@ fn process(
 }
 
 fn add_or_replace(
-    idx: Arc<RwLock<usearch::Index>>,
+    idx: Arc<impl UsearchIndex>,
     keys: Arc<RwLock<BiMap<PrimaryKey, Key>>>,
     usearch_key: Arc<AtomicU64>,
     primary_key: PrimaryKey,
@@ -220,12 +495,12 @@ fn add_or_replace(
         keys.write().unwrap().remove_by_right(key);
     };
 
-    let capacity = idx.read().unwrap().capacity();
-    let free_space = capacity - idx.read().unwrap().size();
+    let capacity = idx.capacity();
+    let free_space = capacity - idx.size();
     if free_space < RESERVE_THRESHOLD {
         // free space below threshold, reserve more space
         let capacity = capacity + RESERVE_INCREMENT;
-        if let Err(err) = idx.write().unwrap().reserve(capacity) {
+        if let Err(err) = idx.reserve(capacity) {
             error!("unable to reserve index capacity for {capacity} in usearch: {err}");
             remove_key_from_bimap(&key);
             return;
@@ -234,19 +509,19 @@ fn add_or_replace(
     }
 
     if remove {
-        if let Err(err) = idx.read().unwrap().remove(key.0) {
+        if let Err(err) = idx.remove(key) {
             debug!("add_or_replace: unable to remove embedding for key {key}: {err}");
             return;
         };
     }
-    if let Err(err) = idx.read().unwrap().add(key.0, &embedding.0) {
+    if let Err(err) = idx.add(key, &embedding) {
         debug!("add_or_replace: unable to add embedding for key {key}: {err}");
         remove_key_from_bimap(&key);
     };
 }
 
 fn remove(
-    idx: Arc<RwLock<usearch::Index>>,
+    idx: Arc<impl UsearchIndex>,
     keys: Arc<RwLock<BiMap<PrimaryKey, Key>>>,
     primary_key: PrimaryKey,
 ) {
@@ -254,13 +529,13 @@ fn remove(
         return;
     };
 
-    if let Err(err) = idx.read().unwrap().remove(key.0) {
+    if let Err(err) = idx.remove(key) {
         debug!("remove: unable to remove embeddings for key {key}: {err}");
     };
 }
 
 fn ann(
-    idx: Arc<RwLock<usearch::Index>>,
+    idx: Arc<impl UsearchIndex>,
     tx_ann: oneshot::Sender<AnnR>,
     keys: Arc<RwLock<BiMap<PrimaryKey, Key>>>,
     embedding: Vector,
@@ -275,36 +550,27 @@ fn ann(
 
     tx_ann
         .send(
-            idx.read()
-                .unwrap()
-                .search(&embedding.0, limit.0.get())
+            idx.search(&embedding, limit)
                 .map_err(|err| anyhow!("ann: search failed: {err}"))
                 .and_then(|matches| {
-                    let primary_keys = {
-                        let keys = keys.read().unwrap();
-                        matches
-                            .keys
-                            .into_iter()
-                            .map(|key| {
-                                keys.get_by_right(&key.into())
-                                    .cloned()
-                                    .ok_or(anyhow!("not defined primary key column {key}"))
-                            })
-                            .collect::<anyhow::Result<_>>()?
-                    };
-                    let distances = matches
-                        .distances
-                        .into_iter()
-                        .map(|value| value.into())
-                        .collect();
+                    let keys = keys.read().unwrap();
+                    let (primary_keys, distances) = itertools::process_results(
+                        matches.map(|(key, distance)| {
+                            keys.get_by_right(&key)
+                                .cloned()
+                                .ok_or(anyhow!("not defined primary key column {key}"))
+                                .map(|primary_key| (primary_key, distance))
+                        }),
+                        |it| it.unzip(),
+                    )?;
                     Ok((primary_keys, distances))
                 }),
         )
         .unwrap_or_else(|_| trace!("ann: unable to send response"));
 }
 
-fn count(idx: Arc<RwLock<usearch::Index>>, tx: oneshot::Sender<CountR>) {
-    tx.send(Ok(idx.read().unwrap().size()))
+fn count(idx: Arc<impl UsearchIndex>, tx: oneshot::Sender<CountR>) {
+    tx.send(Ok(idx.size()))
         .unwrap_or_else(|_| trace!("count: unable to send response"));
 }
 
@@ -325,19 +591,23 @@ mod tests {
 
     #[tokio::test]
     async fn add_or_replace_size_ann() {
-        let actor = new(
-            IndexConfiguration {
-                id: IndexId::new(&"vector".to_string().into(), &"store".to_string().into()),
-                dimensions: NonZeroUsize::new(3).unwrap().into(),
-                connectivity: Connectivity::default(),
-                expansion_add: ExpansionAdd::default(),
-                expansion_search: ExpansionSearch::default(),
-                space_type: SpaceType::Euclidean,
-            },
-            Arc::new(Semaphore::new(4)),
-            memory::new(),
-        )
-        .unwrap();
+        let factory = UsearchIndexFactory {
+            semaphore: Arc::new(Semaphore::new(4)),
+            mode: Mode::Usearch,
+        };
+        let actor = factory
+            .create_index(
+                IndexConfiguration {
+                    id: IndexId::new(&"vector".to_string().into(), &"store".to_string().into()),
+                    dimensions: NonZeroUsize::new(3).unwrap().into(),
+                    connectivity: Connectivity::default(),
+                    expansion_add: ExpansionAdd::default(),
+                    expansion_search: ExpansionSearch::default(),
+                    space_type: SpaceType::Euclidean,
+                },
+                memory::new(),
+            )
+            .unwrap();
 
         actor
             .add_or_replace(

@@ -107,7 +107,7 @@ fn main() -> anyhow::Result<()> {
             vector_store::new_index_factory_opensearch(addr)?
         } else {
             tracing::info!("Using Usearch index factory");
-            vector_store::new_index_factory_usearch()?
+            vector_store::new_index_factory_usearch(config_rx)?
         };
 
         let credentials = config.credentials.clone();

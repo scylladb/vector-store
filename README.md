@@ -17,6 +17,7 @@ service supports also `.env` files.
 | `VECTOR_STORE_SCYLLADB_PASSWORD_FILE` | The path to a file containing the password for ScyllaDB authentication.                                                  |                   |
 | `VECTOR_STORE_OPENSEARCH_URI`         | A connection endpoint to an OpenSearch instance HTTP API. If not set, the service uses the USearch library for indexing. |                   |
 | `VECTOR_STORE_THREADS`                | How many threads should be used for Vector Store indexing.                                                               | (number of cores) |
+| `VECTOR_STORE_USEARCH_SIMULATOR`      | Enable simulator for USearch. Provides human readable delays for simulated operations (`search:add-remove:reserve`).     |                   | 
 
 ## Development builds
 

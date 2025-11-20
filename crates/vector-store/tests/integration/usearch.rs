@@ -14,8 +14,11 @@ use reqwest::StatusCode;
 use scylla::value::CqlValue;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
+use tokio::sync::watch;
 use uuid::Uuid;
+use vector_store::Config;
 use vector_store::Connectivity;
 use vector_store::ExpansionAdd;
 use vector_store::ExpansionSearch;
@@ -73,7 +76,8 @@ pub(crate) async fn setup_store() -> (
     )
     .unwrap();
 
-    let index_factory = vector_store::new_index_factory_usearch().unwrap();
+    let (_, rx) = watch::channel(Arc::new(Config::default()));
+    let index_factory = vector_store::new_index_factory_usearch(rx).unwrap();
 
     let run = {
         let node_state = node_state.clone();
@@ -207,7 +211,8 @@ async fn failed_db_index_create() {
         version: Uuid::new_v4().into(),
     };
 
-    let index_factory = vector_store::new_index_factory_usearch().unwrap();
+    let (_, rx) = watch::channel(Arc::new(Config::default()));
+    let index_factory = vector_store::new_index_factory_usearch(rx).unwrap();
 
     let (_server_actor, addr) = vector_store::run(
         SocketAddr::from(([127, 0, 0, 1], 0)).into(),

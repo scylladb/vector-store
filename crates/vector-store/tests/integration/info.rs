@@ -6,6 +6,9 @@
 use crate::{db_basic, mock_opensearch};
 use httpclient::HttpClient;
 use std::net::SocketAddr;
+use std::sync::Arc;
+use tokio::sync::watch;
+use vector_store::Config;
 
 async fn run_vs(
     index_factory: Box<dyn vector_store::IndexFactory + Send + Sync>,
@@ -25,7 +28,8 @@ async fn run_vs(
 
 #[tokio::test]
 async fn get_application_info_usearch() {
-    let (client, _server) = run_vs(vector_store::new_index_factory_usearch().unwrap()).await;
+    let (_, rx) = watch::channel(Arc::new(Config::default()));
+    let (client, _server) = run_vs(vector_store::new_index_factory_usearch(rx).unwrap()).await;
 
     let info = client.info().await;
 

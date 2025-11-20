@@ -37,6 +37,7 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 use time::OffsetDateTime;
 use tokio::runtime::Builder;
 use tokio::runtime::Handle;
@@ -44,6 +45,7 @@ use tokio::signal;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
+use tokio::sync::watch;
 use tokio::task;
 use utoipa::PartialSchema;
 use utoipa::ToSchema;
@@ -65,6 +67,7 @@ pub struct Config {
     pub threads: Option<usize>,
     pub opensearch_addr: Option<String>,
     pub credentials: Option<Credentials>,
+    pub usearch_simulator: Option<Vec<Duration>>,
     pub disable_colors: bool,
 }
 
@@ -76,6 +79,7 @@ impl Default for Config {
             threads: None,
             opensearch_addr: None,
             credentials: None,
+            usearch_simulator: None,
             disable_colors: false,
         }
     }
@@ -553,13 +557,15 @@ async fn move_to_the_end_of_async_runtime_queue() {
     task::yield_now().await;
 }
 
-pub fn new_index_factory_usearch() -> anyhow::Result<Box<dyn IndexFactory + Send + Sync>> {
+pub fn new_index_factory_usearch(
+    config_tx: watch::Receiver<Arc<Config>>,
+) -> anyhow::Result<Box<dyn IndexFactory + Send + Sync>> {
     // This semaphore decides how many tasks are queued for an usearch process. It is
     // calculated as a number of threads, to be sure that there is always a new
     // task waiting in the queue.
     let semaphore = Arc::new(Semaphore::new(Handle::current().metrics().num_workers()));
 
-    Ok(Box::new(index::usearch::new_usearch(semaphore)?))
+    Ok(Box::new(index::usearch::new_usearch(semaphore, config_tx)?))
 }
 
 pub fn new_index_factory_opensearch(

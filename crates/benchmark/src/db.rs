@@ -61,13 +61,13 @@ impl Scylla {
         Self(Arc::new(State { session, st_search }))
     }
 
-    pub(crate) async fn create_table(&self, dimension: usize) {
+    pub(crate) async fn create_table(&self, dimension: usize, replication_factor: usize) {
         self.0.session
         .query_unpaged(
             format!(
                 "
                 CREATE KEYSPACE {KEYSPACE}
-                WITH replication = {{'class': 'NetworkTopologyStrategy' , 'replication_factor': '3'}}
+                WITH replication = {{'class': 'NetworkTopologyStrategy' , 'replication_factor': '{replication_factor}'}}
                 "
             ),
             &[],
