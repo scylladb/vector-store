@@ -22,6 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::SystemTime;
 use tokio::sync::Notify;
+use tokio::task;
 use tokio::time;
 use tokio::time::Instant;
 use tracing::info;
@@ -111,6 +112,9 @@ enum Command {
 
         #[clap(long)]
         from: Option<humantime::Timestamp>,
+
+        #[clap(long)]
+        delay: Option<humantime::Duration>,
     },
 
     SearchHttp {
@@ -209,6 +213,7 @@ async fn main() {
             duration,
             concurrency,
             from,
+            delay,
         } => {
             let dataset = data::new(data_dir).await;
             let queries = Arc::new(dataset.queries(limit as usize).await);
@@ -232,6 +237,13 @@ async fn main() {
                             let query = random(&queries);
                             let (duration, recall) = measure_duration(scylla.search(query)).await;
                             measurement.record(duration, recall);
+                            if let Some(delay) = delay {
+                                let start = Instant::now();
+                                let duration = Duration::from(delay);
+                                while start.elapsed() < duration {
+                                    task::yield_now().await;
+                                }
+                            }
                         }
                         measurement
                     })
