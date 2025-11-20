@@ -31,6 +31,9 @@ jobs:
     - name: Build release
       run: ./scripts/run-with-release-toolchain cargo build --release --workspace
 
+    - name: Setup AIO requirements for Scylla
+      run: sudo sysctl -w fs.aio-max-nr=1048576
+
     - name: Run the Validator tests
 
       run: ./scripts/run-validator-with-scylla-docker scylladb/scylla-nightly:2026.1.0-dev-0.20251117.f0039381d22c target/amd64/release/vector-store target/amd64/release/vector-search-validator --verbose
