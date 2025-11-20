@@ -13,7 +13,7 @@ pub enum ScyllaCluster {
     },
     Start {
         vs_uri: String,
-        db_ip: Ipv4Addr,
+        db_ips: Vec<Ipv4Addr>,
         conf: Option<Vec<u8>>,
     },
     WaitForReady {
@@ -31,11 +31,11 @@ pub trait ScyllaClusterExt {
     /// Returns the version of the ScyllaDB executable.
     fn version(&self) -> impl Future<Output = String>;
 
-    /// Starts the ScyllaDB cluster with the given vector store URI and database IP.
+    /// Starts the ScyllaDB cluster with the given vector store URI and database IPs.
     fn start(
         &self,
         vs_uri: String,
-        db_ip: Ipv4Addr,
+        db_ips: Vec<Ipv4Addr>,
         conf: Option<Vec<u8>>,
     ) -> impl Future<Output = ()>;
 
@@ -62,10 +62,10 @@ impl ScyllaClusterExt for mpsc::Sender<ScyllaCluster> {
             .expect("ScyllaClusterExt::version: internal actor should send response")
     }
 
-    async fn start(&self, vs_uri: String, db_ip: Ipv4Addr, conf: Option<Vec<u8>>) {
+    async fn start(&self, vs_uri: String, db_ips: Vec<Ipv4Addr>, conf: Option<Vec<u8>>) {
         self.send(ScyllaCluster::Start {
             vs_uri,
-            db_ip,
+            db_ips,
             conf,
         })
         .await

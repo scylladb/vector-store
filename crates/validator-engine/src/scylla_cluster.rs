@@ -17,6 +17,7 @@ use tokio::time;
 use tracing::Instrument;
 use tracing::debug;
 use tracing::debug_span;
+use tracing::info;
 use vector_search_validator_tests::ScyllaCluster;
 
 pub(crate) async fn new(
@@ -54,13 +55,17 @@ pub(crate) async fn new(
     tx
 }
 
+struct NodeState {
+    db_ip: Ipv4Addr,
+    child: Option<Child>,
+    workdir: Option<TempDir>,
+}
+
 struct State {
     path: PathBuf,
     default_conf: PathBuf,
     tempdir: PathBuf,
-    db_ip: Option<Ipv4Addr>,
-    child: Option<Child>,
-    workdir: Option<TempDir>,
+    nodes: Vec<NodeState>,
     version: String,
     verbose: bool,
 }
@@ -83,9 +88,7 @@ impl State {
             default_conf,
             version,
             tempdir,
-            db_ip: None,
-            child: None,
-            workdir: None,
+            nodes: Vec::new(),
             verbose,
         }
     }
@@ -100,10 +103,10 @@ async fn process(msg: ScyllaCluster, state: &mut State) {
 
         ScyllaCluster::Start {
             vs_uri,
-            db_ip,
+            db_ips,
             conf,
         } => {
-            start(vs_uri, db_ip, conf, state).await;
+            start(vs_uri, db_ips, conf, state).await;
         }
 
         ScyllaCluster::Stop => {
@@ -125,13 +128,15 @@ async fn process(msg: ScyllaCluster, state: &mut State) {
     }
 }
 
-async fn run_cluster(
+async fn run_node(
     vs_uri: &String,
     db_ip: &Ipv4Addr,
+    seeds: &str,
     conf: &Option<Vec<u8>>,
     path: &Path,
-    state: &mut State,
-) {
+    rack: &str,
+    state: &State,
+) -> Child {
     let conf = if let Some(conf) = conf {
         let conf_path = path.join("scylla.conf");
         fs::write(&conf_path, conf)
@@ -141,88 +146,133 @@ async fn run_cluster(
     } else {
         state.default_conf.clone()
     };
+
+    let conf_dir = path.join("conf");
+    fs::create_dir_all(&conf_dir)
+        .await
+        .expect("start: failed to create conf directory");
+
+    let rack_dc_properties = format!(
+        "
+    dc=datacenter1
+    rack={rack}
+    prefer_local=true
+    "
+    );
+    let properties_path = conf_dir.join("cassandra-rackdc.properties");
+    debug!(
+        "Creating cassandra-rackdc.properties at {:?}",
+        properties_path
+    );
+
+    fs::write(&properties_path, &rack_dc_properties)
+        .await
+        .expect("start: failed to write cassandra-rackdc.properties");
+
     let mut cmd = Command::new(&state.path);
     if !state.verbose {
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
-    state.child = Some(
-        cmd.arg("--overprovisioned")
-            .arg("--options-file")
-            .arg(&conf)
-            .arg("--workdir")
-            .arg(path)
-            .arg("--listen-address")
-            .arg(db_ip.to_string())
-            .arg("--rpc-address")
-            .arg(db_ip.to_string())
-            .arg("--api-address")
-            .arg(db_ip.to_string())
-            .arg("--seed-provider-parameters")
-            .arg(format!("seeds={db_ip}"))
-            .arg("--vector-store-primary-uri")
-            .arg(vs_uri)
-            .arg("--developer-mode")
-            .arg("true")
-            .arg("--smp")
-            .arg("2")
-            .arg("--log-to-stdout")
-            .arg("true")
-            .arg("--logger-ostream-type")
-            .arg("stdout")
-            .arg("--rf-rack-valid-keyspaces")
-            .arg("true")
-            .spawn()
-            .expect("start: failed to spawn scylladb"),
+
+    cmd.env("SCYLLA_CONF", &conf_dir);
+
+    cmd.arg("--overprovisioned")
+        .arg("--options-file")
+        .arg(&conf)
+        .arg("--workdir")
+        .arg(path)
+        .arg("--listen-address")
+        .arg(db_ip.to_string())
+        .arg("--rpc-address")
+        .arg(db_ip.to_string())
+        .arg("--api-address")
+        .arg(db_ip.to_string())
+        .arg("--seed-provider-parameters")
+        .arg(format!("seeds={seeds}"))
+        .arg("--vector-store-primary-uri")
+        .arg(vs_uri)
+        .arg("--developer-mode")
+        .arg("true")
+        .arg("--smp")
+        .arg("2")
+        .arg("--log-to-stdout")
+        .arg("true")
+        .arg("--logger-ostream-type")
+        .arg("stdout")
+        .arg("--rf-rack-valid-keyspaces")
+        .arg("true")
+        .arg("--endpoint-snitch")
+        .arg("GossipingPropertyFileSnitch")
+        .spawn()
+        .expect("run_node: failed to spawn scylladb")
+}
+
+async fn start(vs_uri: String, db_ips: Vec<Ipv4Addr>, conf: Option<Vec<u8>>, state: &mut State) {
+    debug!("scylla_cluster: using DB IPs: {:?}", db_ips);
+
+    // The first node IP will be used as seed for whole cluster
+    let seed_ip = db_ips[0];
+
+    // Start each node sequentially with proper seed configuration
+    for (i, db_ip) in db_ips.iter().enumerate() {
+        let workdir = TempDir::new_in(&state.tempdir)
+            .expect("start: failed to create temporary directory for scylladb");
+        let rack = format!("rack{}", i + 1);
+        let seeds = seed_ip.to_string();
+
+        info!("Starting Scylla node {} on IP {} in {}", i + 1, db_ip, rack);
+
+        let child = run_node(&vs_uri, db_ip, &seeds, &conf, workdir.path(), &rack, state).await;
+
+        state.nodes.push(NodeState {
+            db_ip: *db_ip,
+            child: Some(child),
+            workdir: Some(workdir),
+        });
+    }
+
+    debug!(
+        "Started {} Scylla nodes in {}-rack cluster configuration, waiting for initialization...",
+        state.nodes.len(),
+        state.nodes.len()
     );
 }
 
-async fn start(vs_uri: String, db_ip: Ipv4Addr, conf: Option<Vec<u8>>, state: &mut State) {
-    let workdir = TempDir::new_in(&state.tempdir)
-        .expect("start: failed to create temporary directory for scylladb");
-    run_cluster(&vs_uri, &db_ip, &conf, workdir.path(), state).await;
-    state.workdir = Some(workdir);
-    state.db_ip = Some(db_ip);
-}
-
 async fn stop(state: &mut State) {
-    let Some(mut child) = state.child.take() else {
-        return;
-    };
-    child
-        .start_kill()
-        .expect("stop: failed to send SIGTERM to scylladb process");
-    child
-        .wait()
-        .await
-        .expect("stop: failed to wait for scylladb process to exit");
-    state.child = None;
-    state.workdir = None;
-    state.db_ip = None;
+    for node in &mut state.nodes {
+        if let Some(mut child) = node.child.take() {
+            child
+                .start_kill()
+                .expect("stop: failed to send SIGTERM to scylladb process");
+            child
+                .wait()
+                .await
+                .expect("stop: failed to wait for scylladb process to exit");
+        }
+        node.workdir = None;
+    }
+    state.nodes.clear();
 }
 
 async fn down(state: &mut State) {
-    let Some(mut child) = state.child.take() else {
-        return;
-    };
-    child
-        .start_kill()
-        .expect("stop: failed to send SIGTERM to scylladb process");
-    child
-        .wait()
-        .await
-        .expect("stop: failed to wait for scylladb process to exit");
-    state.child = None;
+    for node in &mut state.nodes {
+        if let Some(mut child) = node.child.take() {
+            child
+                .start_kill()
+                .expect("down: failed to send SIGTERM to scylladb process");
+            child
+                .wait()
+                .await
+                .expect("down: failed to wait for scylladb process to exit");
+        }
+    }
 }
 
-/// Waits for ScyllaDB to be ready by checking the nodetool status.
-async fn wait_for_ready(state: &State) -> bool {
-    let Some(db_ip) = state.db_ip else {
-        return false;
-    };
+async fn wait_for_node(state: &State, ip: Ipv4Addr) -> bool {
     let mut cmd = Command::new(&state.path);
     cmd.arg("nodetool")
         .arg("-h")
-        .arg(db_ip.to_string())
+        .arg(ip.to_string())
         .arg("status");
 
     loop {
@@ -233,7 +283,7 @@ async fn wait_for_ready(state: &State) -> bool {
                 .stdout,
         )
         .lines()
-        .any(|line| line.starts_with(&format!("UN {db_ip}")))
+        .any(|line| line.starts_with(&format!("UN {ip}")))
         {
             return true;
         }
@@ -241,14 +291,46 @@ async fn wait_for_ready(state: &State) -> bool {
     }
 }
 
-async fn up(vs_uri: String, conf: Option<Vec<u8>>, state: &mut State) {
-    let db_ip = state.db_ip.expect("State should have DB IP");
-    let path = state
-        .workdir
-        .as_ref()
-        .expect("State should have workdir")
-        .path()
-        .to_path_buf();
+/// Waits for ScyllaDB to be ready by checking the nodetool status.
+async fn wait_for_ready(state: &State) -> bool {
+    if state.nodes.is_empty() {
+        tracing::error!("No nodes to wait for - nodes list is empty");
+        return false;
+    }
 
-    run_cluster(&vs_uri, &db_ip, &conf, &path, state).await;
+    for node in &state.nodes {
+        tracing::info!("Waiting for node at IP {} to be ready...", node.db_ip);
+        wait_for_node(state, node.db_ip).await;
+        tracing::info!("Node at IP {} is ready.", node.db_ip);
+    }
+
+    true
+}
+
+async fn up(vs_uri: String, conf: Option<Vec<u8>>, state: &mut State) {
+    if state.nodes.is_empty() {
+        return;
+    }
+
+    // Use the first node as seed for whole cluster
+    let seed_ip = state.nodes[0].db_ip.to_string();
+
+    let nodes = state
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, node)| {
+            (
+                i,
+                node.db_ip,
+                node.workdir.as_ref().unwrap().path().to_path_buf(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    for (i, db_ip, path) in nodes.into_iter() {
+        let rack = format!("rack{}", i + 1);
+        let child = run_node(&vs_uri, &db_ip, &seed_ip, &conf, &path, &rack, state).await;
+        state.nodes[i].child = Some(child);
+    }
 }
