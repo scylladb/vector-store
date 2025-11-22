@@ -40,7 +40,7 @@ async fn run_server(
     )
     .await
     .unwrap();
-    
+
     (server, addr, _config_tx)
 }
 

@@ -567,8 +567,11 @@ pub fn new_index_factory_usearch() -> anyhow::Result<Box<dyn IndexFactory + Send
 
 pub fn new_index_factory_opensearch(
     addr: String,
+    config_rx: watch::Receiver<Arc<Config>>,
 ) -> anyhow::Result<Box<dyn IndexFactory + Send + Sync>> {
-    Ok(Box::new(index::opensearch::new_opensearch(&addr)?))
+    Ok(Box::new(index::opensearch::new_opensearch(
+        &addr, config_rx,
+    )?))
 }
 
 pub async fn wait_for_shutdown() {
