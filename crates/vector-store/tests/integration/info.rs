@@ -6,26 +6,31 @@
 use crate::{db_basic, mock_opensearch};
 use httpclient::HttpClient;
 use std::net::SocketAddr;
+use std::sync::Arc;
+use tokio::sync::watch;
 
 async fn run_vs(
     index_factory: Box<dyn vector_store::IndexFactory + Send + Sync>,
-) -> (HttpClient, impl Sized) {
+) -> (HttpClient, impl Sized, impl Sized) {
     let node_state = vector_store::new_node_state().await;
     let (db_actor, _) = db_basic::new(node_state.clone());
+    let (_config_tx, config_rx) = watch::channel(Arc::new(vector_store::Config::default()));
     let (server, addr) = vector_store::run(
         SocketAddr::from(([127, 0, 0, 1], 0)).into(),
         node_state,
         db_actor,
         index_factory,
+        config_rx,
     )
     .await
     .unwrap();
-    (HttpClient::new(addr), server)
+    (HttpClient::new(addr), server, _config_tx)
 }
 
 #[tokio::test]
 async fn get_application_info_usearch() {
-    let (client, _server) = run_vs(vector_store::new_index_factory_usearch().unwrap()).await;
+    let (client, _server, _config_tx) =
+        run_vs(vector_store::new_index_factory_usearch().unwrap()).await;
 
     let info = client.info().await;
 
@@ -37,8 +42,10 @@ async fn get_application_info_usearch() {
 #[tokio::test]
 async fn get_application_info_opensearch() {
     let server = mock_opensearch::TestOpenSearchServer::start().await;
-    let index_factory = vector_store::new_index_factory_opensearch(server.base_url()).unwrap();
-    let (client, _server) = run_vs(index_factory).await;
+    let (_, config_rx) = watch::channel(Arc::new(vector_store::Config::default()));
+    let index_factory =
+        vector_store::new_index_factory_opensearch(server.base_url(), config_rx).unwrap();
+    let (client, _server, _config_tx) = run_vs(index_factory).await;
 
     let info = client.info().await;
 

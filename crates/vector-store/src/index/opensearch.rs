@@ -34,21 +34,31 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use tokio::sync::Notify;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
+use tokio::sync::watch;
 use tracing::Instrument;
 use tracing::debug;
 use tracing::debug_span;
 use tracing::error;
 use tracing::info;
 use tracing::trace;
+use tracing::warn;
 
 use super::actor::AnnR;
 use super::actor::CountR;
 
 pub struct OpenSearchIndexFactory {
     client: Arc<OpenSearch>,
+    shutdown_notify: Arc<Notify>,
+}
+
+impl Drop for OpenSearchIndexFactory {
+    fn drop(&mut self) {
+        self.shutdown_notify.notify_one();
+    }
 }
 
 impl OpenSearchIndexFactory {
@@ -93,10 +103,44 @@ impl IndexFactory for OpenSearchIndexFactory {
     }
 }
 
-pub fn new_opensearch(addr: &str) -> Result<OpenSearchIndexFactory, anyhow::Error> {
-    Ok(OpenSearchIndexFactory {
+pub fn new_opensearch(
+    addr: &str,
+    config_rx: watch::Receiver<Arc<crate::Config>>,
+) -> Result<OpenSearchIndexFactory, anyhow::Error> {
+    let initial_addr = addr.to_string();
+    let shutdown_notify = Arc::new(Notify::new());
+    let factory = OpenSearchIndexFactory {
         client: Arc::new(OpenSearchIndexFactory::create_opensearch_client(addr)?),
-    })
+        shutdown_notify: shutdown_notify.clone(),
+    };
+
+    // Spawn monitoring task
+    tokio::spawn(async move {
+        let mut rx = config_rx;
+        loop {
+            tokio::select! {
+                result = rx.changed() => {
+                    if result.is_err() {
+                        break;
+                    }
+                    let new_config = rx.borrow();
+                    let new_addr = new_config.opensearch_addr.as_deref();
+
+                    if Some(initial_addr.as_str()) != new_addr {
+                        let new_display = new_addr.unwrap_or("None (using Usearch)");
+                        warn!(
+                            "OpenSearch address changed: {initial_addr} -> {new_display}. Restart required."
+                        );
+                    }
+                }
+                _ = shutdown_notify.notified() => {
+                    break;
+                }
+            }
+        }
+    });
+
+    Ok(factory)
 }
 
 #[derive(

@@ -14,7 +14,9 @@ use reqwest::StatusCode;
 use scylla::value::CqlValue;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
+use tokio::sync::watch;
 use uuid::Uuid;
 use vector_store::Connectivity;
 use vector_store::ExpansionAdd;
@@ -26,7 +28,7 @@ use vector_store::Vector;
 use vector_store::node_state::NodeState;
 
 pub(crate) async fn setup_store() -> (
-    impl std::future::Future<Output = (HttpClient, impl Sized)>,
+    impl std::future::Future<Output = (HttpClient, impl Sized, impl Sized)>,
     IndexMetadata,
     DbBasic,
     Sender<NodeState>,
@@ -78,16 +80,18 @@ pub(crate) async fn setup_store() -> (
     let run = {
         let node_state = node_state.clone();
         async move {
+            let (_config_tx, config_rx) = watch::channel(Arc::new(vector_store::Config::default()));
             let (server, addr) = vector_store::run(
                 SocketAddr::from(([127, 0, 0, 1], 0)).into(),
                 node_state,
                 db_actor,
                 index_factory,
+                config_rx,
             )
             .await
             .unwrap();
 
-            (HttpClient::new(addr), server)
+            (HttpClient::new(addr), server, _config_tx)
         }
     };
 
@@ -102,7 +106,7 @@ pub(crate) async fn setup_store_and_wait_for_index() -> (
     Sender<NodeState>,
 ) {
     let (run, index, db, node_state) = setup_store().await;
-    let (client, server) = run.await;
+    let (client, server, _config_tx) = run.await;
 
     wait_for(
         || async { !client.indexes().await.is_empty() },
@@ -110,7 +114,7 @@ pub(crate) async fn setup_store_and_wait_for_index() -> (
     )
     .await;
 
-    (index, client, db, server, node_state)
+    (index, client, db, (server, _config_tx), node_state)
 }
 
 #[tokio::test]
@@ -118,7 +122,7 @@ async fn simple_create_search_delete_index() {
     crate::enable_tracing();
 
     let (run, index, db, _node_state) = setup_store().await;
-    let (client, _server) = run.await;
+    let (client, _server, _config_tx) = run.await;
 
     db.insert_values(
         &index.keyspace_name,
@@ -209,11 +213,14 @@ async fn failed_db_index_create() {
 
     let index_factory = vector_store::new_index_factory_usearch().unwrap();
 
+    let (_config_tx, config_rx) = watch::channel(Arc::new(vector_store::Config::default()));
+
     let (_server_actor, addr) = vector_store::run(
         SocketAddr::from(([127, 0, 0, 1], 0)).into(),
         node_state,
         db_actor,
         index_factory,
+        config_rx,
     )
     .await
     .unwrap();
@@ -343,7 +350,7 @@ async fn ann_fail_while_building() {
     db.set_next_full_scan_progress(vector_store::Progress::InProgress(
         Percentage::try_from(33.333).unwrap(),
     ));
-    let (client, _server) = run.await;
+    let (client, _server, _config_tx) = run.await;
 
     let result = client
         .post_ann(
