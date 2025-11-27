@@ -296,12 +296,14 @@ impl UsearchIndex for RwLock<Simulator> {
     }
 
     fn add(&self, key: Key, _: &Vector) -> anyhow::Result<()> {
+        info!("start add {}", key.0);
         let start = Instant::now();
 
         let sim = self.read().unwrap();
         sim.keys.write().unwrap().insert(key);
 
         sim.wait_add_remove(start);
+        info!("end add {}", key.0);
         Ok(())
     }
 
@@ -383,37 +385,57 @@ fn new(
     let (tx, mut rx) = mpsc::channel(CHANNEL_SIZE);
 
     tokio::spawn(
-        async move {
-            debug!("starting");
+        {
+            let id = id.clone();
+            async move {
+                debug!("starting");
 
-            // bimap between PrimaryKey and Key for an usearch index
-            let keys = Arc::new(RwLock::new(BiMap::new()));
+                // bimap between PrimaryKey and Key for an usearch index
+                let keys = Arc::new(RwLock::new(BiMap::new()));
 
-            // Incremental key for a usearch index
-            let usearch_key = Arc::new(AtomicU64::new(0));
+                // Incremental key for a usearch index
+                let usearch_key = Arc::new(AtomicU64::new(0));
+                let id = id.clone();
 
-            while let Some(msg) = rx.recv().await {
-                let permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
-                tokio::spawn({
-                    let idx = Arc::clone(&idx);
-                    let keys = Arc::clone(&keys);
-                    let usearch_key = Arc::clone(&usearch_key);
-                    let memory = memory.clone();
-                    async move {
-                        crate::move_to_the_end_of_async_runtime_queue().await;
-                        let allocate = memory
-                            .can_allocate()
-                            .await
-                            .unwrap_or(Allocate::CannotAllocate);
-                        process(msg, dimensions, idx, keys, usearch_key, allocate);
-                        drop(permit);
-                    }
-                });
+                let pool = Arc::new(
+                    rayon::ThreadPoolBuilder::new()
+                        .thread_name(move |i| format!("usearch-{}-{}", id, i))
+                        .build()
+                        .unwrap(),
+                );
+
+                while let Some(msg) = rx.recv().await {
+                    let permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
+                    tokio::spawn({
+                        let idx = Arc::clone(&idx);
+                        let keys = Arc::clone(&keys);
+                        let usearch_key = Arc::clone(&usearch_key);
+                        let memory = memory.clone();
+                        let pool = pool.clone();
+                        async move {
+                            crate::move_to_the_end_of_async_runtime_queue().await;
+                            let allocate = memory
+                                .can_allocate()
+                                .await
+                                .unwrap_or(Allocate::CannotAllocate);
+                            process(
+                                msg,
+                                dimensions,
+                                idx,
+                                keys,
+                                usearch_key,
+                                allocate,
+                                pool.clone(),
+                            );
+                            drop(permit);
+                        }
+                    });
+                }
+
+                idx.stop();
+
+                debug!("finished");
             }
-
-            idx.stop();
-
-            debug!("finished");
         }
         .instrument(debug_span!("usearch", "{}", id)),
     );
@@ -424,10 +446,11 @@ fn new(
 fn process(
     msg: Index,
     dimensions: Dimensions,
-    idx: Arc<impl UsearchIndex>,
+    idx: Arc<impl UsearchIndex + Send + Sync + 'static>,
     keys: Arc<RwLock<BiMap<PrimaryKey, Key>>>,
     usearch_key: Arc<AtomicU64>,
     allocate: Allocate,
+    pool: Arc<rayon::ThreadPool>,
 ) {
     match msg {
         Index::AddOrReplace {
@@ -435,7 +458,9 @@ fn process(
             embedding,
             in_progress: _in_progress,
         } => {
-            add_or_replace(idx, keys, usearch_key, primary_key, embedding, allocate);
+            pool.spawn(move || {
+                add_or_replace(idx, keys, usearch_key, primary_key, embedding, allocate);
+            });
         }
 
         Index::Remove {
