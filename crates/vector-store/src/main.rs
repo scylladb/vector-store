@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+use std::sync::Arc;
+
 use anyhow::anyhow;
 use anyhow::bail;
 use clap::Parser;
@@ -94,6 +96,12 @@ fn main() -> anyhow::Result<()> {
 
     let threads = config.threads;
 
+    let pool = Arc::new(
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads.unwrap_or(0))
+            .build()?,
+    );
+
     vector_store::block_on(threads, async move || {
         // Start SIGHUP handler now that we're in the Tokio runtime
         config_manager.start(dotenvy_to_std_var);
@@ -107,7 +115,7 @@ fn main() -> anyhow::Result<()> {
             vector_store::new_index_factory_opensearch(addr)?
         } else {
             tracing::info!("Using Usearch index factory");
-            vector_store::new_index_factory_usearch(config_rx)?
+            vector_store::new_index_factory_usearch(config_rx, pool)?
         };
 
         let credentials = config.credentials.clone();

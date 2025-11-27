@@ -559,13 +559,16 @@ async fn move_to_the_end_of_async_runtime_queue() {
 
 pub fn new_index_factory_usearch(
     config_tx: watch::Receiver<Arc<Config>>,
+    pool: Arc<rayon::ThreadPool>,
 ) -> anyhow::Result<Box<dyn IndexFactory + Send + Sync>> {
     // This semaphore decides how many tasks are queued for an usearch process. It is
     // calculated as a number of threads, to be sure that there is always a new
     // task waiting in the queue.
     let semaphore = Arc::new(Semaphore::new(Handle::current().metrics().num_workers()));
 
-    Ok(Box::new(index::usearch::new_usearch(semaphore, config_tx)?))
+    Ok(Box::new(index::usearch::new_usearch(
+        semaphore, config_tx, pool,
+    )?))
 }
 
 pub fn new_index_factory_opensearch(

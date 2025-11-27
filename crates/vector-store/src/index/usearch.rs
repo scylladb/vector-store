@@ -48,6 +48,7 @@ use usearch::ScalarKind;
 pub struct UsearchIndexFactory {
     semaphore: Arc<Semaphore>,
     mode: Mode,
+    pool: Arc<rayon::ThreadPool>,
 }
 
 impl IndexFactory for UsearchIndexFactory {
@@ -75,6 +76,7 @@ impl IndexFactory for UsearchIndexFactory {
                     index.dimensions,
                     Arc::clone(&self.semaphore),
                     memory,
+                    Arc::clone(&self.pool),
                 )
             }
             Mode::Simulator { config, config_rx } => {
@@ -85,6 +87,7 @@ impl IndexFactory for UsearchIndexFactory {
                     index.dimensions,
                     Arc::clone(&self.semaphore),
                     memory,
+                    Arc::clone(&self.pool),
                 )
             }
         }
@@ -101,6 +104,7 @@ impl IndexFactory for UsearchIndexFactory {
 pub fn new_usearch(
     semaphore: Arc<Semaphore>,
     mut config_rx: watch::Receiver<Arc<Config>>,
+    pool: Arc<rayon::ThreadPool>,
 ) -> anyhow::Result<UsearchIndexFactory> {
     let config = config_rx.borrow_and_update().clone();
     Ok(UsearchIndexFactory {
@@ -110,6 +114,7 @@ pub fn new_usearch(
         } else {
             Mode::Simulator { config, config_rx }
         },
+        pool,
     })
 }
 
@@ -377,6 +382,7 @@ fn new(
     dimensions: Dimensions,
     semaphore: Arc<Semaphore>,
     memory: mpsc::Sender<Memory>,
+    pool: Arc<rayon::ThreadPool>,
 ) -> anyhow::Result<mpsc::Sender<Index>> {
     idx.reserve(RESERVE_INCREMENT)?;
 
@@ -385,57 +391,46 @@ fn new(
     let (tx, mut rx) = mpsc::channel(CHANNEL_SIZE);
 
     tokio::spawn(
-        {
-            let id = id.clone();
-            async move {
-                debug!("starting");
+        async move {
+            debug!("starting");
 
-                // bimap between PrimaryKey and Key for an usearch index
-                let keys = Arc::new(RwLock::new(BiMap::new()));
+            // bimap between PrimaryKey and Key for an usearch index
+            let keys = Arc::new(RwLock::new(BiMap::new()));
 
-                // Incremental key for a usearch index
-                let usearch_key = Arc::new(AtomicU64::new(0));
-                let id = id.clone();
+            // Incremental key for a usearch index
+            let usearch_key = Arc::new(AtomicU64::new(0));
 
-                let pool = Arc::new(
-                    rayon::ThreadPoolBuilder::new()
-                        .thread_name(move |i| format!("usearch-{}-{}", id, i))
-                        .build()
-                        .unwrap(),
-                );
-
-                while let Some(msg) = rx.recv().await {
-                    let permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
-                    tokio::spawn({
-                        let idx = Arc::clone(&idx);
-                        let keys = Arc::clone(&keys);
-                        let usearch_key = Arc::clone(&usearch_key);
-                        let memory = memory.clone();
-                        let pool = pool.clone();
-                        async move {
-                            crate::move_to_the_end_of_async_runtime_queue().await;
-                            let allocate = memory
-                                .can_allocate()
-                                .await
-                                .unwrap_or(Allocate::CannotAllocate);
-                            process(
-                                msg,
-                                dimensions,
-                                idx,
-                                keys,
-                                usearch_key,
-                                allocate,
-                                pool.clone(),
-                            );
-                            drop(permit);
-                        }
-                    });
-                }
-
-                idx.stop();
-
-                debug!("finished");
+            while let Some(msg) = rx.recv().await {
+                let permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
+                tokio::spawn({
+                    let idx = Arc::clone(&idx);
+                    let keys = Arc::clone(&keys);
+                    let usearch_key = Arc::clone(&usearch_key);
+                    let memory = memory.clone();
+                    let pool = pool.clone();
+                    async move {
+                        crate::move_to_the_end_of_async_runtime_queue().await;
+                        let allocate = memory
+                            .can_allocate()
+                            .await
+                            .unwrap_or(Allocate::CannotAllocate);
+                        process(
+                            msg,
+                            dimensions,
+                            idx,
+                            keys,
+                            usearch_key,
+                            allocate,
+                            pool.clone(),
+                        );
+                        drop(permit);
+                    }
+                });
             }
+
+            idx.stop();
+
+            debug!("finished");
         }
         .instrument(debug_span!("usearch", "{}", id)),
     );
