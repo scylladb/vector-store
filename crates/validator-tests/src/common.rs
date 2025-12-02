@@ -26,23 +26,32 @@ pub use vector_store::httproutes::IndexStatus;
 
 pub const DEFAULT_TEST_TIMEOUT: Duration = Duration::from_secs(120);
 
-pub const VS_NAME: &str = "vs";
+pub const VS_NAMES: [&str; 3] = ["vs1", "vs2", "vs3"];
 
 pub const VS_PORT: u16 = 6080;
 pub const DB_PORT: u16 = 9042;
 
-pub const VS_OCTET: u8 = 1;
-pub const DB_OCTET_1: u8 = 2;
-pub const DB_OCTET_2: u8 = 3;
-pub const DB_OCTET_3: u8 = 4;
+pub const DB_OCTET_1: u8 = 1;
+pub const DB_OCTET_2: u8 = 2;
+pub const DB_OCTET_3: u8 = 3;
+pub const VS_OCTET_1: u8 = 128;
+pub const VS_OCTET_2: u8 = 129;
+pub const VS_OCTET_3: u8 = 130;
 
-pub async fn get_default_vs_url(actors: &TestActors) -> String {
-    format!(
-        "http://{}.{}:{}",
-        VS_NAME,
-        actors.dns.domain().await,
-        VS_PORT
-    )
+pub async fn get_default_vs_urls(actors: &TestActors) -> Vec<String> {
+    let domain = actors.dns.domain().await;
+    VS_NAMES
+        .iter()
+        .map(|name| format!("http://{name}.{domain}:{VS_PORT}"))
+        .collect()
+}
+
+pub fn get_default_vs_ips(actors: &TestActors) -> Vec<Ipv4Addr> {
+    vec![
+        actors.services_subnet.ip(VS_OCTET_1),
+        actors.services_subnet.ip(VS_OCTET_2),
+        actors.services_subnet.ip(VS_OCTET_3),
+    ]
 }
 
 pub fn get_default_db_ips(actors: &TestActors) -> Vec<Ipv4Addr> {
@@ -54,13 +63,17 @@ pub fn get_default_db_ips(actors: &TestActors) -> Vec<Ipv4Addr> {
 }
 
 pub async fn get_default_scylla_node_configs(actors: &TestActors) -> Vec<ScyllaNodeConfig> {
-    let vs_url = get_default_vs_url(actors).await;
+    let default_vs_urls = get_default_vs_urls(actors).await;
     get_default_db_ips(actors)
         .iter()
-        .map(|&ip| ScyllaNodeConfig {
-            db_ip: ip,
-            primary_vs_uris: vec![vs_url.clone()],
-            secondary_vs_uris: vec![],
+        .enumerate()
+        .map(|(i, &ip)| {
+            let mut vs_urls = default_vs_urls.clone();
+            ScyllaNodeConfig {
+                db_ip: ip,
+                primary_vs_uris: vec![vs_urls.remove(i)],
+                secondary_vs_uris: vs_urls,
+            }
         })
         .collect()
 }
@@ -75,8 +88,10 @@ pub async fn init(actors: TestActors) {
 }
 
 pub async fn init_with_config(actors: TestActors, node_configs: Vec<ScyllaNodeConfig>) {
-    let vs_ip = actors.services_subnet.ip(VS_OCTET);
-    actors.dns.upsert(VS_NAME.to_string(), vs_ip).await;
+    let vs_ips = get_default_vs_ips(&actors);
+    for (name, ip) in VS_NAMES.iter().zip(vs_ips.iter()) {
+        actors.dns.upsert(name.to_string(), *ip).await;
+    }
 
     let db_ip = node_configs.first().unwrap().db_ip; // Use the first DB node for vector store connection
 
@@ -85,7 +100,7 @@ pub async fn init_with_config(actors: TestActors, node_configs: Vec<ScyllaNodeCo
     actors
         .vs
         .start(
-            (vs_ip, VS_PORT).into(),
+            (vs_ips[0], VS_PORT).into(),
             (db_ip, DB_PORT).into(),
             HashMap::new(),
         )
@@ -95,7 +110,9 @@ pub async fn init_with_config(actors: TestActors, node_configs: Vec<ScyllaNodeCo
 
 pub async fn cleanup(actors: TestActors) {
     info!("started");
-    actors.dns.remove(VS_NAME.to_string()).await;
+    for name in VS_NAMES.iter() {
+        actors.dns.remove(name.to_string()).await;
+    }
     actors.vs.stop().await;
     actors.db.stop().await;
     info!("finished");
@@ -109,7 +126,7 @@ pub async fn prepare_connection(actors: &TestActors) -> (Arc<Session>, HttpClien
             .await
             .expect("failed to create session"),
     );
-    let client = HttpClient::new((actors.services_subnet.ip(VS_OCTET), VS_PORT).into());
+    let client = HttpClient::new((actors.services_subnet.ip(VS_OCTET_1), VS_PORT).into());
     (session, client)
 }
 

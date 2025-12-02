@@ -20,7 +20,9 @@ pub(crate) async fn new() -> TestCase {
 async fn test_secondary_uri_works_correctly(actors: TestActors) {
     info!("started");
 
-    let vs_url = get_default_vs_url(&actors).await;
+    let vs_urls = get_default_vs_urls(&actors).await;
+    let vs_url = &vs_urls[0];
+
     let node_configs: Vec<ScyllaNodeConfig> = vec![
         ScyllaNodeConfig {
             db_ip: actors.services_subnet.ip(DB_OCTET_1),

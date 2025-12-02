@@ -35,8 +35,11 @@ async fn memory_limit_during_index_build(actors: TestActors) {
     info!("started");
 
     // Start DB
-    let vs_ip = actors.services_subnet.ip(common::VS_OCTET);
-    actors.dns.upsert(common::VS_NAME.to_string(), vs_ip).await;
+    let vs_ip = actors.services_subnet.ip(common::VS_OCTET_1);
+    actors
+        .dns
+        .upsert(common::VS_NAMES[0].to_string(), vs_ip)
+        .await;
     let node_configs = common::get_default_scylla_node_configs(&actors).await;
     let db_ip = node_configs.first().unwrap().db_ip;
     actors.db.start(node_configs.clone(), None).await;
@@ -104,8 +107,13 @@ async fn memory_limit_during_index_build(actors: TestActors) {
     assert!(actors.vs.wait_for_ready().await);
 
     // Create index
-    let client =
-        HttpClient::new((actors.services_subnet.ip(common::VS_OCTET), common::VS_PORT).into());
+    let client = HttpClient::new(
+        (
+            actors.services_subnet.ip(common::VS_OCTET_1),
+            common::VS_PORT,
+        )
+            .into(),
+    );
 
     let index = common::create_index(&session, &client, &table, "v").await;
 
