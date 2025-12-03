@@ -17,8 +17,11 @@ use scylla::client::session_builder::SessionBuilder;
 use scylla::statement::Consistency;
 use scylla::statement::prepared::PreparedStatement;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use tap::Pipe;
+use tokio::fs;
 use tokio::sync::Semaphore;
 use tokio::time;
 use tracing::error;
@@ -38,7 +41,16 @@ struct State {
 }
 
 impl Scylla {
-    pub(crate) async fn new(uri: SocketAddr) -> Self {
+    pub(crate) async fn new(
+        uri: SocketAddr,
+        user: Option<String>,
+        passwd_path: Option<PathBuf>,
+    ) -> Self {
+        let passwd = if let Some(path) = passwd_path {
+            fs::read_to_string(path).await.unwrap_or_default()
+        } else {
+            String::new()
+        };
         let session = SessionBuilder::new()
             .known_node(uri.to_string())
             .default_execution_profile_handle(
@@ -47,6 +59,13 @@ impl Scylla {
                     .build()
                     .into_handle(),
             )
+            .pipe(|builder| {
+                if let (Some(user), passwd) = (user, passwd) {
+                    builder.user(user, passwd)
+                } else {
+                    builder
+                }
+            })
             .build()
             .await
             .unwrap();

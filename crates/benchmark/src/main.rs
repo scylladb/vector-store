@@ -58,6 +58,12 @@ enum Command {
         scylla: SocketAddr,
 
         #[clap(long)]
+        user: Option<String>,
+
+        #[clap(long)]
+        passwd_path: Option<PathBuf>,
+
+        #[clap(long)]
         rf: usize,
 
         #[clap(long, value_parser = clap::value_parser!(u32).range(1..=1_000_000))]
@@ -67,6 +73,12 @@ enum Command {
     BuildIndex {
         #[clap(long)]
         scylla: SocketAddr,
+
+        #[clap(long)]
+        user: Option<String>,
+
+        #[clap(long)]
+        passwd_path: Option<PathBuf>,
 
         #[clap(long, required = true)]
         vector_store: Vec<SocketAddr>,
@@ -87,11 +99,23 @@ enum Command {
     DropTable {
         #[clap(long)]
         scylla: SocketAddr,
+
+        #[clap(long)]
+        user: Option<String>,
+
+        #[clap(long)]
+        passwd_path: Option<PathBuf>,
     },
 
     DropIndex {
         #[clap(long)]
         scylla: SocketAddr,
+
+        #[clap(long)]
+        user: Option<String>,
+
+        #[clap(long)]
+        passwd_path: Option<PathBuf>,
     },
 
     SearchCql {
@@ -100,6 +124,12 @@ enum Command {
 
         #[clap(long)]
         scylla: SocketAddr,
+
+        #[clap(long)]
+        user: Option<String>,
+
+        #[clap(long)]
+        passwd_path: Option<PathBuf>,
 
         #[clap(long, value_parser = clap::value_parser!(u32).range(1..=100))]
         limit: u32,
@@ -153,13 +183,15 @@ async fn main() {
         Command::BuildTable {
             data_dir,
             scylla,
+            user,
+            passwd_path,
             rf,
             concurrency,
         } => {
             let dataset = data::new(data_dir).await;
             let dimension = dataset.dimension().await;
             let stream = dataset.vector_stream().await;
-            let scylla = Scylla::new(scylla).await;
+            let scylla = Scylla::new(scylla, user, passwd_path).await;
             let (duration, _) = measure_duration(async move {
                 scylla.create_table(dimension, rf).await;
                 scylla.upload_vectors(stream, concurrency as usize).await;
@@ -170,13 +202,15 @@ async fn main() {
 
         Command::BuildIndex {
             scylla,
+            user,
+            passwd_path,
             vector_store,
             metric_type,
             m,
             ef_construction,
             ef_search,
         } => {
-            let scylla = Scylla::new(scylla).await;
+            let scylla = Scylla::new(scylla, user, passwd_path).await;
             let clients = vs::new_http_clients(vector_store);
             let (duration, _) = measure_duration(async move {
                 scylla
@@ -188,8 +222,12 @@ async fn main() {
             info!("Build Index took {duration:.2?}");
         }
 
-        Command::DropTable { scylla } => {
-            let scylla = Scylla::new(scylla).await;
+        Command::DropTable {
+            scylla,
+            user,
+            passwd_path,
+        } => {
+            let scylla = Scylla::new(scylla, user, passwd_path).await;
             let (duration, _) = measure_duration(async move {
                 scylla.drop_table().await;
             })
@@ -197,8 +235,12 @@ async fn main() {
             info!("Drop Table took {duration:.2?}");
         }
 
-        Command::DropIndex { scylla } => {
-            let scylla = Scylla::new(scylla).await;
+        Command::DropIndex {
+            scylla,
+            user,
+            passwd_path,
+        } => {
+            let scylla = Scylla::new(scylla, user, passwd_path).await;
             let (duration, _) = measure_duration(async move {
                 scylla.drop_index().await;
             })
@@ -209,6 +251,8 @@ async fn main() {
         Command::SearchCql {
             data_dir,
             scylla,
+            user,
+            passwd_path,
             limit,
             duration,
             concurrency,
@@ -218,7 +262,7 @@ async fn main() {
             let dataset = data::new(data_dir).await;
             let queries = Arc::new(dataset.queries(limit as usize).await);
             let notify = Arc::new(Notify::new());
-            let scylla = Scylla::new(scylla).await;
+            let scylla = Scylla::new(scylla, user, passwd_path).await;
 
             let start = from
                 .map(SystemTime::from)
