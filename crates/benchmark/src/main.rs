@@ -55,6 +55,9 @@ enum Command {
         data_dir: PathBuf,
 
         #[clap(long)]
+        data_multiplicity: Option<usize>,
+
+        #[clap(long)]
         scylla: SocketAddr,
 
         #[clap(long)]
@@ -182,6 +185,7 @@ async fn main() {
     match Args::parse().command {
         Command::BuildTable {
             data_dir,
+            data_multiplicity,
             scylla,
             user,
             passwd_path,
@@ -190,11 +194,16 @@ async fn main() {
         } => {
             let dataset = data::new(data_dir).await;
             let dimension = dataset.dimension().await;
-            let stream = dataset.vector_stream().await;
+            let data_multiplicity = data_multiplicity.unwrap_or(1);
             let scylla = Scylla::new(scylla, user, passwd_path).await;
             let (duration, _) = measure_duration(async move {
                 scylla.create_table(dimension, rf).await;
-                scylla.upload_vectors(stream, concurrency as usize).await;
+
+                for _ in 0..data_multiplicity {
+                    scylla
+                        .upload_vectors(dataset.vector_stream().await, concurrency as usize)
+                        .await;
+                }
             })
             .await;
             info!("Build table took {duration:.2?}");
