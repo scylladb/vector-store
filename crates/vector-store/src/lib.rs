@@ -498,6 +498,10 @@ pub fn block_on<Output>(threads: Option<usize>, f: impl AsyncFnOnce() -> Output)
         Some(0) | None => Builder::new_multi_thread(),
         Some(1) => Builder::new_current_thread(),
         Some(threads) => {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build_global()
+                .unwrap();
             let mut builder = Builder::new_multi_thread();
             builder.worker_threads(threads);
             builder
