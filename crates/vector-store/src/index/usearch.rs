@@ -323,14 +323,22 @@ impl UsearchIndex for RwLock<Simulator> {
         let start = Instant::now();
 
         let sim = self.read().unwrap();
-        let len = sim.keys.read().unwrap().len() as u64;
-        let keys: Vec<_> = iter::repeat_with(|| rand::random_range(0..len))
-            .map(Key)
-            .filter(|key| sim.keys.read().unwrap().contains(key))
-            .take(limit.0.get())
-            .collect();
-
         sim.wait_search(start);
+
+        let keys = {
+            let keys = sim.keys.read().unwrap();
+            let len = keys.len() as u64;
+            if len == 0 {
+                Vec::new()
+            } else {
+                iter::repeat_with(|| rand::random_range(0..len))
+                    .map(Key)
+                    .filter(|key| keys.contains(key))
+                    .take(limit.0.get())
+                    .collect()
+            }
+        };
+
         Ok(keys.into_iter().map(|key| (key, 0.0.into())))
     }
 
