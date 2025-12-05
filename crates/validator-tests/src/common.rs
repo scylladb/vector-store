@@ -81,21 +81,21 @@ pub async fn get_default_scylla_node_configs(actors: &TestActors) -> Vec<ScyllaN
 pub async fn init(actors: TestActors) {
     info!("started");
 
-    let node_configs = get_default_scylla_node_configs(&actors).await;
-    init_with_config(actors, node_configs).await;
+    let scylla_configs = get_default_scylla_node_configs(&actors).await;
+    init_with_config(actors, scylla_configs).await;
 
     info!("finished");
 }
 
-pub async fn init_with_config(actors: TestActors, node_configs: Vec<ScyllaNodeConfig>) {
+pub async fn init_with_config(actors: TestActors, scylla_configs: Vec<ScyllaNodeConfig>) {
     let vs_ips = get_default_vs_ips(&actors);
     for (name, ip) in VS_NAMES.iter().zip(vs_ips.iter()) {
         actors.dns.upsert(name.to_string(), *ip).await;
     }
 
-    let db_ip = node_configs.first().unwrap().db_ip; // Use the first DB node for vector store connection
+    let db_ip = scylla_configs.first().unwrap().db_ip; // Use the first DB node for vector store connection
 
-    actors.db.start(node_configs, None).await;
+    actors.db.start(scylla_configs, None).await;
     assert!(actors.db.wait_for_ready().await);
     actors
         .vs

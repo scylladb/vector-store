@@ -371,14 +371,17 @@ async fn is_cql_port_ready(ip: Ipv4Addr) -> bool {
 /// Waits for ScyllaDB to be ready by checking the nodetool status.
 async fn wait_for_ready(state: &State) -> bool {
     if state.nodes.is_empty() {
-        tracing::error!("No nodes to wait for - nodes list is empty");
+        tracing::error!("No ScyllaDB nodes to wait for - nodes list is empty");
         return false;
     }
 
     for node in &state.nodes {
-        tracing::info!("Waiting for node at IP {} to be ready...", &node.db_ip);
+        tracing::info!(
+            "Waiting for ScyllaDB node at IP {} to be ready...",
+            &node.db_ip
+        );
         wait_for_node(state, node.db_ip).await;
-        tracing::info!("Node at IP {} is ready.", &node.db_ip);
+        tracing::info!("ScyllaDB node at IP {} is ready.", &node.db_ip);
     }
 
     true
