@@ -199,10 +199,20 @@ async fn register() -> Vec<(String, TestCase)> {
 pub fn run() -> Result<(), &'static str> {
     let args = Args::parse();
 
-    let ansi = if let Command::Run { disable_colors, .. } = &args.command {
-        !disable_colors
-    } else {
-        true
+    let (ansi, rust_log) = match &args.command {
+        Command::Run {
+            disable_colors,
+            verbose,
+            ..
+        } => (
+            !disable_colors,
+            if *verbose {
+                "info"
+            } else {
+                "info,hickory_server=warn"
+            },
+        ),
+        _ => (true, "info,hickory_server=warn"),
     };
     tracing_subscriber::registry()
         .with({
@@ -227,7 +237,7 @@ pub fn run() -> Result<(), &'static str> {
         })
         .with(
             EnvFilter::try_from_default_env()
-                .or_else(|_| EnvFilter::try_new("info"))
+                .or_else(|_| EnvFilter::try_new(rust_log))
                 .expect("Failed to create EnvFilter"),
         )
         .with(
