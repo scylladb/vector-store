@@ -45,7 +45,7 @@ pub(crate) async fn new() -> TestCase {
 async fn ann_query_returns_expected_results(actors: TestActors) {
     info!("started");
 
-    let (session, client) = prepare_connection(&actors).await;
+    let (session, clients) = prepare_connection(&actors).await;
 
     let keyspace = create_keyspace(&session).await;
     let table = create_table(&session, "pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None).await;
@@ -72,14 +72,15 @@ async fn ann_query_returns_expected_results(actors: TestActors) {
             .expect("failed to insert data");
     }
 
-    let index = create_index(&session, &client, &table, "v").await;
+    let index = create_index(&session, &clients, &table, "v").await;
 
-    let index_status = wait_for_index(&client, &index).await;
-
-    assert_eq!(
-        index_status.count, 1000,
-        "Expected 1000 vectors to be indexed"
-    );
+    for client in &clients {
+        let index_status = wait_for_index(client, &index).await;
+        assert_eq!(
+            index_status.count, 1000,
+            "Expected 1000 vectors to be indexed"
+        );
+    }
 
     // Check if the query returns the expected results (recall at least 85%)
     let results = get_query_results(
@@ -114,7 +115,7 @@ async fn ann_query_returns_expected_results(actors: TestActors) {
 async fn ann_query_returns_expected_results_multicolumn_pk(actors: TestActors) {
     info!("started");
 
-    let (session, client) = prepare_connection(&actors).await;
+    let (session, clients) = prepare_connection(&actors).await;
 
     let keyspace = create_keyspace(&session).await;
     let table = create_table(
@@ -137,7 +138,7 @@ async fn ann_query_returns_expected_results_multicolumn_pk(actors: TestActors) {
             .await
             .expect("failed to insert data");
     }
-    create_index(&session, &client, &table, "v").await;
+    create_index(&session, &clients, &table, "v").await;
 
     let result = wait_for_value(
         || async {
@@ -178,7 +179,7 @@ async fn ann_query_returns_expected_results_multicolumn_pk(actors: TestActors) {
 async fn ann_query_respects_limit(actors: TestActors) {
     info!("started");
 
-    let (session, client) = prepare_connection(&actors).await;
+    let (session, clients) = prepare_connection(&actors).await;
 
     let keyspace = create_keyspace(&session).await;
     let table = create_table(&session, "pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None).await;
@@ -196,11 +197,12 @@ async fn ann_query_respects_limit(actors: TestActors) {
     }
 
     // Create index
-    let index = create_index(&session, &client, &table, "v").await;
+    let index = create_index(&session, &clients, &table, "v").await;
 
-    let index_status = wait_for_index(&client, &index).await;
-
-    assert_eq!(index_status.count, 10, "Expected 10 vectors to be indexed");
+    for client in &clients {
+        let index_status = wait_for_index(client, &index).await;
+        assert_eq!(index_status.count, 10, "Expected 10 vectors to be indexed");
+    }
 
     // Check if queries return the expected number of results
     let results = get_query_results(
@@ -244,7 +246,7 @@ async fn ann_query_respects_limit(actors: TestActors) {
 async fn ann_query_respects_limit_over_1000_vectors(actors: TestActors) {
     info!("started");
 
-    let (session, client) = prepare_connection(&actors).await;
+    let (session, clients) = prepare_connection(&actors).await;
 
     let keyspace = create_keyspace(&session).await;
     let table = create_table(&session, "pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None).await;
@@ -261,14 +263,15 @@ async fn ann_query_respects_limit_over_1000_vectors(actors: TestActors) {
             .expect("failed to insert data");
     }
 
-    let index = create_index(&session, &client, &table, "v").await;
+    let index = create_index(&session, &clients, &table, "v").await;
 
-    let index_status = wait_for_index(&client, &index).await;
-
-    assert_eq!(
-        index_status.count, 1111,
-        "Expected 1111 vectors to be indexed"
-    );
+    for client in &clients {
+        let index_status = wait_for_index(client, &index).await;
+        assert_eq!(
+            index_status.count, 1111,
+            "Expected 1111 vectors to be indexed"
+        );
+    }
 
     // Check if queries return the expected number of results
     let results = get_query_results(
@@ -312,7 +315,7 @@ async fn ann_query_respects_limit_over_1000_vectors(actors: TestActors) {
 async fn ann_query_returns_rows_identified_by_composite_primary_key(actors: TestActors) {
     info!("started");
 
-    let (session, client) = prepare_connection(&actors).await;
+    let (session, clients) = prepare_connection(&actors).await;
     let keyspace = create_keyspace(&session).await;
     let table = create_table(
         &session,
@@ -335,7 +338,7 @@ async fn ann_query_returns_rows_identified_by_composite_primary_key(actors: Test
             .await
             .expect("failed to insert data");
     }
-    create_index(&session, &client, &table, "v").await;
+    create_index(&session, &clients, &table, "v").await;
 
     let result = wait_for_value(
         || async {

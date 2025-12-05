@@ -4,8 +4,7 @@
  */
 
 use httpclient::HttpClient;
-use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
@@ -16,7 +15,9 @@ use tokio::time;
 use tracing::Instrument;
 use tracing::debug;
 use tracing::debug_span;
+use tracing::info;
 use vector_search_validator_tests::VectorStoreCluster;
+use vector_search_validator_tests::VectorStoreNodeConfig;
 use vector_store::httproutes::NodeStatus;
 
 pub(crate) async fn new(
@@ -49,10 +50,15 @@ pub(crate) async fn new(
     tx
 }
 
-struct State {
-    path: PathBuf,
+struct NodeState {
+    vs_ip: Ipv4Addr,
     child: Option<Child>,
     client: Option<HttpClient>,
+}
+
+struct State {
+    path: PathBuf,
+    nodes: Vec<NodeState>,
     version: String,
     verbose: bool,
     disable_colors: bool,
@@ -74,8 +80,7 @@ impl State {
         Self {
             path,
             version,
-            child: None,
-            client: None,
+            nodes: Vec::new(),
             verbose,
             disable_colors,
         }
@@ -89,12 +94,8 @@ async fn process(msg: VectorStoreCluster, state: &mut State) {
                 .expect("process VectorStoreCluster::Version: failed to send a response");
         }
 
-        VectorStoreCluster::Start {
-            vs_addr,
-            db_addr,
-            envs,
-        } => {
-            start(vs_addr, db_addr, envs, state).await;
+        VectorStoreCluster::Start { node_configs } => {
+            start(node_configs, state).await;
         }
 
         VectorStoreCluster::Stop { tx } => {
@@ -107,62 +108,191 @@ async fn process(msg: VectorStoreCluster, state: &mut State) {
             tx.send(wait_for_ready(state).await)
                 .expect("process VectorStoreCluster::WaitForReady: failed to send a response");
         }
+
+        VectorStoreCluster::Up { node_configs } => {
+            up(node_configs, state).await;
+        }
+
+        VectorStoreCluster::UpNode { node_config } => {
+            up_node(node_config, state).await;
+        }
+
+        VectorStoreCluster::Down { tx } => {
+            down(state).await;
+            tx.send(())
+                .expect("process VectorStoreCluster::Down: failed to send a response");
+        }
+
+        VectorStoreCluster::DownNode { vs_ip, tx } => {
+            down_node(state, vs_ip).await;
+            tx.send(())
+                .expect("process VectorStoreCluster::DownNode: failed to send a response");
+        }
     }
 }
 
-async fn start(
-    vs_addr: SocketAddr,
-    db_addr: SocketAddr,
-    envs: HashMap<String, String>,
-    state: &mut State,
-) {
+async fn run_node(node_config: &VectorStoreNodeConfig, state: &State) -> Child {
     let mut cmd = Command::new(&state.path);
     if !state.verbose {
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
 
-    state.child = Some({
-        let cmd = cmd
-            .env("VECTOR_STORE_URI", vs_addr.to_string())
-            .env("VECTOR_STORE_SCYLLADB_URI", db_addr.to_string())
-            .env("VECTOR_STORE_THREADS", "2")
-            .env(
-                "VECTOR_STORE_DISABLE_COLORS",
-                state.disable_colors.to_string(),
-            );
-        envs.into_iter().for_each(|(k, v)| {
-            cmd.env(k, v);
+    cmd.env("VECTOR_STORE_URI", node_config.vs_addr().to_string())
+        .env(
+            "VECTOR_STORE_SCYLLADB_URI",
+            node_config.db_addr().to_string(),
+        )
+        .env("VECTOR_STORE_THREADS", "2")
+        .env(
+            "VECTOR_STORE_DISABLE_COLORS",
+            state.disable_colors.to_string(),
+        );
+
+    for (k, v) in &node_config.envs {
+        cmd.env(k, v);
+    }
+
+    cmd.spawn().expect("start: failed to spawn vector-store")
+}
+
+async fn start(node_configs: Vec<VectorStoreNodeConfig>, state: &mut State) {
+    if node_configs.is_empty() {
+        return;
+    }
+
+    let vs_ips: Vec<Ipv4Addr> = node_configs.iter().map(|c| c.vs_ip).collect();
+    debug!("vector_store_cluster: using VS IPs: {:?}", vs_ips);
+
+    for (i, node_config) in node_configs.iter().enumerate() {
+        info!(
+            "Starting Vector Store node {} on IP {} (connecting to DB {})",
+            i + 1,
+            node_config.vs_ip,
+            node_config.db_ip
+        );
+
+        let child = run_node(node_config, state).await;
+        let client = HttpClient::new(node_config.vs_addr());
+
+        state.nodes.push(NodeState {
+            vs_ip: node_config.vs_ip,
+            child: Some(child),
+            client: Some(client),
         });
-        cmd.spawn().expect("start: failed to spawn vector-store")
-    });
-    state.client = Some(HttpClient::new(vs_addr));
+    }
+
+    debug!(
+        "Started {} Vector Store nodes, waiting for initialization...",
+        state.nodes.len()
+    );
 }
 
 async fn stop(state: &mut State) {
-    let Some(mut child) = state.child.take() else {
-        return;
-    };
-    child
-        .start_kill()
-        .expect("stop: failed to send SIGTERM to vector-store process");
-    child
-        .wait()
-        .await
-        .expect("stop: failed to wait for vector-store process to exit");
-    state.child = None;
-    state.client = None;
+    for node in &mut state.nodes {
+        if let Some(mut child) = node.child.take() {
+            child
+                .start_kill()
+                .expect("stop: failed to send SIGTERM to vector-store process");
+            child
+                .wait()
+                .await
+                .expect("stop: failed to wait for vector-store process to exit");
+        }
+        node.client = None;
+    }
+    state.nodes.clear();
 }
 
-/// Waits for the vector-store server to be ready checking the status of the service.
-async fn wait_for_ready(state: &State) -> bool {
-    let Some(ref client) = state.client else {
-        return false;
-    };
-
-    loop {
-        if matches!(client.status().await, Ok(NodeStatus::Serving)) {
-            return true;
+async fn down(state: &mut State) {
+    for node in &mut state.nodes {
+        if let Some(mut child) = node.child.take() {
+            child
+                .start_kill()
+                .expect("down: failed to send SIGTERM to vector-store process");
+            child
+                .wait()
+                .await
+                .expect("down: failed to wait for vector-store process to exit");
         }
-        time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn down_node(state: &mut State, vs_ip: Ipv4Addr) {
+    if let Some(node) = state.nodes.iter_mut().find(|n| n.vs_ip == vs_ip) {
+        if let Some(mut child) = node.child.take() {
+            child
+                .start_kill()
+                .expect("down_node: failed to send SIGTERM to vector-store process");
+            child
+                .wait()
+                .await
+                .expect("down_node: failed to wait for vector-store process to exit");
+        }
+    }
+}
+
+async fn wait_for_node(client: &HttpClient) -> bool {
+    time::timeout(Duration::from_secs(30), async {
+        loop {
+            if matches!(client.status().await, Ok(NodeStatus::Serving)) {
+                return true;
+            }
+            time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap_or(false)
+}
+
+/// Waits for all Vector Store nodes to be ready by checking the status of each node.
+async fn wait_for_ready(state: &State) -> bool {
+    if state.nodes.is_empty() {
+        tracing::error!("No Vector Store nodes to wait for - nodes list is empty");
+        return false;
+    }
+
+    for node in &state.nodes {
+        if let Some(ref client) = node.client {
+            info!(
+                "Waiting for Vector Store node at IP {} to be ready...",
+                &node.vs_ip
+            );
+            wait_for_node(client).await;
+            info!("Vector Store node at IP {} is ready.", &node.vs_ip);
+        } else {
+            tracing::error!("Client for node at IP {} is not initialized.", &node.vs_ip);
+            return false;
+        }
+    }
+
+    true
+}
+
+async fn up(node_configs: Vec<VectorStoreNodeConfig>, state: &mut State) {
+    if state.nodes.is_empty() {
+        return;
+    }
+
+    for (i, node_config) in node_configs.iter().enumerate() {
+        if i < state.nodes.len() && state.nodes[i].vs_ip == node_config.vs_ip {
+            let child = run_node(node_config, state).await;
+            state.nodes[i].child = Some(child);
+        }
+    }
+}
+
+async fn up_node(node_config: VectorStoreNodeConfig, state: &mut State) {
+    if state.nodes.is_empty() {
+        return;
+    }
+
+    let node_index = state
+        .nodes
+        .iter()
+        .position(|n| n.vs_ip == node_config.vs_ip);
+
+    if let Some(idx) = node_index {
+        let child = run_node(&node_config, state).await;
+        state.nodes[idx].child = Some(child);
     }
 }

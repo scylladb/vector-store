@@ -8,6 +8,7 @@ use crate::ScyllaClusterExt;
 use crate::ScyllaNodeConfig;
 use crate::TestActors;
 use crate::VectorStoreClusterExt;
+use crate::VectorStoreNodeConfig;
 use httpclient::HttpClient;
 use scylla::client::session::Session;
 use scylla::client::session_builder::SessionBuilder;
@@ -26,23 +27,32 @@ pub use vector_store::httproutes::IndexStatus;
 
 pub const DEFAULT_TEST_TIMEOUT: Duration = Duration::from_secs(120);
 
-pub const VS_NAME: &str = "vs";
+pub const VS_NAMES: [&str; 3] = ["vs1", "vs2", "vs3"];
 
 pub const VS_PORT: u16 = 6080;
 pub const DB_PORT: u16 = 9042;
 
-pub const VS_OCTET: u8 = 1;
-pub const DB_OCTET_1: u8 = 2;
-pub const DB_OCTET_2: u8 = 3;
-pub const DB_OCTET_3: u8 = 4;
+pub const DB_OCTET_1: u8 = 1;
+pub const DB_OCTET_2: u8 = 2;
+pub const DB_OCTET_3: u8 = 3;
+pub const VS_OCTET_1: u8 = 128;
+pub const VS_OCTET_2: u8 = 129;
+pub const VS_OCTET_3: u8 = 130;
 
-pub async fn get_default_vs_url(actors: &TestActors) -> String {
-    format!(
-        "http://{}.{}:{}",
-        VS_NAME,
-        actors.dns.domain().await,
-        VS_PORT
-    )
+pub async fn get_default_vs_urls(actors: &TestActors) -> Vec<String> {
+    let domain = actors.dns.domain().await;
+    VS_NAMES
+        .iter()
+        .map(|name| format!("http://{name}.{domain}:{VS_PORT}"))
+        .collect()
+}
+
+pub fn get_default_vs_ips(actors: &TestActors) -> Vec<Ipv4Addr> {
+    vec![
+        actors.services_subnet.ip(VS_OCTET_1),
+        actors.services_subnet.ip(VS_OCTET_2),
+        actors.services_subnet.ip(VS_OCTET_3),
+    ]
 }
 
 pub fn get_default_db_ips(actors: &TestActors) -> Vec<Ipv4Addr> {
@@ -54,13 +64,30 @@ pub fn get_default_db_ips(actors: &TestActors) -> Vec<Ipv4Addr> {
 }
 
 pub async fn get_default_scylla_node_configs(actors: &TestActors) -> Vec<ScyllaNodeConfig> {
-    let vs_url = get_default_vs_url(actors).await;
+    let default_vs_urls = get_default_vs_urls(actors).await;
     get_default_db_ips(actors)
         .iter()
-        .map(|&ip| ScyllaNodeConfig {
-            db_ip: ip,
-            primary_vs_uris: vec![vs_url.clone()],
-            secondary_vs_uris: vec![],
+        .enumerate()
+        .map(|(i, &ip)| {
+            let mut vs_urls = default_vs_urls.clone();
+            ScyllaNodeConfig {
+                db_ip: ip,
+                primary_vs_uris: vec![vs_urls.remove(i)],
+                secondary_vs_uris: vs_urls,
+            }
+        })
+        .collect()
+}
+
+pub fn get_default_vs_node_configs(actors: &TestActors) -> Vec<VectorStoreNodeConfig> {
+    let db_ips = get_default_db_ips(actors);
+    get_default_vs_ips(actors)
+        .iter()
+        .zip(db_ips.iter())
+        .map(|(&vs_ip, &db_ip)| VectorStoreNodeConfig {
+            vs_ip,
+            db_ip,
+            envs: HashMap::new(),
         })
         .collect()
 }
@@ -68,40 +95,43 @@ pub async fn get_default_scylla_node_configs(actors: &TestActors) -> Vec<ScyllaN
 pub async fn init(actors: TestActors) {
     info!("started");
 
-    let node_configs = get_default_scylla_node_configs(&actors).await;
-    init_with_config(actors, node_configs).await;
+    let scylla_configs = get_default_scylla_node_configs(&actors).await;
+    let vs_configs = get_default_vs_node_configs(&actors);
+    init_with_config(actors, scylla_configs, vs_configs).await;
 
     info!("finished");
 }
 
-pub async fn init_with_config(actors: TestActors, node_configs: Vec<ScyllaNodeConfig>) {
-    let vs_ip = actors.services_subnet.ip(VS_OCTET);
-    actors.dns.upsert(VS_NAME.to_string(), vs_ip).await;
+pub async fn init_with_config(
+    actors: TestActors,
+    scylla_configs: Vec<ScyllaNodeConfig>,
+    vs_configs: Vec<VectorStoreNodeConfig>,
+) {
+    let vs_ips = get_default_vs_ips(&actors);
+    for (name, ip) in VS_NAMES.iter().zip(vs_ips.iter()) {
+        actors.dns.upsert(name.to_string(), *ip).await;
+    }
 
-    let db_ip = node_configs.first().unwrap().db_ip; // Use the first DB node for vector store connection
-
-    actors.db.start(node_configs, None).await;
+    actors.db.start(scylla_configs, None).await;
     assert!(actors.db.wait_for_ready().await);
-    actors
-        .vs
-        .start(
-            (vs_ip, VS_PORT).into(),
-            (db_ip, DB_PORT).into(),
-            HashMap::new(),
-        )
-        .await;
+    actors.vs.start(vs_configs).await;
     assert!(actors.vs.wait_for_ready().await);
 }
 
 pub async fn cleanup(actors: TestActors) {
     info!("started");
-    actors.dns.remove(VS_NAME.to_string()).await;
+    for name in VS_NAMES.iter() {
+        actors.dns.remove(name.to_string()).await;
+    }
     actors.vs.stop().await;
     actors.db.stop().await;
     info!("finished");
 }
 
-pub async fn prepare_connection(actors: &TestActors) -> (Arc<Session>, HttpClient) {
+pub async fn prepare_connection_with_custom_vs_ips(
+    actors: &TestActors,
+    vs_ips: Vec<Ipv4Addr>,
+) -> (Arc<Session>, Vec<HttpClient>) {
     let session = Arc::new(
         SessionBuilder::new()
             .known_node(actors.services_subnet.ip(DB_OCTET_1).to_string())
@@ -109,8 +139,15 @@ pub async fn prepare_connection(actors: &TestActors) -> (Arc<Session>, HttpClien
             .await
             .expect("failed to create session"),
     );
-    let client = HttpClient::new((actors.services_subnet.ip(VS_OCTET), VS_PORT).into());
-    (session, client)
+    let clients = vs_ips
+        .iter()
+        .map(|&ip| HttpClient::new((ip, VS_PORT).into()))
+        .collect();
+    (session, clients)
+}
+
+pub async fn prepare_connection(actors: &TestActors) -> (Arc<Session>, Vec<HttpClient>) {
+    prepare_connection_with_custom_vs_ips(actors, get_default_vs_ips(actors)).await
 }
 
 pub async fn wait_for<F, Fut>(mut condition: F, msg: &str, timeout: Duration)
@@ -217,7 +254,7 @@ pub async fn create_table(session: &Session, columns: &str, options: Option<&str
 
 pub async fn create_index(
     session: &Session,
-    client: &HttpClient,
+    clients: &[HttpClient],
     table: &str,
     column: &str,
 ) -> IndexInfo {
@@ -235,18 +272,26 @@ pub async fn create_index(
     // Wait for the index to be created
     wait_for(
         || async {
-            client
-                .indexes()
-                .await
-                .iter()
-                .any(|idx| idx.index.to_string() == index)
+            for client in clients.iter() {
+                if !client
+                    .indexes()
+                    .await
+                    .iter()
+                    .any(|idx| idx.index.to_string() == index)
+                {
+                    return false;
+                }
+            }
+            true
         },
         "Waiting for the first index to be created",
-        Duration::from_secs(5),
+        Duration::from_secs(10),
     )
     .await;
 
-    client
+    clients
+        .first()
+        .expect("No vector store clients provided")
         .indexes()
         .await
         .into_iter()
