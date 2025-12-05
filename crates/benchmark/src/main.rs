@@ -48,6 +48,13 @@ enum MetricType {
     DotProduct,
 }
 
+struct IndexConfig {
+    metric_type: MetricType,
+    m: usize,
+    ef_construction: usize,
+    ef_search: usize,
+}
+
 #[derive(Subcommand)]
 enum Command {
     BuildTable {
@@ -55,10 +62,25 @@ enum Command {
         data_dir: PathBuf,
 
         #[clap(long)]
+        data_multiplicity: Option<usize>,
+
+        #[clap(long)]
         scylla: SocketAddr,
 
         #[clap(long)]
+        user: Option<String>,
+
+        #[clap(long)]
+        passwd_path: Option<PathBuf>,
+
+        #[clap(long)]
         rf: usize,
+
+        #[clap(long, default_value = KEYSPACE)]
+        keyspace: String,
+
+        #[clap(long, default_value = TABLE)]
+        table: String,
 
         #[clap(long, value_parser = clap::value_parser!(u32).range(1..=1_000_000))]
         concurrency: u32,
@@ -67,6 +89,21 @@ enum Command {
     BuildIndex {
         #[clap(long)]
         scylla: SocketAddr,
+
+        #[clap(long)]
+        user: Option<String>,
+
+        #[clap(long)]
+        passwd_path: Option<PathBuf>,
+
+        #[clap(long, default_value = KEYSPACE)]
+        keyspace: String,
+
+        #[clap(long, default_value = TABLE)]
+        table: String,
+
+        #[clap(long, default_value = INDEX)]
+        index: String,
 
         #[clap(long, required = true)]
         vector_store: Vec<SocketAddr>,
@@ -87,11 +124,38 @@ enum Command {
     DropTable {
         #[clap(long)]
         scylla: SocketAddr,
+
+        #[clap(long)]
+        user: Option<String>,
+
+        #[clap(long)]
+        passwd_path: Option<PathBuf>,
+
+        #[clap(long, default_value = KEYSPACE)]
+        keyspace: String,
+
+        #[clap(long, default_value = TABLE)]
+        table: String,
     },
 
     DropIndex {
         #[clap(long)]
         scylla: SocketAddr,
+
+        #[clap(long)]
+        user: Option<String>,
+
+        #[clap(long)]
+        passwd_path: Option<PathBuf>,
+
+        #[clap(long, default_value = KEYSPACE)]
+        keyspace: String,
+
+        #[clap(long, default_value = TABLE)]
+        table: String,
+
+        #[clap(long, default_value = INDEX)]
+        index: String,
     },
 
     SearchCql {
@@ -100,6 +164,18 @@ enum Command {
 
         #[clap(long)]
         scylla: SocketAddr,
+
+        #[clap(long)]
+        user: Option<String>,
+
+        #[clap(long)]
+        passwd_path: Option<PathBuf>,
+
+        #[clap(long, default_value = KEYSPACE)]
+        keyspace: String,
+
+        #[clap(long, default_value = TABLE)]
+        table: String,
 
         #[clap(long, value_parser = clap::value_parser!(u32).range(1..=100))]
         limit: u32,
@@ -120,6 +196,12 @@ enum Command {
     SearchHttp {
         #[clap(long)]
         data_dir: PathBuf,
+
+        #[clap(long, default_value = KEYSPACE)]
+        keyspace: String,
+
+        #[clap(long, default_value = INDEX)]
+        index: String,
 
         #[clap(long)]
         vector_store: Vec<SocketAddr>,
@@ -152,17 +234,32 @@ async fn main() {
     match Args::parse().command {
         Command::BuildTable {
             data_dir,
+            data_multiplicity,
             scylla,
+            user,
+            passwd_path,
             rf,
+            keyspace,
+            table,
             concurrency,
         } => {
             let dataset = data::new(data_dir).await;
             let dimension = dataset.dimension().await;
-            let stream = dataset.vector_stream().await;
-            let scylla = Scylla::new(scylla).await;
+            let data_multiplicity = data_multiplicity.unwrap_or(1);
+            let scylla = Scylla::new(scylla, user, passwd_path, &keyspace, &table).await;
             let (duration, _) = measure_duration(async move {
-                scylla.create_table(dimension, rf).await;
-                scylla.upload_vectors(stream, concurrency as usize).await;
+                scylla.create_table(&keyspace, &table, dimension, rf).await;
+
+                for _ in 0..data_multiplicity {
+                    scylla
+                        .upload_vectors(
+                            &keyspace,
+                            &table,
+                            dataset.vector_stream().await,
+                            concurrency as usize,
+                        )
+                        .await;
+                }
             })
             .await;
             info!("Build table took {duration:.2?}");
@@ -170,37 +267,65 @@ async fn main() {
 
         Command::BuildIndex {
             scylla,
+            user,
+            passwd_path,
+            keyspace,
+            table,
+            index,
             vector_store,
             metric_type,
             m,
             ef_construction,
             ef_search,
         } => {
-            let scylla = Scylla::new(scylla).await;
+            let scylla = Scylla::new(scylla, user, passwd_path, &keyspace, &table).await;
             let clients = vs::new_http_clients(vector_store);
             let (duration, _) = measure_duration(async move {
                 scylla
-                    .create_index(metric_type, m, ef_construction, ef_search)
+                    .create_index(
+                        &keyspace,
+                        &table,
+                        &index,
+                        IndexConfig {
+                            metric_type,
+                            m,
+                            ef_construction,
+                            ef_search,
+                        },
+                    )
                     .await;
-                vs::wait_for_indexes_ready(&clients).await;
+                vs::wait_for_indexes_ready(&keyspace, &index, &clients).await;
             })
             .await;
             info!("Build Index took {duration:.2?}");
         }
 
-        Command::DropTable { scylla } => {
-            let scylla = Scylla::new(scylla).await;
+        Command::DropTable {
+            scylla,
+            user,
+            passwd_path,
+            keyspace,
+            table,
+        } => {
+            let scylla = Scylla::new(scylla, user, passwd_path, &keyspace, &table).await;
             let (duration, _) = measure_duration(async move {
-                scylla.drop_table().await;
+                scylla.drop_table(&keyspace).await;
             })
             .await;
             info!("Drop Table took {duration:.2?}");
         }
 
-        Command::DropIndex { scylla } => {
-            let scylla = Scylla::new(scylla).await;
+        Command::DropIndex {
+            scylla,
+            user,
+            passwd_path,
+            keyspace,
+            table,
+            index,
+        } => {
+            let scylla = Scylla::new(scylla, user, passwd_path, &keyspace, &table).await;
             let (duration, _) = measure_duration(async move {
-                scylla.drop_index().await;
+                scylla.drop_index(&keyspace, &index).await;
             })
             .await;
             info!("Drop Index took {duration:.2?}");
@@ -209,6 +334,10 @@ async fn main() {
         Command::SearchCql {
             data_dir,
             scylla,
+            user,
+            passwd_path,
+            keyspace,
+            table,
             limit,
             duration,
             concurrency,
@@ -218,7 +347,7 @@ async fn main() {
             let dataset = data::new(data_dir).await;
             let queries = Arc::new(dataset.queries(limit as usize).await);
             let notify = Arc::new(Notify::new());
-            let scylla = Scylla::new(scylla).await;
+            let scylla = Scylla::new(scylla, user, passwd_path, &keyspace, &table).await;
 
             let start = from
                 .map(SystemTime::from)
@@ -272,6 +401,8 @@ async fn main() {
 
         Command::SearchHttp {
             data_dir,
+            keyspace,
+            index,
             vector_store,
             limit,
             duration,
@@ -279,6 +410,8 @@ async fn main() {
             from,
         } => {
             let dataset = data::new(data_dir).await;
+            let keyspace = Arc::new(keyspace.into());
+            let index = Arc::new(index.into());
             let queries = Arc::new(dataset.queries(limit as usize).await);
             let notify = Arc::new(Notify::new());
             assert!(!vector_store.is_empty());
@@ -295,6 +428,8 @@ async fn main() {
                     let queries = Arc::clone(&queries);
                     let notify = Arc::clone(&notify);
                     let clients = Arc::clone(&clients);
+                    let keyspace = Arc::clone(&keyspace);
+                    let index = Arc::clone(&index);
                     tokio::spawn(async move {
                         let mut count = 0;
                         let mut measurements = vec![SearchMeasure::without_recall(); clients_len];
@@ -306,8 +441,8 @@ async fn main() {
                             let (duration, _) = measure_duration(async {
                                 client
                                     .ann(
-                                        &KEYSPACE.to_string().into(),
-                                        &INDEX.to_string().into(),
+                                        &keyspace,
+                                        &index,
                                         query.query.clone().into(),
                                         NonZeroUsize::new(query.neighbors.len()).unwrap().into(),
                                     )
