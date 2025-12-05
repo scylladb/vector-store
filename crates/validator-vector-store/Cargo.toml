@@ -8,7 +8,6 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-httpclient.workspace = true
 scylla.workspace = true
 sysinfo.workspace = true
 tokio.workspace = true

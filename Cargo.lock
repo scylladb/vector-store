@@ -3790,7 +3790,6 @@ dependencies = [
 name = "vector-search-validator-vector-store"
 version = "1.0.0"
 dependencies = [
- "httpclient",
  "scylla",
  "sysinfo",
  "tokio",

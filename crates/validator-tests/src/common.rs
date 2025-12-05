@@ -8,6 +8,7 @@ use crate::ScyllaClusterExt;
 use crate::ScyllaNodeConfig;
 use crate::TestActors;
 use crate::VectorStoreClusterExt;
+use crate::VectorStoreNodeConfig;
 use httpclient::HttpClient;
 use scylla::client::session::Session;
 use scylla::client::session_builder::SessionBuilder;
@@ -78,33 +79,42 @@ pub async fn get_default_scylla_node_configs(actors: &TestActors) -> Vec<ScyllaN
         .collect()
 }
 
+pub fn get_default_vs_node_configs(actors: &TestActors) -> Vec<VectorStoreNodeConfig> {
+    let db_ips = get_default_db_ips(actors);
+    get_default_vs_ips(actors)
+        .iter()
+        .zip(db_ips.iter())
+        .map(|(&vs_ip, &db_ip)| VectorStoreNodeConfig {
+            vs_ip,
+            db_ip,
+            envs: HashMap::new(),
+        })
+        .collect()
+}
+
 pub async fn init(actors: TestActors) {
     info!("started");
 
     let scylla_configs = get_default_scylla_node_configs(&actors).await;
-    init_with_config(actors, scylla_configs).await;
+    let vs_configs = get_default_vs_node_configs(&actors);
+    init_with_config(actors, scylla_configs, vs_configs).await;
 
     info!("finished");
 }
 
-pub async fn init_with_config(actors: TestActors, scylla_configs: Vec<ScyllaNodeConfig>) {
+pub async fn init_with_config(
+    actors: TestActors,
+    scylla_configs: Vec<ScyllaNodeConfig>,
+    vs_configs: Vec<VectorStoreNodeConfig>,
+) {
     let vs_ips = get_default_vs_ips(&actors);
     for (name, ip) in VS_NAMES.iter().zip(vs_ips.iter()) {
         actors.dns.upsert(name.to_string(), *ip).await;
     }
 
-    let db_ip = scylla_configs.first().unwrap().db_ip; // Use the first DB node for vector store connection
-
     actors.db.start(scylla_configs, None).await;
     assert!(actors.db.wait_for_ready().await);
-    actors
-        .vs
-        .start(
-            (vs_ips[0], VS_PORT).into(),
-            (db_ip, DB_PORT).into(),
-            HashMap::new(),
-        )
-        .await;
+    actors.vs.start(vs_configs).await;
     assert!(actors.vs.wait_for_ready().await);
 }
 
@@ -118,7 +128,10 @@ pub async fn cleanup(actors: TestActors) {
     info!("finished");
 }
 
-pub async fn prepare_connection(actors: &TestActors) -> (Arc<Session>, HttpClient) {
+pub async fn prepare_connection_with_custom_vs_ips(
+    actors: &TestActors,
+    vs_ips: Vec<Ipv4Addr>,
+) -> (Arc<Session>, Vec<HttpClient>) {
     let session = Arc::new(
         SessionBuilder::new()
             .known_node(actors.services_subnet.ip(DB_OCTET_1).to_string())
@@ -126,8 +139,15 @@ pub async fn prepare_connection(actors: &TestActors) -> (Arc<Session>, HttpClien
             .await
             .expect("failed to create session"),
     );
-    let client = HttpClient::new((actors.services_subnet.ip(VS_OCTET_1), VS_PORT).into());
-    (session, client)
+    let clients = vs_ips
+        .iter()
+        .map(|&ip| HttpClient::new((ip, VS_PORT).into()))
+        .collect();
+    (session, clients)
+}
+
+pub async fn prepare_connection(actors: &TestActors) -> (Arc<Session>, Vec<HttpClient>) {
+    prepare_connection_with_custom_vs_ips(actors, get_default_vs_ips(actors)).await
 }
 
 pub async fn wait_for<F, Fut>(mut condition: F, msg: &str, timeout: Duration)
@@ -234,7 +254,7 @@ pub async fn create_table(session: &Session, columns: &str, options: Option<&str
 
 pub async fn create_index(
     session: &Session,
-    client: &HttpClient,
+    clients: &[HttpClient],
     table: &str,
     column: &str,
 ) -> IndexInfo {
@@ -252,18 +272,26 @@ pub async fn create_index(
     // Wait for the index to be created
     wait_for(
         || async {
-            client
-                .indexes()
-                .await
-                .iter()
-                .any(|idx| idx.index.to_string() == index)
+            for client in clients.iter() {
+                if !client
+                    .indexes()
+                    .await
+                    .iter()
+                    .any(|idx| idx.index.to_string() == index)
+                {
+                    return false;
+                }
+            }
+            true
         },
         "Waiting for the first index to be created",
-        Duration::from_secs(5),
+        Duration::from_secs(10),
     )
     .await;
 
-    client
+    clients
+        .first()
+        .expect("No vector store clients provided")
         .indexes()
         .await
         .into_iter()

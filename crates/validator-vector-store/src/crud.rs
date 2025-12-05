@@ -33,7 +33,7 @@ pub(crate) async fn new() -> TestCase {
 async fn simple_create_drop_index(actors: TestActors) {
     info!("started");
 
-    let (session, client) = prepare_connection(&actors).await;
+    let (session, clients) = prepare_connection(&actors).await;
 
     let keyspace = create_keyspace(&session).await;
     let table = create_table(
@@ -43,7 +43,7 @@ async fn simple_create_drop_index(actors: TestActors) {
     )
     .await;
 
-    let index = create_index(&session, &client, &table, "embedding").await;
+    let index = create_index(&session, &clients, &table, "embedding").await;
 
     assert_eq!(index.keyspace.as_ref(), &keyspace);
 
@@ -52,7 +52,14 @@ async fn simple_create_drop_index(actors: TestActors) {
         .await
         .expect("failed to drop an index");
 
-    while !client.indexes().await.is_empty() {}
+    for client in &clients {
+        wait_for(
+            || async { client.indexes().await.is_empty() },
+            "Waiting for index deletion",
+            Duration::from_secs(20),
+        )
+        .await;
+    }
 
     session
         .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
@@ -65,7 +72,7 @@ async fn simple_create_drop_index(actors: TestActors) {
 async fn simple_create_drop_multiple_indexes(actors: TestActors) {
     info!("started");
 
-    let (session, client) = prepare_connection(&actors).await;
+    let (session, clients) = prepare_connection(&actors).await;
 
     let keyspace = create_keyspace(&session).await;
     let table = create_table(
@@ -76,7 +83,7 @@ async fn simple_create_drop_multiple_indexes(actors: TestActors) {
     .await;
 
     // Create index on column v1
-    let index1 = create_index(&session, &client, &table, "v1").await;
+    let index1 = create_index(&session, &clients, &table, "v1").await;
 
     // Wait for the full scan to complete and check if ANN query succeeds on v1
     wait_for(
@@ -104,7 +111,7 @@ async fn simple_create_drop_multiple_indexes(actors: TestActors) {
         .expect_err("ANN query should fail when index does not exist");
 
     // Create index on column v2
-    let index2 = create_index(&session, &client, &table, "v2").await;
+    let index2 = create_index(&session, &clients, &table, "v2").await;
 
     // Check if ANN query on v1 still succeeds
     session
@@ -140,12 +147,14 @@ async fn simple_create_drop_multiple_indexes(actors: TestActors) {
     info!("waiting for the first index to be dropped");
 
     // Wait for the first index to be dropped
-    wait_for(
-        || async { client.indexes().await.len() == 1 },
-        "Waiting for the first index to be dropped",
-        Duration::from_secs(5),
-    )
-    .await;
+    for client in &clients {
+        wait_for(
+            || async { client.indexes().await.len() == 1 },
+            "Waiting for the first index to be dropped",
+            Duration::from_secs(5),
+        )
+        .await;
+    }
 
     // ANN query on v1 should not succeed after dropping the index
     session
@@ -172,12 +181,14 @@ async fn simple_create_drop_multiple_indexes(actors: TestActors) {
         .expect("failed to drop an index");
 
     // Wait for the second index to be dropped
-    wait_for(
-        || async { client.indexes().await.is_empty() },
-        "Waiting for all indexes to be dropped",
-        Duration::from_secs(5),
-    )
-    .await;
+    for client in &clients {
+        wait_for(
+            || async { client.indexes().await.is_empty() },
+            "Waiting for all indexes to be dropped",
+            Duration::from_secs(5),
+        )
+        .await;
+    }
 
     // Drop keyspace
     session
@@ -191,7 +202,7 @@ async fn simple_create_drop_multiple_indexes(actors: TestActors) {
 async fn drop_table_removes_index(actors: TestActors) {
     info!("started");
 
-    let (session, client) = prepare_connection(&actors).await;
+    let (session, clients) = prepare_connection(&actors).await;
 
     let keyspace = create_keyspace(&session).await;
     let table = create_table(
@@ -215,7 +226,7 @@ async fn drop_table_removes_index(actors: TestActors) {
             .expect("failed to insert a row");
     }
 
-    let _ = create_index(&session, &client, &table, "embedding").await;
+    let _ = create_index(&session, &clients, &table, "embedding").await;
 
     let stmt = session
         .prepare(format!("DROP TABLE {keyspace}.{table}"))
@@ -226,12 +237,14 @@ async fn drop_table_removes_index(actors: TestActors) {
         .await
         .expect("failed to drop table");
 
-    wait_for(
-        || async { client.indexes().await.is_empty() },
-        "Waiting for index deletion",
-        Duration::from_secs(20),
-    )
-    .await;
+    for client in &clients {
+        wait_for(
+            || async { client.indexes().await.is_empty() },
+            "Waiting for index deletion",
+            Duration::from_secs(20),
+        )
+        .await;
+    }
 
     session
         .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())

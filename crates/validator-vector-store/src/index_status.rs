@@ -29,7 +29,7 @@ pub(crate) async fn new() -> TestCase {
 async fn status_returned_correctly(actors: TestActors) {
     info!("started");
 
-    let (session, client) = prepare_connection(&actors).await;
+    let (session, clients) = prepare_connection(&actors).await;
 
     let keyspace = create_keyspace(&session).await;
     let table = create_table(&session, "pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None).await;
@@ -46,18 +46,20 @@ async fn status_returned_correctly(actors: TestActors) {
             .expect("failed to insert data");
     }
 
-    let index = create_index(&session, &client, &table, "v").await;
+    let index = create_index(&session, &clients, &table, "v").await;
 
-    let index_status = wait_for_index(&client, &index).await;
-    assert_eq!(
-        index_status.status,
-        IndexStatus::Serving,
-        "Expected index status to be Serving after indexing is complete"
-    );
-    assert_eq!(
-        index_status.count, 10000,
-        "Expected 10000 vectors to be indexed"
-    );
+    for client in &clients {
+        let index_status = wait_for_index(client, &index).await;
+        assert_eq!(
+            index_status.status,
+            IndexStatus::Serving,
+            "Expected index status to be Serving after indexing is complete"
+        );
+        assert_eq!(
+            index_status.count, 10000,
+            "Expected 10000 vectors to be indexed"
+        );
+    }
 
     // Drop keyspace
     session
@@ -71,14 +73,16 @@ async fn status_returned_correctly(actors: TestActors) {
 async fn status_returns_404_for_non_existent_index(actors: TestActors) {
     info!("started");
 
-    let (_session, client) = prepare_connection(&actors).await;
+    let (_session, clients) = prepare_connection(&actors).await;
 
     // Assert that querying the status of the dropped index returns an HTTP 404 error
     let keyspace_name = KeyspaceName::from("non_existent_keyspace".to_string());
     let index_name = IndexName::from("non_existent_index".to_string());
-    let index_status = client.index_status(&keyspace_name, &index_name).await;
-    assert!(index_status.is_err());
-    assert!(index_status.err().unwrap().to_string().contains("404"));
+    for client in &clients {
+        let index_status = client.index_status(&keyspace_name, &index_name).await;
+        assert!(index_status.is_err());
+        assert!(index_status.err().unwrap().to_string().contains("404"));
+    }
 
     info!("finished");
 }

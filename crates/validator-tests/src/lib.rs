@@ -32,6 +32,7 @@ use tracing::error_span;
 use tracing::info;
 pub use vector_store_cluster::VectorStoreCluster;
 pub use vector_store_cluster::VectorStoreClusterExt;
+pub use vector_store_cluster::VectorStoreNodeConfig;
 
 /// Represents a subnet for services, derived from a base IP address.
 pub struct ServicesSubnet([u8; 3]);

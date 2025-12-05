@@ -4,7 +4,6 @@
  */
 
 use scylla::value::CqlValue;
-use std::time::Duration;
 use vector_search_validator_tests::common;
 use vector_search_validator_tests::common::*;
 use vector_search_validator_tests::*;
@@ -22,7 +21,7 @@ pub(crate) async fn new() -> TestCase {
 }
 
 async fn test_serialization_deserialization_all_types(actors: TestActors) {
-    let (session, _client) = common::prepare_connection(&actors).await;
+    let (session, clients) = common::prepare_connection(&actors).await;
 
     let cases = vec![
         ("ascii", "'random_text'"),
@@ -59,32 +58,11 @@ async fn test_serialization_deserialization_all_types(actors: TestActors) {
             .await
             .expect("failed to insert data");
 
-        session
-            .query_unpaged(
-                format!("CREATE INDEX idx_{typ} ON tbl_{typ}(vec) USING 'vector_index'"),
-                (),
-            )
-            .await
-            .expect("failed to create an index");
-    }
+        let index = create_index(&session, &clients, format!("tbl_{typ}").as_str(), "vec").await;
+        for client in &clients {
+            wait_for_index(client, &index).await;
+        }
 
-    for (typ, _) in &cases {
-        wait_for(
-            || async {
-                session
-                    .query_unpaged(
-                        format!(
-                            "SELECT * FROM tbl_{typ} ORDER BY vec ANN OF [1.0, 2.0, 3.0] LIMIT 1"
-                        ),
-                        (),
-                    )
-                    .await
-                    .is_ok()
-            },
-            "Waiting for index build",
-            Duration::from_secs(10),
-        )
-        .await;
         let rows = session
             .query_unpaged(
                 format!("SELECT * FROM tbl_{typ} ORDER BY vec ANN OF [1.0, 2.0, 3.0] LIMIT 1"),

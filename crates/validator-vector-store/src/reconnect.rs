@@ -35,7 +35,7 @@ pub(crate) async fn new() -> TestCase {
 async fn reconnect_doesnt_break_fullscan(actors: TestActors) {
     info!("started");
 
-    let (session, client) = prepare_connection(&actors).await;
+    let (session, clients) = prepare_connection(&actors).await;
 
     let keyspace = create_keyspace(&session).await;
     let table = create_table(
@@ -59,7 +59,7 @@ async fn reconnect_doesnt_break_fullscan(actors: TestActors) {
             .expect("failed to insert a row");
     }
 
-    let index = create_index(&session, &client, &table, "embedding").await;
+    let index = create_index(&session, &clients, &table, "embedding").await;
 
     let result = session
         .query_unpaged(
@@ -76,15 +76,17 @@ async fn reconnect_doesnt_break_fullscan(actors: TestActors) {
     actors.db.down().await;
 
     sleep(Duration::from_secs(1)).await;
-    let status = client
-        .index_status(&index.keyspace, &index.index)
-        .await
-        .expect("failed to get index status")
-        .status;
-    assert!(
-        status == IndexStatus::Bootstrapping,
-        "Full scan should be interrupted by disconnect"
-    );
+    for client in &clients {
+        let status = client
+            .index_status(&index.keyspace, &index.index)
+            .await
+            .expect("failed to get index status")
+            .status;
+        assert!(
+            status == IndexStatus::Bootstrapping,
+            "Full scan should be interrupted by disconnect"
+        );
+    }
     actors
         .db
         .up(get_default_scylla_node_configs(&actors).await, None)
@@ -120,7 +122,7 @@ async fn reconnect_doesnt_break_fullscan(actors: TestActors) {
 async fn restarting_one_node_doesnt_break_fullscan(actors: TestActors) {
     info!("started");
 
-    let (session, client) = prepare_connection(&actors).await;
+    let (session, clients) = prepare_connection(&actors).await;
 
     let keyspace = create_keyspace(&session).await;
     let table = create_table(
@@ -153,24 +155,27 @@ async fn restarting_one_node_doesnt_break_fullscan(actors: TestActors) {
     // Flush to disk to ensure data is persisted before restarting nodes
     actors.db.flush().await;
 
-    let index = create_index(&session, &client, &table, "embedding").await;
+    let index = create_index(&session, &clients, &table, "embedding").await;
 
-    let index_status = client
-        .index_status(&index.keyspace, &index.index)
-        .await
-        .expect("failed to get index status");
-    assert_eq!(index_status.status, IndexStatus::Bootstrapping);
+    for client in &clients {
+        let index_status = client
+            .index_status(&index.keyspace, &index.index)
+            .await
+            .expect("failed to get index status");
+        assert_eq!(index_status.status, IndexStatus::Bootstrapping);
+    }
 
     let node_configs = get_default_scylla_node_configs(&actors).await;
     let node_config = node_configs.first().unwrap();
     info!("Restarting node {}", node_config.db_ip);
     actors.db.restart(node_config).await;
-    let index_status = wait_for_index(&client, &index).await;
-
-    assert_eq!(
-        index_status.count, 1000,
-        "Expected 1000 vectors to be indexed"
-    );
+    for client in &clients {
+        let index_status = wait_for_index(client, &index).await;
+        assert_eq!(
+            index_status.count, 1000,
+            "Expected 1000 vectors to be indexed"
+        );
+    }
 
     session
         .query_unpaged(
@@ -191,7 +196,7 @@ async fn restarting_one_node_doesnt_break_fullscan(actors: TestActors) {
 async fn restarting_all_nodes_doesnt_break_fullscan(actors: TestActors) {
     info!("started");
 
-    let (session, client) = prepare_connection(&actors).await;
+    let (session, clients) = prepare_connection(&actors).await;
 
     let keyspace = create_keyspace(&session).await;
     let table = create_table(
@@ -224,13 +229,15 @@ async fn restarting_all_nodes_doesnt_break_fullscan(actors: TestActors) {
     // Flush to disk to ensure data is persisted before restarting nodes
     actors.db.flush().await;
 
-    let index = create_index(&session, &client, &table, "embedding").await;
+    let index = create_index(&session, &clients, &table, "embedding").await;
 
-    let index_status = client
-        .index_status(&index.keyspace, &index.index)
-        .await
-        .expect("failed to get index status");
-    assert_eq!(index_status.status, IndexStatus::Bootstrapping);
+    for client in &clients {
+        let index_status = client
+            .index_status(&index.keyspace, &index.index)
+            .await
+            .expect("failed to get index status");
+        assert_eq!(index_status.status, IndexStatus::Bootstrapping);
+    }
 
     let node_configs = get_default_scylla_node_configs(&actors).await;
 
@@ -240,12 +247,13 @@ async fn restarting_all_nodes_doesnt_break_fullscan(actors: TestActors) {
         actors.db.restart(node_config).await;
     }
 
-    let index_status = wait_for_index(&client, &index).await;
-
-    assert_eq!(
-        index_status.count, 1000,
-        "Expected 1000 vectors to be indexed"
-    );
+    for client in &clients {
+        let index_status = wait_for_index(client, &index).await;
+        assert_eq!(
+            index_status.count, 1000,
+            "Expected 1000 vectors to be indexed"
+        );
+    }
 
     session
         .query_unpaged(
