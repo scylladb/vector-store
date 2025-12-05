@@ -5,6 +5,7 @@
 
 use crate::usearch::{setup_store, setup_store_and_wait_for_index};
 use crate::wait_for;
+use vector_store::Config;
 use vector_store::httproutes::NodeStatus;
 
 #[tokio::test]
@@ -19,7 +20,7 @@ async fn status_is_serving_after_creation() {
 #[tokio::test]
 async fn status_is_bootstrapping_while_discovering_indexes() {
     crate::enable_tracing();
-    let (run, _index, db, _node_state) = setup_store().await;
+    let (run, _index, db, _node_state) = setup_store(Config::default()).await;
     db.simulate_endless_get_indexes_processing();
     let (client, _server, _config_tx) = run.await;
 

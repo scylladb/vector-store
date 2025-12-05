@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+use crate::Duration;
 use crate::db_basic;
 use crate::db_basic::DbBasic;
 use crate::db_basic::Index;
@@ -28,7 +29,9 @@ use vector_store::SpaceType;
 use vector_store::Vector;
 use vector_store::node_state::NodeState;
 
-pub(crate) async fn setup_store() -> (
+pub(crate) async fn setup_store(
+    config: Config,
+) -> (
     impl std::future::Future<Output = (HttpClient, impl Sized, impl Sized)>,
     IndexMetadata,
     DbBasic,
@@ -76,13 +79,12 @@ pub(crate) async fn setup_store() -> (
     )
     .unwrap();
 
-    let (_, rx) = watch::channel(Arc::new(Config::default()));
-    let index_factory = vector_store::new_index_factory_usearch(rx).unwrap();
+    let (config_tx, config_rx) = watch::channel(Arc::new(config));
+    let index_factory = vector_store::new_index_factory_usearch(config_rx.clone()).unwrap();
 
     let run = {
         let node_state = node_state.clone();
         async move {
-            let (_config_tx, config_rx) = watch::channel(Arc::new(vector_store::Config::default()));
             let (server, addr) = vector_store::run(
                 SocketAddr::from(([127, 0, 0, 1], 0)).into(),
                 node_state,
@@ -93,7 +95,7 @@ pub(crate) async fn setup_store() -> (
             .await
             .unwrap();
 
-            (HttpClient::new(addr), server, _config_tx)
+            (HttpClient::new(addr), server, config_tx)
         }
     };
 
@@ -107,7 +109,7 @@ pub(crate) async fn setup_store_and_wait_for_index() -> (
     impl Sized,
     Sender<NodeState>,
 ) {
-    let (run, index, db, node_state) = setup_store().await;
+    let (run, index, db, node_state) = setup_store(Config::default()).await;
     let (client, server, _config_tx) = run.await;
 
     wait_for(
@@ -123,7 +125,7 @@ pub(crate) async fn setup_store_and_wait_for_index() -> (
 async fn simple_create_search_delete_index() {
     crate::enable_tracing();
 
-    let (run, index, db, _node_state) = setup_store().await;
+    let (run, index, db, _node_state) = setup_store(Config::default()).await;
     let (client, _server, _config_tx) = run.await;
 
     db.insert_values(
@@ -349,7 +351,7 @@ async fn ann_returns_bad_request_when_provided_vector_size_is_not_eq_index_dimen
 #[tokio::test]
 async fn ann_fail_while_building() {
     crate::enable_tracing();
-    let (run, index, db, _node_state) = setup_store().await;
+    let (run, index, db, _node_state) = setup_store(Config::default()).await;
     db.set_next_full_scan_progress(vector_store::Progress::InProgress(
         Percentage::try_from(33.333).unwrap(),
     ));
@@ -392,4 +394,38 @@ async fn ann_works_with_embedding_field_name() {
         .await;
 
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+#[ntest::timeout(10_000)]
+async fn http_server_is_responsive_when_index_add_hangs() {
+    crate::enable_tracing();
+    let config = Config {
+        usearch_simulator: Some(vec![
+            Duration::from_secs(0),
+            Duration::from_secs(20), // Simulate long add operation (longer than test timeout).
+            Duration::from_secs(0),
+        ]),
+        ..Default::default()
+    };
+    let (run, index, db, _node_state) = setup_store(config).await;
+    // Insert a value before starting the vector store. The mock DB does not support
+    // adding embeddings while it's running, so it must be populated beforehand.
+    db.insert_values(
+        &index.keyspace_name,
+        &index.table_name,
+        &index.target_column,
+        vec![(
+            vec![CqlValue::Int(1), CqlValue::Text("one".to_string())].into(),
+            Some(vec![1., 1., 1.].into()),
+            OffsetDateTime::from_unix_timestamp(10).unwrap().into(),
+        )],
+    )
+    .unwrap();
+    let (client, _server, _config_tx) = run.await;
+
+    // Ensure the HTTP server stays responsive while the (simulated) embedding add is long-running.
+    let status = client.status().await.unwrap();
+
+    assert_eq!(status, vector_store::httproutes::NodeStatus::Serving);
 }

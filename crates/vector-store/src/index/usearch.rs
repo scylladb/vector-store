@@ -31,6 +31,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
 use tokio::sync::Notify;
+use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -323,14 +324,21 @@ impl UsearchIndex for RwLock<Simulator> {
         let start = Instant::now();
 
         let sim = self.read().unwrap();
-        let len = sim.keys.read().unwrap().len() as u64;
-        let keys: Vec<_> = iter::repeat_with(|| rand::random_range(0..len))
-            .map(Key)
-            .filter(|key| sim.keys.read().unwrap().contains(key))
-            .take(limit.0.get())
-            .collect();
-
         sim.wait_search(start);
+
+        let keys = {
+            let len = sim.keys.read().unwrap().len() as u64;
+            if len == 0 {
+                Vec::new()
+            } else {
+                iter::repeat_with(|| rand::random_range(0..len))
+                    .map(Key)
+                    .filter(|key| sim.keys.read().unwrap().contains(key))
+                    .take(limit.0.get())
+                    .collect()
+            }
+        };
+
         Ok(keys.into_iter().map(|key| (key, 0.0.into())))
     }
 
@@ -417,8 +425,7 @@ fn new(
                         let usearch_key = Arc::clone(&usearch_key);
                         async move {
                             crate::move_to_the_end_of_async_runtime_queue().await;
-                            process(msg, dimensions, idx, keys, usearch_key);
-                            drop(permit);
+                            process(msg, dimensions, idx, keys, usearch_key, permit);
                         }
                     });
                 }
@@ -437,24 +444,32 @@ fn new(
 fn process(
     msg: Index,
     dimensions: Dimensions,
-    idx: Arc<impl UsearchIndex>,
+    idx: Arc<impl UsearchIndex + Send + Sync + 'static>,
     keys: Arc<RwLock<BiMap<PrimaryKey, Key>>>,
     usearch_key: Arc<AtomicU64>,
+    permit: OwnedSemaphorePermit,
 ) {
     match msg {
         Index::AddOrReplace {
             primary_key,
             embedding,
-            in_progress: _in_progress,
+            in_progress,
         } => {
-            add_or_replace(idx, keys, usearch_key, primary_key, embedding);
+            rayon::spawn(move || {
+                add_or_replace(idx, keys, usearch_key, primary_key, embedding);
+                drop(in_progress);
+                drop(permit);
+            });
         }
 
         Index::Remove {
             primary_key,
             in_progress: _in_progress,
         } => {
-            remove(idx, keys, primary_key);
+            rayon::spawn(move || {
+                remove(idx, keys, primary_key);
+                drop(permit);
+            });
         }
 
         Index::Ann {
