@@ -3,11 +3,9 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
-use crate::INDEX;
-use crate::KEYSPACE;
+use crate::IndexConfig;
 use crate::MetricType;
 use crate::Query;
-use crate::TABLE;
 use futures::StreamExt;
 use futures::TryStreamExt;
 use futures::stream::BoxStream;
@@ -45,6 +43,8 @@ impl Scylla {
         uri: SocketAddr,
         user: Option<String>,
         passwd_path: Option<PathBuf>,
+        keyspace: &str,
+        table: &str,
     ) -> Self {
         let passwd = if let Some(path) = passwd_path {
             fs::read_to_string(path).await.unwrap_or_default()
@@ -72,7 +72,7 @@ impl Scylla {
 
         let st_search = session
             .prepare(format!(
-                "SELECT {VECTOR_ID} FROM {KEYSPACE}.{TABLE} ORDER BY {VECTOR} ANN OF ? LIMIT ?"
+                "SELECT {VECTOR_ID} FROM {keyspace}.{table} ORDER BY {VECTOR} ANN OF ? LIMIT ?"
             ))
             .await
             .ok();
@@ -80,12 +80,18 @@ impl Scylla {
         Self(Arc::new(State { session, st_search }))
     }
 
-    pub(crate) async fn create_table(&self, dimension: usize, replication_factor: usize) {
+    pub(crate) async fn create_table(
+        &self,
+        keyspace: &str,
+        table: &str,
+        dimension: usize,
+        replication_factor: usize,
+    ) {
         self.0.session
         .query_unpaged(
             format!(
                 "
-                CREATE KEYSPACE {KEYSPACE}
+                CREATE KEYSPACE {keyspace}
                 WITH replication = {{'class': 'NetworkTopologyStrategy' , 'replication_factor': '{replication_factor}'}}
                 "
             ),
@@ -99,7 +105,7 @@ impl Scylla {
             .query_unpaged(
                 format!(
                     "
-                CREATE TABLE {KEYSPACE}.{TABLE} (
+                CREATE TABLE {keyspace}.{table} (
                     {ID} uuid PRIMARY KEY,
                     {VECTOR_ID} bigint,
                     {VECTOR} vector<float, {dimension}>,
@@ -112,22 +118,22 @@ impl Scylla {
             .unwrap();
     }
 
-    pub(crate) async fn drop_table(&self) {
+    pub(crate) async fn drop_table(&self, keyspace: &str) {
         self.0
             .session
-            .query_unpaged(format!("DROP KEYSPACE IF EXISTS {KEYSPACE}"), &[])
+            .query_unpaged(format!("DROP KEYSPACE IF EXISTS {keyspace}"), &[])
             .await
             .unwrap();
     }
 
     pub(crate) async fn create_index(
         &self,
-        metric_type: MetricType,
-        m: usize,
-        ef_construction: usize,
-        ef_search: usize,
+        keyspace: &str,
+        table: &str,
+        index: &str,
+        config: IndexConfig,
     ) {
-        let metric_type = match metric_type {
+        let metric_type = match config.metric_type {
             MetricType::Euclidean => "EUCLIDEAN",
             MetricType::Cosine => "COSINE",
             MetricType::DotProduct => "DOT_PRODUCT",
@@ -137,14 +143,17 @@ impl Scylla {
             .query_unpaged(
                 format!(
                     "
-                CREATE CUSTOM INDEX {INDEX} ON {KEYSPACE}.{TABLE} ({VECTOR})
-                USING 'vector_index' WITH OPTIONS = {{
-                    'similarity_function': '{metric_type}',
-                    'maximum_node_connections': '{m}',
-                    'construction_beam_width': '{ef_construction}',
-                    'search_beam_width': '{ef_search}'
-               }}
-               "
+                    CREATE CUSTOM INDEX {index} ON {keyspace}.{table} ({VECTOR})
+                    USING 'vector_index' WITH OPTIONS = {{
+                        'similarity_function': '{metric_type}',
+                        'maximum_node_connections': '{m}',
+                        'construction_beam_width': '{ef_construction}',
+                        'search_beam_width': '{ef_search}'
+                   }}
+                   ",
+                    m = config.m,
+                    ef_construction = config.ef_construction,
+                    ef_search = config.ef_search
                 ),
                 &[],
             )
@@ -152,16 +161,18 @@ impl Scylla {
             .unwrap();
     }
 
-    pub(crate) async fn drop_index(&self) {
+    pub(crate) async fn drop_index(&self, keyspace: &str, index: &str) {
         self.0
             .session
-            .query_unpaged(format!("DROP INDEX IF EXISTS {KEYSPACE}.{INDEX}"), &[])
+            .query_unpaged(format!("DROP INDEX IF EXISTS {keyspace}.{index}"), &[])
             .await
             .unwrap();
     }
 
     pub(crate) async fn upload_vectors(
         &self,
+        keyspace: &str,
+        table: &str,
         mut stream: BoxStream<'static, (i64, Vec<f32>)>,
         concurrency: usize,
     ) {
@@ -169,7 +180,7 @@ impl Scylla {
             .0
             .session
             .prepare(format!(
-                "INSERT INTO {KEYSPACE}.{TABLE} ({ID}, {VECTOR_ID}, {VECTOR}) VALUES (?, ?, ?)"
+                "INSERT INTO {keyspace}.{table} ({ID}, {VECTOR_ID}, {VECTOR}) VALUES (?, ?, ?)"
             ))
             .await
             .unwrap();
