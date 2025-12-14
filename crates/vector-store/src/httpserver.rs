@@ -4,7 +4,6 @@
  */
 
 use crate::Config;
-use crate::HttpServerConfig;
 use crate::engine::Engine;
 use crate::httproutes;
 use crate::metrics::Metrics;
@@ -21,10 +20,10 @@ use tokio::sync::watch;
 
 pub(crate) enum HttpServer {}
 
-async fn load_tls_config(config: &HttpServerConfig) -> anyhow::Result<Option<RustlsConfig>> {
-    match &config.tls {
-        Some(tls) => {
-            let config = RustlsConfig::from_pem_file(&tls.cert_path, &tls.key_path)
+async fn load_tls_config(config: &Config) -> anyhow::Result<Option<RustlsConfig>> {
+    match (&config.tls_cert_path, &config.tls_key_path) {
+        (Some(cert_path), Some(key_path)) => {
+            let config = RustlsConfig::from_pem_file(cert_path, key_path)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to load TLS config: {e}"))?;
             Ok(Some(config))
@@ -42,7 +41,6 @@ fn protocol(tls_config: &Option<RustlsConfig>) -> &'static str {
 }
 
 pub(crate) async fn new(
-    config: HttpServerConfig,
     state: Sender<NodeState>,
     engine: Sender<Engine>,
     metrics: Arc<Metrics>,
@@ -54,10 +52,11 @@ pub(crate) async fn new(
     let (tx, mut rx) = mpsc::channel(CHANNEL_SIZE);
 
     let handle = Handle::new();
+    let config = config_rx.borrow().clone();
     let tls_config = load_tls_config(&config).await?;
     let protocol = protocol(&tls_config);
 
-    let initial_addr = config.addr;
+    let initial_addr = config.vector_store_addr;
 
     tokio::spawn({
         let handle = handle.clone();
@@ -97,9 +96,10 @@ pub(crate) async fn new(
 
     tokio::spawn({
         let handle = handle.clone();
+        let addr = config.vector_store_addr;
         async move {
             let router = httproutes::new(engine, metrics, state, index_engine_version);
-            let server = axum_server::bind(config.addr).handle(handle);
+            let server = axum_server::bind(addr).handle(handle);
             let acceptor = NoDelayAcceptor::new();
 
             let result = match tls_config {

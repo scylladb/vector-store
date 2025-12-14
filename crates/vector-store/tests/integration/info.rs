@@ -15,16 +15,16 @@ async fn run_vs(
 ) -> (HttpClient, impl Sized, impl Sized) {
     let node_state = vector_store::new_node_state().await;
     let (db_actor, _) = db_basic::new(node_state.clone());
-    let (_config_tx, config_rx) = watch::channel(Arc::new(vector_store::Config::default()));
-    let (server, addr) = vector_store::run(
-        SocketAddr::from(([127, 0, 0, 1], 0)).into(),
-        node_state,
-        db_actor,
-        index_factory,
-        config_rx,
-    )
-    .await
-    .unwrap();
+
+    let config = vector_store::Config {
+        vector_store_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+        ..Default::default()
+    };
+    let (_config_tx, config_rx) = watch::channel(Arc::new(config));
+
+    let (server, addr) = vector_store::run(node_state, db_actor, index_factory, config_rx)
+        .await
+        .unwrap();
     (HttpClient::new(addr), server, _config_tx)
 }
 

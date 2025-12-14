@@ -6,6 +6,7 @@
 use crate::db_basic;
 use rcgen::CertifiedKey;
 use std::io::Write;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::NamedTempFile;
 use tokio::sync::watch;
@@ -19,29 +20,26 @@ fn create_temp_file<C: AsRef<[u8]>>(content: C) -> NamedTempFile {
 
 async fn run_server(
     addr: core::net::SocketAddr,
-    tls_config: Option<vector_store::TlsConfig>,
+    tls_cert_path: Option<PathBuf>,
+    tls_key_path: Option<PathBuf>,
 ) -> (impl Sized, core::net::SocketAddr, impl Sized) {
     let node_state = vector_store::new_node_state().await;
     let (db_actor, _db) = db_basic::new(node_state.clone());
     let (_, rx) = watch::channel(Arc::new(Config::default()));
     let index_factory = vector_store::new_index_factory_usearch(rx).unwrap();
 
-    let server_config = vector_store::HttpServerConfig {
-        addr,
-        tls: tls_config,
+    let config = vector_store::Config {
+        vector_store_addr: addr,
+        tls_cert_path,
+        tls_key_path,
+        ..Default::default()
     };
 
-    let (_config_tx, config_rx) = watch::channel(Arc::new(vector_store::Config::default()));
+    let (_config_tx, config_rx) = watch::channel(Arc::new(config));
 
-    let (server, addr) = vector_store::run(
-        server_config,
-        node_state,
-        db_actor,
-        index_factory,
-        config_rx,
-    )
-    .await
-    .unwrap();
+    let (server, addr) = vector_store::run(node_state, db_actor, index_factory, config_rx)
+        .await
+        .unwrap();
 
     (server, addr, _config_tx)
 }
@@ -63,10 +61,8 @@ async fn test_https_server_responds() {
 
     let (_server, addr, _config_tx) = run_server(
         addr,
-        Some(vector_store::TlsConfig {
-            cert_path: cert_file.path().to_path_buf(),
-            key_path: key_file.path().to_path_buf(),
-        }),
+        Some(cert_file.path().to_path_buf()),
+        Some(key_file.path().to_path_buf()),
     )
     .await;
 

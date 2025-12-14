@@ -4,7 +4,6 @@
  */
 
 use anyhow::anyhow;
-use anyhow::bail;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
@@ -20,24 +19,6 @@ struct Args {}
 
 fn dotenvy_to_std_var(key: &'static str) -> Result<String, std::env::VarError> {
     dotenvy::var(key).map_err(|_| std::env::VarError::NotPresent)
-}
-
-fn tls_config() -> anyhow::Result<Option<vector_store::TlsConfig>> {
-    let cert_path = dotenvy::var("VECTOR_STORE_TLS_CERT_PATH").ok();
-    let key_path = dotenvy::var("VECTOR_STORE_TLS_KEY_PATH").ok();
-
-    match (cert_path, key_path) {
-        (Some(cert_path), Some(key_path)) => Ok(Some(vector_store::TlsConfig {
-            cert_path: cert_path.into(),
-            key_path: key_path.into(),
-        })),
-        (None, None) => Ok(None),
-        _ => {
-            bail!(
-                "Both VECTOR_STORE_TLS_CERT_PATH and VECTOR_STORE_TLS_KEY_PATH must be set together"
-            )
-        }
-    }
 }
 
 // Index creating/querying is CPU bound task, so that vector-store uses rayon ThreadPool for them.
@@ -84,13 +65,6 @@ fn main() -> anyhow::Result<()> {
     let (config_manager, config_rx) = ConfigManager::new(loaded_config);
     let config = config_rx.borrow().clone();
 
-    let vector_store_addr = config.vector_store_addr;
-
-    let http_server_config = vector_store::HttpServerConfig {
-        addr: vector_store_addr,
-        tls: tls_config()?,
-    };
-
     let threads = config.threads;
 
     vector_store::block_on(threads, async move || {
@@ -111,14 +85,8 @@ fn main() -> anyhow::Result<()> {
 
         let db_actor = vector_store::new_db(node_state.clone(), config_rx.clone()).await?;
 
-        let (_server_actor, addr) = vector_store::run(
-            http_server_config,
-            node_state,
-            db_actor,
-            index_factory,
-            config_rx.clone(),
-        )
-        .await?;
+        let (_server_actor, addr) =
+            vector_store::run(node_state, db_actor, index_factory, config_rx.clone()).await?;
         tracing::info!("listening on {addr}");
 
         vector_store::wait_for_shutdown().await;
@@ -127,64 +95,4 @@ fn main() -> anyhow::Result<()> {
     })?;
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn tls_config_none_when_no_env_vars() {
-        temp_env::with_vars_unset(
-            ["VECTOR_STORE_TLS_CERT_PATH", "VECTOR_STORE_TLS_KEY_PATH"],
-            || {
-                let config = tls_config();
-                assert!(config.is_ok());
-                assert!(config.unwrap().is_none());
-            },
-        );
-    }
-
-    #[test]
-    fn tls_config_success_when_both_set() {
-        temp_env::with_vars(
-            [
-                ("VECTOR_STORE_TLS_CERT_PATH", Some("/path/to/cert.pem")),
-                ("VECTOR_STORE_TLS_KEY_PATH", Some("/path/to/key.pem")),
-            ],
-            || {
-                let config = tls_config().unwrap().unwrap();
-                assert_eq!(config.cert_path.to_str(), Some("/path/to/cert.pem"));
-                assert_eq!(config.key_path.to_str(), Some("/path/to/key.pem"));
-            },
-        );
-    }
-
-    #[test]
-    fn tls_config_error_when_only_cert_set() {
-        temp_env::with_vars(
-            [
-                ("VECTOR_STORE_TLS_CERT_PATH", Some("/path/to/cert.pem")),
-                ("VECTOR_STORE_TLS_KEY_PATH", None),
-            ],
-            || {
-                let result = tls_config();
-                assert!(result.is_err());
-            },
-        );
-    }
-
-    #[test]
-    fn tls_config_error_when_only_key_set() {
-        temp_env::with_vars(
-            [
-                ("VECTOR_STORE_TLS_CERT_PATH", None),
-                ("VECTOR_STORE_TLS_KEY_PATH", Some("/path/to/key.pem")),
-            ],
-            || {
-                let result = tls_config();
-                assert!(result.is_err());
-            },
-        );
-    }
 }
