@@ -17,7 +17,7 @@ def run(template_cmd, shell=False):
     cmd = template_cmd.format(_HOME=HOME_DIR, _USER=USER, _COPY_OR_MOVE=COPY_OR_MOVE)
     if dry_run:
         print(cmd)
-        return
+        return None
     if verbose:
         print(cmd)
     if not shell:
@@ -32,7 +32,7 @@ def run(template_cmd, shell=False):
         print(cmd,end =" ")
         print(e.output)
         raise
-
+    return None
 def chdir(template_dir):
     dir = template_dir.format(_HOME=HOME_DIR, _USER=USER)
     if dry_run:
