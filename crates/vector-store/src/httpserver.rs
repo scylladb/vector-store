@@ -14,7 +14,6 @@ use axum_server::tls_rustls::RustlsAcceptor;
 use axum_server::tls_rustls::RustlsConfig;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::watch;
@@ -121,19 +120,48 @@ pub(crate) async fn new(
                             tracing::info!("Shutting down old HTTP server");
                             current_handle.graceful_shutdown(Some(std::time::Duration::from_secs(10)));
 
-                            // Wait for the port to become available (max 2 seconds = 40 attempts * 50ms)
-                            wait_for_port_available(current_addr, 40).await;
+                            // Retry starting new server with exponential backoff
+                            let mut retry_delay = std::time::Duration::from_millis(50);
+                            let max_retries = 10;
+                            let mut new_server_result = None;
+
+                            for attempt in 1..=max_retries {
+                                tokio::time::sleep(retry_delay).await;
+
+                                match spawn_server(
+                                    &new_config,
+                                    state.clone(),
+                                    engine.clone(),
+                                    metrics.clone(),
+                                    index_engine_version.clone(),
+                                )
+                                .await
+                                {
+                                    Ok(result) => {
+                                        new_server_result = Some(Ok(result));
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        if attempt < max_retries {
+                                            tracing::warn!(
+                                                "Failed to start HTTP server (attempt {}/{}): {e}, retrying in {:?}",
+                                                attempt,
+                                                max_retries,
+                                                retry_delay
+                                            );
+                                            // Exponential backoff: 50ms, 100ms, 200ms, 400ms, 800ms, 1600ms, ...
+                                            retry_delay = std::time::Duration::from_millis(
+                                                (retry_delay.as_millis() * 2).min(2000) as u64
+                                            );
+                                        } else {
+                                            new_server_result = Some(Err(e));
+                                        }
+                                    }
+                                }
+                            }
 
                             // Validate and start new server
-                            match spawn_server(
-                                &new_config,
-                                state.clone(),
-                                engine.clone(),
-                                metrics.clone(),
-                                index_engine_version.clone(),
-                            )
-                            .await
-                            {
+                            match new_server_result.unwrap() {
                                 Ok((handle, new_actual_addr)) => {
                                     current_handle = handle;
                                     current_addr = new_config.vector_store_addr;
@@ -156,39 +184,12 @@ pub(crate) async fn new(
             // Final shutdown
             tracing::info!("HTTP server shutting down");
             current_handle.graceful_shutdown(Some(std::time::Duration::from_secs(10)));
-            // Wait for the port to be released (max 2 seconds)
-            wait_for_port_available(current_addr, 40).await;
+            // Brief delay to allow clean shutdown
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     });
 
     Ok((tx, actual_addr))
-}
-
-/// Wait for a port to become available by attempting to bind to it.
-/// Returns when the port can be successfully bound, or after max_attempts.
-async fn wait_for_port_available(addr: SocketAddr, max_attempts: u32) {
-    for attempt in 1..=max_attempts {
-        match TcpListener::bind(addr).await {
-            Ok(_) => {
-                tracing::debug!(
-                    "Port {} is available after {} attempts",
-                    addr.port(),
-                    attempt
-                );
-                return;
-            }
-            Err(_) => {
-                if attempt < max_attempts {
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                }
-            }
-        }
-    }
-    tracing::warn!(
-        "Port {} availability check completed after {} attempts - port may still be in use",
-        addr.port(),
-        max_attempts
-    );
 }
 
 /// Spawn a new HTTP server instance with the given configuration
