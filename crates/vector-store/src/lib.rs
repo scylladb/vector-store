@@ -34,7 +34,6 @@ use std::hash::Hash;
 use std::hash::Hasher;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
-use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -71,6 +70,8 @@ pub struct Config {
     pub credentials: Option<Credentials>,
     pub usearch_simulator: Option<Vec<Duration>>,
     pub disable_colors: bool,
+    pub tls_cert_path: Option<std::path::PathBuf>,
+    pub tls_key_path: Option<std::path::PathBuf>,
 }
 
 impl Default for Config {
@@ -85,6 +86,8 @@ impl Default for Config {
             credentials: None,
             usearch_simulator: None,
             disable_colors: false,
+            tls_cert_path: None,
+            tls_key_path: None,
         }
     }
 }
@@ -472,22 +475,6 @@ pub struct DbEmbedding {
     pub timestamp: Timestamp,
 }
 
-pub struct TlsConfig {
-    pub cert_path: PathBuf,
-    pub key_path: PathBuf,
-}
-
-pub struct HttpServerConfig {
-    pub addr: SocketAddr,
-    pub tls: Option<TlsConfig>,
-}
-
-impl From<SocketAddr> for HttpServerConfig {
-    fn from(addr: SocketAddr) -> Self {
-        Self { addr, tls: None }
-    }
-}
-
 #[derive(Clone)]
 /// Marker struct to indicate that an async operation is in progress.
 #[allow(dead_code)]
@@ -511,7 +498,6 @@ pub fn block_on<Output>(threads: Option<usize>, f: impl AsyncFnOnce() -> Output)
 }
 
 pub async fn run(
-    http_server_config: HttpServerConfig,
     node_state: Sender<NodeState>,
     db_actor: Sender<Db>,
     index_factory: Box<dyn IndexFactory + Send + Sync>,
@@ -520,7 +506,6 @@ pub async fn run(
     let metrics: Arc<Metrics> = Arc::new(metrics::Metrics::new());
     let index_engine_version = index_factory.index_engine_version();
     httpserver::new(
-        http_server_config,
         node_state.clone(),
         engine::new(
             db_actor,

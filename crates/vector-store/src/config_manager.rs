@@ -154,7 +154,7 @@ impl ConfigManager {
     }
 }
 
-async fn credentials<F>(env: F) -> anyhow::Result<Option<vector_store::Credentials>>
+async fn credentials<F>(env: &F) -> anyhow::Result<Option<vector_store::Credentials>>
 where
     F: Fn(&'static str) -> Result<String, std::env::VarError>,
 {
@@ -290,7 +290,28 @@ where
             anyhow!("Unable to parse VECTOR_STORE_USEARCH_SIMULATOR env (search_us:add_us:delete_us:...): {err}")
         })).transpose()?;
 
-    config.credentials = credentials(env).await?;
+    config.credentials = credentials(&env).await?;
+
+    // Load TLS configuration
+    let tls_cert_path = env("VECTOR_STORE_TLS_CERT_PATH")
+        .ok()
+        .map(std::path::PathBuf::from);
+    let tls_key_path = env("VECTOR_STORE_TLS_KEY_PATH")
+        .ok()
+        .map(std::path::PathBuf::from);
+
+    // Validate that both cert and key are provided together, or neither
+    match (&tls_cert_path, &tls_key_path) {
+        (Some(_), Some(_)) | (None, None) => {
+            config.tls_cert_path = tls_cert_path;
+            config.tls_key_path = tls_key_path;
+        }
+        _ => {
+            bail!(
+                "Both VECTOR_STORE_TLS_CERT_PATH and VECTOR_STORE_TLS_KEY_PATH must be set together"
+            )
+        }
+    }
 
     Ok(config)
 }
@@ -326,7 +347,7 @@ mod tests {
     async fn credentials_none_when_no_username() {
         let env = mock_env(HashMap::new());
 
-        let creds = credentials(env).await.unwrap();
+        let creds = credentials(&env).await.unwrap();
 
         assert!(creds.is_none());
     }
@@ -339,7 +360,7 @@ mod tests {
             ("VECTOR_STORE_SCYLLADB_PASSWORD_FILE", path(&file)),
         ]));
 
-        let result = credentials(env).await;
+        let result = credentials(&env).await;
 
         assert!(result.is_err());
     }
@@ -351,7 +372,7 @@ mod tests {
             USERNAME.into(),
         )]));
 
-        let result = credentials(env).await;
+        let result = credentials(&env).await;
 
         assert!(result.is_err());
         assert_eq!(
@@ -370,7 +391,7 @@ mod tests {
             ),
         ]));
 
-        let result = credentials(env).await;
+        let result = credentials(&env).await;
 
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -388,7 +409,7 @@ mod tests {
             ("VECTOR_STORE_SCYLLADB_PASSWORD_FILE", path(&file)),
         ]));
 
-        let creds = credentials(env).await.unwrap().unwrap();
+        let creds = credentials(&env).await.unwrap().unwrap();
 
         assert_eq!(creds.username, Some(USERNAME.to_string()));
         assert_eq!(creds.password.as_ref().unwrap().expose_secret(), PASSWORD);
@@ -403,7 +424,7 @@ mod tests {
             ("VECTOR_STORE_SCYLLADB_PASSWORD_FILE", path(&file)),
         ]));
 
-        let creds = credentials(env).await.unwrap().unwrap();
+        let creds = credentials(&env).await.unwrap().unwrap();
 
         assert_eq!(creds.username, Some(USERNAME.to_string()));
         assert_eq!(
@@ -419,7 +440,7 @@ mod tests {
             "/path/to/cert.pem".into(),
         )]));
 
-        let creds = credentials(env).await.unwrap().unwrap();
+        let creds = credentials(&env).await.unwrap().unwrap();
 
         assert_eq!(creds.username, None);
         assert!(creds.password.is_none());
@@ -441,7 +462,7 @@ mod tests {
             ),
         ]));
 
-        let creds = credentials(env).await.unwrap().unwrap();
+        let creds = credentials(&env).await.unwrap().unwrap();
 
         assert_eq!(creds.username, Some(USERNAME.to_string()));
         assert_eq!(creds.password.as_ref().unwrap().expose_secret(), PASSWORD);
@@ -463,6 +484,8 @@ mod tests {
             credentials: None,
             usearch_simulator: None,
             disable_colors: false,
+            tls_cert_path: None,
+            tls_key_path: None,
         };
 
         let (config_manager, mut config_rx) = ConfigManager::new(initial_config);

@@ -82,16 +82,15 @@ pub(crate) async fn setup_store() -> (
     let run = {
         let node_state = node_state.clone();
         async move {
-            let (_config_tx, config_rx) = watch::channel(Arc::new(vector_store::Config::default()));
-            let (server, addr) = vector_store::run(
-                SocketAddr::from(([127, 0, 0, 1], 0)).into(),
-                node_state,
-                db_actor,
-                index_factory,
-                config_rx,
-            )
-            .await
-            .unwrap();
+            let config = vector_store::Config {
+                vector_store_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+                ..Default::default()
+            };
+            let (_config_tx, config_rx) = watch::channel(Arc::new(config));
+
+            let (server, addr) = vector_store::run(node_state, db_actor, index_factory, config_rx)
+                .await
+                .unwrap();
 
             (HttpClient::new(addr), server, _config_tx)
         }
@@ -216,17 +215,15 @@ async fn failed_db_index_create() {
     let (_, rx) = watch::channel(Arc::new(Config::default()));
     let index_factory = vector_store::new_index_factory_usearch(rx).unwrap();
 
-    let (_config_tx, config_rx) = watch::channel(Arc::new(vector_store::Config::default()));
+    let config = vector_store::Config {
+        vector_store_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+        ..Default::default()
+    };
+    let (_config_tx, config_rx) = watch::channel(Arc::new(config));
 
-    let (_server_actor, addr) = vector_store::run(
-        SocketAddr::from(([127, 0, 0, 1], 0)).into(),
-        node_state,
-        db_actor,
-        index_factory,
-        config_rx,
-    )
-    .await
-    .unwrap();
+    let (_server_actor, addr) = vector_store::run(node_state, db_actor, index_factory, config_rx)
+        .await
+        .unwrap();
 
     let client = HttpClient::new(addr);
 

@@ -110,23 +110,20 @@ async fn memory_limit_during_index_build() {
         "Setting VS memory limit to {LIMIT_MEMORY} bytes, current used memory is {used_memory} bytes, "
     );
 
-    let (_config_tx, config_rx) = watch::channel(Arc::new(Config {
+    let mut config = Config {
         memory_limit: Some(limit_memory),
         memory_usage_check_interval: Some(Duration::from_millis(10)),
         ..Default::default()
-    }));
+    };
+    config.vector_store_addr = SocketAddr::from(([127, 0, 0, 1], 0));
+
+    let (_config_tx, config_rx) = watch::channel(Arc::new(config));
     let index_factory = vector_store::new_index_factory_usearch(config_rx.clone()).unwrap();
 
     let node_state = node_state.clone();
-    let (_server, addr) = vector_store::run(
-        SocketAddr::from(([127, 0, 0, 1], 0)).into(),
-        node_state,
-        db_actor,
-        index_factory,
-        config_rx,
-    )
-    .await
-    .unwrap();
+    let (_server, addr) = vector_store::run(node_state, db_actor, index_factory, config_rx)
+        .await
+        .unwrap();
 
     let client = HttpClient::new(addr);
 
