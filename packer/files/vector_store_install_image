@@ -42,6 +42,25 @@ def chdir(template_dir):
         print('cd ', dir)
     os.chdir(dir)
 
+def install_pip_package(arch):
+    try:
+        run('pip3 install {_BREAK_SYSTEM_PACKAGES} psutil traceback_with_variables'.format(_BREAK_SYSTEM_PACKAGES='--break-system-packages' if arch=='arm64' else ''))
+    except Exception as e:
+        print("pip3 install failed" + str(e))
+        print(e.output)
+def get_swap_scripts():
+    with open("{_HOME}/scylla_product.py".format(_HOME=HOME_DIR, ), "w") as f:
+        f.write('PRODUCT="vector-store"\n')
+    run('chown {_USER}:{_USER} {_HOME}/scylla_product.py')
+
+def update_swap(size):
+    if size == 0:
+        return
+    try:
+        run('{_HOME}/scylla_swap_setup --swap-size {SIZE}'.format(_HOME=HOME_DIR, SIZE=size))
+    except Exception as e:
+        print("Failed creating swap:", e.output)
+
 def install_vector_store(version, arch):
     name = 'vector-store-{VERSION}-{ARC}'.format(VERSION=version, ARC=arch)
     run('sudo -u {_USER} curl -L -o {_HOME}/vector-store.tar.gz  https://github.com/scylladb/vector-store/releases/download/{VERSION}/{NAME}.tar.gz'.format(VERSION=version, _HOME=HOME_DIR, _USER=USER, NAME=name))
@@ -90,6 +109,7 @@ if __name__ == '__main__':
     parser.add_argument('--verbose', action='store_true', default=False, help='Verbose trace mode')
     parser.add_argument('--do-not-move', action='store_true', default=False, help='For testing, do not move files, copy them instead')
     parser.add_argument('-d', '--dry-run', action='store_true', default=False, help='Dry run mode')
+    parser.add_argument('--swap-size', default=50, type=int, help='set the swap size in GB, set it to 0 for no swap')
 
     args = parser.parse_args()
     dry_run = args.dry_run
@@ -99,5 +119,8 @@ if __name__ == '__main__':
         COPY_OR_MOVE='cp'
     install_vector_store(args.version, args.arch)
     install_service()
+    install_pip_package(args.arch)
+    get_swap_scripts()
+    update_swap(args.swap_size)
     install_node_exporter(arch=args.arch)
     install_process_exporter()
