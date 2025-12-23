@@ -4,6 +4,9 @@ on:
   pull_request_target:
     types: [opened]
 
+permissions:
+  contents: read
+
 jobs:
   call-jira-status-in-progress:
     uses: scylladb/github-automation/.github/workflows/main_update_jira_status_to_in_progress.yml@main
