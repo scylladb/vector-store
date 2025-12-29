@@ -476,6 +476,7 @@ mod tests {
                         Default::default(), // expansion_add
                         Default::default(), // expansion_search
                         Default::default(), // space_type
+                        Default::default(), // quantization
                     ))))
                     .unwrap();
                 }
@@ -595,6 +596,7 @@ mod tests {
             .returning(move |_, _, _, tx| {
                 async move {
                     tx.send(Ok(Some((
+                        Default::default(),
                         Default::default(),
                         Default::default(),
                         Default::default(),

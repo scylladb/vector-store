@@ -10,6 +10,7 @@ use crate::IndexFactory;
 use crate::IndexId;
 use crate::Limit;
 use crate::PrimaryKey;
+use crate::Quantization;
 use crate::SpaceType;
 use crate::Vector;
 use crate::index::actor::AnnR;
@@ -66,7 +67,7 @@ impl IndexFactory for UsearchIndexFactory {
                     expansion_add: index.expansion_add.0,
                     expansion_search: index.expansion_search.0,
                     metric: index.space_type.into(),
-                    quantization: ScalarKind::F32,
+                    quantization: index.quantization.into(),
                     ..Default::default()
                 };
 
@@ -378,6 +379,18 @@ impl From<SpaceType> for MetricKind {
             SpaceType::Cosine => MetricKind::Cos,
             SpaceType::Euclidean => MetricKind::L2sq,
             SpaceType::DotProduct => MetricKind::IP,
+        }
+    }
+}
+
+impl From<Quantization> for ScalarKind {
+    fn from(quantization: Quantization) -> Self {
+        match quantization {
+            Quantization::F32 => ScalarKind::F32,
+            Quantization::F16 => ScalarKind::F16,
+            Quantization::BF16 => ScalarKind::BF16,
+            Quantization::I8 => ScalarKind::I8,
+            Quantization::B1 => ScalarKind::B1,
         }
     }
 }
@@ -721,6 +734,7 @@ mod tests {
                     expansion_add: ExpansionAdd::default(),
                     expansion_search: ExpansionSearch::default(),
                     space_type: SpaceType::Euclidean,
+                    quantization: Quantization::F32,
                 },
                 memory::new(config_rx),
             )
@@ -845,6 +859,7 @@ mod tests {
                     expansion_add: ExpansionAdd::default(),
                     expansion_search: ExpansionSearch::default(),
                     space_type: SpaceType::Euclidean,
+                    quantization: Quantization::F32,
                 },
                 memory_tx,
             )
@@ -878,5 +893,14 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn quantization_to_kind_conversion() {
+        assert_eq!(ScalarKind::from(Quantization::F32), ScalarKind::F32);
+        assert_eq!(ScalarKind::from(Quantization::F16), ScalarKind::F16);
+        assert_eq!(ScalarKind::from(Quantization::BF16), ScalarKind::BF16);
+        assert_eq!(ScalarKind::from(Quantization::I8), ScalarKind::I8);
+        assert_eq!(ScalarKind::from(Quantization::B1), ScalarKind::B1);
     }
 }
