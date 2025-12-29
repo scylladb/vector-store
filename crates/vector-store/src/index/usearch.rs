@@ -16,6 +16,7 @@ use crate::Vector;
 use crate::index::actor::AnnR;
 use crate::index::actor::CountR;
 use crate::index::actor::Index;
+use crate::index::actor::MemoryUsageR;
 use crate::index::factory::IndexConfiguration;
 use crate::index::validator;
 use crate::memory::Allocate;
@@ -140,6 +141,8 @@ trait UsearchIndex {
         limit: Limit,
     ) -> anyhow::Result<impl Iterator<Item = (Key, Distance)>>;
 
+    fn memory_usage(&self) -> usize;
+
     fn stop(&self);
 }
 
@@ -175,6 +178,10 @@ impl UsearchIndex for usearch::Index {
             .into_iter()
             .zip(matches.distances)
             .map(|(key, distance)| (key.into(), distance.into())))
+    }
+
+    fn memory_usage(&self) -> usize {
+        self.memory_usage()
     }
 
     fn stop(&self) {}
@@ -348,6 +355,10 @@ impl UsearchIndex for RwLock<Simulator> {
         Ok(keys.into_iter().map(|key| (key, 0.0.into())))
     }
 
+    fn memory_usage(&self) -> usize {
+        0
+    }
+
     fn stop(&self) {}
 }
 
@@ -495,7 +506,10 @@ async fn dispatch_task(
 }
 
 fn should_run_on_tokio(msg: &Index) -> bool {
-    matches!(msg, Index::Ann { .. } | Index::Count { .. })
+    matches!(
+        msg,
+        Index::Ann { .. } | Index::Count { .. } | Index::MemoryUsage { .. }
+    )
 }
 
 fn process<I: UsearchIndex + Send + Sync + 'static>(msg: Index, index: &IndexState<I>) {
@@ -535,6 +549,9 @@ fn process<I: UsearchIndex + Send + Sync + 'static>(msg: Index, index: &IndexSta
         }
         Index::Count { tx } => {
             count(Arc::clone(&index.idx), tx);
+        }
+        Index::MemoryUsage { tx } => {
+            memory_usage(Arc::clone(&index.idx), tx);
         }
     }
 }
@@ -677,6 +694,11 @@ fn count(idx: Arc<impl UsearchIndex>, tx: oneshot::Sender<CountR>) {
         .unwrap_or_else(|_| trace!("count: unable to send response"));
 }
 
+fn memory_usage(idx: Arc<impl UsearchIndex>, tx: oneshot::Sender<MemoryUsageR>) {
+    tx.send(Ok(idx.memory_usage()))
+        .unwrap_or_else(|_| trace!("memory_usage: unable to send response"));
+}
+
 async fn check_memory_allocation(
     msg: &Index,
     memory: &mpsc::Sender<Memory>,
@@ -715,6 +737,71 @@ mod tests {
     use tokio::sync::watch;
     use tokio::task;
     use tokio::time;
+
+    #[tokio::test]
+    async fn quantization_reduces_memory_usage() {
+        const VECTORS_COUNT: i32 = 1000;
+        let (_, config_rx) = watch::channel(Arc::new(Config::default()));
+
+        let factory = UsearchIndexFactory {
+            tokio_semaphore: Arc::new(Semaphore::new(4)),
+            rayon_semaphore: Arc::new(Semaphore::new(4)),
+            mode: Mode::Usearch,
+        };
+
+        let create_index = |quantization: Quantization| {
+            factory
+                .create_index(
+                    IndexConfiguration {
+                        id: IndexId::new(&"vector".to_string().into(), &"store".to_string().into()),
+                        dimensions: NonZeroUsize::new(3).unwrap().into(),
+                        connectivity: Connectivity::default(),
+                        expansion_add: ExpansionAdd::default(),
+                        expansion_search: ExpansionSearch::default(),
+                        space_type: SpaceType::Euclidean,
+                        quantization,
+                    },
+                    memory::new(config_rx.clone()),
+                )
+                .unwrap()
+        };
+
+        let actor_f32 = create_index(Quantization::F32);
+        let actor_f16 = create_index(Quantization::F16);
+
+        for i in 0..VECTORS_COUNT {
+            let pk = vec![CqlValue::Int(i)].into();
+            let embedding = vec![i as f32, i as f32, i as f32].into();
+            actor_f32
+                .add_or_replace(pk.clone(), embedding.clone(), None)
+                .await;
+            actor_f16.add_or_replace(pk, embedding, None).await;
+        }
+
+        time::timeout(Duration::from_secs(10), async {
+            while actor_f32.count().await.unwrap() != VECTORS_COUNT as usize {
+                task::yield_now().await;
+            }
+            while actor_f16.count().await.unwrap() != VECTORS_COUNT as usize {
+                task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let memory_f32 = actor_f32.memory_usage().await.unwrap();
+        let memory_f16 = actor_f16.memory_usage().await.unwrap();
+
+        // Assert that F16 quantization uses significantly less memory than F32.
+        // We expect it to be roughly half, but we'll check for at least a 40% reduction
+        // to be safe and account for overhead.
+        assert!(
+            memory_f16 < (memory_f32 as f64 * 0.6) as usize,
+            "F16 memory usage ({}) should be less than 60% of F32 memory usage ({})",
+            memory_f16,
+            memory_f32
+        );
+    }
 
     #[tokio::test]
     async fn add_or_replace_size_ann() {

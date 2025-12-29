@@ -13,6 +13,7 @@ use tokio::sync::oneshot;
 
 pub(crate) type AnnR = anyhow::Result<(Vec<PrimaryKey>, Vec<Distance>)>;
 pub(crate) type CountR = anyhow::Result<usize>;
+pub(crate) type MemoryUsageR = anyhow::Result<usize>;
 
 pub enum Index {
     AddOrReplace {
@@ -32,6 +33,9 @@ pub enum Index {
     Count {
         tx: oneshot::Sender<CountR>,
     },
+    MemoryUsage {
+        tx: oneshot::Sender<MemoryUsageR>,
+    },
 }
 
 pub(crate) trait IndexExt {
@@ -44,6 +48,7 @@ pub(crate) trait IndexExt {
     async fn remove(&self, primary_key: PrimaryKey, in_progress: Option<AsyncInProgress>);
     async fn ann(&self, embedding: Vector, limit: Limit) -> AnnR;
     async fn count(&self) -> CountR;
+    async fn memory_usage(&self) -> MemoryUsageR;
 }
 
 impl IndexExt for mpsc::Sender<Index> {
@@ -85,6 +90,12 @@ impl IndexExt for mpsc::Sender<Index> {
     async fn count(&self) -> CountR {
         let (tx, rx) = oneshot::channel();
         self.send(Index::Count { tx }).await?;
+        rx.await?
+    }
+
+    async fn memory_usage(&self) -> MemoryUsageR {
+        let (tx, rx) = oneshot::channel();
+        self.send(Index::MemoryUsage { tx }).await?;
         rx.await?
     }
 }
