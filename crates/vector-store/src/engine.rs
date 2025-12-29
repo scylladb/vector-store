@@ -182,6 +182,7 @@ async fn add_index(
             expansion_add: metadata.expansion_add,
             expansion_search: metadata.expansion_search,
             space_type: metadata.space_type,
+            quantization: metadata.quantization,
         },
         memory,
     ) {

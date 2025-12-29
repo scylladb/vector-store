@@ -29,6 +29,7 @@ use vector_store::IndexName;
 use vector_store::KeyspaceName;
 use vector_store::PrimaryKey;
 use vector_store::Progress;
+use vector_store::Quantization;
 use vector_store::SpaceType;
 use vector_store::TableName;
 use vector_store::Timestamp;
@@ -358,6 +359,7 @@ fn process_db(db: &DbBasic, msg: Db, node_state: Sender<NodeState>) {
                         index.index.expansion_add,
                         index.index.expansion_search,
                         index.index.space_type,
+                        Quantization::default(),
                     )
                 })))
             .map_err(|_| anyhow!("Db::GetIndexParams: unable to send response"))

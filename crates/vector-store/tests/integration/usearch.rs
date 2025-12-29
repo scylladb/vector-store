@@ -25,6 +25,7 @@ use vector_store::ExpansionAdd;
 use vector_store::ExpansionSearch;
 use vector_store::IndexMetadata;
 use vector_store::Percentage;
+use vector_store::Quantization;
 use vector_store::SpaceType;
 use vector_store::Vector;
 use vector_store::node_state::NodeState;
@@ -52,6 +53,7 @@ pub(crate) async fn setup_store(
         expansion_search: ExpansionSearch::default(),
         space_type: SpaceType::default(),
         version: Uuid::new_v4().into(),
+        quantization: Quantization::default(),
     };
 
     db.add_table(
@@ -213,6 +215,7 @@ async fn failed_db_index_create() {
         expansion_search: Default::default(),
         space_type: Default::default(),
         version: Uuid::new_v4().into(),
+        quantization: Default::default(),
     };
 
     let (_, rx) = watch::channel(Arc::new(Config::default()));
