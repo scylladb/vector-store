@@ -380,6 +380,48 @@ impl FromStr for SpaceType {
 }
 
 #[derive(
+    Copy,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    utoipa::ToSchema,
+)]
+
+pub enum Quantization {
+    /// 32-bit single-precision IEEE 754 floating-point.
+    #[default]
+    F32,
+    /// 16-bit standard half-precision floating-point (IEEE 754).
+    F16,
+    /// 16-bit "Brain" floating-point (optimized for ML workloads).
+    BF16,
+    /// 8-bit signed integer.
+    I8,
+    /// 1-bit binary value (packed 8 per byte).
+    B1,
+}
+
+impl FromStr for Quantization {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_uppercase().as_str() {
+            "F32" => Ok(Self::F32),
+            "F16" => Ok(Self::F16),
+            "BF16" => Ok(Self::BF16),
+            "I8" => Ok(Self::I8),
+            "B1" => Ok(Self::B1),
+            _ => Err(format!("Unknown quantization type: {s}")),
+        }
+    }
+}
+
+#[derive(
     Clone,
     Debug,
     PartialEq,

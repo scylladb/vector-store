@@ -20,6 +20,7 @@ pub struct IndexConfiguration {
     pub expansion_add: ExpansionAdd,
     pub expansion_search: ExpansionSearch,
     pub space_type: SpaceType,
+    pub quantization: Quantization,
 }
 
 pub trait IndexFactory {
