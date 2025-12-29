@@ -311,10 +311,6 @@ async fn process(
             tx,
         } => ann(id, tx, keys, embedding, dimensions, limit, client).await,
         Index::Count { tx } => count(id, tx, client).await,
-        Index::Capacity { tx } => {
-            tx.send(Err(anyhow!("not implemented")))
-                .unwrap_or_else(|_| trace!("capacity: unable to send response"));
-        }
     }
 }
 
