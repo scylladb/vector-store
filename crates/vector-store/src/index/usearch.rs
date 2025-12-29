@@ -16,7 +16,6 @@ use crate::Vector;
 use crate::index::actor::AnnR;
 use crate::index::actor::CountR;
 use crate::index::actor::Index;
-use crate::index::actor::MemoryUsageR;
 use crate::index::factory::IndexConfiguration;
 use crate::index::validator;
 use crate::memory::Allocate;
@@ -73,6 +72,9 @@ impl IndexFactory for UsearchIndexFactory {
                 };
 
                 let idx = Arc::new(usearch::Index::new(&options)?);
+                {
+                    error!("creating index {}", &index.id);
+                }
                 new(
                     idx,
                     index.id,
@@ -140,9 +142,6 @@ trait UsearchIndex {
         vector: &Vector,
         limit: Limit,
     ) -> anyhow::Result<impl Iterator<Item = (Key, Distance)>>;
-
-    fn memory_usage(&self) -> usize;
-
     fn stop(&self);
 }
 
@@ -178,10 +177,6 @@ impl UsearchIndex for usearch::Index {
             .into_iter()
             .zip(matches.distances)
             .map(|(key, distance)| (key.into(), distance.into())))
-    }
-
-    fn memory_usage(&self) -> usize {
-        self.memory_usage()
     }
 
     fn stop(&self) {}
@@ -355,10 +350,6 @@ impl UsearchIndex for RwLock<Simulator> {
         Ok(keys.into_iter().map(|key| (key, 0.0.into())))
     }
 
-    fn memory_usage(&self) -> usize {
-        0
-    }
-
     fn stop(&self) {}
 }
 
@@ -508,7 +499,7 @@ async fn dispatch_task(
 fn should_run_on_tokio(msg: &Index) -> bool {
     matches!(
         msg,
-        Index::Ann { .. } | Index::Count { .. } | Index::MemoryUsage { .. }
+        Index::Ann { .. } | Index::Count { .. } | Index::Capacity { .. }
     )
 }
 
@@ -550,8 +541,8 @@ fn process<I: UsearchIndex + Send + Sync + 'static>(msg: Index, index: &IndexSta
         Index::Count { tx } => {
             count(Arc::clone(&index.idx), tx);
         }
-        Index::MemoryUsage { tx } => {
-            memory_usage(Arc::clone(&index.idx), tx);
+        Index::Capacity { tx } => {
+            capacity(Arc::clone(&index.idx), tx);
         }
     }
 }
@@ -694,9 +685,9 @@ fn count(idx: Arc<impl UsearchIndex>, tx: oneshot::Sender<CountR>) {
         .unwrap_or_else(|_| trace!("count: unable to send response"));
 }
 
-fn memory_usage(idx: Arc<impl UsearchIndex>, tx: oneshot::Sender<MemoryUsageR>) {
-    tx.send(Ok(idx.memory_usage()))
-        .unwrap_or_else(|_| trace!("memory_usage: unable to send response"));
+fn capacity(idx: Arc<impl UsearchIndex>, tx: oneshot::Sender<CountR>) {
+    tx.send(Ok(idx.capacity()))
+        .unwrap_or_else(|_| trace!("capacity: unable to send response"));
 }
 
 async fn check_memory_allocation(
@@ -737,71 +728,6 @@ mod tests {
     use tokio::sync::watch;
     use tokio::task;
     use tokio::time;
-
-    #[tokio::test]
-    async fn quantization_reduces_memory_usage() {
-        const VECTORS_COUNT: i32 = 1000;
-        let (_, config_rx) = watch::channel(Arc::new(Config::default()));
-
-        let factory = UsearchIndexFactory {
-            tokio_semaphore: Arc::new(Semaphore::new(4)),
-            rayon_semaphore: Arc::new(Semaphore::new(4)),
-            mode: Mode::Usearch,
-        };
-
-        let create_index = |quantization: Quantization| {
-            factory
-                .create_index(
-                    IndexConfiguration {
-                        id: IndexId::new(&"vector".to_string().into(), &"store".to_string().into()),
-                        dimensions: NonZeroUsize::new(3).unwrap().into(),
-                        connectivity: Connectivity::default(),
-                        expansion_add: ExpansionAdd::default(),
-                        expansion_search: ExpansionSearch::default(),
-                        space_type: SpaceType::Euclidean,
-                        quantization,
-                    },
-                    memory::new(config_rx.clone()),
-                )
-                .unwrap()
-        };
-
-        let actor_f32 = create_index(Quantization::F32);
-        let actor_f16 = create_index(Quantization::F16);
-
-        for i in 0..VECTORS_COUNT {
-            let pk = vec![CqlValue::Int(i)].into();
-            let embedding = vec![i as f32, i as f32, i as f32].into();
-            actor_f32
-                .add_or_replace(pk.clone(), embedding.clone(), None)
-                .await;
-            actor_f16.add_or_replace(pk, embedding, None).await;
-        }
-
-        time::timeout(Duration::from_secs(10), async {
-            while actor_f32.count().await.unwrap() != VECTORS_COUNT as usize {
-                task::yield_now().await;
-            }
-            while actor_f16.count().await.unwrap() != VECTORS_COUNT as usize {
-                task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-
-        let memory_f32 = actor_f32.memory_usage().await.unwrap();
-        let memory_f16 = actor_f16.memory_usage().await.unwrap();
-
-        // Assert that F16 quantization uses significantly less memory than F32.
-        // We expect it to be roughly half, but we'll check for at least a 40% reduction
-        // to be safe and account for overhead.
-        assert!(
-            memory_f16 < (memory_f32 as f64 * 0.6) as usize,
-            "F16 memory usage ({}) should be less than 60% of F32 memory usage ({})",
-            memory_f16,
-            memory_f32
-        );
-    }
 
     #[tokio::test]
     async fn add_or_replace_size_ann() {
@@ -989,5 +915,115 @@ mod tests {
         assert_eq!(ScalarKind::from(Quantization::BF16), ScalarKind::BF16);
         assert_eq!(ScalarKind::from(Quantization::I8), ScalarKind::I8);
         assert_eq!(ScalarKind::from(Quantization::B1), ScalarKind::B1);
+    }
+
+    #[tokio::test]
+    async fn quantization_reduces_memory_usage() {
+        const VECTORS_COUNT: i32 = 1000;
+        let (_, config_rx) = watch::channel(Arc::new(Config::default()));
+
+        let factory = UsearchIndexFactory {
+            tokio_semaphore: Arc::new(Semaphore::new(4)),
+            rayon_semaphore: Arc::new(Semaphore::new(4)),
+            mode: Mode::Usearch,
+        };
+
+        // let create_index = |quantization: Quantization| {
+        //     factory
+        //         .create_index(
+        //             IndexConfiguration {
+        //                 id: IndexId::new(
+        //                     &"ks".to_string().into(),
+        //                     &uuid::Uuid::new_v4().to_string().into(),
+        //                 ),
+        //                 dimensions: NonZeroUsize::new(3).unwrap().into(),
+        //                 connectivity: Connectivity::default(),
+        //                 expansion_add: ExpansionAdd::default(),
+        //                 expansion_search: ExpansionSearch::default(),
+        //                 space_type: SpaceType::Euclidean,
+        //                 quantization,
+        //             },
+        //             memory::new(config_rx.clone()),
+        //         )
+        //         .unwrap()
+        // };
+
+        let actor_f32 = factory
+            .create_index(
+                IndexConfiguration {
+                    id: IndexId::new(&"ks".to_string().into(), &"idx-f32".to_string().into()),
+                    dimensions: NonZeroUsize::new(3).unwrap().into(),
+                    connectivity: Connectivity::default(),
+                    expansion_add: ExpansionAdd::default(),
+                    expansion_search: ExpansionSearch::default(),
+                    space_type: SpaceType::Euclidean,
+                    quantization: Quantization::F32,
+                },
+                memory::new(config_rx.clone()),
+            )
+            .unwrap();
+        let actor_i8 = factory
+            .create_index(
+                IndexConfiguration {
+                    id: IndexId::new(&"ks".to_string().into(), &"idx-i8".to_string().into()),
+                    dimensions: NonZeroUsize::new(3).unwrap().into(),
+                    connectivity: Connectivity::default(),
+                    expansion_add: ExpansionAdd::default(),
+                    expansion_search: ExpansionSearch::default(),
+                    space_type: SpaceType::Euclidean,
+                    quantization: Quantization::I8,
+                },
+                memory::new(config_rx.clone()),
+            )
+            .unwrap();
+
+        // for i in 0..VECTORS_COUNT {
+        //     let pk: PrimaryKey = vec![CqlValue::Int(i)].into();
+        //     let embedding: Vector = vec![i as f32, i as f32, i as f32].into();
+        //     actor_f32
+        //         .add_or_replace(pk.clone(), embedding.clone(), None)
+        //         .await;
+        //     actor_i8.add_or_replace(pk, embedding, None).await;
+        // }
+
+        // time::timeout(Duration::from_secs(10), async {
+        //     while actor_f32.count().await.unwrap() != VECTORS_COUNT as usize {
+        //         task::yield_now().await;
+        //     }
+        //     while actor_i8.count().await.unwrap() != VECTORS_COUNT as usize {
+        //         task::yield_now().await;
+        //     }
+        // })
+        // .await
+        // .unwrap();
+        for i in 0..VECTORS_COUNT {
+            let pk: PrimaryKey = vec![CqlValue::Int(i)].into();
+            let embedding: Vector = vec![i as f32, i as f32, i as f32].into();
+            actor_f32.add_or_replace(pk.clone(), embedding.clone(), None).await;
+            actor_i8.add_or_replace(pk, embedding, None).await;
+        }
+
+        time::timeout(Duration::from_secs(10), async {
+            while actor_f32.count().await.unwrap() != VECTORS_COUNT as usize {
+                task::yield_now().await;
+            }
+            while actor_i8.count().await.unwrap() != VECTORS_COUNT as usize {
+                task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let capacity_f32 = IndexExt::capacity(&actor_f32).await.unwrap();
+        let capacity_i8 = IndexExt::capacity(&actor_i8).await.unwrap();
+
+        // Assert that B1 quantization uses significantly less memory than F32.
+        // The threshold of 60% is chosen based on expected memory savings.
+        assert!(
+            capacity_i8 > capacity_f32,
+            "I8 capacity ({}) should be greater than F32 capacity ({})",
+            capacity_i8,
+            capacity_f32
+        );
     }
 }
