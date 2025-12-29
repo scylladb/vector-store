@@ -50,6 +50,8 @@ impl Scylla {
             fs::read_to_string(path)
                 .await
                 .expect("Failed to read password file")
+                .trim()
+                .to_string()
         } else {
             String::new()
         };

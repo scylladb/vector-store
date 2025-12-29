@@ -590,7 +590,7 @@ impl SearchMeasure {
             latency_min: Duration::MAX,
             latency_max: Duration::ZERO,
             with_recall: true,
-            recall_min: 0.0,
+            recall_min: 100.0,
             recall_max: 0.0,
             recall_sum: 0.0,
         }
