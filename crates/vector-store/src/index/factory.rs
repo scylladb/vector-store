@@ -8,6 +8,7 @@ use crate::Dimensions;
 use crate::ExpansionAdd;
 use crate::ExpansionSearch;
 use crate::IndexId;
+use crate::Quantization;
 use crate::SpaceType;
 use crate::index::actor::Index;
 use crate::memory::Memory;

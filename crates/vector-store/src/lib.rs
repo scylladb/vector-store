@@ -387,11 +387,10 @@ impl FromStr for SpaceType {
     Eq,
     Hash,
     Default,
-    serde::Serialize,
-    serde::Deserialize,
-    utoipa::ToSchema,
+    // serde::Serialize,
+    // serde::Deserialize,
+    // utoipa::ToSchema,
 )]
-
 pub enum Quantization {
     /// 32-bit single-precision IEEE 754 floating-point.
     #[default]
@@ -410,7 +409,7 @@ impl FromStr for Quantization {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_uppercase().as_str() {
+        match s.to_ascii_uppercase().as_str() {
             "F32" => Ok(Self::F32),
             "F16" => Ok(Self::F16),
             "BF16" => Ok(Self::BF16),
@@ -482,6 +481,7 @@ pub struct IndexMetadata {
     pub expansion_search: ExpansionSearch,
     pub space_type: SpaceType,
     pub version: IndexVersion,
+    pub quantization: Quantization,
 }
 
 impl IndexMetadata {
