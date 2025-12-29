@@ -48,6 +48,8 @@ pub(crate) trait IndexExt {
     async fn remove(&self, primary_key: PrimaryKey, in_progress: Option<AsyncInProgress>);
     async fn ann(&self, embedding: Vector, limit: Limit) -> AnnR;
     async fn count(&self) -> CountR;
+    // For testing purposes only
+    #[allow(dead_code)]
     async fn memory_usage(&self) -> MemoryUsageR;
 }
 

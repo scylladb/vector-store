@@ -770,8 +770,8 @@ mod tests {
         let actor_f16 = create_index(Quantization::F16);
 
         for i in 0..VECTORS_COUNT {
-            let pk = vec![CqlValue::Int(i)].into();
-            let embedding = vec![i as f32, i as f32, i as f32].into();
+            let pk: PrimaryKey = vec![CqlValue::Int(i)].into();
+            let embedding: Vector = vec![i as f32, i as f32, i as f32].into();
             actor_f32
                 .add_or_replace(pk.clone(), embedding.clone(), None)
                 .await;

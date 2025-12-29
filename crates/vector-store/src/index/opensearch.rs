@@ -311,6 +311,16 @@ async fn process(
             tx,
         } => ann(id, tx, keys, embedding, dimensions, limit, client).await,
         Index::Count { tx } => count(id, tx, client).await,
+        Index::MemoryUsage { tx } => {
+            // Currently OpenSearch does not provide a way to get memory usage per index.
+            // So we return 0 for now.
+            tx.send(Err(anyhow!(
+                "memory_usage: not implemented for OpenSearch index"
+            )))
+            .unwrap_or_else(|_| {
+                trace!("memory_usage: unable to send response");
+            });
+        }
     }
 }
 
