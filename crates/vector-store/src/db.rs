@@ -718,7 +718,7 @@ impl Statements {
                 .unwrap_or_default();
             let space_type = options
                 .remove("similarity_function")
-                .and_then(|s| s.to_ascii_uppercase().parse().ok())
+                .and_then(|s| s.parse().ok())
                 .unwrap_or_default();
             let quantization = options
                 .remove("quantization")

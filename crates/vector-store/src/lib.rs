@@ -370,7 +370,7 @@ impl FromStr for SpaceType {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match s.to_ascii_uppercase().as_str() {
             "EUCLIDEAN" => Ok(Self::Euclidean),
             "COSINE" => Ok(Self::Cosine),
             "DOT_PRODUCT" => Ok(Self::DotProduct),
