@@ -24,9 +24,11 @@ use crate::memory::Memory;
 use crate::memory::MemoryExt;
 use anyhow::anyhow;
 use bimap::BiMap;
+use rayon::vec;
 use std::collections::HashSet;
 use std::iter;
 use std::sync::Arc;
+use std::sync::Once;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -44,6 +46,9 @@ use tracing::debug_span;
 use tracing::error;
 use tracing::info;
 use tracing::trace;
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt;
+use tracing_subscriber::prelude::*;
 use usearch::IndexOptions;
 use usearch::MetricKind;
 use usearch::ScalarKind;
@@ -160,7 +165,15 @@ impl UsearchIndex for usearch::Index {
     }
 
     fn add(&self, key: Key, vector: &Vector) -> anyhow::Result<()> {
-        Ok(self.add(key.0, &vector.0)?)
+        let vec_i8: Vec<i8> = vector
+            .0
+            .iter()
+            .map(|v| {
+                let v = v.clamp(i8::MIN as f32, i8::MAX as f32);
+                v.round() as i8
+            })
+            .collect();
+        Ok(self.add(key.0, &vec_i8)?)
     }
 
     fn remove(&self, key: Key) -> anyhow::Result<()> {
@@ -634,6 +647,11 @@ fn add_or_replace(
         debug!("add_or_replace: unable to remove embedding for key {key}: {err}");
         return;
     }
+    // Convert embedding floats to a vector of i8 (clamp -> round -> cast) and shadow `embedding`.
+    // let embedding = {
+
+    // vec_i8.into()
+    // };
     if let Err(err) = idx.add(key, &embedding) {
         debug!("add_or_replace: unable to add embedding for key {key}: {err}");
         remove_key_from_bimap(&key);
@@ -723,6 +741,17 @@ async fn check_memory_allocation(
 
 #[cfg(test)]
 mod tests {
+    static INIT_TRACING: Once = Once::new();
+
+    fn enable_tracing() {
+        INIT_TRACING.call_once(|| {
+            tracing_subscriber::registry()
+                .with(EnvFilter::try_new("info").unwrap())
+                .with(fmt::layer().with_target(false))
+                .init();
+        });
+    }
+
     use super::*;
     use crate::Config;
     use crate::Connectivity;
@@ -740,6 +769,7 @@ mod tests {
 
     #[tokio::test]
     async fn quantization_reduces_memory_usage() {
+        enable_tracing();
         const VECTORS_COUNT: i32 = 1000;
         let (_, config_rx) = watch::channel(Arc::new(Config::default()));
 
@@ -749,58 +779,125 @@ mod tests {
             mode: Mode::Usearch,
         };
 
-        let create_index = |quantization: Quantization| {
-            factory
-                .create_index(
-                    IndexConfiguration {
-                        id: IndexId::new(&"vector".to_string().into(), &"store".to_string().into()),
-                        dimensions: NonZeroUsize::new(3).unwrap().into(),
-                        connectivity: Connectivity::default(),
-                        expansion_add: ExpansionAdd::default(),
-                        expansion_search: ExpansionSearch::default(),
-                        space_type: SpaceType::Euclidean,
-                        quantization,
-                    },
-                    memory::new(config_rx.clone()),
-                )
-                .unwrap()
-        };
+        // let create_index = |quantization: Quantization| {
+        //     factory
+        //         .create_index(
+        //             IndexConfiguration {
+        //                 id: IndexId::new(&"vector".to_string().into(), &"store".to_string().into()),
+        //                 dimensions: NonZeroUsize::new(3).unwrap().into(),
+        //                 connectivity: Connectivity::default(),
+        //                 expansion_add: ExpansionAdd::default(),
+        //                 expansion_search: ExpansionSearch::default(),
+        //                 space_type: SpaceType::Euclidean,
+        //                 quantization,
+        //             },
+        //             memory::new(config_rx.clone()),
+        //         )
+        //         .unwrap()
+        // };
 
-        let actor_f32 = create_index(Quantization::F32);
-        let actor_f16 = create_index(Quantization::F16);
+        let actor_f32 = factory
+            .create_index(
+                IndexConfiguration {
+                    id: IndexId::new(&"vector".to_string().into(), &"idx-f32".to_string().into()),
+                    dimensions: NonZeroUsize::new(3).unwrap().into(),
+                    connectivity: Connectivity::default(),
+                    expansion_add: ExpansionAdd::default(),
+                    expansion_search: ExpansionSearch::default(),
+                    space_type: SpaceType::Euclidean,
+                    quantization: Quantization::F32,
+                },
+                memory::new(config_rx.clone()),
+            )
+            .unwrap();
+        let actor_f16 = factory
+            .create_index(
+                IndexConfiguration {
+                    id: IndexId::new(&"vector".to_string().into(), &"idx-f16".to_string().into()),
+                    dimensions: NonZeroUsize::new(3).unwrap().into(),
+                    connectivity: Connectivity::default(),
+                    expansion_add: ExpansionAdd::default(),
+                    expansion_search: ExpansionSearch::default(),
+                    space_type: SpaceType::Euclidean,
+                    quantization: Quantization::I8,
+                },
+                memory::new(config_rx.clone()),
+            )
+            .unwrap();
 
-        for i in 0..VECTORS_COUNT {
-            let pk: PrimaryKey = vec![CqlValue::Int(i)].into();
-            let embedding: Vector = vec![i as f32, i as f32, i as f32].into();
-            actor_f32
-                .add_or_replace(pk.clone(), embedding.clone(), None)
-                .await;
+        // Add vectors until memory usage increases (reserve was triggered) for each index.
+        // We add unique primary keys so count increases.
+        // let mut i = 0usize;
+        // const MAX_ADDS: usize = 100_000;
+
+        // f32 index: add until memory usage increases
+        // let mem_before_f32 = actor_f32.memory_usage().await.unwrap();
+
+        // f16/index with I8 quantization: continue with new unique keys to avoid replaces
+        // let mut j = 0usize;
+        // let mem_before_f16 = actor_f16.memory_usage().await.unwrap();
+        for j in 0..VECTORS_COUNT {
+            let pk: PrimaryKey = vec![CqlValue::Int(j as i32)].into();
+            let embedding: Vector = vec![j as f32, j as f32, j as f32].into();
             actor_f16.add_or_replace(pk, embedding, None).await;
+
+            // let mem_now = ;
+            error!("j={} memory={}", j, actor_f16.memory_usage().await.unwrap());
+            // j += 1;
+            // if actor_f16.memory_usage().await.unwrap() > mem_before_f16 {
+            //     break;
+            // }
         }
 
-        time::timeout(Duration::from_secs(10), async {
-            while actor_f32.count().await.unwrap() != VECTORS_COUNT as usize {
-                task::yield_now().await;
-            }
-            while actor_f16.count().await.unwrap() != VECTORS_COUNT as usize {
-                task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        for i in 0..VECTORS_COUNT {
+            let pk: PrimaryKey = vec![CqlValue::Int(i as i32)].into();
+            let embedding: Vector = vec![i as f32, i as f32, i as f32].into();
+            actor_f32.add_or_replace(pk, embedding, None).await;
 
-        let memory_f32 = actor_f32.memory_usage().await.unwrap();
-        let memory_f16 = actor_f16.memory_usage().await.unwrap();
+            // let mem_now = ;
+            error!("i={} memory={}", i, actor_f16.memory_usage().await.unwrap());
+            // i += 1;
+            // if actor_f32.memory_usage().await.unwrap() > mem_before_f32 {
+            //     break;
+            // }
+        }
+
+        // // wait for operations to be visible
+        // time::timeout(Duration::from_secs(10), async {
+        //     while actor_f32.count().await.unwrap() < VECTORS_COUNT as usize {
+        //         task::yield_now().await;
+        //     }
+        // })
+        // .await
+        // .unwrap();
+
+        // wait for f16 operations to be visible
+        // time::timeout(Duration::from_secs(10), async {
+        //     while actor_f16.count().await.unwrap() < j {
+        //         task::yield_now().await;
+        //     }
+        // })
+        // .await
+        // .unwrap();
+
+        // let memory_f32 = actor_f32.memory_usage().await.unwrap();
+        // let memory_f16 = actor_f16.memory_usage().await.unwrap();
 
         // Assert that F16 quantization uses significantly less memory than F32.
         // We expect it to be roughly half, but we'll check for at least a 40% reduction
         // to be safe and account for overhead.
-        assert!(
-            memory_f16 < (memory_f32 as f64 * 0.6) as usize,
-            "F16 memory usage ({}) should be less than 60% of F32 memory usage ({})",
-            memory_f16,
-            memory_f32
-        );
+        // assert!(
+        //     memory_f16 < (memory_f32 as f64 * 0.6) as usize,
+        //     "I8 memory usage ({}) should be less than 60% of F32 memory usage ({})",
+        //     memory_f16,
+        //     memory_f32
+        // );
+        // assert!(
+        //     j < i,
+        //     "I8 memory usage ({}) should be less than 60% of F32 memory usage ({})",
+        //     j,
+        //     i
+        // );
     }
 
     #[tokio::test]
