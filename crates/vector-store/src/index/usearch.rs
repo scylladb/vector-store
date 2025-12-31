@@ -22,6 +22,7 @@ use crate::memory::Memory;
 use crate::memory::MemoryExt;
 use anyhow::anyhow;
 use bimap::BiMap;
+use bimap::Overwritten;
 use std::collections::HashSet;
 use std::iter;
 use std::sync::Arc;
@@ -636,32 +637,15 @@ fn add_or_replace(
 ) {
     let key = usearch_key.fetch_add(1, Ordering::Relaxed).into();
 
-    let (key, remove) = if keys
-        .write()
-        .unwrap()
-        .insert_no_overwrite(primary_key.clone(), key)
-        .is_ok()
-    {
-        (key, false)
-    } else {
-        usearch_key.fetch_sub(1, Ordering::Relaxed);
-        (
-            *keys.read().unwrap().get_by_left(&primary_key).unwrap(),
-            true,
-        )
-    };
-
-    let remove_key_from_bimap = |key: &Key| {
-        keys.write().unwrap().remove_by_right(key);
-    };
-
-    if remove && let Err(err) = idx.remove(key) {
-        debug!("add_or_replace: unable to remove embedding for key {key}: {err}");
-        return;
+    if let Overwritten::Left(_, old_key) = keys.write().unwrap().insert(primary_key.clone(), key) {
+        if let Err(err) = idx.remove(old_key) {
+            debug!("add_or_replace: unable to remove embedding for old key {old_key}: {err}");
+        }
     }
+
     if let Err(err) = idx.add(key, &embedding) {
         debug!("add_or_replace: unable to add embedding for key {key}: {err}");
-        remove_key_from_bimap(&key);
+        keys.write().unwrap().remove_by_right(&key);
     };
 }
 
@@ -804,6 +788,31 @@ mod tests {
             }));
         }
         search_handles
+    }
+
+    fn replace_concurrently(
+        index: mpsc::Sender<Index>,
+        threads: usize,
+        replaces_per_worker: usize,
+        dimensions: NonZeroUsize,
+    ) -> Vec<task::JoinHandle<()>> {
+        let mut handles = Vec::new();
+        for _ in 0..threads {
+            let actor = index.clone();
+            handles.push(tokio::spawn(async move {
+                for _ in 0..replaces_per_worker {
+                    let id: i32 = 0xbeef;
+                    actor
+                        .add_or_replace(
+                            vec![CqlValue::Int(id)].into(),
+                            vec![0.0f32; dimensions.get()].into(),
+                            None,
+                        )
+                        .await;
+                }
+            }));
+        }
+        handles
     }
 
     #[tokio::test]
@@ -1026,6 +1035,47 @@ mod tests {
         // Wait for expected number of vectors to be added.
         time::timeout(Duration::from_secs(10), async {
             while index.count().await.unwrap() != threads * adds_per_worker {
+                task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ntest::timeout(10_000)]
+    async fn concurrent_replace() {
+        let (_, config_rx) = watch::channel(Arc::new(Config::default()));
+        let dimensions = NonZeroUsize::new(1024).unwrap();
+        let factory = UsearchIndexFactory {
+            tokio_semaphore: Arc::new(Semaphore::new(Semaphore::MAX_PERMITS)),
+            rayon_semaphore: Arc::new(Semaphore::new(Semaphore::MAX_PERMITS)),
+            mode: Mode::Usearch,
+        };
+        let index = factory
+            .create_index(
+                IndexConfiguration {
+                    id: IndexId::new(&"vector".to_string().into(), &"store".to_string().into()),
+                    dimensions: dimensions.into(),
+                    connectivity: Connectivity::default(),
+                    expansion_add: ExpansionAdd::default(),
+                    expansion_search: ExpansionSearch::default(),
+                    space_type: SpaceType::Euclidean,
+                },
+                memory::new(config_rx),
+            )
+            .unwrap();
+        let threads = Handle::current().metrics().num_workers();
+
+        let handles = replace_concurrently(index.clone(), threads, 50, dimensions);
+
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        // Expect to have one vector as a result of all replacements.
+        time::timeout(Duration::from_secs(10), async {
+            while index.count().await.unwrap() != 1 {
                 task::yield_now().await;
             }
         })
