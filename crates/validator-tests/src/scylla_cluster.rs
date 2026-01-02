@@ -112,6 +112,13 @@ pub trait ScyllaClusterExt {
         conf: Option<Vec<u8>>,
     ) -> impl Future<Output = ()>;
 
+    /// Starts the ScyllaDB cluster with the given vector store URI and database IPs and authorization/authentication enabled.
+    fn start_with_auth(
+        &self,
+        node_configs: Vec<ScyllaNodeConfig>,
+        conf: Option<Vec<u8>>,
+    ) -> impl Future<Output = ()>;
+
     /// Stops the ScyllaDB cluster.
     fn stop(&self) -> impl Future<Output = ()>;
 
@@ -125,11 +132,25 @@ pub trait ScyllaClusterExt {
         conf: Option<Vec<u8>>,
     ) -> impl Future<Output = ()>;
 
+    /// Starts a paused cluster back again with authorization/authentication enabled.
+    fn up_with_auth(
+        &self,
+        node_configs: Vec<ScyllaNodeConfig>,
+        conf: Option<Vec<u8>>,
+    ) -> impl Future<Output = ()>;
+
     /// Pauses a cluster.
     fn down(&self) -> impl Future<Output = ()>;
 
     /// Starts a single paused ScyllaDB instance back again.
     fn up_node(
+        &self,
+        node_config: ScyllaNodeConfig,
+        conf: Option<Vec<u8>>,
+    ) -> impl Future<Output = ()>;
+
+    /// Starts a single paused ScyllaDB instance back again with authorization/authentication enabled.
+    fn up_node_with_auth(
         &self,
         node_config: ScyllaNodeConfig,
         conf: Option<Vec<u8>>,
@@ -164,6 +185,18 @@ impl ScyllaClusterExt for mpsc::Sender<ScyllaCluster> {
     }
 
     #[framed]
+    async fn start_with_auth(&self, node_configs: Vec<ScyllaNodeConfig>, conf: Option<Vec<u8>>) {
+        let mut actual_conf =
+            "authenticator: PasswordAuthenticator\nauthorizer: CassandraAuthorizer\ntablets_mode_for_new_keyspaces: enabled"
+                .as_bytes()
+                .to_vec();
+        if let Some(c) = conf {
+            actual_conf.extend_from_slice(&c);
+        }
+        self.start(node_configs, Some(actual_conf)).await;
+    }
+
+    #[framed]
     async fn stop(&self) {
         let (tx, rx) = oneshot::channel();
         self.send(ScyllaCluster::Stop { tx })
@@ -191,10 +224,34 @@ impl ScyllaClusterExt for mpsc::Sender<ScyllaCluster> {
     }
 
     #[framed]
+    async fn up_with_auth(&self, node_configs: Vec<ScyllaNodeConfig>, conf: Option<Vec<u8>>) {
+        let mut actual_conf =
+            "authenticator: PasswordAuthenticator\nauthorizer: CassandraAuthorizer\ntablets_mode_for_new_keyspaces: enabled"
+                .as_bytes()
+                .to_vec();
+        if let Some(c) = conf {
+            actual_conf.extend_from_slice(&c);
+        }
+        self.up(node_configs, Some(actual_conf)).await;
+    }
+
+    #[framed]
     async fn up_node(&self, node_config: ScyllaNodeConfig, conf: Option<Vec<u8>>) {
         self.send(ScyllaCluster::UpNode { node_config, conf })
             .await
             .expect("ScyllaClusterExt::up_node: internal actor should receive request")
+    }
+
+    #[framed]
+    async fn up_node_with_auth(&self, node_config: ScyllaNodeConfig, conf: Option<Vec<u8>>) {
+        let mut actual_conf =
+            "authenticator: PasswordAuthenticator\nauthorizer: CassandraAuthorizer\ntablets_mode_for_new_keyspaces: enabled"
+                .as_bytes()
+                .to_vec();
+        if let Some(c) = conf {
+            actual_conf.extend_from_slice(&c);
+        }
+        self.up_node(node_config, Some(actual_conf)).await;
     }
 
     #[framed]

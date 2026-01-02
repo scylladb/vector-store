@@ -112,6 +112,40 @@ pub async fn init(actors: TestActors) {
     info!("finished");
 }
 
+pub async fn init_with_auth(actors: TestActors) {
+    info!("started");
+
+    let scylla_configs = get_default_scylla_node_configs(&actors).await;
+    let vs_configs = get_default_vs_node_configs(&actors);
+    init_with_config_and_auth(actors, scylla_configs, vs_configs).await;
+
+    info!("finished");
+}
+
+#[framed]
+pub async fn init_with_config_and_auth(
+    actors: TestActors,
+    scylla_configs: Vec<ScyllaNodeConfig>,
+    vs_configs: Vec<VectorStoreNodeConfig>,
+) {
+    let vs_ips = get_default_vs_ips(&actors);
+    for (name, ip) in VS_NAMES.iter().zip(vs_ips.iter()) {
+        actors.dns.upsert(name.to_string(), *ip).await;
+    }
+
+    actors.db.start_with_auth(scylla_configs, None).await;
+    assert!(actors.db.wait_for_ready().await);
+    actors
+        .vs
+        .start_with_auth(
+            vs_configs,
+            "alice".to_string(),
+            "alice_password".to_string(),
+        )
+        .await;
+    assert!(actors.vs.wait_for_ready().await);
+}
+
 #[framed]
 pub async fn init_with_config(
     actors: TestActors,
@@ -152,6 +186,28 @@ pub async fn prepare_connection_with_custom_vs_ips(
             .await
             .expect("failed to create session"),
     );
+    let clients = vs_ips
+        .iter()
+        .map(|&ip| HttpClient::new((ip, VS_PORT).into()))
+        .collect();
+    (session, clients)
+}
+
+#[framed]
+pub async fn prepare_connection_with_auth(
+    actors: &TestActors,
+    user: &str,
+    password: &str,
+) -> (Arc<Session>, Vec<HttpClient>) {
+    let session = Arc::new(
+        SessionBuilder::new()
+            .known_node(actors.services_subnet.ip(DB_OCTET_1).to_string())
+            .user(user, password)
+            .build()
+            .await
+            .expect("failed to create session"),
+    );
+    let vs_ips = get_default_vs_ips(actors);
     let clients = vs_ips
         .iter()
         .map(|&ip| HttpClient::new((ip, VS_PORT).into()))

@@ -38,8 +38,18 @@ pub enum VectorStoreCluster {
     Start {
         node_configs: Vec<VectorStoreNodeConfig>,
     },
+    StartWithAuth {
+        node_configs: Vec<VectorStoreNodeConfig>,
+        user: String,
+        password: String,
+    },
     StartNode {
         node_config: VectorStoreNodeConfig,
+    },
+    StartNodeWithAuth {
+        node_config: VectorStoreNodeConfig,
+        user: String,
+        password: String,
     },
     Stop {
         tx: oneshot::Sender<()>,
@@ -60,8 +70,24 @@ pub trait VectorStoreClusterExt {
     /// Starts the vector-store cluster with the given node configurations.
     fn start(&self, node_configs: Vec<VectorStoreNodeConfig>) -> impl Future<Output = ()>;
 
+    /// Starts the vector-store cluster with the given node configurations and authentication.
+    fn start_with_auth(
+        &self,
+        node_configs: Vec<VectorStoreNodeConfig>,
+        user: String,
+        password: String,
+    ) -> impl Future<Output = ()>;
+
     /// Starts a single vector-store instance.
     fn start_node(&self, node_config: VectorStoreNodeConfig) -> impl Future<Output = ()>;
+
+    /// Starts a single vector-store instance with authentication.
+    fn start_node_with_auth(
+        &self,
+        node_config: VectorStoreNodeConfig,
+        user: String,
+        password: String,
+    ) -> impl Future<Output = ()>;
 
     /// Stops the vector-store cluster.
     fn stop(&self) -> impl Future<Output = ()>;
@@ -95,10 +121,44 @@ impl VectorStoreClusterExt for mpsc::Sender<VectorStoreCluster> {
     }
 
     #[framed]
+    async fn start_with_auth(
+        &self,
+        node_configs: Vec<VectorStoreNodeConfig>,
+        user: String,
+        password: String,
+    ) {
+        self.send(VectorStoreCluster::StartWithAuth {
+            node_configs,
+            user,
+            password,
+        })
+        .await
+        .expect("VectorStoreClusterExt::start_with_auth: internal actor should receive request");
+    }
+
+    #[framed]
     async fn start_node(&self, node_config: VectorStoreNodeConfig) {
         self.send(VectorStoreCluster::StartNode { node_config })
             .await
             .expect("VectorStoreClusterExt::start_node: internal actor should receive request");
+    }
+
+    #[framed]
+    async fn start_node_with_auth(
+        &self,
+        node_config: VectorStoreNodeConfig,
+        user: String,
+        password: String,
+    ) {
+        self.send(VectorStoreCluster::StartNodeWithAuth {
+            node_config,
+            user,
+            password,
+        })
+        .await
+        .expect(
+            "VectorStoreClusterExt::start_node_with_auth: internal actor should receive request",
+        );
     }
 
     #[framed]
