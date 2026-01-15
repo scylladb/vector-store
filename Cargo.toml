@@ -42,6 +42,7 @@ regex = "1.11.1"
 reqwest = { version = "0.12.15", default-features = false, features = ["json", "rustls-tls"] }
 scylla = { version = "1.2.0", features = ["time-03", "rustls-023"] }
 scylla-cdc = "0.5.0"
+scylla-proxy = "0.0.5"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 syn = { version = "2.0", features = ["full"] }

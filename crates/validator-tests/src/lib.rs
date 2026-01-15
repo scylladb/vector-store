@@ -6,6 +6,7 @@
 pub mod common;
 mod dns;
 mod scylla_cluster;
+mod scylla_proxy_cluster;
 mod vector_store_cluster;
 
 use async_backtrace::frame;
@@ -21,6 +22,9 @@ pub use scylla_cluster::ScyllaClusterExt;
 pub use scylla_cluster::ScyllaNodeConfig;
 pub use scylla_cluster::default_scylla_args;
 pub use scylla_cluster::set_default_scylla_args;
+pub use scylla_proxy_cluster::ScyllaProxyCluster;
+pub use scylla_proxy_cluster::ScyllaProxyClusterExt;
+pub use scylla_proxy_cluster::ScyllaProxyNodeConfig;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::future;
@@ -71,6 +75,7 @@ pub struct TestActors {
     pub dns: mpsc::Sender<Dns>,
     pub db: mpsc::Sender<ScyllaCluster>,
     pub vs: mpsc::Sender<VectorStoreCluster>,
+    pub db_proxy: mpsc::Sender<ScyllaProxyCluster>,
 }
 
 type TestFuture = BoxFuture<'static, ()>;
