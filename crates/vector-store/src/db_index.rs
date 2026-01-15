@@ -12,6 +12,8 @@ use crate::KeyspaceName;
 use crate::Percentage;
 use crate::Progress;
 use crate::TableName;
+use crate::internals::Internals;
+use crate::internals::InternalsExt;
 use crate::node_state::Event;
 use crate::node_state::NodeState;
 use crate::node_state::NodeStateExt;
@@ -134,6 +136,7 @@ pub(crate) async fn new(
     mut session_rx: watch::Receiver<Option<Arc<Session>>>,
     metadata: IndexMetadata,
     node_state: Sender<NodeState>,
+    internals: Sender<Internals>,
 ) -> anyhow::Result<(
     mpsc::Sender<DbIndex>,
     mpsc::Receiver<(DbEmbedding, Option<AsyncInProgress>)>,
@@ -211,12 +214,16 @@ pub(crate) async fn new(
                                 // Spawn CDC handler task
                                 let shutdown_notify_clone = Arc::clone(&shutdown_notify);
                                 let handler_id = cdc_id.clone();
+                                let internals = internals.clone();
                                 cdc_handler_task = Some(tokio::spawn(
                                     async move {
                                         tokio::select! {
                                             result = handler => {
                                                 if let Err(err) = result {
                                                     debug!("CDC handler error: {err}");
+                                                    internals
+                                                        .increment_counter(format!("{handler_id}-cdc-handler-errors"))
+                                                        .await;
                                                 }
                                             }
                                             _ = shutdown_notify_clone.notified() => {
@@ -225,7 +232,7 @@ pub(crate) async fn new(
                                         }
                                         debug!("CDC handler finished");
                                     }
-                                    .instrument(debug_span!("cdc", "{}", handler_id)),
+                                    .instrument(debug_span!("cdc", "{cdc_id}")),
                                 ));
 
                                 info!("CDC reader created successfully for {}", cdc_metadata.id());

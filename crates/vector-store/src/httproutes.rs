@@ -232,7 +232,7 @@ impl From<crate::node_state::IndexStatus> for IndexStatus {
     }
 }
 
-#[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
+#[derive(Debug, serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
 pub struct IndexStatusResponse {
     pub status: IndexStatus,
     pub count: usize,

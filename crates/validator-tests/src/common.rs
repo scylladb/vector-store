@@ -6,6 +6,8 @@
 use crate::DnsExt;
 use crate::ScyllaClusterExt;
 use crate::ScyllaNodeConfig;
+use crate::ScyllaProxyClusterExt;
+use crate::ScyllaProxyNodeConfig;
 use crate::TestActors;
 use crate::VectorStoreClusterExt;
 use crate::VectorStoreNodeConfig;
@@ -38,9 +40,12 @@ pub const DB_PORT: u16 = 9042;
 pub const DB_OCTET_1: u8 = 1;
 pub const DB_OCTET_2: u8 = 2;
 pub const DB_OCTET_3: u8 = 3;
-pub const VS_OCTET_1: u8 = 128;
-pub const VS_OCTET_2: u8 = 129;
-pub const VS_OCTET_3: u8 = 130;
+pub const DB_PROXY_OCTET_1: u8 = 10;
+pub const DB_PROXY_OCTET_2: u8 = 11;
+pub const DB_PROXY_OCTET_3: u8 = 12;
+pub const VS_OCTET_1: u8 = 20;
+pub const VS_OCTET_2: u8 = 21;
+pub const VS_OCTET_3: u8 = 22;
 
 #[framed]
 pub async fn get_default_vs_urls(actors: &TestActors) -> Vec<String> {
@@ -69,6 +74,14 @@ pub fn get_default_db_ips(actors: &TestActors) -> Vec<Ipv4Addr> {
     ]
 }
 
+pub fn get_default_db_proxy_ips(actors: &TestActors) -> Vec<Ipv4Addr> {
+    vec![
+        actors.services_subnet.ip(DB_PROXY_OCTET_1),
+        actors.services_subnet.ip(DB_PROXY_OCTET_2),
+        actors.services_subnet.ip(DB_PROXY_OCTET_3),
+    ]
+}
+
 #[framed]
 pub async fn get_default_scylla_node_configs(actors: &TestActors) -> Vec<ScyllaNodeConfig> {
     let default_vs_urls = get_default_vs_urls(actors).await;
@@ -84,6 +97,21 @@ pub async fn get_default_scylla_node_configs(actors: &TestActors) -> Vec<ScyllaN
                 args: crate::default_scylla_args(),
                 config: None,
             }
+        })
+        .collect()
+}
+
+#[framed]
+pub async fn get_default_scylla_proxy_node_configs(
+    actors: &TestActors,
+) -> Vec<ScyllaProxyNodeConfig> {
+    let db_ips = get_default_db_ips(actors);
+    get_default_db_proxy_ips(actors)
+        .into_iter()
+        .zip(db_ips.into_iter())
+        .map(|(proxy_addr, real_addr)| ScyllaProxyNodeConfig {
+            real_addr,
+            proxy_addr,
         })
         .collect()
 }
@@ -105,12 +133,45 @@ pub fn get_default_vs_node_configs(actors: &TestActors) -> Vec<VectorStoreNodeCo
 }
 
 #[framed]
+pub fn get_proxy_vs_node_configs(actors: &TestActors) -> Vec<VectorStoreNodeConfig> {
+    let db_proxy_ips = get_default_db_proxy_ips(actors);
+    get_default_vs_ips(actors)
+        .iter()
+        .zip(db_proxy_ips.iter())
+        .map(|(&vs_ip, &db_ip)| VectorStoreNodeConfig {
+            vs_ip,
+            db_ip,
+            user: None,
+            password: None,
+            envs: HashMap::new(),
+        })
+        .collect()
+}
+
+#[framed]
 pub async fn init(actors: TestActors) {
     info!("started");
 
     let scylla_configs = get_default_scylla_node_configs(&actors).await;
     let vs_configs = get_default_vs_node_configs(&actors);
     init_with_config(actors, scylla_configs, vs_configs).await;
+
+    info!("finished");
+}
+
+#[framed]
+pub async fn init_with_proxy(actors: TestActors) {
+    info!("started");
+
+    let scylla_configs = get_default_scylla_node_configs(&actors).await;
+    let scylla_proxy_configs = get_default_scylla_proxy_node_configs(&actors).await;
+    let vs_configs = get_proxy_vs_node_configs(&actors);
+
+    actors.db.start(scylla_configs).await;
+    assert!(actors.db.wait_for_ready().await);
+    actors.db_proxy.start(scylla_proxy_configs).await;
+    actors.vs.start(vs_configs).await;
+    assert!(actors.vs.wait_for_ready().await);
 
     info!("finished");
 }
@@ -144,6 +205,7 @@ pub async fn cleanup(actors: TestActors) {
         actors.dns.remove(name.to_string()).await;
     }
     actors.vs.stop().await;
+    actors.db_proxy.stop().await;
     actors.db.stop().await;
     info!("finished");
 }
