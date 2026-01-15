@@ -4012,6 +4012,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sysinfo",
+ "tap",
  "temp-env",
  "tempfile",
  "thiserror 2.0.17",

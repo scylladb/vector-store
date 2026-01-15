@@ -47,6 +47,7 @@ secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sysinfo.workspace = true
+tap.workspace = true
 thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true

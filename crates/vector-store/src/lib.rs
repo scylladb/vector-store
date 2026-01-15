@@ -56,10 +56,6 @@ use utoipa::openapi::SchemaFormat;
 use utoipa::openapi::schema::Type;
 use uuid::Uuid;
 
-#[derive(Clone, derive_more::From, derive_more::Display)]
-#[from(String, &str)]
-pub struct ScyllaDbUri(String);
-
 #[derive(Clone, Debug)]
 pub struct Config {
     pub vector_store_addr: std::net::SocketAddr,
@@ -70,6 +66,11 @@ pub struct Config {
     pub opensearch_addr: Option<String>,
     pub credentials: Option<Credentials>,
     pub usearch_simulator: Option<Vec<Duration>>,
+    pub cql_keepalive_interval: Option<Duration>,
+    pub cql_keepalive_timeout: Option<Duration>,
+    pub cql_tcp_keepalive_interval: Option<Duration>,
+    pub cdc_safety_interval: Option<Duration>,
+    pub cdc_sleep_interval: Option<Duration>,
     pub disable_colors: bool,
     pub tls_cert_path: Option<std::path::PathBuf>,
     pub tls_key_path: Option<std::path::PathBuf>,
@@ -89,6 +90,11 @@ impl Default for Config {
             disable_colors: false,
             tls_cert_path: None,
             tls_key_path: None,
+            cql_keepalive_interval: None,
+            cql_keepalive_timeout: None,
+            cql_tcp_keepalive_interval: None,
+            cdc_safety_interval: None,
+            cdc_sleep_interval: None,
         }
     }
 }

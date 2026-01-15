@@ -5,6 +5,7 @@
 
 use crate::AsyncInProgress;
 use crate::ColumnName;
+use crate::Config;
 use crate::DbEmbedding;
 use crate::IndexMetadata;
 use crate::KeyspaceName;
@@ -42,6 +43,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
+use tap::Pipe;
 use time::Date;
 use time::OffsetDateTime;
 use time::Time;
@@ -50,6 +52,7 @@ use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
+use tokio::sync::watch;
 use tracing::Instrument;
 use tracing::debug;
 use tracing::debug_span;
@@ -127,7 +130,8 @@ impl DbIndexExt for mpsc::Sender<DbIndex> {
 }
 
 pub(crate) async fn new(
-    mut session_rx: tokio::sync::watch::Receiver<Option<Arc<Session>>>,
+    mut config_rx: watch::Receiver<Arc<Config>>,
+    mut session_rx: watch::Receiver<Option<Arc<Session>>>,
     metadata: IndexMetadata,
     node_state: Sender<NodeState>,
 ) -> anyhow::Result<(
@@ -192,7 +196,9 @@ pub(crate) async fn new(
                         }
 
                         // Create new CDC reader
+                        let config = config_rx.borrow_and_update().clone();
                         match create_cdc_reader(
+                            config,
                             session,
                             cdc_metadata.clone(),
                             cdc_tx_embeddings.clone(),
@@ -316,6 +322,7 @@ pub(crate) async fn new(
 
 // Helper function to create CDC reader - extracted to avoid duplication
 async fn create_cdc_reader(
+    config: Arc<Config>,
     session: Arc<Session>,
     metadata: IndexMetadata,
     tx_embeddings: mpsc::Sender<(DbEmbedding, Option<AsyncInProgress>)>,
@@ -330,6 +337,22 @@ async fn create_cdc_reader(
         .keyspace(metadata.keyspace_name.as_ref())
         .table_name(metadata.table_name.as_ref())
         .consumer_factory(Arc::new(consumer_factory))
+        .pipe(|builder| {
+            if let Some(interval) = config.cdc_safety_interval {
+                info!("Setting CDC safety interval to {interval:?}");
+                builder.safety_interval(interval)
+            } else {
+                builder
+            }
+        })
+        .pipe(|builder| {
+            if let Some(interval) = config.cdc_sleep_interval {
+                info!("Setting CDC sleep interval to {interval:?}");
+                builder.sleep_interval(interval)
+            } else {
+                builder
+            }
+        })
         .build()
         .await
         .context("Failed to build CDC log reader")
