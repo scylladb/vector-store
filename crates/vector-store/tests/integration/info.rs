@@ -14,6 +14,7 @@ async fn run_vs(
     index_factory: Box<dyn vector_store::IndexFactory + Send + Sync>,
 ) -> (HttpClient, impl Sized, impl Sized) {
     let node_state = vector_store::new_node_state().await;
+    let internals = vector_store::new_internals();
     let (db_actor, _) = db_basic::new(node_state.clone());
 
     let config = vector_store::Config {
@@ -22,9 +23,10 @@ async fn run_vs(
     };
     let (_config_tx, config_rx) = watch::channel(Arc::new(config));
 
-    let (server, addr) = vector_store::run(node_state, db_actor, index_factory, config_rx)
-        .await
-        .unwrap();
+    let (server, addr) =
+        vector_store::run(node_state, db_actor, internals, index_factory, config_rx)
+            .await
+            .unwrap();
     (HttpClient::new(addr), server, _config_tx)
 }
 

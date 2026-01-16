@@ -19,6 +19,8 @@ use crate::engine::EngineExt;
 use crate::index::IndexExt;
 use crate::index::validator;
 use crate::info::Info;
+use crate::internals::Internals;
+use crate::internals::InternalsExt;
 use crate::metrics::Metrics;
 use crate::node_state::NodeState;
 use crate::node_state::NodeStateExt;
@@ -37,6 +39,7 @@ use axum::response;
 use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::routing::get;
+use axum::routing::put;
 use axum_server_dual_protocol::Protocol;
 use itertools::Itertools;
 use macros::ToEnumSchema;
@@ -101,6 +104,7 @@ struct RoutesInnerState {
     engine: Sender<Engine>,
     metrics: Arc<Metrics>,
     node_state: Sender<NodeState>,
+    internals: Sender<Internals>,
     index_engine_version: String,
     use_tls: bool,
 }
@@ -109,6 +113,7 @@ pub(crate) fn new(
     engine: Sender<Engine>,
     metrics: Arc<Metrics>,
     node_state: Sender<NodeState>,
+    internals: Sender<Internals>,
     index_engine_version: String,
     use_tls: bool,
 ) -> Router {
@@ -116,12 +121,14 @@ pub(crate) fn new(
         engine,
         metrics: metrics.clone(),
         node_state,
+        internals,
         index_engine_version,
         use_tls,
     };
     let (router, api) = new_open_api_router();
     let router = router
         .route("/metrics", get(get_metrics))
+        .nest("/api/internals", new_internals())
         .with_state(state)
         .layer(TraceLayer::new_for_http());
 
@@ -971,6 +978,31 @@ async fn get_status(State(state): State<RoutesInnerState>) -> Response {
         response::Json(NodeStatus::from(state.node_state.get_status().await)),
     )
         .into_response()
+}
+
+fn new_internals() -> Router<RoutesInnerState> {
+    Router::new()
+        .route(
+            "/counters",
+            get(get_internal_counters).delete(delete_internal_counters),
+        )
+        .route("/counters/{id}", put(put_internal_counter))
+}
+
+async fn get_internal_counters(State(state): State<RoutesInnerState>) -> Response {
+    (
+        StatusCode::OK,
+        response::Json(state.internals.counters().await),
+    )
+        .into_response()
+}
+
+async fn delete_internal_counters(State(state): State<RoutesInnerState>) {
+    state.internals.clear_counters().await;
+}
+
+async fn put_internal_counter(State(state): State<RoutesInnerState>, Path(id): Path<String>) {
+    state.internals.start_counter(id).await;
 }
 
 #[cfg(test)]

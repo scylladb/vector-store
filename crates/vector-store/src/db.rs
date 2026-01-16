@@ -21,6 +21,7 @@ use crate::SpaceType;
 use crate::TableName;
 use crate::db_index;
 use crate::db_index::DbIndex;
+use crate::internals::Internals;
 use crate::node_state::Event;
 use crate::node_state::NodeState;
 use crate::node_state::NodeStateExt;
@@ -230,6 +231,7 @@ impl DbExt for mpsc::Sender<Db> {
 
 pub(crate) async fn new(
     node_state: Sender<NodeState>,
+    internals: Sender<Internals>,
     mut config_rx: watch::Receiver<Arc<Config>>,
 ) -> anyhow::Result<mpsc::Sender<Db>> {
     let (tx, mut rx) = mpsc::channel(10);

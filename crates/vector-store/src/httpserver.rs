@@ -6,6 +6,7 @@
 use crate::Config;
 use crate::engine::Engine;
 use crate::httproutes;
+use crate::internals::Internals;
 use crate::metrics::Metrics;
 use crate::node_state::NodeState;
 use axum_server::Handle;
@@ -47,6 +48,7 @@ async fn spawn_server_with_retry(
     state: Sender<NodeState>,
     engine: Sender<Engine>,
     metrics: Arc<Metrics>,
+    internals: Sender<Internals>,
     index_engine_version: String,
 ) -> anyhow::Result<(Handle, SocketAddr)> {
     let mut retry_delay = Duration::from_millis(50);
@@ -62,6 +64,7 @@ async fn spawn_server_with_retry(
             state.clone(),
             engine.clone(),
             metrics.clone(),
+            internals.clone(),
             index_engine_version.clone(),
         )
         .await
@@ -92,6 +95,7 @@ pub(crate) async fn new(
     state: Sender<NodeState>,
     engine: Sender<Engine>,
     metrics: Arc<Metrics>,
+    internals: Sender<Internals>,
     index_engine_version: String,
     mut config_rx: watch::Receiver<Arc<Config>>,
 ) -> anyhow::Result<(Sender<HttpServer>, SocketAddr)> {
@@ -107,6 +111,7 @@ pub(crate) async fn new(
         state.clone(),
         engine.clone(),
         metrics.clone(),
+        internals.clone(),
         index_engine_version.clone(),
     )
     .await?;
@@ -174,6 +179,7 @@ pub(crate) async fn new(
                                 state.clone(),
                                 engine.clone(),
                                 metrics.clone(),
+                                internals.clone(),
                                 index_engine_version.clone(),
                             )
                             .await
@@ -215,6 +221,7 @@ async fn spawn_server(
     state: Sender<NodeState>,
     engine: Sender<Engine>,
     metrics: Arc<Metrics>,
+    internals: Sender<Internals>,
     index_engine_version: String,
 ) -> anyhow::Result<(Handle, SocketAddr)> {
     let tls_config = load_tls_config(config).await?;
@@ -231,8 +238,15 @@ async fn spawn_server(
                     axum_server_dual_protocol::bind_dual_protocol(addr, tls_config)
                         .handle(handle)
                         .serve(
-                            httproutes::new(engine, metrics, state, index_engine_version, true)
-                                .into_make_service(),
+                            httproutes::new(
+                                engine,
+                                metrics,
+                                state,
+                                internals,
+                                index_engine_version,
+                                true,
+                            )
+                            .into_make_service(),
                         )
                         .await
                 }
@@ -241,8 +255,15 @@ async fn spawn_server(
                         .handle(handle)
                         .acceptor(NoDelayAcceptor::new())
                         .serve(
-                            httproutes::new(engine, metrics, state, index_engine_version, false)
-                                .into_make_service(),
+                            httproutes::new(
+                                engine,
+                                metrics,
+                                state,
+                                internals,
+                                index_engine_version,
+                                false,
+                            )
+                            .into_make_service(),
                         )
                         .await
                 }

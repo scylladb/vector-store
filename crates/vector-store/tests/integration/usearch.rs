@@ -50,6 +50,7 @@ pub(crate) async fn setup_store(
     Sender<NodeState>,
 ) {
     let node_state = vector_store::new_node_state().await;
+    let internals = vector_store::new_internals();
 
     let (db_actor, db) = db_basic::new(node_state.clone());
 
@@ -107,9 +108,10 @@ pub(crate) async fn setup_store(
     let run = {
         let node_state = node_state.clone();
         async move {
-            let (server, addr) = vector_store::run(node_state, db_actor, index_factory, config_rx)
-                .await
-                .unwrap();
+            let (server, addr) =
+                vector_store::run(node_state, db_actor, internals, index_factory, config_rx)
+                    .await
+                    .unwrap();
 
             (HttpClient::new(addr), server, config_tx)
         }
@@ -234,6 +236,7 @@ async fn failed_db_index_create() {
     crate::enable_tracing();
 
     let node_state = vector_store::new_node_state().await;
+    let internals = vector_store::new_internals();
     let (db_actor, db) = db_basic::new(node_state.clone());
 
     let index = IndexMetadata {
@@ -258,9 +261,10 @@ async fn failed_db_index_create() {
     };
     let (_config_tx, config_rx) = watch::channel(Arc::new(config));
 
-    let (_server_actor, addr) = vector_store::run(node_state, db_actor, index_factory, config_rx)
-        .await
-        .unwrap();
+    let (_server_actor, addr) =
+        vector_store::run(node_state, db_actor, internals, index_factory, config_rx)
+            .await
+            .unwrap();
 
     let client = HttpClient::new(addr);
 
