@@ -17,11 +17,11 @@ use crate::IndexMetadata;
 use crate::IndexName;
 use crate::IndexVersion;
 use crate::KeyspaceName;
-use crate::ScyllaDbUri;
 use crate::SpaceType;
 use crate::TableName;
 use crate::db_index;
 use crate::db_index::DbIndex;
+use crate::internals::Internals;
 use crate::node_state::Event;
 use crate::node_state::NodeState;
 use crate::node_state::NodeStateExt;
@@ -42,6 +42,8 @@ use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
+use tap::Pipe;
+use tokio::sync::Notify;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
@@ -49,7 +51,7 @@ use tokio::sync::watch;
 use tokio::time::interval;
 use tracing::Instrument;
 use tracing::debug;
-use tracing::debug_span;
+use tracing::error_span;
 use tracing::info;
 use tracing::trace;
 use tracing::warn;
@@ -230,16 +232,18 @@ impl DbExt for mpsc::Sender<Db> {
 
 pub(crate) async fn new(
     node_state: Sender<NodeState>,
+    internals: Sender<Internals>,
     mut config_rx: watch::Receiver<Arc<Config>>,
 ) -> anyhow::Result<mpsc::Sender<Db>> {
     let (tx, mut rx) = mpsc::channel(10);
     tokio::spawn(
         async move {
-            let config = config_rx.borrow().clone();
-            let mut current_uri = config.scylladb_uri.clone();
-            let mut current_credentials = config.credentials.clone();
+            let mut config = config_rx.borrow().clone();
             let mut reconnect_timer = interval(RECONNECT_TIMEOUT);
             reconnect_timer.tick().await; // Consume the first immediate tick
+
+            // Notification for CDC errors
+            let cdc_error_notify = Arc::new(Notify::new());
 
             // Use watch channel to share session, starting with None
             let (session_tx, session_rx) = watch::channel(None);
@@ -251,23 +255,22 @@ pub(crate) async fn new(
                     _ = reconnect_timer.tick() => {
                         if session_rx.borrow().is_none() {
                             match create_session(
-                                ScyllaDbUri(current_uri.clone()),
-                                current_credentials.clone(),
+                                config.clone(),
                                 &node_state
                             ).await {
                                 Ok(session) => {
                                     node_state.send_event(Event::ConnectedToDb).await;
                                     session_tx.send(Some(session)).ok();
                                     if statements.is_none() {
-                                        statements = Some(Arc::new(Statements::new(session_rx.clone()).await.unwrap()));
+                                        statements = Some(Arc::new(Statements::new(config_rx.clone(), session_rx.clone()).await.unwrap()));
                                     }
-                                    info!("Connected to ScyllaDB at {}", current_uri);
+                                    info!("Connected to ScyllaDB at {}", config.scylladb_uri);
                                 }
                                 Err(e) => {
                                     tracing::error!(
                                         "Failed to connect to ScyllaDB (error: {}) at {}, retrying in {}s",
                                         e,
-                                        current_uri,
+                                        config.scylladb_uri,
                                         RECONNECT_TIMEOUT.as_secs()
                                     );
                                 }
@@ -275,14 +278,20 @@ pub(crate) async fn new(
                         }
                     }
 
+                    _ = cdc_error_notify.notified() => {
+                        warn!("CDC error notification received, cancelling the current ScyllaDB connection...");
+                        // Cancel existing session and let reconnection timer handle it
+                        session_tx.send(None).ok();
+                    }
+
                     // Config changes - check if URI/credentials changed
                     result = config_rx.changed() => {
                         if result.is_ok() {
-                            let config = config_rx.borrow_and_update().clone();
+                            let new_config = config_rx.borrow_and_update().clone();
 
                             // Check if credentials or URI changed
-                            let uri_changed = config.scylladb_uri != current_uri;
-                            let credentials_changed = match (&config.credentials, &current_credentials) {
+                            let uri_changed = new_config.scylladb_uri != config.scylladb_uri;
+                            let credentials_changed = match (&new_config.credentials, &config.credentials) {
                                 (None, None) => false,
                                 (Some(_), None) | (None, Some(_)) => true,
                                 (Some(new_creds), Some(old_creds)) => {
@@ -302,13 +311,12 @@ pub(crate) async fn new(
                             if uri_changed || credentials_changed {
                                 if uri_changed {
                                     warn!("ScyllaDB URI changed from {} to {}, will reconnect...",
-                                          current_uri, config.scylladb_uri);
-                                    current_uri = config.scylladb_uri.clone();
+                                          config.scylladb_uri, new_config.scylladb_uri);
                                 }
                                 if credentials_changed {
                                     warn!("ScyllaDB credentials changed, will reconnect...");
-                                    current_credentials = config.credentials.clone();
                                 }
+                                config = new_config;
 
                                 // Cancel existing session and let reconnection timer handle it
                                 session_tx.send(None).ok();
@@ -327,7 +335,8 @@ pub(crate) async fn new(
                             Some(msg) => {
                                 if let Some(ref stmts) = statements {
                                     if session_rx.borrow().is_some() {
-                                        tokio::spawn(process(stmts.clone(), msg, node_state.clone()));
+                                        tokio::spawn(process(stmts.clone(), msg, node_state.clone(), internals.clone(), cdc_error_notify.clone())
+                                            .instrument(error_span!("db-process")));
                                     } else {
                                         warn!("Received message but no valid session");
                                         respond_with_error(msg, anyhow::anyhow!("No active database session"));
@@ -342,7 +351,7 @@ pub(crate) async fn new(
                 }
             }
         }
-        .instrument(debug_span!("db")),
+        .instrument(error_span!("db")),
     );
     Ok(tx)
 }
@@ -373,10 +382,20 @@ fn respond_with_error(msg: Db, error: anyhow::Error) {
     }
 }
 
-async fn process(statements: Arc<Statements>, msg: Db, node_state: Sender<NodeState>) {
+async fn process(
+    statements: Arc<Statements>,
+    msg: Db,
+    node_state: Sender<NodeState>,
+    internals: Sender<Internals>,
+    cdc_error_notify: Arc<Notify>,
+) {
     match msg {
         Db::GetDbIndex { metadata, tx } => tx
-            .send(statements.get_db_index(metadata, node_state.clone()).await)
+            .send(
+                statements
+                    .get_db_index(metadata, node_state.clone(), internals, cdc_error_notify)
+                    .await,
+            )
             .unwrap_or_else(|_| trace!("process: Db::GetDbIndex: unable to send response")),
 
         Db::LatestSchemaVersion { tx } => tx
@@ -427,6 +446,7 @@ async fn process(statements: Arc<Statements>, msg: Db, node_state: Sender<NodeSt
 }
 
 struct Statements {
+    config_rx: watch::Receiver<Arc<Config>>,
     session_rx: watch::Receiver<Option<Arc<Session>>>,
     st_latest_schema_version: PreparedStatement,
     st_get_indexes: PreparedStatement,
@@ -436,18 +456,42 @@ struct Statements {
 }
 
 async fn create_session(
-    uri: ScyllaDbUri,
-    credentials: Option<Credentials>,
+    config: Arc<Config>,
     node_state: &Sender<NodeState>,
 ) -> anyhow::Result<Arc<Session>> {
     node_state.send_event(Event::ConnectingToDb).await;
-    let mut builder = SessionBuilder::new().known_node(uri.0.as_str());
+    let mut builder = SessionBuilder::new()
+        .known_node(&config.scylladb_uri)
+        .pipe(|builder| {
+            if let Some(interval) = config.cql_keepalive_interval {
+                info!("Setting CQL keepalive interval to {interval:?}");
+                builder.keepalive_interval(interval)
+            } else {
+                builder
+            }
+        })
+        .pipe(|builder| {
+            if let Some(timeout) = config.cql_keepalive_timeout {
+                info!("Setting CQL keepalive timeout to {timeout:?}");
+                builder.keepalive_timeout(timeout)
+            } else {
+                builder
+            }
+        })
+        .pipe(|builder| {
+            if let Some(interval) = config.cql_tcp_keepalive_interval {
+                info!("Setting CQL TCP keepalive interval to {interval:?}");
+                builder.tcp_keepalive_interval(interval)
+            } else {
+                builder
+            }
+        });
 
     if let Some(Credentials {
         username,
         password,
         certificate_path,
-    }) = credentials
+    }) = &config.credentials
     {
         // Configure username/password authentication if provided
         if let (Some(username), Some(password)) = (username, password) {
@@ -501,21 +545,32 @@ async fn create_session(
             .await?
             .into_rows_result()?
             .single_row()?;
-        info!("Connected to ScyllaDB {} at {}", version.0, uri.0);
+        info!(
+            "Connected to ScyllaDB {} at {}",
+            version.0, config.scylladb_uri
+        );
     } else {
-        warn!("No ScyllaDB node at {}, please verify the URI", uri.0);
+        warn!(
+            "No ScyllaDB node at {}, please verify the URI",
+            config.scylladb_uri
+        );
     }
 
     Ok(session)
 }
 
 impl Statements {
-    async fn new(session_rx: watch::Receiver<Option<Arc<Session>>>) -> anyhow::Result<Self> {
+    async fn new(
+        config_rx: watch::Receiver<Arc<Config>>,
+        session_rx: watch::Receiver<Option<Arc<Session>>>,
+    ) -> anyhow::Result<Self> {
         let session = session_rx.borrow().clone().ok_or_else(|| {
             anyhow::anyhow!("No session available during Statements initialization")
         })?;
 
         Ok(Self {
+            config_rx,
+
             st_latest_schema_version: session
                 .prepare(Self::ST_LATEST_SCHEMA_VERSION)
                 .await
@@ -547,8 +602,18 @@ impl Statements {
         &self,
         metadata: IndexMetadata,
         node_state: Sender<NodeState>,
+        internals: Sender<Internals>,
+        cdc_error_notify: Arc<Notify>,
     ) -> GetDbIndexR {
-        db_index::new(self.session_rx.clone(), metadata, node_state).await
+        db_index::new(
+            self.config_rx.clone(),
+            self.session_rx.clone(),
+            metadata,
+            node_state,
+            internals,
+            cdc_error_notify,
+        )
+        .await
     }
 
     const ST_LATEST_SCHEMA_VERSION: &str = "
@@ -873,7 +938,7 @@ pub(crate) mod tests {
 
                 debug!("finished");
             }
-            .instrument(debug_span!("engine-test")),
+            .instrument(error_span!("engine-test")),
         );
 
         tx

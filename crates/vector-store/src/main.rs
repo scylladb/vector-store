@@ -83,10 +83,18 @@ fn main() -> anyhow::Result<()> {
             vector_store::new_index_factory_usearch(config_rx.clone())?
         };
 
-        let db_actor = vector_store::new_db(node_state.clone(), config_rx.clone()).await?;
+        let internals = vector_store::new_internals();
+        let db_actor =
+            vector_store::new_db(node_state.clone(), internals.clone(), config_rx.clone()).await?;
 
-        let (_server_actor, addr) =
-            vector_store::run(node_state, db_actor, index_factory, config_rx.clone()).await?;
+        let (_server_actor, addr) = vector_store::run(
+            node_state,
+            db_actor,
+            internals,
+            index_factory,
+            config_rx.clone(),
+        )
+        .await?;
         tracing::info!("listening on {addr}");
 
         vector_store::wait_for_shutdown().await;

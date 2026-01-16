@@ -6,6 +6,7 @@
 use reqwest::Client;
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use vector_store::ColumnName;
@@ -26,12 +27,14 @@ use vector_store::httproutes::PostIndexAnnResponse;
 pub struct HttpClient {
     client: Client,
     url_api: String,
+    url_internals_api: String,
 }
 
 impl HttpClient {
     pub fn new(addr: SocketAddr) -> Self {
         Self {
             url_api: format!("http://{addr}/api/v1"),
+            url_internals_api: format!("http://{addr}/api/internals"),
             client: Client::new(),
         }
     }
@@ -144,5 +147,31 @@ impl HttpClient {
             .await?
             .json()
             .await?)
+    }
+
+    pub async fn internals_counters(&self) -> anyhow::Result<BTreeMap<String, u64>> {
+        Ok(self
+            .client
+            .get(format!("{}/counters", self.url_internals_api))
+            .send()
+            .await?
+            .json()
+            .await?)
+    }
+
+    pub async fn internals_clear_counters(&self) -> anyhow::Result<()> {
+        self.client
+            .delete(format!("{}/counters", self.url_internals_api))
+            .send()
+            .await?;
+        Ok(())
+    }
+
+    pub async fn internals_start_counter(&self, id: String) -> anyhow::Result<()> {
+        self.client
+            .put(format!("{}/counters/{id}", self.url_internals_api))
+            .send()
+            .await?;
+        Ok(())
     }
 }

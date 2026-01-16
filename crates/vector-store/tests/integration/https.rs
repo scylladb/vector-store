@@ -27,6 +27,7 @@ async fn run_server(
     tls_key_path: Option<PathBuf>,
 ) -> (impl Sized, core::net::SocketAddr, impl Sized) {
     let node_state = vector_store::new_node_state().await;
+    let internals = vector_store::new_internals();
     let (db_actor, _db) = db_basic::new(node_state.clone());
     let (_, rx) = watch::channel(Arc::new(Config::default()));
     let index_factory = vector_store::new_index_factory_usearch(rx).unwrap();
@@ -40,9 +41,10 @@ async fn run_server(
 
     let (_config_tx, config_rx) = watch::channel(Arc::new(config));
 
-    let (server, addr) = vector_store::run(node_state, db_actor, index_factory, config_rx)
-        .await
-        .unwrap();
+    let (server, addr) =
+        vector_store::run(node_state, db_actor, internals, index_factory, config_rx)
+            .await
+            .unwrap();
 
     (server, addr, _config_tx)
 }

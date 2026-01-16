@@ -154,7 +154,12 @@ async fn run_node(node_config: &VectorStoreNodeConfig, state: &State, workdir: &
         .env(
             "VECTOR_STORE_DISABLE_COLORS",
             state.disable_colors.to_string(),
-        );
+        )
+        .env("VECTOR_STORE_CQL_KEEPALIVE_INTERVAL", "2s")
+        .env("VECTOR_STORE_CQL_KEEPALIVE_TIMEOUT", "10s")
+        .env("VECTOR_STORE_CQL_TCP_KEEPALIVE_INTERVAL", "1s")
+        .env("VECTOR_STORE_CDC_SAFETY_INTERVAL", "3s")
+        .env("VECTOR_STORE_CDC_SLEEP_INTERVAL", "1s");
 
     if let Some(u) = node_config.user.as_deref()
         && let Some(p) = node_config.password.as_deref()

@@ -300,6 +300,36 @@ where
         .ok()
         .map(std::path::PathBuf::from);
 
+    config.cql_keepalive_interval = env("VECTOR_STORE_CQL_KEEPALIVE_INTERVAL")
+        .ok()
+        .map(|v| v.parse::<humantime::Duration>())
+        .transpose()?
+        .map(|v| v.into());
+
+    config.cql_keepalive_timeout = env("VECTOR_STORE_CQL_KEEPALIVE_TIMEOUT")
+        .ok()
+        .map(|v| v.parse::<humantime::Duration>())
+        .transpose()?
+        .map(|v| v.into());
+
+    config.cql_tcp_keepalive_interval = env("VECTOR_STORE_CQL_TCP_KEEPALIVE_INTERVAL")
+        .ok()
+        .map(|v| v.parse::<humantime::Duration>())
+        .transpose()?
+        .map(|v| v.into());
+
+    config.cdc_safety_interval = env("VECTOR_STORE_CDC_SAFETY_INTERVAL")
+        .ok()
+        .map(|v| v.parse::<humantime::Duration>())
+        .transpose()?
+        .map(|v| v.into());
+
+    config.cdc_sleep_interval = env("VECTOR_STORE_CDC_SLEEP_INTERVAL")
+        .ok()
+        .map(|v| v.parse::<humantime::Duration>())
+        .transpose()?
+        .map(|v| v.into());
+
     // Validate that both cert and key are provided together, or neither
     match (&tls_cert_path, &tls_key_path) {
         (Some(_), Some(_)) | (None, None) => {
@@ -486,6 +516,11 @@ mod tests {
             disable_colors: false,
             tls_cert_path: None,
             tls_key_path: None,
+            cql_keepalive_interval: None,
+            cql_keepalive_timeout: None,
+            cql_tcp_keepalive_interval: None,
+            cdc_safety_interval: None,
+            cdc_sleep_interval: None,
         };
 
         let (config_manager, mut config_rx) = ConfigManager::new(initial_config);

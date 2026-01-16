@@ -10,6 +10,7 @@ pub mod httproutes;
 mod httpserver;
 mod index;
 mod info;
+mod internals;
 mod memory;
 mod metrics;
 mod monitor_indexes;
@@ -17,6 +18,7 @@ mod monitor_items;
 pub mod node_state;
 
 use crate::index::usearch::Semaphore;
+use crate::internals::Internals;
 use crate::metrics::Metrics;
 use crate::node_state::NodeState;
 use db::Db;
@@ -56,10 +58,6 @@ use utoipa::openapi::SchemaFormat;
 use utoipa::openapi::schema::Type;
 use uuid::Uuid;
 
-#[derive(Clone, derive_more::From, derive_more::Display)]
-#[from(String, &str)]
-pub struct ScyllaDbUri(String);
-
 #[derive(Clone, Debug)]
 pub struct Config {
     pub vector_store_addr: std::net::SocketAddr,
@@ -70,6 +68,11 @@ pub struct Config {
     pub opensearch_addr: Option<String>,
     pub credentials: Option<Credentials>,
     pub usearch_simulator: Option<Vec<Duration>>,
+    pub cql_keepalive_interval: Option<Duration>,
+    pub cql_keepalive_timeout: Option<Duration>,
+    pub cql_tcp_keepalive_interval: Option<Duration>,
+    pub cdc_safety_interval: Option<Duration>,
+    pub cdc_sleep_interval: Option<Duration>,
     pub disable_colors: bool,
     pub tls_cert_path: Option<std::path::PathBuf>,
     pub tls_key_path: Option<std::path::PathBuf>,
@@ -89,6 +92,11 @@ impl Default for Config {
             disable_colors: false,
             tls_cert_path: None,
             tls_key_path: None,
+            cql_keepalive_interval: None,
+            cql_keepalive_timeout: None,
+            cql_tcp_keepalive_interval: None,
+            cdc_safety_interval: None,
+            cdc_sleep_interval: None,
         }
     }
 }
@@ -573,6 +581,7 @@ pub fn block_on<Output>(threads: Option<usize>, f: impl AsyncFnOnce() -> Output)
 pub async fn run(
     node_state: Sender<NodeState>,
     db_actor: Sender<Db>,
+    internals: Sender<Internals>,
     index_factory: Box<dyn IndexFactory + Send + Sync>,
     config_rx: watch::Receiver<Arc<Config>>,
 ) -> anyhow::Result<(impl Sized, SocketAddr)> {
@@ -589,6 +598,7 @@ pub async fn run(
         )
         .await?,
         metrics,
+        internals,
         index_engine_version,
         config_rx,
     )
@@ -597,13 +607,18 @@ pub async fn run(
 
 pub async fn new_db(
     node_state: Sender<NodeState>,
+    internals: Sender<Internals>,
     config_rx: watch::Receiver<Arc<Config>>,
 ) -> anyhow::Result<Sender<Db>> {
-    db::new(node_state, config_rx).await
+    db::new(node_state, internals, config_rx).await
 }
 
 pub async fn new_node_state() -> Sender<NodeState> {
     node_state::new().await
+}
+
+pub fn new_internals() -> Sender<Internals> {
+    internals::new()
 }
 
 // yield to let other tasks run before cpu-intensive processing, as it is CPU intensive and can

@@ -12,6 +12,7 @@ async-backtrace.workspace = true
 clap.workspace = true
 hickory-server.workspace = true
 httpclient.workspace = true
+scylla-proxy.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 tracing.workspace = true

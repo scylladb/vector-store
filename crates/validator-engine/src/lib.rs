@@ -5,6 +5,7 @@
 
 mod dns;
 mod scylla_cluster;
+mod scylla_proxy_cluster;
 mod vector_store_cluster;
 
 use async_backtrace::frame;
@@ -310,6 +311,7 @@ pub fn run() -> Result<(), &'static str> {
             let db =
                 scylla_cluster::new(scylla, scylla_default_conf, tmpdir.clone(), verbose).await;
             let vs = vector_store_cluster::new(vector_store, verbose, disable_colors, tmpdir).await;
+            let db_proxy = scylla_proxy_cluster::new().await;
 
             info!(
                 "{} version: {}",
@@ -329,6 +331,7 @@ pub fn run() -> Result<(), &'static str> {
                     dns,
                     db,
                     vs,
+                    db_proxy,
                 },
                 test_cases,
                 Arc::new(filter_map),
