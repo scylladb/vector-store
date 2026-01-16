@@ -43,6 +43,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 use tap::Pipe;
+use tokio::sync::Notify;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
@@ -50,7 +51,7 @@ use tokio::sync::watch;
 use tokio::time::interval;
 use tracing::Instrument;
 use tracing::debug;
-use tracing::debug_span;
+use tracing::error_span;
 use tracing::info;
 use tracing::trace;
 use tracing::warn;
@@ -241,6 +242,9 @@ pub(crate) async fn new(
             let mut reconnect_timer = interval(RECONNECT_TIMEOUT);
             reconnect_timer.tick().await; // Consume the first immediate tick
 
+            // Notification for CDC errors
+            let cdc_error_notify = Arc::new(Notify::new());
+
             // Use watch channel to share session, starting with None
             let (session_tx, session_rx) = watch::channel(None);
             let mut statements: Option<Arc<Statements>> = None;
@@ -272,6 +276,12 @@ pub(crate) async fn new(
                                 }
                             }
                         }
+                    }
+
+                    _ = cdc_error_notify.notified() => {
+                        warn!("CDC error notification received, cancelling the current ScyllaDB connection...");
+                        // Cancel existing session and let reconnection timer handle it
+                        session_tx.send(None).ok();
                     }
 
                     // Config changes - check if URI/credentials changed
@@ -325,7 +335,8 @@ pub(crate) async fn new(
                             Some(msg) => {
                                 if let Some(ref stmts) = statements {
                                     if session_rx.borrow().is_some() {
-                                        tokio::spawn(process(stmts.clone(), msg, node_state.clone(), internals.clone()));
+                                        tokio::spawn(process(stmts.clone(), msg, node_state.clone(), internals.clone(), cdc_error_notify.clone())
+                                            .instrument(error_span!("db-process")));
                                     } else {
                                         warn!("Received message but no valid session");
                                         respond_with_error(msg, anyhow::anyhow!("No active database session"));
@@ -340,7 +351,7 @@ pub(crate) async fn new(
                 }
             }
         }
-        .instrument(debug_span!("db")),
+        .instrument(error_span!("db")),
     );
     Ok(tx)
 }
@@ -376,12 +387,13 @@ async fn process(
     msg: Db,
     node_state: Sender<NodeState>,
     internals: Sender<Internals>,
+    cdc_error_notify: Arc<Notify>,
 ) {
     match msg {
         Db::GetDbIndex { metadata, tx } => tx
             .send(
                 statements
-                    .get_db_index(metadata, node_state.clone(), internals)
+                    .get_db_index(metadata, node_state.clone(), internals, cdc_error_notify)
                     .await,
             )
             .unwrap_or_else(|_| trace!("process: Db::GetDbIndex: unable to send response")),
@@ -591,6 +603,7 @@ impl Statements {
         metadata: IndexMetadata,
         node_state: Sender<NodeState>,
         internals: Sender<Internals>,
+        cdc_error_notify: Arc<Notify>,
     ) -> GetDbIndexR {
         db_index::new(
             self.config_rx.clone(),
@@ -598,6 +611,7 @@ impl Statements {
             metadata,
             node_state,
             internals,
+            cdc_error_notify,
         )
         .await
     }
@@ -924,7 +938,7 @@ pub(crate) mod tests {
 
                 debug!("finished");
             }
-            .instrument(debug_span!("engine-test")),
+            .instrument(error_span!("engine-test")),
         );
 
         tx

@@ -21,6 +21,7 @@ axum-server = { version = "0.7.2", features = ["tls-rustls"] }
 axum-server-dual-protocol = "0.7.0"
 bimap = "0.6.3"
 clap = { version = "4.5.40", features = ["derive"] }
+chrono = "0.4.43"
 derive_more = { version = "2.0.1", features = ["full"] }
 dotenvy = "0.15.7"
 futures = "0.3.31"

@@ -27,6 +27,7 @@ axum-server.workspace = true
 axum-server-dual-protocol.workspace = true
 bimap.workspace = true
 clap.workspace = true
+chrono.workspace = true
 dashmap = "6.1.0"
 derive_more.workspace = true
 dotenvy.workspace = true
