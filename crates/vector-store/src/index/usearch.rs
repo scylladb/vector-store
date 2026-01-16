@@ -35,11 +35,8 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
 use tokio::runtime::Handle;
-use tokio::sync::AcquireError;
 use tokio::sync::Notify;
-use tokio::sync::OwnedSemaphorePermit;
-use tokio::sync::RwLock as TokioRwLock;
-use tokio::sync::Semaphore as TokioSemaphore;
+use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
@@ -52,30 +49,6 @@ use tracing::trace;
 use usearch::IndexOptions;
 use usearch::MetricKind;
 use usearch::ScalarKind;
-
-pub struct Semaphore {
-    inner: Arc<TokioSemaphore>,
-    permits: usize,
-}
-
-impl Semaphore {
-    pub const MAX_PERMITS: usize = TokioSemaphore::MAX_PERMITS;
-
-    pub fn new(permits: usize) -> Self {
-        Self {
-            inner: Arc::new(TokioSemaphore::new(permits)),
-            permits,
-        }
-    }
-
-    pub fn permits(&self) -> usize {
-        self.permits
-    }
-
-    pub async fn acquire_owned(self: Arc<Self>) -> Result<OwnedSemaphorePermit, AcquireError> {
-        self.inner.clone().acquire_owned().await
-    }
-}
 
 pub struct UsearchIndexFactory {
     tokio_semaphore: Arc<Semaphore>,
@@ -464,6 +437,128 @@ impl From<SpaceType> for MetricKind {
     }
 }
 
+mod operation {
+    use super::Index;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+    use tokio::sync::Notify;
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Mode {
+        Reserve,
+        Insert,
+        Remove,
+        Search,
+    }
+
+    impl From<&Index> for Mode {
+        fn from(msg: &Index) -> Self {
+            match msg {
+                Index::Add { .. } => Mode::Insert,
+                Index::Remove { .. } => Mode::Remove,
+                Index::Ann { .. } | Index::FilteredAnn { .. } | Index::Count { .. } => Mode::Search,
+            }
+        }
+    }
+
+    impl Mode {
+        fn is_exclusive(&self) -> bool {
+            match self {
+                Mode::Insert | Mode::Search => false,
+                // Remove and reserve are not safe to run concurrently with other operations.
+                // Therefore, we perform both exclusively.
+                // See: https://github.com/unum-cloud/USearch/issues/697.
+                Mode::Reserve | Mode::Remove => true,
+            }
+        }
+    }
+
+    pub(super) struct Permit {
+        notify: Arc<Notify>,
+        counter: Arc<AtomicUsize>,
+    }
+
+    impl Drop for Permit {
+        fn drop(&mut self) {
+            let previous = self.counter.fetch_sub(1, Ordering::Relaxed);
+            if previous == 1 {
+                self.notify.notify_one();
+            }
+        }
+    }
+
+    pub(super) struct Operation {
+        mode: Mode,
+        notify: Arc<Notify>,
+        counter: Arc<AtomicUsize>,
+    }
+
+    impl Operation {
+        pub(super) fn new() -> Self {
+            Self {
+                mode: Mode::Insert,
+                notify: Arc::new(Notify::new()),
+                counter: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        /// Wait until it will be possible to spawn operation.
+        ///
+        /// The function must be called before spawning operation tasks as it blocks
+        /// until only requested family of operations is in progress.
+        async fn permit(&mut self, mode: Mode) -> Permit {
+            while self.mode != mode {
+                if self.counter.load(Ordering::Relaxed) == 0 {
+                    // it is safe to switch to the operation because there are no spawned tasks
+                    // and self.counter won't be changed
+                    self.mode = mode;
+                    break;
+                }
+                self.notify.notified().await;
+            }
+
+            if mode.is_exclusive() {
+                while self.counter.load(Ordering::Relaxed) != 0 {
+                    self.notify.notified().await;
+                }
+            }
+
+            self.counter.fetch_add(1, Ordering::Relaxed);
+            Permit {
+                notify: Arc::clone(&self.notify),
+                counter: Arc::clone(&self.counter),
+            }
+        }
+
+        pub(super) async fn permit_for_message(&mut self, msg: &Index) -> Permit {
+            self.permit(msg.into()).await
+        }
+
+        pub(super) async fn permit_for_reserve(&mut self) -> Permit {
+            self.permit(Mode::Reserve).await
+        }
+
+        /// Capacity permit cannot be concurrent only with reserve mode.
+        pub(super) async fn permit_for_capacity(&mut self) -> Permit {
+            while self.mode == Mode::Reserve {
+                if self.counter.load(Ordering::Relaxed) == 0 {
+                    // checking for capacity is during add, so insert mode is fine
+                    self.mode = Mode::Insert;
+                    break;
+                }
+                self.notify.notified().await;
+            }
+
+            self.counter.fetch_add(1, Ordering::Relaxed);
+            Permit {
+                notify: Arc::clone(&self.notify),
+                counter: Arc::clone(&self.counter),
+            }
+        }
+    }
+}
+
 struct IndexState<I: UsearchIndex + Send + Sync + 'static> {
     idx: Arc<I>,
     keys: RwLock<BiMap<PrimaryKey, Key>>,
@@ -506,12 +601,10 @@ fn new<I: UsearchIndex + Send + Sync + 'static>(
             let id = id.clone();
             async move {
                 debug!("starting");
-                let idx = Arc::new(TokioRwLock::with_max_readers(
-                    IndexState::new(Arc::clone(&idx), dimensions),
-                    get_index_concurrency(&tokio_semaphore, &rayon_semaphore),
-                ));
+                let idx = Arc::new(IndexState::new(Arc::clone(&idx), dimensions));
 
                 let mut allocate_prev = Allocate::Can;
+                let mut operation = operation::Operation::new();
 
                 while let Some(msg) = rx.recv().await {
                     if !check_memory_allocation(&msg, &memory, &mut allocate_prev, &id).await {
@@ -519,6 +612,7 @@ fn new<I: UsearchIndex + Send + Sync + 'static>(
                     }
 
                     dispatch_task(
+                        &mut operation,
                         msg,
                         Arc::clone(&idx),
                         Arc::clone(&primary_key_columns),
@@ -528,7 +622,7 @@ fn new<I: UsearchIndex + Send + Sync + 'static>(
                     .await;
                 }
 
-                idx.write().await.stop();
+                idx.stop();
 
                 debug!("finished");
             }
@@ -539,60 +633,49 @@ fn new<I: UsearchIndex + Send + Sync + 'static>(
     Ok(tx)
 }
 
-fn get_index_concurrency(
-    tokio_semaphore: &Arc<Semaphore>,
-    rayon_semaphore: &Arc<Semaphore>,
-) -> u32 {
-    // The maximum number of concurrent readers for `tokio::sync::RwLock`.
-    const MAX_INDEX_CONCURRENCY: u32 = u32::MAX >> 3;
-    // The concurrency for a single index is limited by the maximum of the global
-    // add/remove and search concurrency limits. This prevents a single, busy index
-    // from exhausting both the global add/remove and search concurrency pools.
-    (rayon_semaphore.permits().max(tokio_semaphore.permits()) as u32).min(MAX_INDEX_CONCURRENCY)
-}
-
 async fn dispatch_task(
+    operation: &mut operation::Operation,
     msg: Index,
-    idx: Arc<TokioRwLock<IndexState<impl UsearchIndex + Send + Sync + 'static>>>,
+    idx: Arc<IndexState<impl UsearchIndex + Send + Sync + 'static>>,
     primary_key_columns: Arc<Vec<ColumnName>>,
     tokio_semaphore: &Arc<Semaphore>,
     rayon_semaphore: &Arc<Semaphore>,
 ) {
-    if let Index::Add { .. } = &msg
-        && let Err(err) = reserve(Arc::clone(rayon_semaphore), Arc::clone(&idx)).await
-    {
-        error!("unable to reserve space for index: {err}");
-        return;
+    if let Index::Add { .. } = &msg {
+        let operation_permit = operation.permit_for_capacity().await;
+        if needs_more_capacity(idx.idx.as_ref(), &idx.keys).is_some() {
+            drop(operation_permit);
+            let operation_permit = operation.permit_for_reserve().await;
+            if let Some(capacity) = needs_more_capacity(idx.idx.as_ref(), &idx.keys) {
+                let permit = Arc::clone(rayon_semaphore).acquire_owned().await.unwrap();
+                let idx = Arc::clone(&idx.idx);
+                rayon::spawn(move || {
+                    reserve(idx.as_ref(), capacity);
+                    drop(permit);
+                    drop(operation_permit);
+                });
+            }
+        }
     }
-    if let Index::Remove {
-        primary_key,
-        in_progress: _in_progress,
-    } = &msg
-    {
-        // Remove (like reserve) is not safe to run concurrently with other operations.
-        // Therefore, we perform it upfront with an exclusive write lock.
-        // See: https://github.com/unum-cloud/USearch/issues/697.
-        let lock = idx.write().await;
-        remove(Arc::clone(&lock.idx), &lock.keys, primary_key.clone()).await;
-        return;
-    }
-    let lock = idx.read_owned().await;
+
+    let operation_permit = operation.permit_for_message(&msg).await;
+
     if should_run_on_tokio(&msg) {
         let permit = Arc::clone(tokio_semaphore).acquire_owned().await.unwrap();
         tokio::spawn(async move {
             crate::move_to_the_end_of_async_runtime_queue().await;
-            process(msg, &lock, &primary_key_columns);
+            process(msg, &idx, &primary_key_columns);
             drop(permit);
-            drop(lock);
+            drop(operation_permit);
         });
-    } else {
-        let permit = Arc::clone(rayon_semaphore).acquire_owned().await.unwrap();
-        rayon::spawn(move || {
-            process(msg, &lock, &primary_key_columns);
-            drop(permit);
-            drop(lock);
-        });
+        return;
     }
+    let permit = Arc::clone(rayon_semaphore).acquire_owned().await.unwrap();
+    rayon::spawn(move || {
+        process(msg, &idx, &primary_key_columns);
+        drop(permit);
+        drop(operation_permit);
+    });
 }
 
 fn should_run_on_tokio(msg: &Index) -> bool {
@@ -611,7 +694,7 @@ fn process<I: UsearchIndex + Send + Sync + 'static>(
             in_progress: _in_progress,
         } => {
             add(
-                Arc::clone(&index.idx),
+                index.idx.as_ref(),
                 &index.keys,
                 &index.usearch_key,
                 primary_key,
@@ -648,50 +731,28 @@ fn process<I: UsearchIndex + Send + Sync + 'static>(
         Index::Count { tx } => {
             count(Arc::clone(&index.idx), tx);
         }
-        _ => {
-            unreachable!();
-        }
+        Index::Remove {
+            primary_key,
+            in_progress: _in_progress,
+        } => remove(index.idx.as_ref(), &index.keys, primary_key),
     }
 }
 
-async fn reserve(
-    rayon_semaphore: Arc<Semaphore>,
-    idx: Arc<TokioRwLock<IndexState<impl UsearchIndex + Send + Sync + 'static>>>,
-) -> anyhow::Result<()> {
-    // Check for capacity needs with a read lock first to avoid taking a write lock unnecessarily.
-    let needed_capacity = {
-        let lock = idx.read().await;
-        needs_more_capacity(&lock.idx)
-    };
-
-    if needed_capacity.is_some() {
-        let lock = idx.write_owned().await;
-        // Re-check capacity after acquiring the write lock to avoid a race condition
-        // where another thread might have already performed the reservation.
-        if let Some(new_capacity) = needs_more_capacity(&lock.idx) {
-            let permit = rayon_semaphore.acquire_owned().await.unwrap();
-            let (tx, rx) = oneshot::channel::<anyhow::Result<()>>();
-            rayon::spawn(move || {
-                let result = lock.idx.reserve(new_capacity);
-                if let Err(err) = &result {
-                    error!("unable to reserve index capacity for {new_capacity} in usearch: {err}");
-                } else {
-                    debug!("reserve: reserved index capacity for {new_capacity}");
-                }
-                drop(permit);
-                let _ = tx.send(result);
-            });
-            return rx
-                .await
-                .expect("reserve: unable to receive result from reserve task");
-        }
+fn reserve(idx: &impl UsearchIndex, capacity: usize) {
+    let result = idx.reserve(capacity);
+    if let Err(err) = &result {
+        error!("unable to reserve index capacity for {capacity} in usearch: {err}");
+    } else {
+        debug!("reserve: reserved index capacity for {capacity}");
     }
-    Ok(())
 }
 
-fn needs_more_capacity(idx: &Arc<impl UsearchIndex>) -> Option<usize> {
+fn needs_more_capacity(
+    idx: &impl UsearchIndex,
+    keys: &RwLock<BiMap<PrimaryKey, Key>>,
+) -> Option<usize> {
     let capacity = idx.capacity();
-    let free_space = capacity - idx.size();
+    let free_space = capacity - keys.read().unwrap().len();
 
     if free_space < RESERVE_THRESHOLD {
         Some(capacity + RESERVE_INCREMENT)
@@ -701,7 +762,7 @@ fn needs_more_capacity(idx: &Arc<impl UsearchIndex>) -> Option<usize> {
 }
 
 fn add(
-    idx: Arc<impl UsearchIndex>,
+    idx: &impl UsearchIndex,
     keys: &RwLock<BiMap<PrimaryKey, Key>>,
     usearch_key: &AtomicU64,
     primary_key: PrimaryKey,
@@ -715,11 +776,7 @@ fn add(
     let _ = keys.write().unwrap().insert(primary_key.clone(), key);
 }
 
-async fn remove(
-    idx: Arc<impl UsearchIndex>,
-    keys: &RwLock<BiMap<PrimaryKey, Key>>,
-    primary_key: PrimaryKey,
-) {
+fn remove(idx: &impl UsearchIndex, keys: &RwLock<BiMap<PrimaryKey, Key>>, primary_key: PrimaryKey) {
     let Some((_, key)) = keys.write().unwrap().remove_by_left(&primary_key) else {
         return;
     };
@@ -1176,24 +1233,5 @@ mod tests {
         })
         .await
         .unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_get_index_concurrency() {
-        let tokio_semaphore = Arc::new(Semaphore::new(8));
-        let rayon_semaphore = Arc::new(Semaphore::new(4));
-        assert_eq!(get_index_concurrency(&tokio_semaphore, &rayon_semaphore), 8);
-
-        let tokio_semaphore = Arc::new(Semaphore::new(2));
-        let rayon_semaphore = Arc::new(Semaphore::new(4));
-        assert_eq!(get_index_concurrency(&tokio_semaphore, &rayon_semaphore), 4);
-
-        let tokio_semaphore = Arc::new(Semaphore::new(Semaphore::MAX_PERMITS));
-        let rayon_semaphore = Arc::new(Semaphore::new(Semaphore::MAX_PERMITS));
-        // Verify that `get_index_concurrency` does not exceed the maximum number of readers allowed by `TokioRwLock`.
-        TokioRwLock::with_max_readers(
-            (),
-            get_index_concurrency(&tokio_semaphore, &rayon_semaphore),
-        );
     }
 }

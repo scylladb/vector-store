@@ -16,7 +16,6 @@ mod monitor_indexes;
 mod monitor_items;
 pub mod node_state;
 
-use crate::index::usearch::Semaphore;
 use crate::metrics::Metrics;
 use crate::node_state::NodeState;
 use db::Db;
@@ -42,6 +41,7 @@ use time::OffsetDateTime;
 use tokio::runtime::Builder;
 use tokio::runtime::Handle;
 use tokio::signal;
+use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::watch;
