@@ -105,6 +105,19 @@ pub(crate) struct Index {
     pub(crate) space_type: SpaceType,
 }
 
+impl From<IndexMetadata> for Index {
+    fn from(metadata: IndexMetadata) -> Self {
+        Self {
+            table_name: metadata.table_name,
+            target_column: metadata.target_column,
+            connectivity: metadata.connectivity,
+            expansion_add: metadata.expansion_add,
+            expansion_search: metadata.expansion_search,
+            space_type: metadata.space_type,
+        }
+    }
+}
+
 struct Keyspace {
     tables: HashMap<TableName, TableStore>,
     indexes: HashMap<IndexName, IndexStore>,

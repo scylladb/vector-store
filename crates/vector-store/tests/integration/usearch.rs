@@ -6,7 +6,6 @@
 use crate::Duration;
 use crate::db_basic;
 use crate::db_basic::DbBasic;
-use crate::db_basic::Index;
 use crate::db_basic::Table;
 use crate::wait_for;
 use crate::wait_for_value;
@@ -98,14 +97,7 @@ pub(crate) async fn setup_store(
     db.add_index(
         &index.keyspace_name,
         index.index_name.clone(),
-        Index {
-            table_name: index.table_name.clone(),
-            target_column: index.target_column.clone(),
-            connectivity: index.connectivity,
-            expansion_add: index.expansion_add,
-            expansion_search: index.expansion_search,
-            space_type: index.space_type,
-        },
+        index.clone().into(),
     )
     .unwrap();
 
@@ -284,14 +276,7 @@ async fn failed_db_index_create() {
     db.add_index(
         &index.keyspace_name,
         index.index_name.clone(),
-        Index {
-            table_name: index.table_name.clone(),
-            target_column: index.target_column.clone(),
-            connectivity: index.connectivity,
-            expansion_add: index.expansion_add,
-            expansion_search: index.expansion_search,
-            space_type: index.space_type,
-        },
+        index.clone().into(),
     )
     .unwrap();
 
@@ -301,19 +286,8 @@ async fn failed_db_index_create() {
     )
     .await;
 
-    db.add_index(
-        &index.keyspace_name,
-        "ann2".into(),
-        Index {
-            table_name: index.table_name.clone(),
-            target_column: index.target_column.clone(),
-            connectivity: index.connectivity,
-            expansion_add: index.expansion_add,
-            expansion_search: index.expansion_search,
-            space_type: index.space_type,
-        },
-    )
-    .unwrap();
+    db.add_index(&index.keyspace_name, "ann2".into(), index.clone().into())
+        .unwrap();
 
     wait_for(
         || async { client.indexes().await.len() == 2 },
@@ -326,19 +300,8 @@ async fn failed_db_index_create() {
     assert!(indexes.contains(&vector_store::IndexInfo::new("vector", "ann")));
     assert!(indexes.contains(&vector_store::IndexInfo::new("vector", "ann2")));
 
-    db.add_index(
-        &index.keyspace_name,
-        "ann3".into(),
-        Index {
-            table_name: index.table_name.clone(),
-            target_column: index.target_column.clone(),
-            connectivity: index.connectivity,
-            expansion_add: index.expansion_add,
-            expansion_search: index.expansion_search,
-            space_type: index.space_type,
-        },
-    )
-    .unwrap();
+    db.add_index(&index.keyspace_name, "ann3".into(), index.clone().into())
+        .unwrap();
 
     wait_for(
         || async { client.indexes().await.len() == 3 },
