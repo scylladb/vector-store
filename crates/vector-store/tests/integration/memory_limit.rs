@@ -4,7 +4,6 @@
  */
 
 use crate::db_basic;
-use crate::db_basic::Index;
 use crate::db_basic::Table;
 use crate::usearch::test_config;
 use ::time::OffsetDateTime;
@@ -72,14 +71,7 @@ async fn memory_limit_during_index_build() {
     db.add_index(
         &index.keyspace_name,
         index.index_name.clone(),
-        Index {
-            table_name: index.table_name.clone(),
-            target_column: index.target_column.clone(),
-            connectivity: index.connectivity,
-            expansion_add: index.expansion_add,
-            expansion_search: index.expansion_search,
-            space_type: index.space_type,
-        },
+        index.clone().into(),
     )
     .unwrap();
 
