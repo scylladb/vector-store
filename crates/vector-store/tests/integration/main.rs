@@ -10,6 +10,7 @@ mod memory_limit;
 mod mock_opensearch;
 mod openapi;
 mod opensearch;
+mod quantization;
 mod status;
 mod usearch;
 

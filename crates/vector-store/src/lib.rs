@@ -266,7 +266,15 @@ impl PartialEq for PrimaryKey {
 impl Eq for PrimaryKey {}
 
 #[derive(
-    Clone, Debug, serde::Serialize, serde::Deserialize, derive_more::From, utoipa::ToSchema,
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    derive_more::From,
+    utoipa::ToSchema,
+    PartialEq,
+    PartialOrd,
+    Copy,
 )]
 /// Distance between vectors measured using the distance function defined while creating the index.
 pub struct Distance(f32);
@@ -389,11 +397,45 @@ impl FromStr for SpaceType {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match s.to_ascii_uppercase().as_str() {
             "EUCLIDEAN" => Ok(Self::Euclidean),
             "COSINE" => Ok(Self::Cosine),
             "DOT_PRODUCT" => Ok(Self::DotProduct),
             _ => Err(format!("Unknown space type: {s}")),
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
+/// Represents the quantization type for vectors.
+///
+/// Quantization is a process that reduces the precision of floating-point numbers,
+/// which can lead to significant memory savings.
+pub enum Quantization {
+    /// 32-bit single-precision IEEE 754 floating-point.
+    #[default]
+    F32,
+    /// 16-bit standard half-precision floating-point (IEEE 754).
+    F16,
+    /// 16-bit "Brain" floating-point.
+    BF16,
+    /// 8-bit signed integer.
+    I8,
+    /// 1-bit binary value (packed 8 per byte).
+    B1,
+}
+
+impl FromStr for Quantization {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_uppercase().as_str() {
+            "F32" => Ok(Self::F32),
+            "F16" => Ok(Self::F16),
+            "BF16" => Ok(Self::BF16),
+            "I8" => Ok(Self::I8),
+            "B1" => Ok(Self::B1),
+            _ => Err(format!("Unknown quantization type: {s}")),
         }
     }
 }
@@ -520,6 +562,7 @@ pub struct IndexMetadata {
     pub expansion_search: ExpansionSearch,
     pub space_type: SpaceType,
     pub version: IndexVersion,
+    pub quantization: Quantization,
 }
 
 impl IndexMetadata {

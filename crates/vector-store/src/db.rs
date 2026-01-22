@@ -17,6 +17,7 @@ use crate::IndexMetadata;
 use crate::IndexName;
 use crate::IndexVersion;
 use crate::KeyspaceName;
+use crate::Quantization;
 use crate::SpaceType;
 use crate::TableName;
 use crate::db_index;
@@ -65,8 +66,15 @@ pub(crate) type LatestSchemaVersionR = anyhow::Result<Option<CqlTimeuuid>>;
 type GetIndexesR = anyhow::Result<Vec<DbCustomIndex>>;
 type GetIndexVersionR = anyhow::Result<Option<IndexVersion>>;
 type GetIndexTargetTypeR = anyhow::Result<Option<Dimensions>>;
-type GetIndexParamsR =
-    anyhow::Result<Option<(Connectivity, ExpansionAdd, ExpansionSearch, SpaceType)>>;
+type GetIndexParamsR = anyhow::Result<
+    Option<(
+        Connectivity,
+        ExpansionAdd,
+        ExpansionSearch,
+        SpaceType,
+        Quantization,
+    )>,
+>;
 type IsValidIndexR = bool;
 
 const RECONNECT_TIMEOUT: Duration = Duration::from_secs(1);
@@ -783,9 +791,19 @@ impl Statements {
                 .unwrap_or_default();
             let space_type = options
                 .remove("similarity_function")
-                .and_then(|s| s.to_ascii_uppercase().parse().ok())
+                .and_then(|s| s.parse().ok())
                 .unwrap_or_default();
-            (connectivity, expansion_add, expansion_search, space_type)
+            let quantization = options
+                .remove("quantization")
+                .and_then(|s| s.parse::<Quantization>().ok())
+                .unwrap_or_default();
+            (
+                connectivity,
+                expansion_add,
+                expansion_search,
+                space_type,
+                quantization,
+            )
         }))
     }
 
