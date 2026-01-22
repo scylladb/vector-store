@@ -7,6 +7,7 @@ use crate::Config;
 use crate::IndexId;
 use crate::IndexMetadata;
 use crate::Metrics;
+use crate::Quantization;
 use crate::db::Db;
 use crate::db::DbExt;
 use crate::db_index::DbIndex;
@@ -32,7 +33,7 @@ use tracing::debug_span;
 use tracing::info;
 use tracing::trace;
 
-type GetIndexIdsR = Vec<IndexId>;
+type GetIndexIdsR = Vec<(IndexId, Quantization)>;
 type AddIndexR = anyhow::Result<()>;
 type GetIndexR = Option<(mpsc::Sender<Index>, mpsc::Sender<DbIndex>)>;
 
@@ -101,6 +102,7 @@ type IndexesT = HashMap<
         mpsc::Sender<Index>,
         mpsc::Sender<MonitorItems>,
         mpsc::Sender<DbIndex>,
+        Quantization,
     ),
 >;
 
@@ -154,8 +156,13 @@ pub(crate) async fn new(
 }
 
 async fn get_index_ids(tx: oneshot::Sender<GetIndexIdsR>, indexes: &IndexesT) {
-    tx.send(indexes.keys().cloned().collect())
-        .unwrap_or_else(|_| trace!("Engine::GetIndexIds: unable to send response"));
+    tx.send(
+        indexes
+            .iter()
+            .map(|(id, (_, _, _, quantization))| (id.clone(), *quantization))
+            .collect(),
+    )
+    .unwrap_or_else(|_| trace!("Engine::GetIndexIds: unable to send response"));
 }
 
 async fn add_index(
@@ -221,7 +228,10 @@ async fn add_index(
             }
         };
 
-    indexes.insert(id.clone(), (index_actor, monitor_actor, db_index));
+    indexes.insert(
+        id.clone(),
+        (index_actor, monitor_actor, db_index, metadata.quantization),
+    );
     info!("creating the index {id}");
     tx.send(Ok(()))
         .unwrap_or_else(|_| trace!("add_index: unable to send response"));
@@ -236,7 +246,7 @@ async fn get_index(id: IndexId, tx: oneshot::Sender<GetIndexR>, indexes: &Indexe
     tx.send(
         indexes
             .get(&id)
-            .map(|(index, _, db_index)| (index.clone(), db_index.clone())),
+            .map(|(index, _, db_index, _)| (index.clone(), db_index.clone())),
     )
     .unwrap_or_else(|_| trace!("get_index: unable to send response"));
 }

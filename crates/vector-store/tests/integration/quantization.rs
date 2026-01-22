@@ -3,11 +3,14 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
-use crate::usearch::{setup_store_with_quantization, test_config};
+use crate::usearch::setup_store_with_quantization;
+use crate::usearch::test_config;
 use crate::wait_for;
+use crate::wait_for_value;
 use scylla::value::CqlValue;
 use std::num::NonZeroUsize;
 use time::OffsetDateTime;
+use vector_store::DataType;
 use vector_store::Distance;
 use vector_store::Quantization;
 
@@ -104,4 +107,36 @@ async fn quantization_is_effectively_applied() {
         "I8 distance should be larger due to quantization. Got: {:?}",
         i8_distance
     );
+}
+
+#[tokio::test]
+async fn quantization_is_returned_as_index_data_type() {
+    crate::enable_tracing();
+
+    for (quantization, expected_data_type) in [
+        (Quantization::default(), DataType::F32),
+        (Quantization::F32, DataType::F32),
+        (Quantization::F16, DataType::F16),
+        (Quantization::BF16, DataType::BF16),
+        (Quantization::I8, DataType::I8),
+        (Quantization::B1, DataType::B1),
+    ] {
+        let (run, index, _db, _node_state) =
+            setup_store_with_quantization(test_config(), [], [], [], quantization).await;
+
+        let (client, _server, _config) = run.await;
+
+        let index_info = wait_for_value(
+            || async {
+                let indexes = client.indexes().await;
+                indexes.into_iter().find(|idx| {
+                    idx.keyspace == index.keyspace_name && idx.index == index.index_name
+                })
+            },
+            "Waiting for index to be added to the store",
+        )
+        .await;
+
+        assert_eq!(index_info.data_type, expected_data_type);
+    }
 }
