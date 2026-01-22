@@ -29,6 +29,7 @@ use vector_store::ExpansionSearch;
 use vector_store::IndexMetadata;
 use vector_store::Percentage;
 use vector_store::PrimaryKey;
+use vector_store::Quantization;
 use vector_store::SpaceType;
 use vector_store::Timestamp;
 use vector_store::Vector;
@@ -55,6 +56,28 @@ pub(crate) async fn setup_store(
     DbBasic,
     Sender<NodeState>,
 ) {
+    setup_store_with_quantization(
+        config,
+        primary_keys,
+        columns,
+        values,
+        Quantization::default(),
+    )
+    .await
+}
+
+pub(crate) async fn setup_store_with_quantization(
+    config: Config,
+    primary_keys: impl IntoIterator<Item = ColumnName>,
+    columns: impl IntoIterator<Item = (ColumnName, NativeType)>,
+    values: impl IntoIterator<Item = (PrimaryKey, Option<Vector>, Timestamp)>,
+    quantization: Quantization,
+) -> (
+    impl std::future::Future<Output = (HttpClient, impl Sized, impl Sized)>,
+    IndexMetadata,
+    DbBasic,
+    Sender<NodeState>,
+) {
     let node_state = vector_store::new_node_state().await;
     let internals = vector_store::new_internals();
 
@@ -71,6 +94,7 @@ pub(crate) async fn setup_store(
         expansion_search: ExpansionSearch::default(),
         space_type: SpaceType::Euclidean,
         version: Uuid::new_v4().into(),
+        quantization,
     };
 
     db.add_table(
@@ -190,7 +214,7 @@ async fn simple_create_search_delete_index() {
 
     let indexes = client.indexes().await;
     assert_eq!(indexes.len(), 1);
-    assert_eq!(indexes[0], vector_store::IndexInfo::new("vector", "ann",));
+    assert_eq!(indexes[0], vector_store::IndexInfo::new("vector", "ann"));
 
     let (primary_keys, distances) = client
         .ann(
@@ -238,6 +262,7 @@ async fn failed_db_index_create() {
         expansion_search: Default::default(),
         space_type: Default::default(),
         version: Uuid::new_v4().into(),
+        quantization: Default::default(),
     };
 
     let (_, rx) = watch::channel(Arc::new(Config::default()));
