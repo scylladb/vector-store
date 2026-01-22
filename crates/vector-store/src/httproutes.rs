@@ -11,6 +11,7 @@ use crate::IndexName;
 use crate::KeyspaceName;
 use crate::Limit;
 use crate::Progress;
+use crate::Quantization;
 use crate::Restriction;
 use crate::Vector;
 use crate::db_index::DbIndexExt;
@@ -155,7 +156,28 @@ fn new_open_api_router() -> (Router<RoutesInnerState>, utoipa::openapi::OpenApi)
 #[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema, PartialEq, Debug)]
 /// Data type and precision used for storing and processing vectors in the index.
 pub enum DataType {
+    /// 32-bit single-precision IEEE 754 floating-point.
     F32,
+    /// 16-bit standard half-precision floating-point (IEEE 754).
+    F16,
+    /// 16-bit "Brain" floating-point.
+    BF16,
+    /// 8-bit signed integer.
+    I8,
+    /// 1-bit binary value (packed 8 per byte).
+    B1,
+}
+
+impl From<Quantization> for DataType {
+    fn from(quantization: Quantization) -> Self {
+        match quantization {
+            Quantization::F32 => DataType::F32,
+            Quantization::F16 => DataType::F16,
+            Quantization::BF16 => DataType::BF16,
+            Quantization::I8 => DataType::I8,
+            Quantization::B1 => DataType::B1,
+        }
+    }
 }
 
 #[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema, PartialEq, Debug)]
@@ -191,16 +213,17 @@ impl IndexInfo {
         )
     )
 )]
+
 async fn get_indexes(State(state): State<RoutesInnerState>) -> Response {
     let indexes: Vec<_> = state
         .engine
         .get_index_ids()
         .await
         .iter()
-        .map(|id| IndexInfo {
+        .map(|(id, quantization)| IndexInfo {
             keyspace: id.keyspace(),
             index: id.index(),
-            data_type: DataType::F32, // currently the only supported data type by Vector Store
+            data_type: (*quantization).into(),
         })
         .collect();
     (StatusCode::OK, response::Json(indexes)).into_response()
