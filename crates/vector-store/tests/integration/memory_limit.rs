@@ -22,6 +22,7 @@ use vector_store::Connectivity;
 use vector_store::ExpansionAdd;
 use vector_store::ExpansionSearch;
 use vector_store::IndexMetadata;
+use vector_store::Quantization;
 use vector_store::SpaceType;
 use vector_store::httproutes::NodeStatus;
 
@@ -53,6 +54,7 @@ async fn memory_limit_during_index_build() {
         expansion_search: ExpansionSearch::default(),
         space_type: SpaceType::default(),
         version: Uuid::new_v4().into(),
+        quantization: Quantization::default(),
     };
 
     db.add_table(

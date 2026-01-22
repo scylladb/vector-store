@@ -12,6 +12,7 @@ use crate::IndexFactory;
 use crate::IndexId;
 use crate::Limit;
 use crate::PrimaryKey;
+use crate::Quantization;
 use crate::Restriction;
 use crate::SpaceType;
 use crate::Vector;
@@ -70,8 +71,8 @@ impl IndexFactory for UsearchIndexFactory {
                     connectivity: index.connectivity.0,
                     expansion_add: index.expansion_add.0,
                     expansion_search: index.expansion_search.0,
-                    metric: index.space_type.into(),
-                    quantization: ScalarKind::F32,
+                    metric: metric_kind(index.quantization, index.space_type),
+                    quantization: index.quantization.into(),
                     ..Default::default()
                 };
                 let threads =
@@ -427,12 +428,36 @@ const RESERVE_THRESHOLD: usize = RESERVE_INCREMENT / 3;
 /// Key for index embeddings
 struct Key(u64);
 
+fn metric_kind(quantization: Quantization, space_type: SpaceType) -> MetricKind {
+    // Usearch requires a binary metric (e.g., Hamming, Jaccard) for B1 quantization.
+    // Using a non-binary metric would cause a panic during index creation.
+    // Since we don't currently support selecting a specific binary space type,
+    // we default to Hamming for B1 quantization.
+    if quantization == Quantization::B1 {
+        MetricKind::Hamming
+    } else {
+        space_type.into()
+    }
+}
+
 impl From<SpaceType> for MetricKind {
     fn from(space_type: SpaceType) -> Self {
         match space_type {
             SpaceType::Cosine => MetricKind::Cos,
             SpaceType::Euclidean => MetricKind::L2sq,
             SpaceType::DotProduct => MetricKind::IP,
+        }
+    }
+}
+
+impl From<Quantization> for ScalarKind {
+    fn from(quantization: Quantization) -> Self {
+        match quantization {
+            Quantization::F32 => ScalarKind::F32,
+            Quantization::F16 => ScalarKind::F16,
+            Quantization::BF16 => ScalarKind::BF16,
+            Quantization::I8 => ScalarKind::I8,
+            Quantization::B1 => ScalarKind::B1,
         }
     }
 }
@@ -1017,6 +1042,7 @@ mod tests {
                     expansion_add: ExpansionAdd::default(),
                     expansion_search: ExpansionSearch::default(),
                     space_type: SpaceType::Euclidean,
+                    quantization: Quantization::default(),
                 },
                 Arc::new(vec![]),
                 memory::new(config_rx),
@@ -1148,6 +1174,7 @@ mod tests {
                     expansion_add: ExpansionAdd::default(),
                     expansion_search: ExpansionSearch::default(),
                     space_type: SpaceType::Euclidean,
+                    quantization: Quantization::default(),
                 },
                 Arc::new(vec![]),
                 memory_tx,
@@ -1206,6 +1233,7 @@ mod tests {
                     expansion_add: ExpansionAdd::default(),
                     expansion_search: ExpansionSearch::default(),
                     space_type: SpaceType::Euclidean,
+                    quantization: Quantization::default(),
                 },
                 Arc::new(vec![]),
                 memory::new(config_rx),
@@ -1233,5 +1261,14 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn quantization_to_kind_conversion() {
+        assert_eq!(ScalarKind::from(Quantization::F32), ScalarKind::F32);
+        assert_eq!(ScalarKind::from(Quantization::F16), ScalarKind::F16);
+        assert_eq!(ScalarKind::from(Quantization::BF16), ScalarKind::BF16);
+        assert_eq!(ScalarKind::from(Quantization::I8), ScalarKind::I8);
+        assert_eq!(ScalarKind::from(Quantization::B1), ScalarKind::B1);
     }
 }

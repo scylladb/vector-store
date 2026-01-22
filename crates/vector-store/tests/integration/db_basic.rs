@@ -30,6 +30,7 @@ use vector_store::IndexName;
 use vector_store::KeyspaceName;
 use vector_store::PrimaryKey;
 use vector_store::Progress;
+use vector_store::Quantization;
 use vector_store::SpaceType;
 use vector_store::TableName;
 use vector_store::Timestamp;
@@ -103,6 +104,7 @@ pub(crate) struct Index {
     pub(crate) expansion_add: ExpansionAdd,
     pub(crate) expansion_search: ExpansionSearch,
     pub(crate) space_type: SpaceType,
+    pub(crate) quantization: Quantization,
 }
 
 impl From<IndexMetadata> for Index {
@@ -114,6 +116,7 @@ impl From<IndexMetadata> for Index {
             expansion_add: metadata.expansion_add,
             expansion_search: metadata.expansion_search,
             space_type: metadata.space_type,
+            quantization: metadata.quantization,
         }
     }
 }
@@ -373,6 +376,7 @@ fn process_db(db: &DbBasic, msg: Db, node_state: Sender<NodeState>) {
                         index.index.expansion_add,
                         index.index.expansion_search,
                         index.index.space_type,
+                        index.index.quantization,
                     )
                 })))
             .map_err(|_| anyhow!("Db::GetIndexParams: unable to send response"))

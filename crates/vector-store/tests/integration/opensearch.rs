@@ -36,6 +36,7 @@ async fn simple_create_search_delete_index() {
         expansion_search: Default::default(),
         space_type: Default::default(),
         version: Uuid::new_v4().into(),
+        quantization: Default::default(),
     };
     let server = mock_opensearch::TestOpenSearchServer::start().await;
 
