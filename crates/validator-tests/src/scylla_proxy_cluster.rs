@@ -6,7 +6,9 @@
 use async_backtrace::framed;
 use scylla_proxy::RequestRule;
 use scylla_proxy::ResponseRule;
+use std::collections::HashMap;
 use std::net::Ipv4Addr;
+use std::net::SocketAddr;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
@@ -18,7 +20,7 @@ pub struct ScyllaProxyNodeConfig {
 pub enum ScyllaProxyCluster {
     Start {
         node_configs: Vec<ScyllaProxyNodeConfig>,
-        tx: oneshot::Sender<()>,
+        tx: oneshot::Sender<HashMap<SocketAddr, SocketAddr>>,
     },
     Stop {
         tx: oneshot::Sender<()>,
@@ -38,7 +40,10 @@ pub enum ScyllaProxyCluster {
 
 pub trait ScyllaProxyClusterExt {
     /// Starts the ScyllaDB proxy cluster with the given node configurations.
-    fn start(&self, node_configs: Vec<ScyllaProxyNodeConfig>) -> impl Future<Output = ()>;
+    fn start(
+        &self,
+        node_configs: Vec<ScyllaProxyNodeConfig>,
+    ) -> impl Future<Output = HashMap<SocketAddr, SocketAddr>>;
 
     /// Stops the ScyllaDB proxy cluster.
     fn stop(&self) -> impl Future<Output = ()>;
@@ -55,13 +60,16 @@ pub trait ScyllaProxyClusterExt {
 
 impl ScyllaProxyClusterExt for mpsc::Sender<ScyllaProxyCluster> {
     #[framed]
-    async fn start(&self, node_configs: Vec<ScyllaProxyNodeConfig>) {
+    async fn start(
+        &self,
+        node_configs: Vec<ScyllaProxyNodeConfig>,
+    ) -> HashMap<SocketAddr, SocketAddr> {
         let (tx, rx) = oneshot::channel();
         self.send(ScyllaProxyCluster::Start { node_configs, tx })
             .await
             .expect("ScyllaProxyClusterExt::start: internal actor should receive request");
         rx.await
-            .expect("ScyllaProxyClusterExt::start: internal actor should send response");
+            .expect("ScyllaProxyClusterExt::start: internal actor should send response")
     }
 
     #[framed]
