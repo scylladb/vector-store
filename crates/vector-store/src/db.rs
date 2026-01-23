@@ -485,6 +485,14 @@ async fn create_session(
             } else {
                 builder
             }
+        })
+        .pipe(|builder| {
+            if let Some(translation_map) = config.cql_uri_translation_map.as_ref() {
+                info!("Setting CQL translation map to {translation_map:?}");
+                builder.address_translator(Arc::new(translation_map.clone()))
+            } else {
+                builder
+            }
         });
 
     if let Some(Credentials {
