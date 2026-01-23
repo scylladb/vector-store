@@ -394,14 +394,14 @@ pub enum SpaceType {
 }
 
 impl FromStr for SpaceType {
-    type Err = String;
+    type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_ascii_uppercase().as_str() {
             "EUCLIDEAN" => Ok(Self::Euclidean),
             "COSINE" => Ok(Self::Cosine),
             "DOT_PRODUCT" => Ok(Self::DotProduct),
-            _ => Err(format!("Unknown space type: {s}")),
+            _ => Err(anyhow::anyhow!("Unknown space type: {s}")),
         }
     }
 }
@@ -426,7 +426,7 @@ pub enum Quantization {
 }
 
 impl FromStr for Quantization {
-    type Err = String;
+    type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_ascii_uppercase().as_str() {
@@ -435,7 +435,7 @@ impl FromStr for Quantization {
             "BF16" => Ok(Self::BF16),
             "I8" => Ok(Self::I8),
             "B1" => Ok(Self::B1),
-            _ => Err(format!("Unknown quantization type: {s}")),
+            _ => Err(anyhow::anyhow!("Unknown quantization type: {s}")),
         }
     }
 }
