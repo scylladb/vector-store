@@ -24,4 +24,9 @@ tokio-stream.workspace = true
 toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+usearch.workspace = true
 uuid.workspace = true
+
+[[bin]]
+name = "b1x8_bench"
+path = "src/b1x8_bench.rs"
