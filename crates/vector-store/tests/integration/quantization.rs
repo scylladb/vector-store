@@ -10,9 +10,12 @@ use crate::wait_for_value;
 use scylla::value::CqlValue;
 use std::num::NonZeroUsize;
 use time::OffsetDateTime;
+use vector_store::ColumnName;
 use vector_store::DataType;
 use vector_store::Distance;
 use vector_store::Quantization;
+use vector_store::httproutes::PostIndexAnnFilter;
+use vector_store::httproutes::PostIndexAnnRestriction;
 
 #[tokio::test]
 // This test verifies that quantization is applied correctly by observing its effect on search results.
@@ -52,6 +55,7 @@ async fn quantization_is_effectively_applied() {
             )],
             values.to_vec(),
             quantization,
+            NonZeroUsize::new(3).unwrap().into(),
         )
         .await;
         let (client, _server, _config_tx) = run.await;
@@ -121,8 +125,15 @@ async fn quantization_is_returned_as_index_data_type() {
         (Quantization::I8, DataType::I8),
         (Quantization::B1, DataType::B1),
     ] {
-        let (run, index, _db, _node_state) =
-            setup_store_with_quantization(test_config(), [], [], [], quantization).await;
+        let (run, index, _db, _node_state) = setup_store_with_quantization(
+            test_config(),
+            [],
+            [],
+            [],
+            quantization,
+            NonZeroUsize::new(3).unwrap().into(),
+        )
+        .await;
 
         let (client, _server, _config) = run.await;
 
@@ -139,4 +150,153 @@ async fn quantization_is_returned_as_index_data_type() {
 
         assert_eq!(index_info.data_type, expected_data_type);
     }
+}
+
+async fn search_with_quantization(quantization: Quantization, filter: Option<PostIndexAnnFilter>) {
+    const DIMENSIONS: usize = 1536;
+    let vector = vec![0.5; DIMENSIONS];
+    let pk_value = 1;
+    let pk_column: ColumnName = "pk".into();
+    let vectors = vec![(
+        vec![CqlValue::Int(pk_value)].into(),
+        Some(vector.clone().into()),
+        OffsetDateTime::from_unix_timestamp(10).unwrap().into(),
+    )];
+
+    let (run, index, _db, _node_state) = setup_store_with_quantization(
+        test_config(),
+        [pk_column.clone()],
+        [(
+            pk_column.clone(),
+            scylla::cluster::metadata::NativeType::Int,
+        )],
+        vectors,
+        quantization,
+        NonZeroUsize::new(DIMENSIONS).unwrap().into(),
+    )
+    .await;
+
+    let (client, _server, _config_tx) = run.await;
+
+    // expect to find the inserted vector as the nearest neighbor
+    // with distance 0.0 as we are searching for the same vector
+    wait_for(
+        || async {
+            client
+                .ann(
+                    &index.keyspace_name,
+                    &index.index_name,
+                    vector.clone().into(),
+                    filter.clone(),
+                    NonZeroUsize::new(1).unwrap().into(),
+                )
+                .await
+                .1[0]
+                == Distance::from(0.0)
+        },
+        &format!(
+            "Waiting for ANN search to return 1 distance ({:?})",
+            quantization
+        ),
+    )
+    .await;
+}
+
+#[tokio::test]
+// Sanity check to ensure that searches work with all supported quantization types.
+async fn can_search_when_quantization_is_enabled() {
+    crate::enable_tracing();
+
+    let quantizations = vec![
+        Quantization::F32,
+        Quantization::F16,
+        Quantization::BF16,
+        Quantization::I8,
+        Quantization::B1,
+    ];
+
+    for quantization in quantizations {
+        search_with_quantization(quantization, None).await;
+    }
+}
+
+#[tokio::test]
+// Sanity check to ensure that filtered searches work with all supported quantization types.
+async fn can_search_with_filter_when_quantization_is_enabled() {
+    crate::enable_tracing();
+
+    let quantizations = vec![
+        Quantization::F32,
+        Quantization::F16,
+        Quantization::BF16,
+        Quantization::I8,
+        Quantization::B1,
+    ];
+
+    let pk_value = 1;
+    let pk_column: ColumnName = "pk".into();
+
+    for quantization in quantizations {
+        search_with_quantization(
+            quantization,
+            Some(PostIndexAnnFilter {
+                restrictions: vec![PostIndexAnnRestriction::In {
+                    lhs: pk_column.clone(),
+                    rhs: vec![pk_value.into()],
+                }],
+                allow_filtering: false,
+            }),
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn binary_quantization_with_non_divisible_by_8_dimensions() {
+    crate::enable_tracing();
+
+    const DIMENSIONS: usize = 100; // Not divisible by 8
+    let vector = vec![0.5; DIMENSIONS];
+    let pk_value = 1;
+    let pk_column: ColumnName = "pk".into();
+    let vectors = vec![(
+        vec![CqlValue::Int(pk_value)].into(),
+        Some(vector.clone().into()),
+        OffsetDateTime::from_unix_timestamp(10).unwrap().into(),
+    )];
+
+    let (run, index, _db, _node_state) = setup_store_with_quantization(
+        test_config(),
+        [pk_column.clone()],
+        [(
+            pk_column.clone(),
+            scylla::cluster::metadata::NativeType::Int,
+        )],
+        vectors,
+        Quantization::B1,
+        NonZeroUsize::new(DIMENSIONS).unwrap().into(),
+    )
+    .await;
+
+    let (client, _server, _config_tx) = run.await;
+
+    // expect to find the inserted vector as the nearest neighbor
+    // with distance 0.0 as we are searching for the same vector
+    wait_for(
+        || async {
+            client
+                .ann(
+                    &index.keyspace_name,
+                    &index.index_name,
+                    vector.clone().into(),
+                    None,
+                    NonZeroUsize::new(1).unwrap().into(),
+                )
+                .await
+                .1[0]
+                == Distance::from(0.0)
+        },
+        "Waiting for ANN search to return 1 distance",
+    )
+    .await;
 }

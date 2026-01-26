@@ -386,7 +386,7 @@ async fn get_metrics(
 }
 
 /// A filter restriction used in ANN search requests.
-#[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
+#[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema, Clone)]
 #[serde(tag = "type")]
 pub enum PostIndexAnnRestriction {
     #[serde(rename = "==")]
@@ -434,7 +434,7 @@ pub enum PostIndexAnnRestriction {
 }
 
 /// A filter used in ANN search requests.
-#[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
+#[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema, Clone)]
 pub struct PostIndexAnnFilter {
     /// A list of filter restrictions.
     pub restrictions: Vec<PostIndexAnnRestriction>,
