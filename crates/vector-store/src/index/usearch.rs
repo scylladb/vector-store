@@ -979,7 +979,34 @@ async fn check_memory_allocation(
     true
 }
 
+trait F32ToB1x8Iterator: Iterator<Item = f32> + Sized {
+    fn to_b1x8(self) -> Vec<b1x8> {
+        use itertools::Itertools;
+
+        let bytes: Vec<u8> = self
+            .chunks(8)
+            .into_iter()
+            .map(|chunk| {
+                chunk.enumerate().fold(
+                    0u8,
+                    |byte, (i, val)| {
+                        if val > 0.0 { byte | (1 << i) } else { byte }
+                    },
+                )
+            })
+            .collect();
+
+        b1x8::from_u8s(&bytes).to_vec()
+    }
+}
+
+impl<I: Iterator<Item = f32>> F32ToB1x8Iterator for I {}
+
 fn f32_to_b1x8(f32_vec: &[f32]) -> Vec<b1x8> {
+    f32_vec.iter().copied().to_b1x8()
+}
+
+fn f32_to_b1x8_2(f32_vec: &[f32]) -> Vec<b1x8> {
     let bytes: Vec<u8> = f32_vec
         .chunks_exact(8)
         .map(|chunk| {
@@ -989,6 +1016,23 @@ fn f32_to_b1x8(f32_vec: &[f32]) -> Vec<b1x8> {
                     if val > 0.0 { byte | (1 << i) } else { byte }
                 },
             )
+        })
+        .collect();
+
+    b1x8::from_u8s(&bytes).to_vec()
+}
+
+fn f32_to_b1x8_3(data: &[f32]) -> Vec<b1x8> {
+    let bytes: Vec<u8> = data
+        .chunks_exact(8)
+        .map(|chunk| {
+            let mut byte = 0u8;
+            for (i, &val) in chunk.iter().enumerate() {
+                if val > 0.0 {
+                    byte |= 1 << i;
+                }
+            }
+            byte
         })
         .collect();
 
