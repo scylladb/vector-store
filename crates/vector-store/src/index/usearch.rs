@@ -50,6 +50,7 @@ use tracing::trace;
 use usearch::IndexOptions;
 use usearch::MetricKind;
 use usearch::ScalarKind;
+use usearch::b1x8;
 
 pub struct UsearchIndexFactory {
     tokio_semaphore: Arc<Semaphore>,
@@ -160,6 +161,7 @@ trait UsearchIndex {
 struct ThreadedUsearchIndex {
     inner: usearch::Index,
     threads: usize,
+    quantization: usearch::ScalarKind,
 }
 
 impl ThreadedUsearchIndex {
@@ -167,6 +169,7 @@ impl ThreadedUsearchIndex {
         Ok(Self {
             inner: usearch::Index::new(&options)?,
             threads,
+            quantization: options.quantization,
         })
     }
 }
@@ -187,6 +190,12 @@ impl UsearchIndex for ThreadedUsearchIndex {
     }
 
     fn add(&self, key: Key, vector: &Vector) -> anyhow::Result<()> {
+        if self.quantization == ScalarKind::B1 {
+            let vector = f32_to_b1x8(&vector.0);
+            return Ok(self.inner.add(key.0, &vector)?);
+            // Usearch requires vectors for B1 quantization to be byte-aligned.
+            // See:
+        }
         Ok(self.inner.add(key.0, &vector.0)?)
     }
 
@@ -199,7 +208,12 @@ impl UsearchIndex for ThreadedUsearchIndex {
         vector: &Vector,
         limit: Limit,
     ) -> anyhow::Result<impl Iterator<Item = (Key, Distance)>> {
-        let matches = self.inner.search(&vector.0, limit.0.get())?;
+        let matches = if self.quantization == ScalarKind::B1 {
+            let vector = f32_to_b1x8(&vector.0);
+            self.inner.search(&vector, limit.0.get())?
+        } else {
+            self.inner.search(&vector.0, limit.0.get())?
+        };
         Ok(matches
             .keys
             .into_iter()
@@ -213,9 +227,14 @@ impl UsearchIndex for ThreadedUsearchIndex {
         limit: Limit,
         filter: impl Fn(Key) -> bool,
     ) -> anyhow::Result<impl Iterator<Item = (Key, Distance)>> {
-        let matches = self
-            .inner
-            .filtered_search(&vector.0, limit.0.get(), |key| filter(Key(key)))?;
+        let matches = if self.quantization == ScalarKind::B1 {
+            let vector = f32_to_b1x8(&vector.0);
+            self.inner
+                .filtered_search(&vector, limit.0.get(), |key| filter(Key(key)))?
+        } else {
+            self.inner
+                .filtered_search(&vector.0, limit.0.get(), |key| filter(Key(key)))?
+        };
         Ok(matches
             .keys
             .into_iter()
@@ -960,6 +979,22 @@ async fn check_memory_allocation(
     true
 }
 
+fn f32_to_b1x8(f32_vec: &[f32]) -> Vec<b1x8> {
+    let bytes: Vec<u8> = f32_vec
+        .chunks_exact(8)
+        .map(|chunk| {
+            chunk.iter().enumerate().fold(
+                0u8,
+                |byte, (i, &val)| {
+                    if val > 0.0 { byte | (1 << i) } else { byte }
+                },
+            )
+        })
+        .collect();
+
+    b1x8::from_u8s(&bytes).to_vec()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -977,6 +1012,7 @@ mod tests {
     use tokio::sync::watch;
     use tokio::task;
     use tokio::time;
+    use usearch::b1x8;
 
     fn add_concurrently(
         index: mpsc::Sender<Index>,
@@ -1270,5 +1306,70 @@ mod tests {
         assert_eq!(ScalarKind::from(Quantization::BF16), ScalarKind::BF16);
         assert_eq!(ScalarKind::from(Quantization::I8), ScalarKind::I8);
         assert_eq!(ScalarKind::from(Quantization::B1), ScalarKind::B1);
+    }
+
+    fn b1x8_to_u8_vec(b1_vec: &[b1x8]) -> Vec<u8> {
+        let byte_slice: &[u8] =
+            unsafe { std::slice::from_raw_parts(b1_vec.as_ptr() as *const u8, b1_vec.len()) };
+        byte_slice.to_vec()
+    }
+
+    #[test]
+    fn f32_to_b1x8_empty() {
+        let f32_vec: Vec<f32> = vec![];
+        let b1_vec = f32_to_b1x8(&f32_vec);
+        assert!(b1_vec.is_empty());
+    }
+
+    #[test]
+    fn f32_to_b1x8_all_positive() {
+        let b1_vec = f32_to_b1x8(&vec![1.0; 8]);
+        assert_eq!(b1_vec.len(), 1);
+        assert_eq!(b1x8_to_u8_vec(&b1_vec), &[0b11111111]);
+    }
+
+    #[test]
+    fn f32_to_b1x8_all_negative() {
+        let b1_vec = f32_to_b1x8(&vec![-1.0, 0.0, -10.0, -0.1, -100.0, -0.0, -42.0, -1.0]);
+        assert_eq!(b1_vec.len(), 1);
+        assert_eq!(b1x8_to_u8_vec(&b1_vec), &[0b00000000]);
+    }
+
+    #[test]
+    fn f32_to_b1x8_mixed() {
+        let b1_vec = f32_to_b1x8(&vec![1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0]);
+        assert_eq!(b1_vec.len(), 1);
+        assert_eq!(b1x8_to_u8_vec(&b1_vec), &[0b10101010]);
+    }
+
+    #[test]
+    fn f32_to_b1x8_zero() {
+        let b1_vec = f32_to_b1x8(&vec![0.0; 8]);
+        assert_eq!(b1_vec.len(), 1);
+        assert_eq!(b1x8_to_u8_vec(&b1_vec), &[0b00000000]);
+    }
+
+    #[test]
+    fn f32_to_b1x8_single_element() {
+        let b1_vec = f32_to_b1x8(&vec![1.0]);
+        assert_eq!(b1_vec.len(), 1);
+        assert_eq!(b1x8_to_u8_vec(&b1_vec), &[0b10000000]);
+    }
+
+    #[test]
+    fn f32_to_b1x8_exact_byte() {
+        let b1_vec = f32_to_b1x8(&vec![1.0, 2.0, -3.0, 4.0, 5.0, -6.0, 7.0, 8.0]);
+        assert_eq!(b1_vec.len(), 1);
+        assert_eq!(b1x8_to_u8_vec(&b1_vec), &[0b11011011]);
+    }
+
+    #[test]
+    fn f32_to_b1x8_crossing_byte_boundary() {
+        let b1_vec = f32_to_b1x8(&vec![
+            1.0, 2.0, -3.0, 4.0, 5.0, -6.0, 7.0, 8.0, // First byte: 0b11011011
+            -9.0, 10.0, // Second byte: 0b01000000
+        ]);
+        assert_eq!(b1_vec.len(), 2);
+        assert_eq!(b1x8_to_u8_vec(&b1_vec), &[0b11011011, 0b01000000]);
     }
 }
