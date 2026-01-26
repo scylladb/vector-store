@@ -24,6 +24,7 @@ use uuid::Uuid;
 use vector_store::ColumnName;
 use vector_store::Config;
 use vector_store::Connectivity;
+use vector_store::Dimensions;
 use vector_store::ExpansionAdd;
 use vector_store::ExpansionSearch;
 use vector_store::IndexMetadata;
@@ -62,6 +63,7 @@ pub(crate) async fn setup_store(
         columns,
         values,
         Quantization::default(),
+        NonZeroUsize::new(3).unwrap().into(),
     )
     .await
 }
@@ -72,6 +74,7 @@ pub(crate) async fn setup_store_with_quantization(
     columns: impl IntoIterator<Item = (ColumnName, NativeType)>,
     values: impl IntoIterator<Item = (PrimaryKey, Option<Vector>, Timestamp)>,
     quantization: Quantization,
+    dimension: Dimensions,
 ) -> (
     impl std::future::Future<Output = (HttpClient, impl Sized, impl Sized)>,
     IndexMetadata,
@@ -88,7 +91,7 @@ pub(crate) async fn setup_store_with_quantization(
         table_name: "items".into(),
         index_name: "ann".into(),
         target_column: "embedding".into(),
-        dimensions: NonZeroUsize::new(3).unwrap().into(),
+        dimensions: dimension,
         connectivity: Connectivity::default(),
         expansion_add: ExpansionAdd::default(),
         expansion_search: ExpansionSearch::default(),
