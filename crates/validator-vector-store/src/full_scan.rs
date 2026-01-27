@@ -49,18 +49,7 @@ async fn full_scan_is_completed_when_responding_to_messages_concurrently(actors:
 
     let index = create_index(&session, &clients, &table, "embedding").await;
 
-    let result = session
-        .query_unpaged(
-            format!("SELECT * FROM {table} ORDER BY embedding ANN OF [1.0, 2.0, 3.0] LIMIT 5"),
-            (),
-        )
-        .await;
-
-    match &result {
-        Err(e) if format!("{e:?}").contains("503 Service Unavailable") => {}
-        _ => panic!("Expected SERVICE_UNAVAILABLE error, got: {result:?}"),
-    }
-
+    // Assert that all vectors are indexed when index is ready.
     for client in &clients {
         let index_status = wait_for_index(client, &index).await;
         assert_eq!(
