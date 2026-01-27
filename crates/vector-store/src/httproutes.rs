@@ -12,6 +12,7 @@ use crate::Limit;
 use crate::Progress;
 use crate::Quantization;
 use crate::Restriction;
+use crate::SimilarityScore;
 use crate::Vector;
 use crate::db_index::DbIndexExt;
 use crate::distance;
@@ -490,6 +491,7 @@ impl From<Distance> for f32 {
 pub struct PostIndexAnnResponse {
     pub primary_keys: HashMap<ColumnName, Vec<Value>>,
     pub distances: Vec<Distance>,
+    pub similarity_scores: Vec<SimilarityScore>,
 }
 
 #[utoipa::path(
@@ -509,7 +511,7 @@ If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
     responses(
         (
             status = 200,
-            description = "Successful ANN search. Returns a list of primary keys and their corresponding distances for the most similar vectors found.",
+            description = "Successful ANN search. Returns a list of primary keys and their corresponding distances and similarity scores for the most similar vectors found.",
             body = PostIndexAnnResponse
         ),
         (
@@ -632,6 +634,11 @@ async fn post_index_ann(
                 debug!("post_index_ann: {msg}");
                 (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
             } else {
+                let similarity_scores: Vec<SimilarityScore> = distances
+                    .iter()
+                    .map(|distance| SimilarityScore::from(*distance))
+                    .collect();
+
                 let primary_keys: anyhow::Result<_> = primary_key_columns
                     .iter()
                     .cloned()
@@ -668,6 +675,7 @@ async fn post_index_ann(
                         response::Json(PostIndexAnnResponse {
                             primary_keys,
                             distances: distances.into_iter().map(|d| d.into()).collect(),
+                            similarity_scores,
                         }),
                     )
                         .into_response(),
