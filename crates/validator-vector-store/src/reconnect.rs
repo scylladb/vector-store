@@ -241,12 +241,22 @@ async fn restarting_all_nodes_doesnt_break_fullscan(actors: TestActors) {
 
     let index = create_index(&session, &clients, &table, "embedding").await;
 
+    // Wait until index is Bootstrapping (performing full scan).
+    // Because sometimes it is so fast that it is already in the Serving state,
+    // we make the constraint less strict and allow it to also be after Initializing (it is either Bootstrapping or Serving).
+    // This makes the test less accurate but avoids flakiness.
     for client in &clients {
-        let index_status = client
-            .index_status(&index.keyspace, &index.index)
-            .await
-            .expect("failed to get index status");
-        assert_eq!(index_status.status, IndexStatus::Bootstrapping);
+        wait_for(
+            || async {
+                client
+                    .index_status(&index.keyspace, &index.index)
+                    .await
+                    .is_ok_and(|s| s.status != IndexStatus::Initializing)
+            },
+            "Waiting for index to finish initializing",
+            Duration::from_secs(60),
+        )
+        .await;
     }
 
     let node_configs = get_default_scylla_node_configs(&actors).await;
