@@ -12,6 +12,7 @@ use std::num::NonZeroUsize;
 use time::OffsetDateTime;
 use vector_store::ColumnName;
 use vector_store::DataType;
+use vector_store::DbIndexType;
 use vector_store::Distance;
 use vector_store::Quantization;
 use vector_store::httproutes::PostIndexAnnFilter;
@@ -48,6 +49,7 @@ async fn quantization_is_effectively_applied() {
         )];
         let (run, index, _db, _node_state) = setup_store_with_quantization(
             test_config(),
+            DbIndexType::Global,
             ["pk".into()],
             [(
                 "pk".to_string().into(),
@@ -127,6 +129,7 @@ async fn quantization_is_returned_as_index_data_type() {
     ] {
         let (run, index, _db, _node_state) = setup_store_with_quantization(
             test_config(),
+            DbIndexType::Global,
             [],
             [],
             [],
@@ -165,6 +168,7 @@ async fn search_with_quantization(quantization: Quantization, filter: Option<Pos
 
     let (run, index, _db, _node_state) = setup_store_with_quantization(
         test_config(),
+        DbIndexType::Global,
         [pk_column.clone()],
         [(
             pk_column.clone(),
@@ -267,6 +271,7 @@ async fn binary_quantization_with_non_divisible_by_8_dimensions() {
 
     let (run, index, _db, _node_state) = setup_store_with_quantization(
         test_config(),
+        DbIndexType::Global,
         [pk_column.clone()],
         [(
             pk_column.clone(),
