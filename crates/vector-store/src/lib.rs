@@ -17,11 +17,13 @@ mod metrics;
 mod monitor_indexes;
 mod monitor_items;
 pub mod node_state;
+mod similarity;
 
 pub use crate::distance::Distance;
 use crate::internals::Internals;
 use crate::metrics::Metrics;
 use crate::node_state::NodeState;
+pub use crate::similarity::SimilarityScore;
 use db::Db;
 pub use httproutes::DataType;
 pub use httproutes::IndexInfo;

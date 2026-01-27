@@ -200,7 +200,7 @@ async fn simple_create_search_delete_index() {
     assert_eq!(indexes.len(), 1);
     assert_eq!(indexes[0], vector_store::IndexInfo::new("vector", "ann",));
 
-    let (primary_keys, distances) = client
+    let (primary_keys, distances, similarity_scores) = client
         .ann(
             &index.keyspace_name,
             &index.index_name,
@@ -210,10 +210,12 @@ async fn simple_create_search_delete_index() {
         )
         .await;
     assert_eq!(distances.len(), 1);
+    assert_eq!(similarity_scores.len(), 1);
     let primary_keys_pk = primary_keys.get(&"pk".into()).unwrap();
     let primary_keys_ck = primary_keys.get(&"ck".into()).unwrap();
     assert_eq!(distances.len(), primary_keys_pk.len());
     assert_eq!(distances.len(), primary_keys_ck.len());
+    assert_eq!(similarity_scores.len(), distances.len());
     assert_eq!(primary_keys_pk.first().unwrap().as_i64().unwrap(), 2);
     assert_eq!(primary_keys_ck.first().unwrap().as_str().unwrap(), "two");
 
@@ -523,7 +525,7 @@ async fn ann_filter_partition_key_int_eq() {
     // Search for nearest neighbors with a filter on primary key "pk" = 1
     let pk_ck_values = wait_for_value(
         || async {
-            let (primary_keys, _) = client
+            let (primary_keys, _, _) = client
                 .ann(
                     &index.keyspace_name,
                     &index.index_name,
@@ -590,7 +592,7 @@ async fn ann_filter_clustering_key_int_eq() {
     // Search for nearest neighbors with a filter on primary key "ck" = 1
     let pk_ck_values = wait_for_value(
         || async {
-            let (primary_keys, _) = client
+            let (primary_keys, _, _) = client
                 .ann(
                     &index.keyspace_name,
                     &index.index_name,
@@ -657,7 +659,7 @@ async fn ann_filter_partition_key_int_in() {
     // Search for nearest neighbors with a filter on primary key "pk" IN (1, 2)
     let pk_ck_values = wait_for_value(
         || async {
-            let (primary_keys, _) = client
+            let (primary_keys, _, _) = client
                 .ann(
                     &index.keyspace_name,
                     &index.index_name,
@@ -728,7 +730,7 @@ async fn ann_filter_clustering_key_int_in() {
     // Search for nearest neighbors with a filter on primary key "ck" IN (1, 3)
     let pk_ck_values = wait_for_value(
         || async {
-            let (primary_keys, _) = client
+            let (primary_keys, _, _) = client
                 .ann(
                     &index.keyspace_name,
                     &index.index_name,
@@ -797,7 +799,7 @@ async fn ann_filter_primary_key_int_eq_tuple() {
     .await;
 
     // Search for nearest neighbors with a filter on primary key ("pk", "ck") = (1, 5)
-    let (primary_keys, _) = client
+    let (primary_keys, _, _) = client
         .ann(
             &index.keyspace_name,
             &index.index_name,
@@ -854,7 +856,7 @@ async fn ann_filter_primary_key_int_in_tuple() {
     .await;
 
     // Search for nearest neighbors with a filter on primary key ("pk", "ck") IN ((0,7), (1, 5))
-    let (primary_keys, _) = client
+    let (primary_keys, _, _) = client
         .ann(
             &index.keyspace_name,
             &index.index_name,
