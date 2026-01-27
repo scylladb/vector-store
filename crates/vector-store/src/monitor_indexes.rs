@@ -29,7 +29,8 @@ use tokio::sync::mpsc::Sender;
 use tokio::time;
 use tracing::Instrument;
 use tracing::debug;
-use tracing::debug_span;
+use tracing::error_span;
+use tracing::info;
 use tracing::warn;
 
 pub(crate) enum MonitorIndexes {}
@@ -58,7 +59,7 @@ pub(crate) async fn new(
                             Event::DiscoveringIndexes,
                         ).await;
                         let Ok(new_indexes) = get_indexes(&db).await.inspect_err(|err| {
-                            debug!("monitor_indexes: unable to get the list of indexes: {err}");
+                            info!("monitor_indexes: unable to get the list of indexes: {err}");
                         }) else {
                             // there was an error during retrieving indexes, reset schema version
                             // and retry next time
@@ -84,7 +85,7 @@ pub(crate) async fn new(
                 }
             }
         }
-        .instrument(debug_span!("monitor_indexes")),
+        .instrument(error_span!("monitor_indexes")),
     );
     Ok(tx)
 }
@@ -162,6 +163,8 @@ async fn get_indexes(db: &Sender<Db>) -> anyhow::Result<HashSet<IndexMetadata>> 
             index_name: idx.index,
             table_name: idx.table,
             target_column: idx.target_column,
+            index_type: idx.index_type,
+            filtering_columns: idx.filtering_columns,
             dimensions,
             connectivity,
             expansion_add,
@@ -221,6 +224,7 @@ async fn del_indexes(engine: &Sender<Engine>, idxs: impl Iterator<Item = IndexMe
 mod tests {
     use super::*;
     use crate::DbCustomIndex;
+    use crate::DbIndexType;
     use crate::IndexId;
     use crate::IndexName;
     use crate::db;
@@ -319,6 +323,8 @@ mod tests {
                 index: name.to_string().into(),
                 table: "tbl".to_string().into(),
                 target_column: "embedding".to_string().into(),
+                index_type: DbIndexType::Global,
+                filtering_columns: Arc::new(Vec::new()),
             }
         }
 
@@ -375,6 +381,8 @@ mod tests {
                         index: idx.index.clone(),
                         table: idx.table.clone(),
                         target_column: idx.target_column.clone(),
+                        index_type: DbIndexType::Global,
+                        filtering_columns: Arc::new(Vec::new()),
                     })
                     .collect()
             }
@@ -565,6 +573,8 @@ mod tests {
                         index: "idx".to_string().into(),
                         table: "tbl".to_string().into(),
                         target_column: "embedding".to_string().into(),
+                        index_type: DbIndexType::Global,
+                        filtering_columns: Arc::new(Vec::new()),
                     };
                     tx.send(Ok(vec![index(), index(), index()])).unwrap();
                 }

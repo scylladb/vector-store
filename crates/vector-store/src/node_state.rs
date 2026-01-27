@@ -183,16 +183,16 @@ pub(crate) async fn new() -> mpsc::Sender<NodeState> {
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroUsize;
-
-    use uuid::Uuid;
-
     use super::*;
     use crate::ColumnName;
+    use crate::DbIndexType;
     use crate::Dimensions;
     use crate::IndexName;
     use crate::KeyspaceName;
     use crate::TableName;
+    use std::num::NonZeroUsize;
+    use std::sync::Arc;
+    use uuid::Uuid;
 
     #[tokio::test]
     async fn test_node_state_changes_as_expected() {
@@ -211,6 +211,8 @@ mod tests {
             index_name: IndexName("test_index".to_string()),
             table_name: TableName("test_table".to_string()),
             target_column: ColumnName("test_column".to_string()),
+            index_type: DbIndexType::Global,
+            filtering_columns: Arc::new(Vec::new()),
             dimensions: Dimensions(NonZeroUsize::new(3).unwrap()),
             connectivity: Default::default(),
             expansion_add: Default::default(),
@@ -224,6 +226,8 @@ mod tests {
             index_name: IndexName("test_index1".to_string()),
             table_name: TableName("test_table".to_string()),
             target_column: ColumnName("test_column".to_string()),
+            index_type: DbIndexType::Global,
+            filtering_columns: Arc::new(Vec::new()),
             dimensions: Dimensions(NonZeroUsize::new(3).unwrap()),
             connectivity: Default::default(),
             expansion_add: Default::default(),
@@ -261,6 +265,8 @@ mod tests {
             index_name: IndexName("test_index".to_string()),
             table_name: TableName("test_table".to_string()),
             target_column: ColumnName("test_column".to_string()),
+            index_type: DbIndexType::Global,
+            filtering_columns: Arc::new(Vec::new()),
             dimensions: Dimensions(NonZeroUsize::new(3).unwrap()),
             connectivity: Default::default(),
             expansion_add: Default::default(),
@@ -348,6 +354,8 @@ mod tests {
             index_name: IndexName("test_index".to_string()),
             table_name: TableName("test_table".to_string()),
             target_column: ColumnName("test_column".to_string()),
+            index_type: DbIndexType::Global,
+            filtering_columns: Arc::new(Vec::new()),
             dimensions: Dimensions(NonZeroUsize::new(3).unwrap()),
             connectivity: Default::default(),
             expansion_add: Default::default(),

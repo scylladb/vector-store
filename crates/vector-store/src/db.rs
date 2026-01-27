@@ -10,6 +10,7 @@ use crate::Connectivity;
 use crate::Credentials;
 use crate::DbCustomIndex;
 use crate::DbEmbedding;
+use crate::DbIndexType;
 use crate::Dimensions;
 use crate::ExpansionAdd;
 use crate::ExpansionSearch;
@@ -28,6 +29,8 @@ use crate::node_state::Event;
 use crate::node_state::NodeState;
 use crate::node_state::NodeStateExt;
 use anyhow::Context;
+use anyhow::anyhow;
+use anyhow::bail;
 use futures::TryStreamExt;
 use regex::Regex;
 use rustls::ClientConfig;
@@ -37,6 +40,8 @@ use rustls_pki_types::pem::PemObject;
 use scylla::client::session::Session;
 use scylla::client::session::TlsContext;
 use scylla::client::session_builder::SessionBuilder;
+use scylla::cluster::metadata::ColumnType;
+use scylla::cluster::metadata::Table;
 use scylla::statement::prepared::PreparedStatement;
 use scylla::value::CqlTimeuuid;
 use secrecy::ExposeSecret;
@@ -671,20 +676,59 @@ impl Statements {
             .borrow()
             .clone()
             .ok_or_else(|| anyhow::anyhow!("No active session"))?;
-        Ok(session
+
+        #[derive(Debug, derive_more::Display)]
+        struct InvalidMetadata;
+
+        let result = session
             .execute_iter(self.st_get_indexes.clone(), &[])
             .await?
             .rows_stream::<(String, String, String, BTreeMap<String, String>)>()?
-            .try_filter_map(|(keyspace, index, table, mut options)| async move {
-                Ok(options.remove("target").map(|target| DbCustomIndex {
-                    keyspace: keyspace.into(),
-                    index: index.into(),
-                    table: table.into(),
-                    target_column: target.into(),
-                }))
+            .map_err(|err| anyhow::anyhow!("Failed to fetch indexes: {}", err))
+            .try_filter_map(|(keyspace_name, index_name, table_name, mut options)| {
+                let session = session.clone();
+                async move {
+                    let cluster_state = session.get_cluster_state();
+                    let table = cluster_state
+                        .get_keyspace(&keyspace_name)
+                        .ok_or_else(|| {
+                            anyhow!("keyspace {keyspace_name} does not exist")
+                                .context(InvalidMetadata)
+                        })?
+                        .tables
+                        .get(&table_name)
+                        .ok_or_else(|| {
+                            anyhow!("table {table_name} does not exist").context(InvalidMetadata)
+                        })?;
+                    Ok(options.remove("target").and_then(|target| {
+                        from_target_option(table, target)
+                            .map(
+                                |(index_type, target_column, filtering_columns)| DbCustomIndex {
+                                    keyspace: keyspace_name.into(),
+                                    index: index_name.clone().into(),
+                                    table: table_name.into(),
+                                    target_column,
+                                    index_type,
+                                    filtering_columns: Arc::new(filtering_columns),
+                                },
+                            )
+                            .inspect_err(|err| {
+                                warn!("Skipping index {index_name} due to invalid target option: {err}");
+                            })
+                            .ok()
+                    }))
+                }
             })
             .try_collect()
-            .await?)
+            .await;
+        if let Err(err) = &result
+            && err.is::<InvalidMetadata>()
+        {
+            // If we encountered invalid metadata, it's likely due to a concurrent schema change.
+            // Refresh metadata and return an error to trigger a retry.
+            session.refresh_metadata().await.unwrap_or(());
+        }
+        result
     }
 
     const ST_GET_INDEX_TARGET_TYPE: &str = "
@@ -861,6 +905,61 @@ impl Statements {
         };
         version_begin == version_end
     }
+}
+
+#[derive(serde::Deserialize)]
+struct TargetOption {
+    pk: Vec<String>,
+    ck: Vec<String>,
+}
+
+fn from_target_option(
+    table: &Table,
+    value: String,
+) -> anyhow::Result<(DbIndexType, ColumnName, Vec<ColumnName>)> {
+    let Ok(mut target_option) = serde_json::from_str::<TargetOption>(&value) else {
+        // Global index with a single target column
+        return Ok((DbIndexType::Global, value.into(), vec![]));
+    };
+
+    let validate_target_type = |target_name: &str| -> anyhow::Result<()> {
+        let column = table.columns.get(target_name).ok_or_else(|| {
+            anyhow!("invalid target option: column {target_name} does not exist in a table")
+        })?;
+        if !matches!(column.typ, ColumnType::Vector { .. }) {
+            bail!("invalid target option: column {target_name} is not a vector column in a table");
+        }
+        Ok(())
+    };
+
+    if target_option.pk == table.partition_key {
+        // Local index
+        let Some(target_name) = target_option.ck.first() else {
+            bail!("invalid target option: ck is empty for local index");
+        };
+        validate_target_type(target_name)?;
+
+        let mut columns = target_option.ck.into_iter();
+        return Ok((
+            DbIndexType::Local(Arc::new(
+                target_option.pk.into_iter().map(ColumnName::from).collect(),
+            )),
+            columns.next().unwrap().into(),
+            columns.map(ColumnName::from).collect(),
+        ));
+    }
+
+    // Global index
+    if target_option.pk.len() != 1 {
+        bail!("invalid target option: pk should contains only vector column for a global index");
+    };
+    let target_name = target_option.pk.remove(0);
+    validate_target_type(&target_name)?;
+    Ok((
+        DbIndexType::Global,
+        target_name.into(),
+        target_option.ck.into_iter().map(ColumnName::from).collect(),
+    ))
 }
 
 #[cfg(test)]

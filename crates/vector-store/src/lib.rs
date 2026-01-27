@@ -556,6 +556,8 @@ pub struct IndexMetadata {
     pub index_name: IndexName,
     pub table_name: TableName,
     pub target_column: ColumnName,
+    pub index_type: DbIndexType,
+    pub filtering_columns: Arc<Vec<ColumnName>>,
     pub dimensions: Dimensions,
     pub connectivity: Connectivity,
     pub expansion_add: ExpansionAdd,
@@ -571,12 +573,20 @@ impl IndexMetadata {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum DbIndexType {
+    Global,
+    Local(Arc<Vec<ColumnName>>),
+}
+
 #[derive(Debug)]
 pub struct DbCustomIndex {
     pub keyspace: KeyspaceName,
     pub index: IndexName,
     pub table: TableName,
     pub target_column: ColumnName,
+    pub index_type: DbIndexType,
+    pub filtering_columns: Arc<Vec<ColumnName>>,
 }
 
 impl DbCustomIndex {

@@ -16,6 +16,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tokio::sync::watch;
 use uuid::Uuid;
+use vector_store::DbIndexType;
 use vector_store::IndexMetadata;
 
 #[tokio::test]
@@ -30,6 +31,8 @@ async fn simple_create_search_delete_index() {
         table_name: "items".into(),
         index_name: "ann".into(),
         target_column: "embedding".into(),
+        index_type: DbIndexType::Global,
+        filtering_columns: Arc::new(Vec::new()),
         dimensions: NonZeroUsize::new(3).unwrap().into(),
         connectivity: Default::default(),
         expansion_add: Default::default(),

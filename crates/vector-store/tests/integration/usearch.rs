@@ -24,6 +24,7 @@ use uuid::Uuid;
 use vector_store::ColumnName;
 use vector_store::Config;
 use vector_store::Connectivity;
+use vector_store::DbIndexType;
 use vector_store::Dimensions;
 use vector_store::ExpansionAdd;
 use vector_store::ExpansionSearch;
@@ -92,6 +93,8 @@ pub(crate) async fn setup_store_with_quantization(
         index_name: "ann".into(),
         target_column: "embedding".into(),
         dimensions: dimension,
+        index_type: DbIndexType::Global,
+        filtering_columns: Arc::new(Vec::new()),
         connectivity: Connectivity::default(),
         expansion_add: ExpansionAdd::default(),
         expansion_search: ExpansionSearch::default(),
@@ -259,6 +262,8 @@ async fn failed_db_index_create() {
         table_name: "items".into(),
         index_name: "ann".into(),
         target_column: "embedding".into(),
+        index_type: DbIndexType::Global,
+        filtering_columns: Arc::new(Vec::new()),
         dimensions: NonZeroUsize::new(3).unwrap().into(),
         connectivity: Default::default(),
         expansion_add: Default::default(),
