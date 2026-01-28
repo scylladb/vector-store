@@ -16,3 +16,4 @@ tokio.workspace = true
 tracing.workspace = true
 vector-search-validator-tests.workspace = true
 vector-store.workspace = true
+httpclient.workspace = true

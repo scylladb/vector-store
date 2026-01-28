@@ -444,12 +444,29 @@ pub async fn create_index(
     table: &str,
     column: &str,
 ) -> IndexInfo {
+    create_index_with_options(session, clients, table, column, None).await
+}
+
+#[framed]
+pub async fn create_index_with_options(
+    session: &Session,
+    clients: &[HttpClient],
+    table: &str,
+    column: &str,
+    options: Option<&str>,
+) -> IndexInfo {
     let index = format!("idx_{}", Uuid::new_v4().simple());
+
+    let extra = if let Some(options) = options {
+        format!("WITH OPTIONS = {options}")
+    } else {
+        String::new()
+    };
 
     // Create index
     session
         .query_unpaged(
-            format!("CREATE INDEX {index} ON {table}({column}) USING 'vector_index'"),
+            format!("CREATE INDEX {index} ON {table}({column}) USING 'vector_index' {extra}"),
             (),
         )
         .await
