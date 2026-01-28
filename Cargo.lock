@@ -2983,9 +2983,9 @@ dependencies = [
 
 [[package]]
 name = "scylla-cdc"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62098ab348522c299c63a1891ed9a8222c03b066d375c921619fd7dbdf18ecd7"
+checksum = "1fc78ca8c6266fedefb7633b98e23d3e8c9b4775fd29c9ae45e22322c370f0db"
 dependencies = [
  "anyhow",
  "async-trait",
