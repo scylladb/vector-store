@@ -147,13 +147,13 @@ trait UsearchIndex {
         &self,
         vector: &Vector,
         limit: Limit,
-    ) -> anyhow::Result<impl Iterator<Item = (Key, Distance)>>;
+    ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<(Key, Distance)>>>;
     fn filtered_search(
         &self,
         vector: &Vector,
         limit: Limit,
         filter: impl Fn(Key) -> bool,
-    ) -> anyhow::Result<impl Iterator<Item = (Key, Distance)>>;
+    ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<(Key, Distance)>>>;
 
     fn stop(&self);
 }
@@ -162,6 +162,7 @@ struct ThreadedUsearchIndex {
     inner: usearch::Index,
     threads: usize,
     quantization: usearch::ScalarKind,
+    space_type: usearch::MetricKind,
 }
 
 impl ThreadedUsearchIndex {
@@ -170,6 +171,7 @@ impl ThreadedUsearchIndex {
             inner: usearch::Index::new(&options)?,
             threads,
             quantization: options.quantization,
+            space_type: options.metric,
         })
     }
 }
@@ -205,7 +207,7 @@ impl UsearchIndex for ThreadedUsearchIndex {
         &self,
         vector: &Vector,
         limit: Limit,
-    ) -> anyhow::Result<impl Iterator<Item = (Key, Distance)>> {
+    ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<(Key, Distance)>>> {
         let matches = if self.quantization == ScalarKind::B1 {
             let vector = f32_to_b1x8(&vector.0);
             self.inner.search(&vector, limit.0.get())?
@@ -216,7 +218,10 @@ impl UsearchIndex for ThreadedUsearchIndex {
             .keys
             .into_iter()
             .zip(matches.distances)
-            .map(|(key, distance)| (key.into(), distance.into())))
+            .map(|(key, distance)| {
+                Distance::try_from((distance, self.space_type.try_into()?, vector.dim()))
+                    .map(|dist| (key.into(), dist))
+            }))
     }
 
     fn filtered_search(
@@ -224,7 +229,7 @@ impl UsearchIndex for ThreadedUsearchIndex {
         vector: &Vector,
         limit: Limit,
         filter: impl Fn(Key) -> bool,
-    ) -> anyhow::Result<impl Iterator<Item = (Key, Distance)>> {
+    ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<(Key, Distance)>>> {
         let matches = if self.quantization == ScalarKind::B1 {
             let vector = f32_to_b1x8(&vector.0);
             self.inner
@@ -237,7 +242,10 @@ impl UsearchIndex for ThreadedUsearchIndex {
             .keys
             .into_iter()
             .zip(matches.distances)
-            .map(|(key, distance)| (key.into(), distance.into())))
+            .map(|(key, distance)| {
+                Distance::try_from((distance, self.space_type.try_into()?, vector.dim()))
+                    .map(|dist| (key.into(), dist))
+            }))
     }
 
     fn stop(&self) {}
@@ -389,7 +397,7 @@ impl UsearchIndex for RwLock<Simulator> {
         &self,
         _: &Vector,
         limit: Limit,
-    ) -> anyhow::Result<impl Iterator<Item = (Key, Distance)>> {
+    ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<(Key, Distance)>>> {
         let start = Instant::now();
 
         let sim = self.read().unwrap();
@@ -408,7 +416,8 @@ impl UsearchIndex for RwLock<Simulator> {
         };
 
         sim.wait_search(start);
-        Ok(keys.into_iter().map(|key| (key, 0.0.into())))
+        let distance = Distance::new_euclidean(0.0)?;
+        Ok(keys.into_iter().map(move |key| Ok((key, distance))))
     }
 
     fn filtered_search(
@@ -416,7 +425,7 @@ impl UsearchIndex for RwLock<Simulator> {
         vector: &Vector,
         limit: Limit,
         _filter: impl Fn(Key) -> bool,
-    ) -> anyhow::Result<impl Iterator<Item = (Key, Distance)>> {
+    ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<(Key, Distance)>>> {
         self.search(vector, limit)
     }
 
@@ -893,11 +902,13 @@ fn ann(
                 .and_then(|matches| {
                     let keys = keys.read().unwrap();
                     let (primary_keys, distances) = itertools::process_results(
-                        matches.map(|(key, distance)| {
-                            keys.get_by_right(&key)
-                                .cloned()
-                                .ok_or(anyhow!("not defined primary key column {key}"))
-                                .map(|primary_key| (primary_key, distance))
+                        matches.map(|result| {
+                            result.and_then(|(key, distance)| {
+                                keys.get_by_right(&key)
+                                    .cloned()
+                                    .ok_or(anyhow!("not defined primary key column {key}"))
+                                    .map(|primary_key| (primary_key, distance))
+                            })
                         }),
                         |it| it.unzip(),
                     )?;
@@ -1041,11 +1052,13 @@ fn filtered_ann(
                 .and_then(|matches| {
                     let keys = keys.read().unwrap();
                     let (primary_keys, distances) = itertools::process_results(
-                        matches.map(|(key, distance)| {
-                            keys.get_by_right(&key)
-                                .cloned()
-                                .ok_or(anyhow!("not defined primary key column {key}"))
-                                .map(|primary_key| (primary_key, distance))
+                        matches.map(|result| {
+                            result.and_then(|(key, distance)| {
+                                keys.get_by_right(&key)
+                                    .cloned()
+                                    .ok_or(anyhow!("not defined primary key column {key}"))
+                                    .map(|primary_key| (primary_key, distance))
+                            })
                         }),
                         |it| it.unzip(),
                     )?;

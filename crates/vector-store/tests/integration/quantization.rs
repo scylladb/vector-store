@@ -14,6 +14,7 @@ use vector_store::ColumnName;
 use vector_store::DataType;
 use vector_store::Distance;
 use vector_store::Quantization;
+use vector_store::httproutes;
 use vector_store::httproutes::PostIndexAnnFilter;
 use vector_store::httproutes::PostIndexAnnRestriction;
 
@@ -40,7 +41,7 @@ async fn quantization_is_effectively_applied() {
         quantization: Quantization,
         add_vector: Vec<f32>,
         search_vector: Vec<f32>,
-    ) -> Distance {
+    ) -> httproutes::Distance {
         let values = [(
             vec![CqlValue::Int(1)].into(),
             Some(add_vector.into()),
@@ -101,13 +102,13 @@ async fn quantization_is_effectively_applied() {
 
     // Assert F32 distance is small (high precision)
     assert!(
-        f32_distance < Distance::from(0.1),
+        f32_distance < Distance::new_euclidean(0.1).unwrap().into(),
         "F32 distance should be small due to high precision. Got: {:?}",
         f32_distance
     );
     // Assert I8 distance is larger (quantization error)
     assert!(
-        i8_distance > Distance::from(300.0),
+        i8_distance > Distance::new_euclidean(300.0).unwrap().into(),
         "I8 distance should be larger due to quantization. Got: {:?}",
         i8_distance
     );
@@ -192,7 +193,7 @@ async fn search_with_quantization(quantization: Quantization, filter: Option<Pos
                 )
                 .await
                 .1[0]
-                == Distance::from(0.0)
+                == Distance::new_euclidean(0.0).unwrap().into()
         },
         &format!(
             "Waiting for ANN search to return 1 distance ({:?})",
@@ -294,7 +295,7 @@ async fn binary_quantization_with_non_divisible_by_8_dimensions() {
                 )
                 .await
                 .1[0]
-                == Distance::from(0.0)
+                == Distance::new_euclidean(0.0).unwrap().into()
         },
         "Waiting for ANN search to return 1 distance",
     )
