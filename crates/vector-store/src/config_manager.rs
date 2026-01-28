@@ -330,6 +330,11 @@ where
         .transpose()?
         .map(|v| v.into());
 
+    config.cql_uri_translation_map = env("VECTOR_STORE_CQL_URI_TRANSLATION_MAP")
+        .ok()
+        .map(|v| serde_json::from_str(&v))
+        .transpose()?;
+
     // Validate that both cert and key are provided together, or neither
     match (&tls_cert_path, &tls_key_path) {
         (Some(_), Some(_)) | (None, None) => {
@@ -519,6 +524,7 @@ mod tests {
             cql_keepalive_interval: None,
             cql_keepalive_timeout: None,
             cql_tcp_keepalive_interval: None,
+            cql_uri_translation_map: None,
             cdc_safety_interval: None,
             cdc_sleep_interval: None,
         };

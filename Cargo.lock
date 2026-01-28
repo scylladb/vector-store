@@ -4004,6 +4004,7 @@ dependencies = [
  "httpclient",
  "scylla",
  "scylla-proxy",
+ "serde_json",
  "tokio",
  "tracing",
  "uuid",

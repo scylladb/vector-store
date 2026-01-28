@@ -32,6 +32,7 @@ use scylla::serialize::writers::CellWriter;
 use scylla::serialize::writers::WrittenCellProof;
 use scylla::value::CqlValue;
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::hash::Hash;
 use std::hash::Hasher;
 use std::net::SocketAddr;
@@ -71,6 +72,7 @@ pub struct Config {
     pub cql_keepalive_interval: Option<Duration>,
     pub cql_keepalive_timeout: Option<Duration>,
     pub cql_tcp_keepalive_interval: Option<Duration>,
+    pub cql_uri_translation_map: Option<HashMap<SocketAddr, SocketAddr>>,
     pub cdc_safety_interval: Option<Duration>,
     pub cdc_sleep_interval: Option<Duration>,
     pub disable_colors: bool,
@@ -95,6 +97,7 @@ impl Default for Config {
             cql_keepalive_interval: None,
             cql_keepalive_timeout: None,
             cql_tcp_keepalive_interval: None,
+            cql_uri_translation_map: None,
             cdc_safety_interval: None,
             cdc_sleep_interval: None,
         }

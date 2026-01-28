@@ -40,12 +40,12 @@ pub const DB_PORT: u16 = 9042;
 pub const DB_OCTET_1: u8 = 1;
 pub const DB_OCTET_2: u8 = 2;
 pub const DB_OCTET_3: u8 = 3;
-pub const DB_PROXY_OCTET_1: u8 = 10;
-pub const DB_PROXY_OCTET_2: u8 = 11;
-pub const DB_PROXY_OCTET_3: u8 = 12;
-pub const VS_OCTET_1: u8 = 20;
-pub const VS_OCTET_2: u8 = 21;
-pub const VS_OCTET_3: u8 = 22;
+pub const DB_PROXY_OCTET_1: u8 = 11;
+pub const DB_PROXY_OCTET_2: u8 = 12;
+pub const DB_PROXY_OCTET_3: u8 = 13;
+pub const VS_OCTET_1: u8 = 21;
+pub const VS_OCTET_2: u8 = 22;
+pub const VS_OCTET_3: u8 = 23;
 
 #[framed]
 pub async fn get_default_vs_urls(actors: &TestActors) -> Vec<String> {
@@ -165,11 +165,20 @@ pub async fn init_with_proxy(actors: TestActors) {
 
     let scylla_configs = get_default_scylla_node_configs(&actors).await;
     let scylla_proxy_configs = get_default_scylla_proxy_node_configs(&actors).await;
-    let vs_configs = get_proxy_vs_node_configs(&actors);
+    let mut vs_configs = get_proxy_vs_node_configs(&actors);
 
     actors.db.start(scylla_configs).await;
     assert!(actors.db.wait_for_ready().await);
-    actors.db_proxy.start(scylla_proxy_configs).await;
+    let translation_map = actors.db_proxy.start(scylla_proxy_configs).await;
+    let envs: HashMap<_, _> = [(
+        "VECTOR_STORE_CQL_URI_TRANSLATION_MAP".to_string(),
+        serde_json::to_string(&translation_map).unwrap(),
+    )]
+    .into_iter()
+    .collect();
+    vs_configs.iter_mut().for_each(|cfg| {
+        cfg.envs.extend(envs.clone());
+    });
     actors.vs.start(vs_configs).await;
     assert!(actors.vs.wait_for_ready().await);
 

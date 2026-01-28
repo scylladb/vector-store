@@ -10,6 +10,8 @@ use scylla_proxy::Proxy;
 use scylla_proxy::RequestRule;
 use scylla_proxy::ResponseRule;
 use scylla_proxy::RunningProxy;
+use std::collections::HashMap;
+use std::net::SocketAddr;
 use tokio::sync::mpsc;
 use tracing::Instrument;
 use tracing::debug;
@@ -50,8 +52,7 @@ pub(crate) async fn new() -> mpsc::Sender<ScyllaProxyCluster> {
 async fn process(msg: ScyllaProxyCluster, proxy: &mut Option<RunningProxy>) {
     match msg {
         ScyllaProxyCluster::Start { node_configs, tx } => {
-            start(node_configs, proxy).await;
-            tx.send(())
+            tx.send(start(node_configs, proxy).await)
                 .expect("process ScyllaProxyCluster::Start: failed to send a response");
         }
 
@@ -84,27 +85,31 @@ async fn process(msg: ScyllaProxyCluster, proxy: &mut Option<RunningProxy>) {
 }
 
 #[framed]
-async fn start(node_configs: Vec<ScyllaProxyNodeConfig>, proxy: &mut Option<RunningProxy>) {
+async fn start(
+    node_configs: Vec<ScyllaProxyNodeConfig>,
+    running_proxy: &mut Option<RunningProxy>,
+) -> HashMap<SocketAddr, SocketAddr> {
     if node_configs.is_empty() {
-        return;
+        return HashMap::new();
     }
-    stop(proxy).await;
+    stop(running_proxy).await;
 
-    *proxy = Proxy::new(node_configs.into_iter().map(|cfg| {
-        Node::new(
-            (cfg.real_addr, DEFAULT_SCYLLA_CQL_PORT).into(),
-            (cfg.proxy_addr, DEFAULT_SCYLLA_CQL_PORT).into(),
-            scylla_proxy::ShardAwareness::QueryNode,
-            None,
-            None,
-        )
-    }))
-    .run()
-    .await
-    .inspect_err(|err| {
-        error!("Failed to start scylla proxy cluster: {err}");
-    })
-    .ok();
+    let proxy = Proxy::new(node_configs.into_iter().map(|cfg| {
+        Node::builder()
+            .real_address((cfg.real_addr, DEFAULT_SCYLLA_CQL_PORT).into())
+            .proxy_address((cfg.proxy_addr, DEFAULT_SCYLLA_CQL_PORT).into())
+            .shard_awareness(scylla_proxy::ShardAwareness::QueryNode)
+            .build()
+    }));
+    let translation_map = proxy.translation_map();
+    *running_proxy = proxy
+        .run()
+        .await
+        .inspect_err(|err| {
+            error!("Failed to start scylla proxy cluster: {err}");
+        })
+        .ok();
+    translation_map
 }
 
 #[framed]
