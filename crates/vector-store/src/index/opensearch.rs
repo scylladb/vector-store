@@ -477,10 +477,17 @@ async fn ann(
         .collect::<Vec<_>>();
 
     let (keys, scores): (Vec<_>, Vec<_>) = hits.iter().cloned().unzip();
-    let distances = scores
+    let distances: anyhow::Result<Vec<_>> = scores
         .iter()
-        .map(|score| Distance(*score as f32))
-        .collect::<Vec<_>>();
+        .map(|score| Distance::try_from(*score as f32))
+        .collect();
+    let distances = match distances {
+        Ok(distances) => distances,
+        Err(err) => {
+            _ = tx_ann.send(Err(err));
+            return;
+        }
+    };
 
     tx_ann
         .send(Ok((keys, distances)))

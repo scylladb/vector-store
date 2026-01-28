@@ -12,6 +12,7 @@ use crate::KeyspaceName;
 use crate::Limit;
 use crate::Progress;
 use crate::Restriction;
+use crate::SimilarityScore;
 use crate::Vector;
 use crate::db_index::DbIndexExt;
 use crate::engine::Engine;
@@ -197,7 +198,7 @@ async fn get_indexes(State(state): State<RoutesInnerState>) -> Response {
         .get_index_ids()
         .await
         .iter()
-        .map(|id| IndexInfo {
+        .map(|(id, _)| IndexInfo {
             keyspace: id.keyspace(),
             index: id.index(),
             data_type: DataType::F32, // currently the only supported data type by Vector Store
@@ -434,6 +435,7 @@ pub struct PostIndexAnnRequest {
 pub struct PostIndexAnnResponse {
     pub primary_keys: HashMap<ColumnName, Vec<Value>>,
     pub distances: Vec<Distance>,
+    pub similarity_scores: Vec<SimilarityScore>,
 }
 
 #[utoipa::path(
@@ -453,7 +455,7 @@ If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
     responses(
         (
             status = 200,
-            description = "Successful ANN search. Returns a list of primary keys and their corresponding distances for the most similar vectors found.",
+            description = "Successful ANN search. Returns a list of primary keys and their corresponding distances and similarity scores for the most similar vectors found.",
             body = PostIndexAnnResponse
         ),
         (
@@ -576,6 +578,28 @@ async fn post_index_ann(
                 debug!("post_index_ann: {msg}");
                 (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
             } else {
+                let index_id = IndexId::new(&keyspace, &index_name);
+                let space_type = match state
+                    .engine
+                    .get_index_ids()
+                    .await
+                    .iter()
+                    .find(|(id, _)| id == &index_id)
+                    .map(|(_, space_type)| *space_type)
+                {
+                    Some(space_type) => space_type,
+                    None => {
+                        let msg = format!("missing space type for index: {keyspace}.{index_name}");
+                        debug!("post_index_ann: {msg}");
+                        return (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response();
+                    }
+                };
+
+                let similarity_scores: Vec<SimilarityScore> = distances
+                    .iter()
+                    .map(|distance| SimilarityScore::from((*distance, space_type)))
+                    .collect();
+
                 let primary_keys: anyhow::Result<_> = primary_key_columns
                     .iter()
                     .cloned()
@@ -612,6 +636,7 @@ async fn post_index_ann(
                         response::Json(PostIndexAnnResponse {
                             primary_keys,
                             distances,
+                            similarity_scores,
                         }),
                     )
                         .into_response(),

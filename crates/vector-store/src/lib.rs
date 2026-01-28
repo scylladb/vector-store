@@ -5,6 +5,7 @@
 
 pub mod db;
 pub mod db_index;
+mod distance;
 mod engine;
 pub mod httproutes;
 mod httpserver;
@@ -16,10 +17,13 @@ mod metrics;
 mod monitor_indexes;
 mod monitor_items;
 pub mod node_state;
+mod similarity;
 
+pub use crate::distance::Distance;
 use crate::internals::Internals;
 use crate::metrics::Metrics;
 use crate::node_state::NodeState;
+pub use crate::similarity::SimilarityScore;
 use db::Db;
 pub use httproutes::DataType;
 pub use httproutes::IndexInfo;
@@ -264,22 +268,6 @@ impl PartialEq for PrimaryKey {
 }
 
 impl Eq for PrimaryKey {}
-
-#[derive(
-    Clone, Debug, serde::Serialize, serde::Deserialize, derive_more::From, utoipa::ToSchema,
-)]
-/// Distance between vectors measured using the distance function defined while creating the index.
-pub struct Distance(f32);
-
-impl SerializeValue for Distance {
-    fn serialize<'b>(
-        &self,
-        typ: &ColumnType,
-        writer: CellWriter<'b>,
-    ) -> Result<WrittenCellProof<'b>, SerializationError> {
-        <f32 as SerializeValue>::serialize(&self.0, typ, writer)
-    }
-}
 
 #[derive(
     Copy,
