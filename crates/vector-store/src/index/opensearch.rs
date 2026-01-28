@@ -276,7 +276,16 @@ pub fn new(
                     let opensearch_key = Arc::clone(&opensearch_key);
                     let client = Arc::clone(&client);
                     async move {
-                        process(msg, dimensions, id, keys, opensearch_key, client).await;
+                        process(
+                            msg,
+                            dimensions,
+                            space_type,
+                            id,
+                            keys,
+                            opensearch_key,
+                            client,
+                        )
+                        .await;
                         drop(permit);
                     }
                 });
@@ -293,6 +302,7 @@ pub fn new(
 async fn process(
     msg: Index,
     dimensions: Dimensions,
+    space_type: SpaceType,
     id: Arc<IndexId>,
     keys: Arc<RwLock<BiMap<PrimaryKey, Key>>>,
     opensearch_key: Arc<AtomicU64>,
@@ -312,7 +322,12 @@ async fn process(
             embedding,
             limit,
             tx,
-        } => ann(id, tx, keys, embedding, dimensions, limit, client).await,
+        } => {
+            ann(
+                id, tx, keys, embedding, dimensions, limit, space_type, client,
+            )
+            .await
+        }
         Index::FilteredAnn { tx, .. } => filtered_ann(tx).await,
         Index::Count { tx } => count(id, tx, client).await,
     }
@@ -406,6 +421,7 @@ async fn remove(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn ann(
     id: Arc<IndexId>,
     tx_ann: oneshot::Sender<AnnR>,
@@ -413,6 +429,7 @@ async fn ann(
     embedding: Vector,
     dimensions: Dimensions,
     limit: Limit,
+    space_type: SpaceType,
     client: Arc<OpenSearch>,
 ) {
     if let Err(err) = validator::embedding_dimensions(&embedding, dimensions) {
@@ -478,10 +495,17 @@ async fn ann(
         .collect::<Vec<_>>();
 
     let (keys, scores): (Vec<_>, Vec<_>) = hits.iter().cloned().unzip();
-    let distances = scores
+    let distances: anyhow::Result<Vec<_>> = scores
         .iter()
-        .map(|score| Distance(*score as f32))
-        .collect::<Vec<_>>();
+        .map(|score| Distance::try_from((*score as f32, space_type, Some(dimensions))))
+        .collect();
+    let distances = match distances {
+        Ok(distances) => distances,
+        Err(err) => {
+            _ = tx_ann.send(Err(err));
+            return;
+        }
+    };
 
     tx_ann
         .send(Ok((keys, distances)))
