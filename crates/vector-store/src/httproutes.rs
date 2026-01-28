@@ -363,7 +363,7 @@ async fn get_metrics(
 }
 
 /// A filter restriction used in ANN search requests.
-#[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
+#[derive(Clone, serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
 #[serde(tag = "type")]
 pub enum PostIndexAnnRestriction {
     #[serde(rename = "==")]
