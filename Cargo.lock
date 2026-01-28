@@ -4016,6 +4016,7 @@ name = "vector-search-validator-vector-store"
 version = "1.4.0"
 dependencies = [
  "async-backtrace",
+ "httpclient",
  "scylla",
  "scylla-proxy",
  "tokio",

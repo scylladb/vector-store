@@ -217,6 +217,7 @@ mod tests {
             expansion_search: Default::default(),
             space_type: Default::default(),
             version: Uuid::new_v4().into(),
+            quantization: Default::default(),
         };
         let idx2 = IndexMetadata {
             keyspace_name: KeyspaceName("test_keyspace".to_string()),
@@ -229,6 +230,7 @@ mod tests {
             expansion_search: Default::default(),
             space_type: Default::default(),
             version: Uuid::new_v4().into(),
+            quantization: Default::default(),
         };
         let idxs = HashSet::from([idx1.clone(), idx2.clone()]);
         node_state.send_event(Event::IndexesDiscovered(idxs)).await;
@@ -265,6 +267,7 @@ mod tests {
             expansion_search: Default::default(),
             space_type: Default::default(),
             version: Uuid::new_v4().into(),
+            quantization: Default::default(),
         };
         let idxs = HashSet::from([idx.clone()]);
         node_state.send_event(Event::IndexesDiscovered(idxs)).await;
@@ -351,6 +354,7 @@ mod tests {
             expansion_search: Default::default(),
             space_type: Default::default(),
             version: Uuid::new_v4().into(),
+            quantization: Default::default(),
         };
 
         // Simulate discovering an index
