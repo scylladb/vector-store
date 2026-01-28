@@ -156,15 +156,15 @@ async fn test_similarity_function_cosine(actors: TestActors) {
 async fn test_similarity_function_dot_product(actors: TestActors) {
     info!("started");
 
-    // With dot product, pk=4 should have highest similarity (2.0 * 1.0 = 2.0)
+    // With dot product, all vectors should be L2 normalized
     let vectors = vec![
         (1, vec![1.0f32, 0.0, 0.0]),
         (2, vec![0.0f32, 1.0, 0.0]),
         (3, vec![0.0f32, 0.0, 1.0]),
-        (4, vec![2.0f32, 0.0, 0.0]), // Higher dot product with query vector
+        (4, vec![0.8f32, 0.6, 0.0]),
     ];
 
-    run_similarity_function_test(&actors, Some("DOT_PRODUCT"), vectors, vec![4]).await;
+    run_similarity_function_test(&actors, Some("DOT_PRODUCT"), vectors, vec![1]).await;
 
     info!("finished");
 }
