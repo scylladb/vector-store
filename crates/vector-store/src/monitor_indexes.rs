@@ -7,6 +7,7 @@ use crate::Connectivity;
 use crate::ExpansionAdd;
 use crate::ExpansionSearch;
 use crate::IndexMetadata;
+use crate::Quantization;
 use crate::SpaceType;
 use crate::db::Db;
 use crate::db::DbExt;
@@ -138,21 +139,23 @@ async fn get_indexes(db: &Sender<Db>) -> anyhow::Result<HashSet<IndexMetadata>> 
             continue;
         };
 
-        let (connectivity, expansion_add, expansion_search, space_type) = if let Some(params) = db
-            .get_index_params(idx.keyspace.clone(), idx.table.clone(), idx.index.clone())
-            .await
-            .inspect_err(|err| warn!("unable to get index params: {err}"))?
-        {
-            params
-        } else {
-            debug!("get_indexes: no params for index {idx:?}");
-            (
-                Connectivity::default(),
-                ExpansionAdd::default(),
-                ExpansionSearch::default(),
-                SpaceType::default(),
-            )
-        };
+        let (connectivity, expansion_add, expansion_search, space_type, quantization) =
+            if let Some(params) = db
+                .get_index_params(idx.keyspace.clone(), idx.table.clone(), idx.index.clone())
+                .await
+                .inspect_err(|err| warn!("unable to get index params: {err}"))?
+            {
+                params
+            } else {
+                debug!("get_indexes: no params for index {idx:?}");
+                (
+                    Connectivity::default(),
+                    ExpansionAdd::default(),
+                    ExpansionSearch::default(),
+                    SpaceType::default(),
+                    Quantization::default(),
+                )
+            };
 
         let metadata = IndexMetadata {
             keyspace_name: idx.keyspace,
@@ -165,6 +168,7 @@ async fn get_indexes(db: &Sender<Db>) -> anyhow::Result<HashSet<IndexMetadata>> 
             expansion_search,
             space_type,
             version,
+            quantization,
         };
 
         if !db.is_valid_index(metadata.clone()).await {
@@ -472,6 +476,7 @@ mod tests {
                         Default::default(), // expansion_add
                         Default::default(), // expansion_search
                         Default::default(), // space_type
+                        Default::default(), // quantization
                     ))))
                     .unwrap();
                 }
@@ -591,6 +596,7 @@ mod tests {
             .returning(move |_, _, _, tx| {
                 async move {
                     tx.send(Ok(Some((
+                        Default::default(),
                         Default::default(),
                         Default::default(),
                         Default::default(),

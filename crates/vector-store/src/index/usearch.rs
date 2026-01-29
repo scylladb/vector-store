@@ -12,6 +12,7 @@ use crate::IndexFactory;
 use crate::IndexId;
 use crate::Limit;
 use crate::PrimaryKey;
+use crate::Quantization;
 use crate::Restriction;
 use crate::SpaceType;
 use crate::Vector;
@@ -49,6 +50,7 @@ use tracing::trace;
 use usearch::IndexOptions;
 use usearch::MetricKind;
 use usearch::ScalarKind;
+use usearch::b1x8;
 
 pub struct UsearchIndexFactory {
     tokio_semaphore: Arc<Semaphore>,
@@ -70,8 +72,8 @@ impl IndexFactory for UsearchIndexFactory {
                     connectivity: index.connectivity.0,
                     expansion_add: index.expansion_add.0,
                     expansion_search: index.expansion_search.0,
-                    metric: index.space_type.into(),
-                    quantization: ScalarKind::F32,
+                    metric: metric_kind(index.quantization, index.space_type),
+                    quantization: index.quantization.into(),
                     ..Default::default()
                 };
                 let threads =
@@ -159,6 +161,7 @@ trait UsearchIndex {
 struct ThreadedUsearchIndex {
     inner: usearch::Index,
     threads: usize,
+    quantization: usearch::ScalarKind,
 }
 
 impl ThreadedUsearchIndex {
@@ -166,6 +169,7 @@ impl ThreadedUsearchIndex {
         Ok(Self {
             inner: usearch::Index::new(&options)?,
             threads,
+            quantization: options.quantization,
         })
     }
 }
@@ -186,6 +190,10 @@ impl UsearchIndex for ThreadedUsearchIndex {
     }
 
     fn add(&self, key: Key, vector: &Vector) -> anyhow::Result<()> {
+        if self.quantization == ScalarKind::B1 {
+            let vector = f32_to_b1x8(&vector.0);
+            return Ok(self.inner.add(key.0, &vector)?);
+        }
         Ok(self.inner.add(key.0, &vector.0)?)
     }
 
@@ -198,7 +206,12 @@ impl UsearchIndex for ThreadedUsearchIndex {
         vector: &Vector,
         limit: Limit,
     ) -> anyhow::Result<impl Iterator<Item = (Key, Distance)>> {
-        let matches = self.inner.search(&vector.0, limit.0.get())?;
+        let matches = if self.quantization == ScalarKind::B1 {
+            let vector = f32_to_b1x8(&vector.0);
+            self.inner.search(&vector, limit.0.get())?
+        } else {
+            self.inner.search(&vector.0, limit.0.get())?
+        };
         Ok(matches
             .keys
             .into_iter()
@@ -212,9 +225,14 @@ impl UsearchIndex for ThreadedUsearchIndex {
         limit: Limit,
         filter: impl Fn(Key) -> bool,
     ) -> anyhow::Result<impl Iterator<Item = (Key, Distance)>> {
-        let matches = self
-            .inner
-            .filtered_search(&vector.0, limit.0.get(), |key| filter(Key(key)))?;
+        let matches = if self.quantization == ScalarKind::B1 {
+            let vector = f32_to_b1x8(&vector.0);
+            self.inner
+                .filtered_search(&vector, limit.0.get(), |key| filter(Key(key)))?
+        } else {
+            self.inner
+                .filtered_search(&vector.0, limit.0.get(), |key| filter(Key(key)))?
+        };
         Ok(matches
             .keys
             .into_iter()
@@ -427,12 +445,36 @@ const RESERVE_THRESHOLD: usize = RESERVE_INCREMENT / 3;
 /// Key for index embeddings
 struct Key(u64);
 
+fn metric_kind(quantization: Quantization, space_type: SpaceType) -> MetricKind {
+    // Usearch requires a binary metric (e.g., Hamming, Jaccard) for B1 quantization.
+    // Using a non-binary metric would cause a panic during index creation.
+    // Since we don't currently support selecting a specific binary space type,
+    // we default to Hamming for B1 quantization.
+    if quantization == Quantization::B1 {
+        MetricKind::Hamming
+    } else {
+        space_type.into()
+    }
+}
+
 impl From<SpaceType> for MetricKind {
     fn from(space_type: SpaceType) -> Self {
         match space_type {
             SpaceType::Cosine => MetricKind::Cos,
             SpaceType::Euclidean => MetricKind::L2sq,
             SpaceType::DotProduct => MetricKind::IP,
+        }
+    }
+}
+
+impl From<Quantization> for ScalarKind {
+    fn from(quantization: Quantization) -> Self {
+        match quantization {
+            Quantization::F32 => ScalarKind::F32,
+            Quantization::F16 => ScalarKind::F16,
+            Quantization::BF16 => ScalarKind::BF16,
+            Quantization::I8 => ScalarKind::I8,
+            Quantization::B1 => ScalarKind::B1,
         }
     }
 }
@@ -935,6 +977,34 @@ async fn check_memory_allocation(
     true
 }
 
+fn f32_to_b1x8(f32_vec: &[f32]) -> Vec<b1x8> {
+    fn chunk_to_byte(chunk: impl Iterator<Item = f32>) -> b1x8 {
+        chunk.enumerate().fold(b1x8(0u8), |byte, (i, val)| {
+            if val > 0.0 {
+                b1x8(byte.0 | (1 << i))
+            } else {
+                byte
+            }
+        })
+    }
+
+    // Pre-calculate total capacity to avoid reallocation when pushing the remainder chunk
+    let capacity = f32_vec.len().div_ceil(8);
+    let mut bytes = Vec::<b1x8>::with_capacity(capacity);
+
+    let mut iter = f32_vec.chunks_exact(8);
+    bytes.extend(
+        iter.by_ref()
+            .map(|chunk| chunk_to_byte(chunk.iter().copied())),
+    );
+
+    let remainder = iter.remainder();
+    if !remainder.is_empty() {
+        bytes.push(chunk_to_byte(remainder.iter().copied()));
+    }
+    bytes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -952,6 +1022,7 @@ mod tests {
     use tokio::sync::watch;
     use tokio::task;
     use tokio::time;
+    use usearch::b1x8;
 
     fn add_concurrently(
         index: mpsc::Sender<Index>,
@@ -1017,6 +1088,7 @@ mod tests {
                     expansion_add: ExpansionAdd::default(),
                     expansion_search: ExpansionSearch::default(),
                     space_type: SpaceType::Euclidean,
+                    quantization: Quantization::default(),
                 },
                 Arc::new(vec![]),
                 memory::new(config_rx),
@@ -1148,6 +1220,7 @@ mod tests {
                     expansion_add: ExpansionAdd::default(),
                     expansion_search: ExpansionSearch::default(),
                     space_type: SpaceType::Euclidean,
+                    quantization: Quantization::default(),
                 },
                 Arc::new(vec![]),
                 memory_tx,
@@ -1206,6 +1279,7 @@ mod tests {
                     expansion_add: ExpansionAdd::default(),
                     expansion_search: ExpansionSearch::default(),
                     space_type: SpaceType::Euclidean,
+                    quantization: Quantization::default(),
                 },
                 Arc::new(vec![]),
                 memory::new(config_rx),
@@ -1233,5 +1307,62 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn quantization_to_kind_conversion() {
+        assert_eq!(ScalarKind::from(Quantization::F32), ScalarKind::F32);
+        assert_eq!(ScalarKind::from(Quantization::F16), ScalarKind::F16);
+        assert_eq!(ScalarKind::from(Quantization::BF16), ScalarKind::BF16);
+        assert_eq!(ScalarKind::from(Quantization::I8), ScalarKind::I8);
+        assert_eq!(ScalarKind::from(Quantization::B1), ScalarKind::B1);
+    }
+
+    fn b1x8_to_u8_vec(b1_vec: &[b1x8]) -> Vec<u8> {
+        b1_vec.iter().map(|&b| b.0).collect()
+    }
+
+    #[test]
+    fn f32_to_b1x8_empty() {
+        let b1_vec = f32_to_b1x8(&[]);
+        assert_eq!(b1_vec.len(), 0);
+    }
+
+    #[test]
+    fn f32_to_b1x8_single_byte() {
+        // =< 0 clears bits and > 0 sets bits
+        let b1_vec = f32_to_b1x8(&[1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(b1_vec.len(), 1);
+        assert_eq!(b1x8_to_u8_vec(&b1_vec), &[0b00001111]);
+    }
+
+    #[test]
+    fn f32_to_b1x8_multiple_bytes() {
+        let input = vec![
+            1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, // 0b01010101
+            -1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 1.0, // 0b11110000
+        ];
+        let b1_vec = f32_to_b1x8(&input);
+        assert_eq!(b1_vec.len(), 2);
+        assert_eq!(b1x8_to_u8_vec(&b1_vec), &[0b01010101, 0b11110000]);
+    }
+
+    #[test]
+    fn f32_to_b1x8_large_input() {
+        let input = vec![1.0; 64]; // 64 elements = 8 bytes
+        let b1_vec = f32_to_b1x8(&input);
+        assert_eq!(b1_vec.len(), 8);
+        assert_eq!(b1x8_to_u8_vec(&b1_vec), &[0b11111111; 8]);
+    }
+
+    #[test]
+    fn f32_to_b1x8_remainder() {
+        let input = vec![
+            1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, // 0b01010101
+            1.0, -1.0, 1.0, // 0b00000101
+        ];
+        let b1_vec = f32_to_b1x8(&input);
+        assert_eq!(b1_vec.len(), 2);
+        assert_eq!(b1x8_to_u8_vec(&b1_vec), &[0b01010101, 0b00000101]);
     }
 }

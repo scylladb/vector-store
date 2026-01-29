@@ -4,7 +4,6 @@
  */
 
 use crate::db_basic;
-use crate::db_basic::Index;
 use crate::db_basic::Table;
 use crate::usearch::test_config;
 use ::time::OffsetDateTime;
@@ -23,6 +22,7 @@ use vector_store::Connectivity;
 use vector_store::ExpansionAdd;
 use vector_store::ExpansionSearch;
 use vector_store::IndexMetadata;
+use vector_store::Quantization;
 use vector_store::SpaceType;
 use vector_store::httproutes::NodeStatus;
 
@@ -54,6 +54,7 @@ async fn memory_limit_during_index_build() {
         expansion_search: ExpansionSearch::default(),
         space_type: SpaceType::default(),
         version: Uuid::new_v4().into(),
+        quantization: Quantization::default(),
     };
 
     db.add_table(
@@ -72,14 +73,7 @@ async fn memory_limit_during_index_build() {
     db.add_index(
         &index.keyspace_name,
         index.index_name.clone(),
-        Index {
-            table_name: index.table_name.clone(),
-            target_column: index.target_column.clone(),
-            connectivity: index.connectivity,
-            expansion_add: index.expansion_add,
-            expansion_search: index.expansion_search,
-            space_type: index.space_type,
-        },
+        index.clone().into(),
     )
     .unwrap();
 
