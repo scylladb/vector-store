@@ -163,9 +163,54 @@ pub async fn init(actors: TestActors) {
 pub async fn init_with_proxy(actors: TestActors) {
     info!("started");
 
+    init_dns(&actors).await;
+
     let scylla_configs = get_default_scylla_node_configs(&actors).await;
     let scylla_proxy_configs = get_default_scylla_proxy_node_configs(&actors).await;
     let mut vs_configs = get_proxy_vs_node_configs(&actors);
+
+    actors.db.start(scylla_configs).await;
+    assert!(actors.db.wait_for_ready().await);
+    let translation_map = actors.db_proxy.start(scylla_proxy_configs).await;
+    let envs: HashMap<_, _> = [(
+        "VECTOR_STORE_CQL_URI_TRANSLATION_MAP".to_string(),
+        serde_json::to_string(&translation_map).unwrap(),
+    )]
+    .into_iter()
+    .collect();
+    vs_configs.iter_mut().for_each(|cfg| {
+        cfg.envs.extend(envs.clone());
+    });
+    actors.vs.start(vs_configs).await;
+    assert!(actors.vs.wait_for_ready().await);
+
+    info!("finished");
+}
+
+#[framed]
+pub async fn init_with_proxy_single_vs(actors: TestActors) {
+    info!("started");
+
+    init_dns(&actors).await;
+
+    let mut scylla_configs = get_default_scylla_node_configs(&actors).await;
+    let first_vs_url = scylla_configs
+        .first()
+        .unwrap()
+        .primary_vs_uris
+        .first()
+        .unwrap()
+        .clone();
+    info!("Using VS URL: {first_vs_url}");
+    scylla_configs.iter_mut().for_each(|config| {
+        config.primary_vs_uris = vec![first_vs_url.clone()];
+        config.secondary_vs_uris = vec![];
+    });
+    let scylla_proxy_configs = get_default_scylla_proxy_node_configs(&actors).await;
+    let mut vs_configs: Vec<_> = get_proxy_vs_node_configs(&actors)
+        .into_iter()
+        .take(1)
+        .collect();
 
     actors.db.start(scylla_configs).await;
     assert!(actors.db.wait_for_ready().await);
@@ -266,26 +311,37 @@ pub async fn prepare_connection(actors: &TestActors) -> (Arc<Session>, Vec<HttpC
 }
 
 #[framed]
-pub async fn wait_for<F, Fut>(mut condition: F, msg: &str, timeout: Duration)
+pub async fn prepare_connection_single_vs(actors: &TestActors) -> (Arc<Session>, Vec<HttpClient>) {
+    prepare_connection_with_custom_vs_ips(
+        actors,
+        get_default_vs_ips(actors).into_iter().take(1).collect(),
+    )
+    .await
+}
+
+#[framed]
+pub async fn wait_for<F, Fut>(mut condition: F, msg: impl AsRef<str>, timeout: Duration)
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = bool>,
 {
+    info!("Waiting for: {msg}", msg = msg.as_ref());
     time::timeout(timeout, async {
         while !condition().await {
             time::sleep(Duration::from_millis(100)).await;
         }
     })
     .await
-    .unwrap_or_else(|_| panic!("Timeout on: {msg}"))
+    .unwrap_or_else(|_| panic!("Timeout on: {msg}", msg = msg.as_ref()))
 }
 
 #[framed]
-pub async fn wait_for_value<F, Fut, T>(mut poll_fn: F, msg: &str, timeout: Duration) -> T
+pub async fn wait_for_value<F, Fut, T>(mut poll_fn: F, msg: impl AsRef<str>, timeout: Duration) -> T
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Option<T>>,
 {
+    info!("Waiting for: {msg}", msg = msg.as_ref());
     time::timeout(timeout, async {
         loop {
             if let Some(value) = poll_fn().await {
@@ -295,7 +351,7 @@ where
         }
     })
     .await
-    .unwrap_or_else(|_| panic!("Timeout on: {msg}"))
+    .unwrap_or_else(|_| panic!("Timeout on: {msg}", msg = msg.as_ref()))
 }
 
 #[framed]
