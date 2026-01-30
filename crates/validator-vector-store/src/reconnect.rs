@@ -206,8 +206,10 @@ async fn reconnect_doesnt_break_fullscan(actors: TestActors) {
 async fn restarting_one_node_doesnt_break_fullscan(actors: TestActors) {
     info!("started");
 
-    let (session, clients) = prepare_connection(&actors).await;
+    let (session, clients) = prepare_connection_single_vs(&actors).await;
+    let client = clients.first().unwrap();
 
+    info!("Creating a table and inserting data");
     let keyspace = create_keyspace(&session).await;
     let table = create_table(
         &session,
@@ -223,7 +225,7 @@ async fn restarting_one_node_doesnt_break_fullscan(actors: TestActors) {
         .await
         .expect("failed to prepare a statement");
 
-    for id in 0..1000 {
+    for id in 0..DATASET_SIZE {
         session
             .execute_unpaged(&stmt, (id,))
             .await
@@ -234,32 +236,68 @@ async fn restarting_one_node_doesnt_break_fullscan(actors: TestActors) {
     let rows = results
         .rows::<(i32, Vec<f32>)>()
         .expect("failed to get rows");
-    assert_eq!(rows.rows_remaining(), 1000);
+    assert_eq!(rows.rows_remaining(), DATASET_SIZE as usize);
 
     // Flush to disk to ensure data is persisted before restarting nodes
     actors.db.flush().await;
 
+    info!("Slow communication between vector-store and scylla using proxy");
+    actors
+        .db_proxy
+        .change_request_rules(Some(vec![RequestRule(
+            Condition::True,
+            RequestReaction::delay(FRAME_DELAY),
+        )]))
+        .await;
+
+    info!("Creating index");
     let index = create_index(&session, &clients, &table, "embedding").await;
 
-    for client in &clients {
-        let index_status = client
-            .index_status(&index.keyspace, &index.index)
-            .await
-            .expect("failed to get index status");
-        assert_eq!(index_status.status, IndexStatus::Bootstrapping);
-    }
+    info!("Checking that full scan isn't completed");
+    let index_status = client
+        .index_status(&index.keyspace, &index.index)
+        .await
+        .expect("failed to get index status");
+    assert_eq!(index_status.status, IndexStatus::Bootstrapping);
 
-    let node_configs = get_default_scylla_node_configs(&actors).await;
-    let node_config = node_configs.first().unwrap();
-    info!("Restarting node {}", node_config.db_ip);
-    actors.db.restart(node_config).await;
-    for client in &clients {
-        let index_status = wait_for_index(client, &index).await;
-        assert_eq!(
-            index_status.count, 1000,
-            "Expected 1000 vectors to be indexed"
-        );
-    }
+    let proxy_addr = get_default_scylla_proxy_node_configs(&actors)
+        .await
+        .first()
+        .unwrap()
+        .proxy_addr;
+    let total_connections = *client
+        .internals_session_counters()
+        .await
+        .unwrap()
+        .get("total-connections")
+        .unwrap();
+
+    info!("Disconnect scylla-proxy {proxy_addr}");
+    actors.firewall.drop_traffic(vec![proxy_addr]).await;
+
+    wait_for(
+        || async {
+            let counters = client.internals_session_counters().await;
+            info!("session counters: {:?}", counters);
+            *counters.unwrap().get("total-connections").unwrap() < total_connections
+        },
+        format!("connections to {proxy_addr} must be closed"),
+        KEEPALIVE_TIMEOUT,
+    )
+    .await;
+
+    info!("Reconnect scylla-proxy");
+    actors.firewall.turn_off_rules().await;
+
+    info!("Disable rules on scylla-proxy");
+    actors.db_proxy.turn_off_rules().await;
+
+    info!("Waiting for all vectors to be indexed");
+    let index_status = wait_for_index(client, &index).await;
+    assert_eq!(
+        index_status.count, DATASET_SIZE as usize,
+        "Expected {DATASET_SIZE} vectors to be indexed"
+    );
 
     session
         .query_unpaged(
@@ -269,6 +307,7 @@ async fn restarting_one_node_doesnt_break_fullscan(actors: TestActors) {
         .await
         .expect("failed to query ANN search");
 
+    info!("Dropping keyspace");
     session
         .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
         .await
