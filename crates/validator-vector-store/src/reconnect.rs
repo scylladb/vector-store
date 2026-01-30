@@ -9,6 +9,7 @@ use scylla_proxy::Reaction;
 use scylla_proxy::RequestReaction;
 use scylla_proxy::RequestRule;
 use std::time::Duration;
+use tap::Pipe;
 use tracing::info;
 use vector_search_validator_tests::ScyllaClusterExt;
 use vector_search_validator_tests::common::*;
@@ -453,8 +454,10 @@ async fn restarting_all_nodes_doesnt_break_fullscan(actors: TestActors) {
 async fn test_restarting_vs_cluster_does_not_break_setup(actors: TestActors) {
     info!("started");
 
-    let (session, clients) = prepare_connection(&actors).await;
+    let (session, clients) = prepare_connection_single_vs(&actors).await;
+    let client = clients.first().unwrap();
 
+    info!("Creating a table and inserting data");
     let keyspace = create_keyspace(&session).await;
     let table = create_table(
         &session,
@@ -470,25 +473,45 @@ async fn test_restarting_vs_cluster_does_not_break_setup(actors: TestActors) {
         .await
         .expect("failed to prepare a statement");
 
-    for id in 0..1000 {
+    for id in 0..DATASET_SIZE {
         session
             .execute_unpaged(&stmt, (id,))
             .await
             .expect("failed to insert a row");
     }
 
+    info!("Slow communication between vector-store and scylla using proxy");
+    actors
+        .db_proxy
+        .change_request_rules(Some(vec![RequestRule(
+            Condition::True,
+            RequestReaction::delay(FRAME_DELAY),
+        )]))
+        .await;
+
+    info!("Creating index");
     let index = create_index(&session, &clients, &table, "embedding").await;
 
+    info!("Stopping VS cluster");
     actors.vs.stop().await;
-    actors.vs.start(get_default_vs_node_configs(&actors)).await;
 
-    for client in &clients {
-        let index_status = wait_for_index(client, &index).await;
-        assert_eq!(
-            index_status.count, 1000,
-            "Expected 1000 vectors to be indexed"
-        );
-    }
+    info!("Disable rules on scylla-proxy");
+    actors.db_proxy.turn_off_rules().await;
+
+    actors
+        .vs
+        .start(get_default_vs_node_configs(&actors).pipe(|mut nodes| {
+            nodes.truncate(1);
+            nodes
+        }))
+        .await;
+
+    info!("Waiting for all vectors to be indexed");
+    let index_status = wait_for_index(client, &index).await;
+    assert_eq!(
+        index_status.count, DATASET_SIZE as usize,
+        "Expected {DATASET_SIZE} vectors to be indexed"
+    );
 
     session
         .query_unpaged(
@@ -498,9 +521,11 @@ async fn test_restarting_vs_cluster_does_not_break_setup(actors: TestActors) {
         .await
         .expect("failed to query ANN search");
 
+    info!("Dropping keyspace");
     session
         .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
         .await
         .expect("failed to drop a keyspace");
+
     info!("finished");
 }

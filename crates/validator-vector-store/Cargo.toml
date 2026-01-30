@@ -11,6 +11,7 @@ license.workspace = true
 async-backtrace.workspace = true
 scylla.workspace = true
 scylla-proxy.workspace = true
+tap.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 vector-search-validator-tests.workspace = true

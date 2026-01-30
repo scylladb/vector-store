@@ -4127,6 +4127,7 @@ dependencies = [
  "async-backtrace",
  "scylla",
  "scylla-proxy",
+ "tap",
  "tokio",
  "tracing",
  "vector-search-validator-tests",
