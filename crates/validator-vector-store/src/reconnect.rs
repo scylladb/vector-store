@@ -4,18 +4,25 @@
  */
 
 use async_backtrace::framed;
+use scylla_proxy::Condition;
+use scylla_proxy::Reaction;
+use scylla_proxy::RequestReaction;
+use scylla_proxy::RequestRule;
 use std::time::Duration;
-use tokio::time::sleep;
 use tracing::info;
 use vector_search_validator_tests::ScyllaClusterExt;
 use vector_search_validator_tests::common::*;
 use vector_search_validator_tests::*;
 
+const FRAME_DELAY: Duration = Duration::from_millis(100);
+const DATASET_SIZE: i32 = 100;
+const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(12); // slightly more than default 10s
+
 #[framed]
 pub(crate) async fn new() -> TestCase {
     let timeout = DEFAULT_TEST_TIMEOUT;
     TestCase::empty()
-        .with_init(timeout, init)
+        .with_init(timeout, init_with_proxy_single_vs)
         .with_cleanup(timeout, cleanup)
         .with_test(
             "reconnect_doesnt_break_fullscan",
@@ -43,7 +50,8 @@ pub(crate) async fn new() -> TestCase {
 async fn reconnect_doesnt_break_fullscan(actors: TestActors) {
     info!("started");
 
-    let (session, clients) = prepare_connection(&actors).await;
+    let (session, clients) = prepare_connection_single_vs(&actors).await;
+    let client = clients.first().unwrap();
 
     let keyspace = create_keyspace(&session).await;
     let table = create_table(
@@ -60,50 +68,116 @@ async fn reconnect_doesnt_break_fullscan(actors: TestActors) {
         .await
         .expect("failed to prepare a statement");
 
-    for id in 0..1000 {
+    info!("Inserting data into the table");
+    for id in 0..DATASET_SIZE {
         session
             .execute_unpaged(&stmt, (id,))
             .await
             .expect("failed to insert a row");
     }
 
+    info!("Restart internals counter for cdc handler errors");
+    client.internals_clear_counters().await.unwrap();
+    client
+        .internals_start_counter("session-create-success".to_string())
+        .await
+        .unwrap();
+    client
+        .internals_start_counter("session-create-failure".to_string())
+        .await
+        .unwrap();
+
+    info!("Slow communication between vector-store and scylla using proxy");
+    actors
+        .db_proxy
+        .change_request_rules(Some(vec![RequestRule(
+            Condition::True,
+            RequestReaction::delay(FRAME_DELAY),
+        )]))
+        .await;
+
+    info!("Creating index");
     let index = create_index(&session, &clients, &table, "embedding").await;
 
+    info!("Checking that full scan isn't completed");
     let result = session
         .query_unpaged(
             format!("SELECT * FROM {table} ORDER BY embedding ANN OF [1.0, 2.0, 3.0] LIMIT 1"),
             (),
         )
         .await;
-
     match &result {
         Err(e) if format!("{e:?}").contains("503 Service Unavailable") => {}
         _ => panic!("Expected SERVICE_UNAVAILABLE error, got: {result:?}"),
     }
 
-    actors.db.down().await;
-
-    sleep(Duration::from_secs(1)).await;
-    for client in &clients {
-        let status = client
-            .index_status(&index.keyspace, &index.index)
-            .await
-            .expect("failed to get index status")
-            .status;
-        assert!(
-            status == IndexStatus::Bootstrapping,
-            "Full scan should be interrupted by disconnect"
-        );
-    }
+    info!("Disconnect scylla-proxy");
     actors
-        .db
-        .up(get_default_scylla_node_configs(&actors).await)
+        .firewall
+        .drop_traffic(get_default_db_proxy_ips(&actors))
         .await;
 
-    assert!(actors.db.wait_for_ready().await);
+    info!(
+        "counters: {:?}, {:?}",
+        client.internals_counters().await.unwrap(),
+        client.internals_session_counters().await.unwrap()
+    );
+    wait_for(
+        || async {
+            if let Ok(counters) = client.internals_counters().await {
+                if let Some(counter) = counters.get("session-create-success")
+                    && *counter > 0
+                {
+                    return true;
+                }
+                if let Some(counter) = counters.get("session-create-failure")
+                    && *counter > 0
+                {
+                    return true;
+                }
+            }
+            if let Ok(counters) = client.internals_session_counters().await
+                && let Some(counter) = counters.get("total-connections")
+                && *counter == 0
+            {
+                return true;
+            }
+            false
+        },
+        "Connection must be closed",
+        KEEPALIVE_TIMEOUT,
+    )
+    .await;
+    info!(
+        "counters: {:?}, {:?}",
+        client.internals_counters().await.unwrap(),
+        client.internals_session_counters().await.unwrap()
+    );
+
+    info!("Check index status is still BOOTSTRAPPING");
+    let status = client
+        .index_status(&index.keyspace, &index.index)
+        .await
+        .expect("failed to get index status")
+        .status;
+    assert!(
+        status == IndexStatus::Bootstrapping,
+        "Full scan should be interrupted by disconnect"
+    );
+
+    info!("Reconnect scylla-proxy");
+    actors.firewall.turn_off_rules().await;
+
+    info!("Disable rules on scylla-proxy");
+    actors.db_proxy.turn_off_rules().await;
 
     wait_for(
         || async {
+            info!("counters: {:?}", client.internals_session_counters().await);
+            info!(
+                "status: {:?}",
+                client.index_status(&index.keyspace, &index.index).await
+            );
             session
                 .query_unpaged(
                     format!(
@@ -114,11 +188,12 @@ async fn reconnect_doesnt_break_fullscan(actors: TestActors) {
                 .await
                 .is_ok()
         },
-        "Waiting for index build",
+        "index must be built",
         Duration::from_secs(60),
     )
     .await;
 
+    info!("Dropping keyspace");
     session
         .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
         .await
