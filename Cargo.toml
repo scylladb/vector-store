@@ -31,6 +31,7 @@ humantime = "2.2.0"
 itertools = "0.14.0"
 macros = { path = "crates/macros" }
 mockall = "0.13.1"
+neli = { version = "0.7.4", default-features = false, features = ["async"] }
 ntest = "0.9.3"
 rustls = "0.23"
 rustls-pki-types = "1.13.1"

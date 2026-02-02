@@ -5,6 +5,7 @@
 
 pub mod common;
 mod dns;
+mod firewall;
 mod scylla_cluster;
 mod scylla_proxy_cluster;
 mod vector_store_cluster;
@@ -13,6 +14,8 @@ use async_backtrace::frame;
 use async_backtrace::framed;
 pub use dns::Dns;
 pub use dns::DnsExt;
+pub use firewall::Firewall;
+pub use firewall::FirewallExt;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use futures::stream;
@@ -73,6 +76,7 @@ impl ServicesSubnet {
 pub struct TestActors {
     pub services_subnet: Arc<ServicesSubnet>,
     pub dns: mpsc::Sender<Dns>,
+    pub firewall: mpsc::Sender<Firewall>,
     pub db: mpsc::Sender<ScyllaCluster>,
     pub vs: mpsc::Sender<VectorStoreCluster>,
     pub db_proxy: mpsc::Sender<ScyllaProxyCluster>,

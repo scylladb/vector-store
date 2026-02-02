@@ -4,6 +4,7 @@
  */
 
 mod dns;
+mod firewall;
 mod scylla_cluster;
 mod scylla_proxy_cluster;
 mod vector_store_cluster;
@@ -308,6 +309,7 @@ pub fn run() -> Result<(), &'static str> {
 
             let services_subnet = Arc::new(ServicesSubnet::new(base_ip));
             let dns = dns::new(dns_ip).await;
+            let firewall = firewall::new().await;
             let db =
                 scylla_cluster::new(scylla, scylla_default_conf, tmpdir.clone(), verbose).await;
             let vs = vector_store_cluster::new(vector_store, verbose, disable_colors, tmpdir).await;
@@ -329,6 +331,7 @@ pub fn run() -> Result<(), &'static str> {
                 TestActors {
                     services_subnet,
                     dns,
+                    firewall,
                     db,
                     vs,
                     db_proxy,
