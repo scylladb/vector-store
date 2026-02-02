@@ -4073,6 +4073,8 @@ dependencies = [
  "httpclient",
  "neli",
  "scylla-proxy",
+ "sysinfo",
+ "tap",
  "tempfile",
  "tokio",
  "tracing",

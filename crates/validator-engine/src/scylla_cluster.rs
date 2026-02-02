@@ -6,10 +6,15 @@
 use async_backtrace::frame;
 use async_backtrace::framed;
 use std::net::Ipv4Addr;
+use std::os::unix;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
+use sysinfo::Gid;
+use sysinfo::Uid;
+use sysinfo::Users;
+use tap::Pipe;
 use tempfile::TempDir;
 use tokio::fs;
 use tokio::process::Child;
@@ -230,6 +235,13 @@ async fn run_node(
         .arg("--endpoint-snitch")
         .arg("GossipingPropertyFileSnitch")
         .args(node_config.args.clone())
+        .pipe(|cmd| {
+            if let Some((uid, gid)) = get_scylla_user() {
+                info!("Starting ScyllaDB process as user 'scylla' ({uid:?}, {gid:?})");
+                cmd.uid(*uid).gid(*gid);
+            }
+            cmd
+        })
         .spawn()
         .expect("start: failed to spawn scylladb")
 }
@@ -250,6 +262,11 @@ async fn start(node_configs: Vec<ScyllaNodeConfig>, state: &mut State) {
     for (i, node_config) in node_configs.iter().enumerate() {
         let workdir = TempDir::new_in(&state.tempdir)
             .expect("start: failed to create temporary directory for scylladb");
+        if let Some((uid, gid)) = get_scylla_user() {
+            info!("Change owner of a ScyllaDB workdir to the 'scylla' user ({uid:?}, {gid:?})");
+            unix::fs::chown(workdir.path(), Some(*uid), Some(*gid))
+                .expect("start: failed to change ownership of scylladb workdir");
+        }
         let rack = format!("rack{}", i + 1);
         let seeds = seed_ip.to_string();
 
@@ -463,4 +480,12 @@ async fn flush(state: &State) {
             info!("Flush completed on node {}", node.db_ip);
         }
     }
+}
+
+fn get_scylla_user() -> Option<(Uid, Gid)> {
+    Users::new_with_refreshed_list()
+        .list()
+        .iter()
+        .find(|u| u.name() == "scylla")
+        .map(|user| (user.id().clone(), user.group_id()))
 }

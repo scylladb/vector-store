@@ -22,6 +22,8 @@ dns_ip=127.0.1.1
 base_ip=127.0.2.1
 
 docker run --rm \
+    --cap-add NET_ADMIN \
+    --user root \
     --security-opt seccomp=unconfined \
     --dns=$dns_ip \
     --dns-search=. \
