@@ -25,6 +25,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+use tap::Pipe;
 use tokio::time;
 use tracing::info;
 use vector_store::IndexInfo;
@@ -470,9 +471,10 @@ pub async fn create_table(session: &Session, columns: &str, options: Option<&str
 #[framed]
 pub async fn create_index(query: CreateIndexQuery<'_>) -> IndexInfo {
     let cql_query = format!(
-        "CREATE CUSTOM INDEX {index} ON {table}({vector_column}{filter_columns}) USING 'vector_index' WITH OPTIONS = {{{options}}}",
+        "CREATE CUSTOM INDEX {index} ON {table}({partition_columns}{vector_column}{filter_columns}) USING 'vector_index' WITH OPTIONS = {{{options}}}",
         index = query.index,
         table = query.table,
+        partition_columns = query.partition_columns,
         vector_column = query.vector_column,
         filter_columns = query.filter_columns,
         options = query.options,
@@ -516,6 +518,7 @@ pub struct CreateIndexQuery<'a> {
     clients: &'a [HttpClient],
     table: String,
     index: IndexName,
+    partition_columns: String,
     vector_column: String,
     filter_columns: String,
     options: String,
@@ -534,10 +537,29 @@ impl<'a> CreateIndexQuery<'a> {
             clients,
             table: table.as_ref().into(),
             index: unique_index_name(),
+            partition_columns: String::new(),
             vector_column: vector_column.as_ref().into(),
             filter_columns: String::new(),
             options: String::new(),
         }
+    }
+
+    pub fn partition_columns(
+        mut self,
+        partition_columns: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> Self {
+        self.partition_columns = partition_columns
+            .into_iter()
+            .map(|column| column.as_ref().to_string())
+            .join(", ")
+            .pipe(|columns| {
+                if !columns.is_empty() {
+                    format!("({}), ", columns)
+                } else {
+                    columns
+                }
+            });
+        self
     }
 
     pub fn filter_columns(
