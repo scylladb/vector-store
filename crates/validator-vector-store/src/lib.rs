@@ -9,6 +9,7 @@ mod crud;
 mod db_timeout;
 mod full_scan;
 mod high_availability;
+mod index_create;
 mod index_status;
 mod quantization_and_rescoring;
 mod reconnect;
@@ -28,6 +29,7 @@ pub async fn test_cases() -> impl Iterator<Item = (String, TestCase)> {
         ("full_scan", full_scan::new().await),
         ("high_availability", high_availability::new().await),
         ("index_status", index_status::new().await),
+        ("index_create", index_create::new().await),
         ("reconnect", reconnect::new().await),
         ("serde", serde::new().await),
         ("similarity_function", similarity_functions::new().await),
