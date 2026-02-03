@@ -11,6 +11,7 @@ use tracing::info;
 use vector_search_validator_tests::common::*;
 use vector_search_validator_tests::*;
 use vector_store::IndexInfo;
+use vector_store::TableName;
 
 /// Generate test vectors for quantization precision testing
 /// Creates a query vector and embeddings with small directional differences
@@ -37,7 +38,7 @@ fn generate_test_vectors(num_vectors: usize) -> (Vec<f32>, HashMap<i32, Vec<f32>
 async fn create_index(
     session: &Session,
     clients: &[HttpClient],
-    table: &str,
+    table: &TableName,
     options: &str,
 ) -> IndexInfo {
     let index = create_index_with_options(session, clients, table, "v", Some(options)).await;
@@ -48,7 +49,7 @@ async fn create_index(
 }
 
 #[framed]
-async fn insert_vectors(session: &Session, table: &str, embeddings: &HashMap<i32, Vec<f32>>) {
+async fn insert_vectors(session: &Session, table: &TableName, embeddings: &HashMap<i32, Vec<f32>>) {
     for (pk, embedding) in embeddings {
         session
             .query_unpaged(

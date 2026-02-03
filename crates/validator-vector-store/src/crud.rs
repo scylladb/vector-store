@@ -47,7 +47,7 @@ async fn simple_create_drop_index(actors: TestActors) {
 
     let index = create_index(&session, &clients, &table, "embedding").await;
 
-    assert_eq!(index.keyspace.as_ref(), &keyspace);
+    assert_eq!(index.keyspace, keyspace);
 
     session
         .query_unpaged(format!("DROP INDEX {}", index.index), ())

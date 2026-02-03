@@ -20,13 +20,15 @@ use scylla::statement::Statement;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::time;
 use tracing::info;
-use uuid::Uuid;
 use vector_store::IndexInfo;
 pub use vector_store::IndexName;
 pub use vector_store::KeyspaceName;
+use vector_store::TableName;
 pub use vector_store::httproutes::IndexStatus;
 
 pub const DEFAULT_TEST_TIMEOUT: Duration = Duration::from_secs(10 * 60); // 10 minutes
@@ -399,9 +401,32 @@ pub async fn get_opt_query_results(
         .ok()
 }
 
+static KEYSPACE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+static TABLE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+static INDEX_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+fn unique_name(prefix: &str, counter: &AtomicUsize) -> String {
+    format!(
+        "{prefix}_{counter}",
+        counter = counter.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+pub fn unique_keyspace_name() -> KeyspaceName {
+    unique_name("ksp", &KEYSPACE_COUNTER).into()
+}
+
+pub fn unique_table_name() -> TableName {
+    unique_name("tbl", &TABLE_COUNTER).into()
+}
+
+pub fn unique_index_name() -> IndexName {
+    unique_name("idx", &INDEX_COUNTER).into()
+}
+
 #[framed]
-pub async fn create_keyspace(session: &Session) -> String {
-    let keyspace = format!("ks_{}", Uuid::new_v4().simple());
+pub async fn create_keyspace(session: &Session) -> KeyspaceName {
+    let keyspace = unique_keyspace_name();
 
     // Create keyspace with replication factor of 3 for the 3-node cluster
     session.query_unpaged(
@@ -411,7 +436,7 @@ pub async fn create_keyspace(session: &Session) -> String {
 
     // Use keyspace
     session
-        .use_keyspace(&keyspace, false)
+        .use_keyspace(keyspace.as_ref(), false)
         .await
         .expect("failed to use a keyspace");
 
@@ -419,8 +444,8 @@ pub async fn create_keyspace(session: &Session) -> String {
 }
 
 #[framed]
-pub async fn create_table(session: &Session, columns: &str, options: Option<&str>) -> String {
-    let table = format!("tbl_{}", Uuid::new_v4().simple());
+pub async fn create_table(session: &Session, columns: &str, options: Option<&str>) -> TableName {
+    let table = unique_table_name();
 
     let extra = if let Some(options) = options {
         format!("WITH {options}")
@@ -441,8 +466,8 @@ pub async fn create_table(session: &Session, columns: &str, options: Option<&str
 pub async fn create_index(
     session: &Session,
     clients: &[HttpClient],
-    table: &str,
-    column: &str,
+    table: impl AsRef<str>,
+    column: impl AsRef<str>,
 ) -> IndexInfo {
     create_index_with_options(session, clients, table, column, None).await
 }
@@ -451,11 +476,13 @@ pub async fn create_index(
 pub async fn create_index_with_options(
     session: &Session,
     clients: &[HttpClient],
-    table: &str,
-    column: &str,
+    table: impl AsRef<str>,
+    column: impl AsRef<str>,
     options: Option<&str>,
 ) -> IndexInfo {
-    let index = format!("idx_{}", Uuid::new_v4().simple());
+    let index = unique_index_name();
+    let table = table.as_ref();
+    let column = column.as_ref();
 
     let extra = if let Some(options) = options {
         format!("WITH OPTIONS = {options}")
@@ -476,12 +503,7 @@ pub async fn create_index_with_options(
     wait_for(
         || async {
             for client in clients.iter() {
-                if !client
-                    .indexes()
-                    .await
-                    .iter()
-                    .any(|idx| idx.index.to_string() == index)
-                {
+                if !client.indexes().await.iter().any(|idx| idx.index == index) {
                     return false;
                 }
             }
@@ -498,6 +520,6 @@ pub async fn create_index_with_options(
         .indexes()
         .await
         .into_iter()
-        .find(|idx| idx.index.to_string() == index)
+        .find(|idx| idx.index == index)
         .expect("index not found")
 }

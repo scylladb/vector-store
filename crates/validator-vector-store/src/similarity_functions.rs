@@ -65,7 +65,7 @@ async fn run_similarity_function_test(
 
     let index = match similarity_function {
         Some(func) => {
-            let index_name = format!("idx_{}", func.to_lowercase());
+            let index_name = unique_index_name();
             session
                 .query_unpaged(
                     format!(
@@ -75,7 +75,7 @@ async fn run_similarity_function_test(
                 )
                 .await
                 .expect("failed to create an index");
-            vector_store::IndexInfo::new(&keyspace, &index_name)
+            vector_store::IndexInfo::new(keyspace.as_ref(), index_name.as_ref())
         }
         None => create_index(&session, &clients, &table, "v").await,
     };
