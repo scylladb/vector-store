@@ -45,7 +45,13 @@ async fn simple_create_drop_index(actors: TestActors) {
     )
     .await;
 
-    let index = create_index(&session, &clients, &table, "embedding").await;
+    let index = create_index(CreateIndexQuery::new(
+        &session,
+        &clients,
+        &table,
+        "embedding",
+    ))
+    .await;
 
     assert_eq!(index.keyspace, keyspace);
 
@@ -86,7 +92,7 @@ async fn simple_create_drop_multiple_indexes(actors: TestActors) {
     .await;
 
     // Create index on column v1
-    let index1 = create_index(&session, &clients, &table, "v1").await;
+    let index1 = create_index(CreateIndexQuery::new(&session, &clients, &table, "v1")).await;
 
     // Wait for the full scan to complete and check if ANN query succeeds on v1
     for client in &clients {
@@ -112,7 +118,7 @@ async fn simple_create_drop_multiple_indexes(actors: TestActors) {
         .expect_err("ANN query should fail when index does not exist");
 
     // Create index on column v2
-    let index2 = create_index(&session, &clients, &table, "v2").await;
+    let index2 = create_index(CreateIndexQuery::new(&session, &clients, &table, "v2")).await;
 
     // Check if ANN query on v1 still succeeds
     session
@@ -226,7 +232,13 @@ async fn drop_table_removes_index(actors: TestActors) {
             .expect("failed to insert a row");
     }
 
-    let _ = create_index(&session, &clients, &table, "embedding").await;
+    let _ = create_index(CreateIndexQuery::new(
+        &session,
+        &clients,
+        &table,
+        "embedding",
+    ))
+    .await;
 
     let stmt = session
         .prepare(format!("DROP TABLE {keyspace}.{table}"))

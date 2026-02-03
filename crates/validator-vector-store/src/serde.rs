@@ -61,7 +61,13 @@ async fn test_serialization_deserialization_all_types(actors: TestActors) {
             .await
             .expect("failed to insert data");
 
-        let index = create_index(&session, &clients, format!("tbl_{typ}").as_str(), "vec").await;
+        let index = create_index(CreateIndexQuery::new(
+            &session,
+            &clients,
+            format!("tbl_{typ}"),
+            "vec",
+        ))
+        .await;
         for client in &clients {
             wait_for_index(client, &index).await;
         }

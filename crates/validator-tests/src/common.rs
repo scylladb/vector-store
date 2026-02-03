@@ -13,11 +13,13 @@ use crate::VectorStoreClusterExt;
 use crate::VectorStoreNodeConfig;
 use async_backtrace::framed;
 use httpclient::HttpClient;
+use itertools::Itertools;
 use scylla::client::session::Session;
 use scylla::client::session_builder::SessionBuilder;
 use scylla::response::query_result::QueryRowsResult;
 use scylla::statement::Statement;
 use std::collections::HashMap;
+use std::iter;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
@@ -26,10 +28,10 @@ use std::time::Duration;
 use tokio::time;
 use tracing::info;
 use vector_store::IndexInfo;
-pub use vector_store::IndexName;
-pub use vector_store::KeyspaceName;
+use vector_store::IndexName;
+use vector_store::KeyspaceName;
 use vector_store::TableName;
-pub use vector_store::httproutes::IndexStatus;
+use vector_store::httproutes::IndexStatus;
 
 pub const DEFAULT_TEST_TIMEOUT: Duration = Duration::from_secs(10 * 60); // 10 minutes
 pub const DEFAULT_OPERATION_TIMEOUT: Duration = Duration::from_secs(20);
@@ -368,7 +370,10 @@ pub async fn wait_for_index(
                 _ => None,
             }
         },
-        "Waiting for index to be SERVING",
+        format!(
+            "Waiting for index to be SERVING at {url}",
+            url = client.url()
+        ),
         Duration::from_secs(60),
     )
     .await
@@ -463,63 +468,100 @@ pub async fn create_table(session: &Session, columns: &str, options: Option<&str
 }
 
 #[framed]
-pub async fn create_index(
-    session: &Session,
-    clients: &[HttpClient],
-    table: impl AsRef<str>,
-    column: impl AsRef<str>,
-) -> IndexInfo {
-    create_index_with_options(session, clients, table, column, None).await
-}
-
-#[framed]
-pub async fn create_index_with_options(
-    session: &Session,
-    clients: &[HttpClient],
-    table: impl AsRef<str>,
-    column: impl AsRef<str>,
-    options: Option<&str>,
-) -> IndexInfo {
-    let index = unique_index_name();
-    let table = table.as_ref();
-    let column = column.as_ref();
-
-    let extra = if let Some(options) = options {
-        format!("WITH OPTIONS = {options}")
-    } else {
-        String::new()
-    };
-
-    // Create index
-    session
-        .query_unpaged(
-            format!("CREATE INDEX {index} ON {table}({column}) USING 'vector_index' {extra}"),
-            (),
-        )
+pub async fn create_index(query: CreateIndexQuery<'_>) -> IndexInfo {
+    let cql_query = format!(
+        "CREATE CUSTOM INDEX {index} ON {table}({vector_column}{filter_columns}) USING 'vector_index' WITH OPTIONS = {{{options}}}",
+        index = query.index,
+        table = query.table,
+        vector_column = query.vector_column,
+        filter_columns = query.filter_columns,
+        options = query.options,
+    );
+    info!("Create index: '{cql_query}'");
+    query
+        .session
+        .query_unpaged(cql_query, ())
         .await
         .expect("failed to create an index");
 
-    // Wait for the index to be created
-    wait_for(
-        || async {
-            for client in clients.iter() {
-                if !client.indexes().await.iter().any(|idx| idx.index == index) {
-                    return false;
-                }
-            }
-            true
-        },
-        "Waiting for the first index to be created",
-        Duration::from_secs(60),
-    )
-    .await;
+    for client in query.clients {
+        wait_for(
+            || async {
+                client
+                    .indexes()
+                    .await
+                    .iter()
+                    .any(|idx| idx.index == query.index)
+            },
+            format!(
+                "the index {index} at {url} must be created",
+                index = query.index,
+                url = client.url()
+            ),
+            Duration::from_secs(60),
+        )
+        .await;
+    }
 
-    clients
-        .first()
-        .expect("No vector store clients provided")
+    query.clients[0]
         .indexes()
         .await
         .into_iter()
-        .find(|idx| idx.index == index)
+        .find(|idx| idx.index == query.index)
         .expect("index not found")
+}
+
+pub struct CreateIndexQuery<'a> {
+    session: &'a Session,
+    clients: &'a [HttpClient],
+    table: String,
+    index: IndexName,
+    vector_column: String,
+    filter_columns: String,
+    options: String,
+}
+
+impl<'a> CreateIndexQuery<'a> {
+    pub fn new(
+        session: &'a Session,
+        clients: &'a [HttpClient],
+        table: impl AsRef<str>,
+        vector_column: impl AsRef<str>,
+    ) -> Self {
+        assert!(!clients.is_empty(), "No vector store clients provided");
+        Self {
+            session,
+            clients,
+            table: table.as_ref().into(),
+            index: unique_index_name(),
+            vector_column: vector_column.as_ref().into(),
+            filter_columns: String::new(),
+            options: String::new(),
+        }
+    }
+
+    pub fn filter_columns(
+        mut self,
+        filter_columns: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> Self {
+        self.filter_columns = iter::once(String::new())
+            .chain(
+                filter_columns
+                    .into_iter()
+                    .map(|column| column.as_ref().to_string()),
+            )
+            .join(", ");
+        self
+    }
+
+    pub fn options(
+        mut self,
+        options: impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>,
+    ) -> Self {
+        self.options = options
+            .into_iter()
+            .map(|(k, v)| format!("'{}': '{}'", k.as_ref(), v.as_ref()))
+            .join(", ");
+        self
+    }
 }
