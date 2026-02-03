@@ -39,9 +39,11 @@ async fn create_index(
     session: &Session,
     clients: &[HttpClient],
     table: &TableName,
-    options: &str,
+    options: impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>,
 ) -> IndexInfo {
-    let index = create_index_with_options(session, clients, table, "v", Some(options)).await;
+    let index =
+        common::create_index(CreateIndexQuery::new(session, clients, table, "v").options(options))
+            .await;
     for client in clients {
         wait_for_index(client, &index).await;
     }
@@ -112,7 +114,11 @@ async fn non_quantized_index_returns_correctly_ranked_vectors(actors: TestActors
         &session,
         &clients,
         &table,
-        "{'quantization': 'f32', 'oversampling': '5.0', 'rescoring': 'false'}",
+        [
+            ("quantization", "f32"),
+            ("oversampling", "5.0"),
+            ("rescoring", "false"),
+        ],
     )
     .await;
     info!("created index with f32 quantization");
@@ -180,7 +186,11 @@ async fn quantized_index_returns_incorrectly_ranked_vectors_due_to_precision_los
         &session,
         &clients,
         &table,
-        "{'quantization': 'f16', 'oversampling': '5.0', 'rescoring': 'false'}",
+        [
+            ("quantization", "f16"),
+            ("oversampling", "5.0"),
+            ("rescoring", "false"),
+        ],
     )
     .await;
     info!("created index with f16 quantization");
@@ -243,7 +253,11 @@ async fn rescoring_ranks_results_correctly_for_quantized_index(actors: TestActor
         &session,
         &clients,
         &table,
-        "{'quantization': 'f16', 'oversampling': '5.0', 'rescoring': 'true'}",
+        [
+            ("quantization", "f16"),
+            ("oversampling", "5.0"),
+            ("rescoring", "true"),
+        ],
     )
     .await;
     info!("created index with f16 quantization and rescoring enabled");
@@ -301,7 +315,11 @@ async fn searching_and_rescoring_works_for_binary_quantization(actors: TestActor
         &session,
         &clients,
         &table,
-        "{'quantization': 'b1', 'oversampling': '5.0', 'rescoring': 'true'}",
+        [
+            ("quantization", "b1"),
+            ("oversampling", "5.0"),
+            ("rescoring", "true"),
+        ],
     )
     .await;
     info!("created index with b1 (binary) quantization and rescoring enabled");

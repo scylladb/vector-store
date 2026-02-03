@@ -77,7 +77,7 @@ async fn run_similarity_function_test(
                 .expect("failed to create an index");
             vector_store::IndexInfo::new(keyspace.as_ref(), index_name.as_ref())
         }
-        None => create_index(&session, &clients, &table, "v").await,
+        None => create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await,
     };
 
     for client in &clients {
