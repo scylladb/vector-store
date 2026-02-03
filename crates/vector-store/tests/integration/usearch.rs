@@ -884,6 +884,549 @@ async fn ann_filter_primary_key_int_in_tuple() {
     );
 }
 
+/// Sets up a store with pk (Int) and ck (Int) columns with 30 vectors.
+/// Vectors are created with pk = i/10 and ck = i%10 for i in 0..30.
+async fn setup_int_int_store() -> (
+    IndexMetadata,
+    HttpClient,
+    ColumnName,
+    ColumnName,
+    DbBasic,
+    impl Sized,
+    Sender<NodeState>,
+) {
+    let pk_column: ColumnName = "pk".into();
+    let ck_column: ColumnName = "ck".into();
+    let (index, client, db, server, node_state) = setup_store_and_wait_for_index(
+        [pk_column.clone(), ck_column.clone()],
+        [
+            (pk_column.clone(), NativeType::Int),
+            (ck_column.clone(), NativeType::Int),
+        ],
+        (0..30).map(|i| {
+            (
+                vec![CqlValue::Int(i / 10), CqlValue::Int(i % 10)].into(),
+                Some(vec![i as f32, i as f32, i as f32].into()),
+                OffsetDateTime::from_unix_timestamp(10).unwrap().into(),
+            )
+        }),
+    )
+    .await;
+    (index, client, pk_column, ck_column, db, server, node_state)
+}
+
+/// Runs an ANN query with the given restrictions and returns a HashSet of (pk, ck) values.
+async fn run_ann_filter_int_int(
+    client: &HttpClient,
+    index: &IndexMetadata,
+    pk_column: &ColumnName,
+    ck_column: &ColumnName,
+    restrictions: Vec<PostIndexAnnRestriction>,
+    expected_count: usize,
+) -> HashSet<(usize, usize)> {
+    wait_for_value(
+        || async {
+            let (primary_keys, _) = client
+                .ann(
+                    &index.keyspace_name,
+                    &index.index_name,
+                    vec![1.0, 2.0, 3.0].into(),
+                    Some(PostIndexAnnFilter {
+                        restrictions: restrictions.clone(),
+                        allow_filtering: false,
+                    }),
+                    NonZeroUsize::new(100).unwrap().into(),
+                )
+                .await;
+            let pk_ck_values: HashSet<_> = primary_keys
+                .get(pk_column)
+                .unwrap()
+                .iter()
+                .map(|v| v.as_i64().unwrap() as usize)
+                .zip(
+                    primary_keys
+                        .get(ck_column)
+                        .unwrap()
+                        .iter()
+                        .map(|v| v.as_i64().unwrap() as usize),
+                )
+                .collect();
+            (pk_ck_values.len() == expected_count).then_some(pk_ck_values)
+        },
+        &format!("Waiting for ANN to return {expected_count} results"),
+    )
+    .await
+}
+
+/// Asserts that all expected (pk, ck) pairs are present in the results,
+/// and that no other values are present.
+fn assert_pk_ck_combinations(
+    pk_ck_values: &HashSet<(usize, usize)>,
+    expected_pk_ck: impl IntoIterator<Item = (usize, usize)>,
+) {
+    let expected: HashSet<_> = expected_pk_ck.into_iter().collect();
+    let diff: HashSet<_> = pk_ck_values.symmetric_difference(&expected).collect();
+    assert!(
+        diff.is_empty(),
+        "Sets differ. Symmetric difference: {:?}",
+        diff
+    );
+}
+
+#[tokio::test]
+#[ntest::timeout(10_000)]
+async fn ann_filter_clustering_key_int_lt() {
+    crate::enable_tracing();
+
+    let (index, client, pk_column, ck_column, _db, _server, _node_state) =
+        setup_int_int_store().await;
+
+    // Search for nearest neighbors with a filter on clustering key "ck" < 3
+    // Should return rows where ck is 0, 1, or 2 (3 values per pk, 3 pks = 9 total)
+    let pk_ck_values = run_ann_filter_int_int(
+        &client,
+        &index,
+        &pk_column,
+        &ck_column,
+        vec![PostIndexAnnRestriction::Lt {
+            lhs: ck_column.clone(),
+            rhs: 3.into(),
+        }],
+        9,
+    )
+    .await;
+    assert_pk_ck_combinations(
+        &pk_ck_values,
+        [
+            (0, 0),
+            (0, 1),
+            (0, 2),
+            (1, 0),
+            (1, 1),
+            (1, 2),
+            (2, 0),
+            (2, 1),
+            (2, 2),
+        ],
+    );
+}
+
+#[tokio::test]
+#[ntest::timeout(10_000)]
+async fn ann_filter_clustering_key_int_lte() {
+    crate::enable_tracing();
+
+    let (index, client, pk_column, ck_column, _db, _server, _node_state) =
+        setup_int_int_store().await;
+
+    // Search for nearest neighbors with a filter on clustering key "ck" <= 2
+    // Should return rows where ck is 0, 1, or 2 (3 values per pk, 3 pks = 9 total)
+    let pk_ck_values = run_ann_filter_int_int(
+        &client,
+        &index,
+        &pk_column,
+        &ck_column,
+        vec![PostIndexAnnRestriction::Lte {
+            lhs: ck_column.clone(),
+            rhs: 2.into(),
+        }],
+        9,
+    )
+    .await;
+    assert_pk_ck_combinations(
+        &pk_ck_values,
+        [
+            (0, 0),
+            (0, 1),
+            (0, 2),
+            (1, 0),
+            (1, 1),
+            (1, 2),
+            (2, 0),
+            (2, 1),
+            (2, 2),
+        ],
+    );
+}
+
+#[tokio::test]
+#[ntest::timeout(10_000)]
+async fn ann_filter_clustering_key_int_gt() {
+    crate::enable_tracing();
+
+    let (index, client, pk_column, ck_column, _db, _server, _node_state) =
+        setup_int_int_store().await;
+
+    // Search for nearest neighbors with a filter on clustering key "ck" > 6
+    // Should return rows where ck is 7, 8, or 9 (3 values per pk, 3 pks = 9 total)
+    let pk_ck_values = run_ann_filter_int_int(
+        &client,
+        &index,
+        &pk_column,
+        &ck_column,
+        vec![PostIndexAnnRestriction::Gt {
+            lhs: ck_column.clone(),
+            rhs: 6.into(),
+        }],
+        9,
+    )
+    .await;
+    assert_pk_ck_combinations(
+        &pk_ck_values,
+        [
+            (0, 7),
+            (0, 8),
+            (0, 9),
+            (1, 7),
+            (1, 8),
+            (1, 9),
+            (2, 7),
+            (2, 8),
+            (2, 9),
+        ],
+    );
+}
+
+#[tokio::test]
+#[ntest::timeout(10_000)]
+async fn ann_filter_clustering_key_int_gte() {
+    crate::enable_tracing();
+
+    let (index, client, pk_column, ck_column, _db, _server, _node_state) =
+        setup_int_int_store().await;
+
+    // Search for nearest neighbors with a filter on clustering key "ck" >= 7
+    // Should return rows where ck is 7, 8, or 9 (3 values per pk, 3 pks = 9 total)
+    let pk_ck_values = run_ann_filter_int_int(
+        &client,
+        &index,
+        &pk_column,
+        &ck_column,
+        vec![PostIndexAnnRestriction::Gte {
+            lhs: ck_column.clone(),
+            rhs: 7.into(),
+        }],
+        9,
+    )
+    .await;
+    assert_pk_ck_combinations(
+        &pk_ck_values,
+        [
+            (0, 7),
+            (0, 8),
+            (0, 9),
+            (1, 7),
+            (1, 8),
+            (1, 9),
+            (2, 7),
+            (2, 8),
+            (2, 9),
+        ],
+    );
+}
+
+#[tokio::test]
+#[ntest::timeout(10_000)]
+async fn ann_filter_clustering_key_int_range() {
+    crate::enable_tracing();
+
+    let (index, client, pk_column, ck_column, _db, _server, _node_state) =
+        setup_int_int_store().await;
+
+    // Search for nearest neighbors with a filter on clustering key 3 <= "ck" < 6
+    // Should return rows where ck is 3, 4, or 5 (3 values per pk, 3 pks = 9 total)
+    let pk_ck_values = run_ann_filter_int_int(
+        &client,
+        &index,
+        &pk_column,
+        &ck_column,
+        vec![
+            PostIndexAnnRestriction::Gte {
+                lhs: ck_column.clone(),
+                rhs: 3.into(),
+            },
+            PostIndexAnnRestriction::Lt {
+                lhs: ck_column.clone(),
+                rhs: 6.into(),
+            },
+        ],
+        9,
+    )
+    .await;
+    assert_pk_ck_combinations(
+        &pk_ck_values,
+        [
+            (0, 3),
+            (0, 4),
+            (0, 5),
+            (1, 3),
+            (1, 4),
+            (1, 5),
+            (2, 3),
+            (2, 4),
+            (2, 5),
+        ],
+    );
+}
+
+#[tokio::test]
+#[ntest::timeout(10_000)]
+async fn ann_filter_primary_key_int_lt_tuple() {
+    crate::enable_tracing();
+
+    let (index, client, pk_column, ck_column, _db, _server, _node_state) =
+        setup_int_int_store().await;
+
+    // Search for nearest neighbors with a filter on primary key ("pk", "ck") < (1, 5)
+    // Should return rows where (pk, ck) < (1, 5), i.e., pk=0 (all ck) and pk=1 with ck < 5
+    // That's 10 (pk=0) + 5 (pk=1, ck=0..4) = 15 rows
+    let pk_ck_values = run_ann_filter_int_int(
+        &client,
+        &index,
+        &pk_column,
+        &ck_column,
+        vec![PostIndexAnnRestriction::LtTuple {
+            lhs: vec![pk_column.clone(), ck_column.clone()],
+            rhs: vec![1.into(), 5.into()],
+        }],
+        15,
+    )
+    .await;
+    // pk=0, all ck values
+    assert_pk_ck_combinations(
+        &pk_ck_values,
+        [
+            (0, 0),
+            (0, 1),
+            (0, 2),
+            (0, 3),
+            (0, 4),
+            (0, 5),
+            (0, 6),
+            (0, 7),
+            (0, 8),
+            (0, 9),
+            (1, 0),
+            (1, 1),
+            (1, 2),
+            (1, 3),
+            (1, 4),
+        ],
+    );
+}
+
+#[tokio::test]
+#[ntest::timeout(10_000)]
+async fn ann_filter_primary_key_int_lte_tuple() {
+    crate::enable_tracing();
+
+    let (index, client, pk_column, ck_column, _db, _server, _node_state) =
+        setup_int_int_store().await;
+
+    // Search for nearest neighbors with a filter on primary key ("pk", "ck") <= (1, 5)
+    // Should return rows where (pk, ck) <= (1, 5), i.e., pk=0 (all ck) and pk=1 with ck <= 5
+    // That's 10 (pk=0) + 6 (pk=1, ck=0..5) = 16 rows
+    let pk_ck_values = run_ann_filter_int_int(
+        &client,
+        &index,
+        &pk_column,
+        &ck_column,
+        vec![PostIndexAnnRestriction::LteTuple {
+            lhs: vec![pk_column.clone(), ck_column.clone()],
+            rhs: vec![1.into(), 5.into()],
+        }],
+        16,
+    )
+    .await;
+    // pk=0, all ck values
+    assert_pk_ck_combinations(
+        &pk_ck_values,
+        [
+            (0, 0),
+            (0, 1),
+            (0, 2),
+            (0, 3),
+            (0, 4),
+            (0, 5),
+            (0, 6),
+            (0, 7),
+            (0, 8),
+            (0, 9),
+            (1, 0),
+            (1, 1),
+            (1, 2),
+            (1, 3),
+            (1, 4),
+            (1, 5),
+        ],
+    );
+}
+
+#[tokio::test]
+#[ntest::timeout(10_000)]
+async fn ann_filter_primary_key_int_gt_tuple() {
+    crate::enable_tracing();
+
+    let (index, client, pk_column, ck_column, _db, _server, _node_state) =
+        setup_int_int_store().await;
+
+    // Search for nearest neighbors with a filter on primary key ("pk", "ck") > (1, 5)
+    // Should return rows where (pk, ck) > (1, 5), i.e., pk=1 with ck > 5 and pk=2 (all ck)
+    // That's 4 (pk=1, ck=6..9) + 10 (pk=2) = 14 rows
+    let pk_ck_values = run_ann_filter_int_int(
+        &client,
+        &index,
+        &pk_column,
+        &ck_column,
+        vec![PostIndexAnnRestriction::GtTuple {
+            lhs: vec![pk_column.clone(), ck_column.clone()],
+            rhs: vec![1.into(), 5.into()],
+        }],
+        14,
+    )
+    .await;
+    // pk=1, ck > 5 and pk=2, all ck values
+    assert_pk_ck_combinations(
+        &pk_ck_values,
+        [
+            (1, 6),
+            (1, 7),
+            (1, 8),
+            (1, 9),
+            (2, 0),
+            (2, 1),
+            (2, 2),
+            (2, 3),
+            (2, 4),
+            (2, 5),
+            (2, 6),
+            (2, 7),
+            (2, 8),
+            (2, 9),
+        ],
+    );
+}
+
+#[tokio::test]
+#[ntest::timeout(10_000)]
+async fn ann_filter_primary_key_int_gte_tuple() {
+    crate::enable_tracing();
+
+    let (index, client, pk_column, ck_column, _db, _server, _node_state) =
+        setup_int_int_store().await;
+
+    // Search for nearest neighbors with a filter on primary key ("pk", "ck") >= (1, 5)
+    // Should return rows where (pk, ck) >= (1, 5), i.e., pk=1 with ck >= 5 and pk=2 (all ck)
+    // That's 5 (pk=1, ck=5..9) + 10 (pk=2) = 15 rows
+    let pk_ck_values = run_ann_filter_int_int(
+        &client,
+        &index,
+        &pk_column,
+        &ck_column,
+        vec![PostIndexAnnRestriction::GteTuple {
+            lhs: vec![pk_column.clone(), ck_column.clone()],
+            rhs: vec![1.into(), 5.into()],
+        }],
+        15,
+    )
+    .await;
+    // pk=1, ck >= 5 and pk=2, all ck values
+    assert_pk_ck_combinations(
+        &pk_ck_values,
+        [
+            (1, 5),
+            (1, 6),
+            (1, 7),
+            (1, 8),
+            (1, 9),
+            (2, 0),
+            (2, 1),
+            (2, 2),
+            (2, 3),
+            (2, 4),
+            (2, 5),
+            (2, 6),
+            (2, 7),
+            (2, 8),
+            (2, 9),
+        ],
+    );
+}
+
+#[tokio::test]
+#[ntest::timeout(10_000)]
+async fn ann_filter_partition_key_text_gt() {
+    crate::enable_tracing();
+
+    let pk_column: ColumnName = "pk".into();
+    let ck_column: ColumnName = "ck".into();
+    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+        [pk_column.clone(), ck_column.clone()],
+        [
+            (pk_column.clone(), NativeType::Text),
+            (ck_column.clone(), NativeType::Int),
+        ],
+        ["a", "b", "c", "d", "e"].iter().enumerate().map(|(i, pk)| {
+            (
+                vec![CqlValue::Text(pk.to_string()), CqlValue::Int(i as i32)].into(),
+                Some(vec![i as f32, i as f32, i as f32].into()),
+                OffsetDateTime::from_unix_timestamp(10).unwrap().into(),
+            )
+        }),
+    )
+    .await;
+
+    // Search for nearest neighbors with a filter on partition key "pk" > "b"
+    // Should return rows where pk is "c", "d", or "e"
+    let pk_ck_values = wait_for_value(
+        || async {
+            let (primary_keys, _) = client
+                .ann(
+                    &index.keyspace_name,
+                    &index.index_name,
+                    vec![1.0, 2.0, 3.0].into(),
+                    Some(PostIndexAnnFilter {
+                        restrictions: vec![PostIndexAnnRestriction::Gt {
+                            lhs: pk_column.clone(),
+                            rhs: "b".into(),
+                        }],
+                        allow_filtering: false,
+                    }),
+                    NonZeroUsize::new(100).unwrap().into(),
+                )
+                .await;
+            let pk_ck_values: HashSet<_> = primary_keys
+                .get(&pk_column)
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .zip(
+                    primary_keys
+                        .get(&ck_column)
+                        .unwrap()
+                        .iter()
+                        .map(|v| v.as_i64().unwrap() as usize),
+                )
+                .collect();
+            (pk_ck_values.len() == 3).then_some(pk_ck_values)
+        },
+        "Waiting for ANN to return 3 results",
+    )
+    .await;
+    assert!(
+        pk_ck_values.contains(&("c".to_string(), 2)),
+        "Expected pk_ck_values to contain value (c, 2)"
+    );
+    assert!(
+        pk_ck_values.contains(&("d".to_string(), 3)),
+        "Expected pk_ck_values to contain value (d, 3)"
+    );
+    assert!(
+        pk_ck_values.contains(&("e".to_string(), 4)),
+        "Expected pk_ck_values to contain value (e, 4)"
+    );
+}
+
 #[tokio::test]
 #[ntest::timeout(10_000)]
 async fn http_server_is_responsive_when_index_add_hangs() {

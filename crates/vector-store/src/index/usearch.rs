@@ -871,6 +871,48 @@ fn ann(
         .unwrap_or_else(|_| trace!("ann: unable to send response"));
 }
 
+/// Compare two CqlValues, returning an Ordering if they are comparable.
+/// Only Numeric, Text, Date, Time, and Timestamp types support comparison operators.
+fn cql_cmp(lhs: &CqlValue, rhs: &CqlValue) -> Option<std::cmp::Ordering> {
+    match (lhs, rhs) {
+        // Numeric types
+        (CqlValue::TinyInt(a), CqlValue::TinyInt(b)) => Some(a.cmp(b)),
+        (CqlValue::SmallInt(a), CqlValue::SmallInt(b)) => Some(a.cmp(b)),
+        (CqlValue::Int(a), CqlValue::Int(b)) => Some(a.cmp(b)),
+        (CqlValue::BigInt(a), CqlValue::BigInt(b)) => Some(a.cmp(b)),
+        (CqlValue::Float(a), CqlValue::Float(b)) => a.partial_cmp(b),
+        (CqlValue::Double(a), CqlValue::Double(b)) => a.partial_cmp(b),
+        (CqlValue::Counter(a), CqlValue::Counter(b)) => Some(a.0.cmp(&b.0)),
+        // Text types
+        (CqlValue::Text(a), CqlValue::Text(b)) => Some(a.cmp(b)),
+        (CqlValue::Ascii(a), CqlValue::Ascii(b)) => Some(a.cmp(b)),
+        // Date and Time types (access inner values directly)
+        (CqlValue::Date(a), CqlValue::Date(b)) => Some(a.0.cmp(&b.0)),
+        (CqlValue::Time(a), CqlValue::Time(b)) => Some(a.0.cmp(&b.0)),
+        (CqlValue::Timestamp(a), CqlValue::Timestamp(b)) => Some(a.0.cmp(&b.0)),
+        // Unsupported or mismatched types
+        _ => None,
+    }
+}
+
+/// Lexicographically compare tuple values.
+/// Returns the ordering of the first non-equal pair, or Equal if all pairs are equal.
+fn cql_cmp_tuple<'a>(
+    primary_key: &'a PrimaryKey,
+    primary_key_value: impl Fn(&'a PrimaryKey, &ColumnName) -> Option<&'a CqlValue>,
+    lhs: &[ColumnName],
+    rhs: &[CqlValue],
+) -> Option<std::cmp::Ordering> {
+    for (col, rhs_val) in lhs.iter().zip(rhs.iter()) {
+        let lhs_val = primary_key_value(primary_key, col)?;
+        match cql_cmp(lhs_val, rhs_val)? {
+            std::cmp::Ordering::Equal => continue,
+            other => return Some(other),
+        }
+    }
+    Some(std::cmp::Ordering::Equal)
+}
+
 fn filtered_ann(
     idx: Arc<impl UsearchIndex>,
     tx_ann: oneshot::Sender<AnnR>,
@@ -909,6 +951,18 @@ fn filtered_ann(
                     let value = primary_key_value(&primary_key, lhs);
                     rhs.iter().any(|rhs| value == Some(rhs))
                 }
+                Restriction::Lt { lhs, rhs } => primary_key_value(&primary_key, lhs)
+                    .and_then(|value| cql_cmp(value, rhs))
+                    .is_some_and(|ord| ord.is_lt()),
+                Restriction::Lte { lhs, rhs } => primary_key_value(&primary_key, lhs)
+                    .and_then(|value| cql_cmp(value, rhs))
+                    .is_some_and(|ord| ord.is_le()),
+                Restriction::Gt { lhs, rhs } => primary_key_value(&primary_key, lhs)
+                    .and_then(|value| cql_cmp(value, rhs))
+                    .is_some_and(|ord| ord.is_gt()),
+                Restriction::Gte { lhs, rhs } => primary_key_value(&primary_key, lhs)
+                    .and_then(|value| cql_cmp(value, rhs))
+                    .is_some_and(|ord| ord.is_ge()),
                 Restriction::EqTuple { lhs, rhs } => lhs
                     .iter()
                     .zip(rhs.iter())
@@ -925,7 +979,22 @@ fn filtered_ann(
                             .all(|(value, rhs)| value == &Some(rhs))
                     })
                 }
-                _ => false,
+                Restriction::LtTuple { lhs, rhs } => {
+                    cql_cmp_tuple(&primary_key, primary_key_value, lhs, rhs)
+                        .is_some_and(|ord| ord.is_lt())
+                }
+                Restriction::LteTuple { lhs, rhs } => {
+                    cql_cmp_tuple(&primary_key, primary_key_value, lhs, rhs)
+                        .is_some_and(|ord| ord.is_le())
+                }
+                Restriction::GtTuple { lhs, rhs } => {
+                    cql_cmp_tuple(&primary_key, primary_key_value, lhs, rhs)
+                        .is_some_and(|ord| ord.is_gt())
+                }
+                Restriction::GteTuple { lhs, rhs } => {
+                    cql_cmp_tuple(&primary_key, primary_key_value, lhs, rhs)
+                        .is_some_and(|ord| ord.is_ge())
+                }
             })
     };
 
@@ -1255,6 +1324,222 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    mod cql_cmp_tests {
+        use super::super::cql_cmp;
+        use scylla::value::CqlValue;
+        use std::cmp::Ordering;
+
+        #[test]
+        fn compare_integers() {
+            assert_eq!(
+                cql_cmp(&CqlValue::Int(1), &CqlValue::Int(2)),
+                Some(Ordering::Less)
+            );
+            assert_eq!(
+                cql_cmp(&CqlValue::Int(2), &CqlValue::Int(2)),
+                Some(Ordering::Equal)
+            );
+            assert_eq!(
+                cql_cmp(&CqlValue::Int(3), &CqlValue::Int(2)),
+                Some(Ordering::Greater)
+            );
+        }
+
+        #[test]
+        fn compare_bigints() {
+            assert_eq!(
+                cql_cmp(&CqlValue::BigInt(100), &CqlValue::BigInt(200)),
+                Some(Ordering::Less)
+            );
+            assert_eq!(
+                cql_cmp(&CqlValue::BigInt(-50), &CqlValue::BigInt(-50)),
+                Some(Ordering::Equal)
+            );
+        }
+
+        #[test]
+        fn compare_floats() {
+            assert_eq!(
+                cql_cmp(&CqlValue::Float(1.0), &CqlValue::Float(2.0)),
+                Some(Ordering::Less)
+            );
+            assert_eq!(
+                cql_cmp(&CqlValue::Float(2.5), &CqlValue::Float(2.5)),
+                Some(Ordering::Equal)
+            );
+            // NaN comparison returns None
+            assert_eq!(
+                cql_cmp(&CqlValue::Float(f32::NAN), &CqlValue::Float(1.0)),
+                None
+            );
+        }
+
+        #[test]
+        fn compare_doubles() {
+            assert_eq!(
+                cql_cmp(&CqlValue::Double(1.0), &CqlValue::Double(2.0)),
+                Some(Ordering::Less)
+            );
+            assert_eq!(
+                cql_cmp(&CqlValue::Double(f64::NAN), &CqlValue::Double(1.0)),
+                None
+            );
+        }
+
+        #[test]
+        fn compare_text() {
+            assert_eq!(
+                cql_cmp(
+                    &CqlValue::Text("apple".to_string()),
+                    &CqlValue::Text("banana".to_string())
+                ),
+                Some(Ordering::Less)
+            );
+            assert_eq!(
+                cql_cmp(
+                    &CqlValue::Text("same".to_string()),
+                    &CqlValue::Text("same".to_string())
+                ),
+                Some(Ordering::Equal)
+            );
+        }
+
+        #[test]
+        fn compare_ascii() {
+            assert_eq!(
+                cql_cmp(
+                    &CqlValue::Ascii("aaa".to_string()),
+                    &CqlValue::Ascii("bbb".to_string())
+                ),
+                Some(Ordering::Less)
+            );
+        }
+
+        #[test]
+        fn compare_smallint_and_tinyint() {
+            assert_eq!(
+                cql_cmp(&CqlValue::SmallInt(10), &CqlValue::SmallInt(20)),
+                Some(Ordering::Less)
+            );
+            assert_eq!(
+                cql_cmp(&CqlValue::TinyInt(5), &CqlValue::TinyInt(3)),
+                Some(Ordering::Greater)
+            );
+        }
+
+        #[test]
+        fn mismatched_types_return_none() {
+            assert_eq!(cql_cmp(&CqlValue::Int(1), &CqlValue::BigInt(1)), None);
+            assert_eq!(
+                cql_cmp(&CqlValue::Int(1), &CqlValue::Text("1".to_string())),
+                None
+            );
+            assert_eq!(cql_cmp(&CqlValue::Float(1.0), &CqlValue::Double(1.0)), None);
+        }
+
+        #[test]
+        fn unsupported_types_return_none() {
+            assert_eq!(
+                cql_cmp(
+                    &CqlValue::Blob(vec![1, 2, 3]),
+                    &CqlValue::Blob(vec![1, 2, 3])
+                ),
+                None
+            );
+            assert_eq!(
+                cql_cmp(&CqlValue::Boolean(true), &CqlValue::Boolean(false)),
+                None
+            );
+        }
+    }
+
+    mod cql_cmp_tuple_tests {
+        use super::super::{ColumnName, PrimaryKey, cql_cmp_tuple};
+        use scylla::value::CqlValue;
+        use std::cmp::Ordering;
+
+        fn make_primary_key(values: Vec<CqlValue>) -> PrimaryKey {
+            values.into()
+        }
+
+        fn primary_key_value_fn<'a>(
+            columns: &'a [ColumnName],
+        ) -> impl Fn(&'a PrimaryKey, &ColumnName) -> Option<&'a CqlValue> {
+            move |pk: &'a PrimaryKey, name: &ColumnName| {
+                columns
+                    .iter()
+                    .position(|col| col == name)
+                    .and_then(|idx| pk.0.get(idx))
+            }
+        }
+
+        #[test]
+        fn equal_tuples() {
+            let columns: Vec<ColumnName> = vec!["a".to_string().into(), "b".to_string().into()];
+            let pk = make_primary_key(vec![CqlValue::Int(1), CqlValue::Int(2)]);
+            let lhs: Vec<ColumnName> = vec!["a".to_string().into(), "b".to_string().into()];
+            let rhs = vec![CqlValue::Int(1), CqlValue::Int(2)];
+
+            let result = cql_cmp_tuple(&pk, primary_key_value_fn(&columns), &lhs, &rhs);
+            assert_eq!(result, Some(Ordering::Equal));
+        }
+
+        #[test]
+        fn first_element_differs() {
+            let columns: Vec<ColumnName> = vec!["a".to_string().into(), "b".to_string().into()];
+            let pk = make_primary_key(vec![CqlValue::Int(1), CqlValue::Int(2)]);
+            let lhs: Vec<ColumnName> = vec!["a".to_string().into(), "b".to_string().into()];
+            let rhs = vec![CqlValue::Int(2), CqlValue::Int(2)];
+
+            let result = cql_cmp_tuple(&pk, primary_key_value_fn(&columns), &lhs, &rhs);
+            assert_eq!(result, Some(Ordering::Less));
+        }
+
+        #[test]
+        fn second_element_differs() {
+            let columns: Vec<ColumnName> = vec!["a".to_string().into(), "b".to_string().into()];
+            let pk = make_primary_key(vec![CqlValue::Int(1), CqlValue::Int(3)]);
+            let lhs: Vec<ColumnName> = vec!["a".to_string().into(), "b".to_string().into()];
+            let rhs = vec![CqlValue::Int(1), CqlValue::Int(2)];
+
+            let result = cql_cmp_tuple(&pk, primary_key_value_fn(&columns), &lhs, &rhs);
+            assert_eq!(result, Some(Ordering::Greater));
+        }
+
+        #[test]
+        fn missing_column_returns_none() {
+            let columns: Vec<ColumnName> = vec!["a".to_string().into()];
+            let pk = make_primary_key(vec![CqlValue::Int(1)]);
+            let lhs: Vec<ColumnName> = vec!["a".to_string().into(), "b".to_string().into()];
+            let rhs = vec![CqlValue::Int(1), CqlValue::Int(2)];
+
+            let result = cql_cmp_tuple(&pk, primary_key_value_fn(&columns), &lhs, &rhs);
+            assert_eq!(result, None);
+        }
+
+        #[test]
+        fn incomparable_types_returns_none() {
+            let columns: Vec<ColumnName> = vec!["a".to_string().into()];
+            let pk = make_primary_key(vec![CqlValue::Int(1)]);
+            let lhs: Vec<ColumnName> = vec!["a".to_string().into()];
+            let rhs = vec![CqlValue::BigInt(1)]; // Different type
+
+            let result = cql_cmp_tuple(&pk, primary_key_value_fn(&columns), &lhs, &rhs);
+            assert_eq!(result, None);
+        }
+
+        #[test]
+        fn empty_tuples_are_equal() {
+            let columns: Vec<ColumnName> = vec![];
+            let pk = make_primary_key(vec![]);
+            let lhs: Vec<ColumnName> = vec![];
+            let rhs: Vec<CqlValue> = vec![];
+
+            let result = cql_cmp_tuple(&pk, primary_key_value_fn(&columns), &lhs, &rhs);
+            assert_eq!(result, Some(Ordering::Equal));
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
