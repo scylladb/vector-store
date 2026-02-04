@@ -84,11 +84,7 @@ async fn add(
         if let Some(embedding) = embedding.embedding {
             metrics
                 .modified
-                .with_label_values(&[
-                    id.keyspace().as_ref().as_str(),
-                    id.index().as_ref().as_str(),
-                    "update",
-                ])
+                .with_label_values(&[id.keyspace().as_ref(), id.index().as_ref(), "update"])
                 .inc();
             if remove_before_add {
                 index.remove(primary_key.clone(), None).await;
@@ -97,18 +93,11 @@ async fn add(
         } else {
             metrics
                 .modified
-                .with_label_values(&[
-                    id.keyspace().as_ref().as_str(),
-                    id.index().as_ref().as_str(),
-                    "remove",
-                ])
+                .with_label_values(&[id.keyspace().as_ref(), id.index().as_ref(), "remove"])
                 .inc();
             index.remove(primary_key, in_progress).await;
         }
-        metrics.mark_dirty(
-            id.keyspace().as_ref().as_str(),
-            id.index().as_ref().as_str(),
-        );
+        metrics.mark_dirty(id.keyspace().as_ref(), id.index().as_ref());
     }
 }
 

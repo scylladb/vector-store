@@ -352,7 +352,7 @@ async fn get_metrics(
             state
                 .metrics
                 .size
-                .with_label_values(&[keyspace.as_ref().as_str(), index_name.as_ref().as_str()])
+                .with_label_values(&[keyspace.as_ref(), index_name.as_ref()])
                 .set(count as f64);
         }
     }
@@ -531,7 +531,7 @@ async fn post_index_ann(
     let timer = state
         .metrics
         .latency
-        .with_label_values(&[keyspace.as_ref().as_str(), index_name.as_ref().as_str()])
+        .with_label_values(&[keyspace.as_ref(), index_name.as_ref()])
         .start_timer();
 
     let Some((index, db_index)) = state
