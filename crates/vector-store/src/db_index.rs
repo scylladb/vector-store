@@ -435,7 +435,7 @@ impl Statements {
 
         let cluster_state = session.get_cluster_state();
         let table = cluster_state
-            .get_keyspace(metadata.keyspace_name.as_ref())
+            .get_keyspace(&metadata.keyspace_name)
             .ok_or_else(|| anyhow!("keyspace {} does not exist", metadata.keyspace_name))?
             .tables
             .get(metadata.table_name.as_ref())

@@ -153,7 +153,8 @@ impl SerializeValue for IndexId {
     serde::Serialize,
     utoipa::ToSchema,
 )]
-#[from(String, &str)]
+#[from(String, &String, &str)]
+#[as_ref(str)]
 /// A keyspace name in a db.
 pub struct KeyspaceName(String);
 
@@ -180,7 +181,8 @@ impl SerializeValue for KeyspaceName {
     derive_more::Display,
     utoipa::ToSchema,
 )]
-#[from(String, &str)]
+#[from(String, &String, &str)]
+#[as_ref(str)]
 /// A name of the vector index in a db.
 pub struct IndexName(String);
 
@@ -207,7 +209,8 @@ impl SerializeValue for IndexName {
     derive_more::Display,
     utoipa::ToSchema,
 )]
-#[from(String, &str)]
+#[from(String, &String, &str)]
+#[as_ref(str)]
 /// A table name of the table with vectors in a db
 pub struct TableName(String);
 
@@ -234,7 +237,8 @@ impl SerializeValue for TableName {
     derive_more::Display,
     utoipa::ToSchema,
 )]
-#[from(String, &str)]
+#[from(String, &String, &str)]
+#[as_ref(str)]
 /// Name of the column in a db table.
 pub struct ColumnName(String);
 
