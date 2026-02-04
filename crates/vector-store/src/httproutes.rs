@@ -1010,6 +1010,7 @@ fn new_internals() -> Router<RoutesInnerState> {
             get(get_internal_counters).delete(delete_internal_counters),
         )
         .route("/counters/{id}", put(put_internal_counter))
+        .route("/session-counters", get(get_internal_session_counters))
 }
 
 async fn get_internal_counters(State(state): State<RoutesInnerState>) -> Response {
@@ -1026,6 +1027,14 @@ async fn delete_internal_counters(State(state): State<RoutesInnerState>) {
 
 async fn put_internal_counter(State(state): State<RoutesInnerState>, Path(id): Path<String>) {
     state.internals.start_counter(id).await;
+}
+
+async fn get_internal_session_counters(State(state): State<RoutesInnerState>) -> Response {
+    (
+        StatusCode::OK,
+        response::Json(state.internals.session_counters().await),
+    )
+        .into_response()
 }
 
 #[cfg(test)]

@@ -8,11 +8,15 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+anyhow.workspace = true
 async-backtrace.workspace = true
 clap.workspace = true
 hickory-server.workspace = true
 httpclient.workspace = true
+neli.workspace = true
 scylla-proxy.workspace = true
+sysinfo.workspace = true
+tap.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 tracing.workspace = true

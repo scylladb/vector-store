@@ -174,4 +174,14 @@ impl HttpClient {
             .await?;
         Ok(())
     }
+
+    pub async fn internals_session_counters(&self) -> anyhow::Result<BTreeMap<String, u64>> {
+        Ok(self
+            .client
+            .get(format!("{}/session-counters", self.url_internals_api))
+            .send()
+            .await?
+            .json()
+            .await?)
+    }
 }

@@ -23,6 +23,7 @@ use crate::TableName;
 use crate::db_index;
 use crate::db_index::DbIndex;
 use crate::internals::Internals;
+use crate::internals::InternalsExt;
 use crate::node_state::Event;
 use crate::node_state::NodeState;
 use crate::node_state::NodeStateExt;
@@ -268,6 +269,7 @@ pub(crate) async fn new(
                             ).await {
                                 Ok(session) => {
                                     node_state.send_event(Event::ConnectedToDb).await;
+                                    internals.create_session(Some(session.clone())).await;
                                     session_tx.send(Some(session)).ok();
                                     if statements.is_none() {
                                         statements = Some(Arc::new(Statements::new(config_rx.clone(), session_rx.clone()).await.unwrap()));
@@ -281,6 +283,7 @@ pub(crate) async fn new(
                                         config.scylladb_uri,
                                         RECONNECT_TIMEOUT.as_secs()
                                     );
+                                    internals.create_session(None).await;
                                 }
                             }
                         }
