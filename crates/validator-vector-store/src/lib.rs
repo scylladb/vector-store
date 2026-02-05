@@ -10,6 +10,7 @@ mod db_timeout;
 mod full_scan;
 mod high_availability;
 mod index_status;
+mod quantization_and_rescoring;
 mod reconnect;
 mod serde;
 mod similarity_functions;
@@ -30,6 +31,10 @@ pub async fn test_cases() -> impl Iterator<Item = (String, TestCase)> {
         ("reconnect", reconnect::new().await),
         ("serde", serde::new().await),
         ("similarity_function", similarity_functions::new().await),
+        (
+            "quantization_and_rescoring",
+            quantization_and_rescoring::new().await,
+        ),
     ]
     .into_iter()
     .map(|(name, test_case)| (name.to_string(), test_case))
