@@ -4089,19 +4089,9 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "vector-search-validator-scylla",
  "vector-search-validator-tests",
  "vector-search-validator-vector-store",
  "vector-store",
-]
-
-[[package]]
-name = "vector-search-validator-scylla"
-version = "0.1.0"
-source = "git+https://github.com/scylladb/scylladb?rev=d6c14de#d6c14de380dd37c42df896957aa6d6d1fa2273a8"
-dependencies = [
- "tracing",
- "vector-search-validator-tests",
 ]
 
 [[package]]
