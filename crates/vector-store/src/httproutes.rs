@@ -446,7 +446,6 @@ pub struct PostIndexAnnFilter {
 
 #[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
 pub struct PostIndexAnnRequest {
-    #[serde(alias = "embedding")]
     pub vector: Vector,
     pub filter: Option<PostIndexAnnFilter>,
     #[serde(default)]
