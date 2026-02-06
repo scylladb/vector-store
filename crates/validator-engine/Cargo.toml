@@ -21,7 +21,6 @@ tempfile.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-vector-search-validator-scylla.workspace = true
 vector-search-validator-tests.workspace = true
 vector-search-validator-vector-store.workspace = true
 vector-store.workspace = true

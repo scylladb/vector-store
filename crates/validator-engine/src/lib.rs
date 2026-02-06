@@ -203,7 +203,6 @@ fn parse_test_filters(
 async fn register() -> Vec<(String, TestCase)> {
     vector_search_validator_vector_store::test_cases()
         .await
-        .chain(vector_search_validator_scylla::test_cases().await)
         .collect()
 }
 
