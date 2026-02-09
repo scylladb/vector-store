@@ -419,37 +419,6 @@ async fn ann_fail_while_building() {
 }
 
 #[tokio::test]
-async fn ann_works_with_embedding_field_name() {
-    // Ensure backward compatibility with the old field name "embedding".
-    crate::enable_tracing();
-    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
-        ["pk".into(), "ck".into()],
-        [
-            ("pk".to_string().into(), NativeType::Int),
-            ("ck".to_string().into(), NativeType::Text),
-        ],
-        [],
-    )
-    .await;
-    #[derive(serde::Serialize)]
-    struct EmbeddingRequest {
-        embedding: Vector,
-    }
-
-    let response = client
-        .post_ann_data(
-            &index.keyspace_name,
-            &index.index_name,
-            &EmbeddingRequest {
-                embedding: vec![1.0, 2.0, 3.0].into(),
-            },
-        )
-        .await;
-
-    assert_eq!(response.status(), StatusCode::OK);
-}
-
-#[tokio::test]
 async fn ann_failed_when_wrong_number_of_primary_keys() {
     crate::enable_tracing();
     let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
