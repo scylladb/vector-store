@@ -18,6 +18,7 @@ use tokio::sync::watch;
 use uuid::Uuid;
 use vector_store::DbIndexType;
 use vector_store::IndexMetadata;
+use vector_store::invariant_key::InvariantKey;
 
 #[tokio::test]
 async fn simple_create_search_delete_index() {
@@ -87,17 +88,18 @@ async fn simple_create_search_delete_index() {
         &index.target_column,
         vec![
             (
-                vec![CqlValue::Int(1), CqlValue::Text("one".to_string())].into(),
+                InvariantKey::new(vec![CqlValue::Int(1), CqlValue::Text("one".to_string())]).into(),
                 Some(vec![1., 1., 1.].into()),
                 OffsetDateTime::from_unix_timestamp(10).unwrap().into(),
             ),
             (
-                vec![CqlValue::Int(2), CqlValue::Text("two".to_string())].into(),
+                InvariantKey::new(vec![CqlValue::Int(2), CqlValue::Text("two".to_string())]).into(),
                 Some(vec![2., -2., 2.].into()),
                 OffsetDateTime::from_unix_timestamp(20).unwrap().into(),
             ),
             (
-                vec![CqlValue::Int(3), CqlValue::Text("three".to_string())].into(),
+                InvariantKey::new(vec![CqlValue::Int(3), CqlValue::Text("three".to_string())])
+                    .into(),
                 Some(vec![3., 3., 3.].into()),
                 OffsetDateTime::from_unix_timestamp(30).unwrap().into(),
             ),
