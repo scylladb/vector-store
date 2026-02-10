@@ -897,15 +897,15 @@ fn cql_cmp(lhs: &CqlValue, rhs: &CqlValue) -> Option<std::cmp::Ordering> {
 
 /// Lexicographically compare tuple values.
 /// Returns the ordering of the first non-equal pair, or Equal if all pairs are equal.
-fn cql_cmp_tuple<'a>(
-    primary_key: &'a PrimaryKey,
-    primary_key_value: impl Fn(&'a PrimaryKey, &ColumnName) -> Option<&'a CqlValue>,
+fn cql_cmp_tuple(
+    primary_key: &PrimaryKey,
+    primary_key_value: impl Fn(&PrimaryKey, &ColumnName) -> Option<CqlValue>,
     lhs: &[ColumnName],
     rhs: &[CqlValue],
 ) -> Option<std::cmp::Ordering> {
     for (col, rhs_val) in lhs.iter().zip(rhs.iter()) {
         let lhs_val = primary_key_value(primary_key, col)?;
-        match cql_cmp(lhs_val, rhs_val)? {
+        match cql_cmp(&lhs_val, rhs_val)? {
             std::cmp::Ordering::Equal => continue,
             other => return Some(other),
         }
@@ -924,17 +924,17 @@ fn filtered_ann(
 ) {
     fn annotate<F>(f: F) -> F
     where
-        F: for<'a, 'b> Fn(&'a PrimaryKey, &'b ColumnName) -> Option<&'a CqlValue>,
+        F: Fn(&PrimaryKey, &ColumnName) -> Option<CqlValue>,
     {
         f
     }
 
     let primary_key_value = annotate(
-        |primary_key: &PrimaryKey, name: &ColumnName| -> Option<&CqlValue> {
+        |primary_key: &PrimaryKey, name: &ColumnName| -> Option<CqlValue> {
             primary_key_columns
                 .iter()
                 .position(|key_column| key_column == name)
-                .and_then(move |idx| primary_key.0.get(idx))
+                .and_then(move |idx| primary_key.get(idx))
         },
     );
 
@@ -946,27 +946,29 @@ fn filtered_ann(
             .restrictions
             .iter()
             .all(|restriction| match restriction {
-                Restriction::Eq { lhs, rhs } => primary_key_value(&primary_key, lhs) == Some(rhs),
+                Restriction::Eq { lhs, rhs } => {
+                    primary_key_value(&primary_key, lhs).as_ref() == Some(rhs)
+                }
                 Restriction::In { lhs, rhs } => {
                     let value = primary_key_value(&primary_key, lhs);
-                    rhs.iter().any(|rhs| value == Some(rhs))
+                    rhs.iter().any(|rhs| value.as_ref() == Some(rhs))
                 }
                 Restriction::Lt { lhs, rhs } => primary_key_value(&primary_key, lhs)
-                    .and_then(|value| cql_cmp(value, rhs))
+                    .and_then(|value| cql_cmp(&value, rhs))
                     .is_some_and(|ord| ord.is_lt()),
                 Restriction::Lte { lhs, rhs } => primary_key_value(&primary_key, lhs)
-                    .and_then(|value| cql_cmp(value, rhs))
+                    .and_then(|value| cql_cmp(&value, rhs))
                     .is_some_and(|ord| ord.is_le()),
                 Restriction::Gt { lhs, rhs } => primary_key_value(&primary_key, lhs)
-                    .and_then(|value| cql_cmp(value, rhs))
+                    .and_then(|value| cql_cmp(&value, rhs))
                     .is_some_and(|ord| ord.is_gt()),
                 Restriction::Gte { lhs, rhs } => primary_key_value(&primary_key, lhs)
-                    .and_then(|value| cql_cmp(value, rhs))
+                    .and_then(|value| cql_cmp(&value, rhs))
                     .is_some_and(|ord| ord.is_ge()),
                 Restriction::EqTuple { lhs, rhs } => lhs
                     .iter()
                     .zip(rhs.iter())
-                    .all(|(lhs, rhs)| primary_key_value(&primary_key, lhs) == Some(rhs)),
+                    .all(|(lhs, rhs)| primary_key_value(&primary_key, lhs).as_ref() == Some(rhs)),
                 Restriction::InTuple { lhs, rhs } => {
                     let values: Vec<_> = lhs
                         .iter()
@@ -976,7 +978,7 @@ fn filtered_ann(
                         values
                             .iter()
                             .zip(rhs.iter())
-                            .all(|(value, rhs)| value == &Some(rhs))
+                            .all(|(value, rhs)| value.as_ref() == Some(rhs))
                     })
                 }
                 Restriction::LtTuple { lhs, rhs } => {
@@ -1464,14 +1466,14 @@ mod tests {
             values.into()
         }
 
-        fn primary_key_value_fn<'a>(
-            columns: &'a [ColumnName],
-        ) -> impl Fn(&'a PrimaryKey, &ColumnName) -> Option<&'a CqlValue> {
-            move |pk: &'a PrimaryKey, name: &ColumnName| {
+        fn primary_key_value_fn(
+            columns: &[ColumnName],
+        ) -> impl Fn(&PrimaryKey, &ColumnName) -> Option<CqlValue> + use<'_> {
+            move |pk: &PrimaryKey, name: &ColumnName| {
                 columns
                     .iter()
                     .position(|col| col == name)
-                    .and_then(|idx| pk.0.get(idx))
+                    .and_then(|idx| pk.get(idx))
             }
         }
 
