@@ -78,6 +78,7 @@ impl Display for SpaceType {
             Self::Euclidean => write!(f, "l2"),
             Self::Cosine => write!(f, "cosinesimil"),
             Self::DotProduct => write!(f, "innerproduct"),
+            Self::Hamming => unimplemented!("Hamming distance is not supported"),
         }
     }
 }
