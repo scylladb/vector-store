@@ -16,6 +16,7 @@ mod metrics;
 mod monitor_indexes;
 mod monitor_items;
 pub mod node_state;
+mod primary_key;
 
 use crate::internals::Internals;
 use crate::metrics::Metrics;
@@ -33,11 +34,11 @@ use scylla::serialize::writers::WrittenCellProof;
 use scylla::value::CqlValue;
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::hash::Hash;
-use std::hash::Hasher;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::str::FromStr;
+
+pub use primary_key::PrimaryKey;
 use std::sync::Arc;
 use std::time::Duration;
 use time::OffsetDateTime;
@@ -248,22 +249,7 @@ impl SerializeValue for ColumnName {
     }
 }
 
-#[derive(Clone, Debug, derive_more::From)]
-pub struct PrimaryKey(Vec<CqlValue>);
-
-impl Hash for PrimaryKey {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        format!("{self:?}").hash(state);
-    }
-}
-
-impl PartialEq for PrimaryKey {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.eq(&other.0)
-    }
-}
-
-impl Eq for PrimaryKey {}
+// PrimaryKey is defined in primary_key.rs and re-exported above.
 
 #[derive(
     Clone,
