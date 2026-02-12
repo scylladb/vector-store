@@ -14,6 +14,7 @@ use tracing::info;
 use vector_search_validator_tests::ScyllaClusterExt;
 use vector_search_validator_tests::common::*;
 use vector_search_validator_tests::*;
+use vector_store::httproutes::IndexStatus;
 
 const FRAME_DELAY: Duration = Duration::from_millis(100);
 const DATASET_SIZE: i32 = 100;
@@ -98,7 +99,13 @@ async fn reconnect_doesnt_break_fullscan(actors: TestActors) {
         .await;
 
     info!("Creating index");
-    let index = create_index(&session, &clients, &table, "embedding").await;
+    let index = create_index(CreateIndexQuery::new(
+        &session,
+        &clients,
+        &table,
+        "embedding",
+    ))
+    .await;
 
     info!("Checking that full scan isn't completed");
     let result = session
@@ -252,7 +259,13 @@ async fn restarting_one_node_doesnt_break_fullscan(actors: TestActors) {
         .await;
 
     info!("Creating index");
-    let index = create_index(&session, &clients, &table, "embedding").await;
+    let index = create_index(CreateIndexQuery::new(
+        &session,
+        &clients,
+        &table,
+        "embedding",
+    ))
+    .await;
 
     info!("Checking that full scan isn't completed");
     let index_status = client
@@ -366,7 +379,13 @@ async fn restarting_all_nodes_doesnt_break_fullscan(actors: TestActors) {
         .await;
 
     info!("Creating index");
-    let index = create_index(&session, &clients, &table, "embedding").await;
+    let index = create_index(CreateIndexQuery::new(
+        &session,
+        &clients,
+        &table,
+        "embedding",
+    ))
+    .await;
 
     let index_status = client
         .index_status(&index.keyspace, &index.index)
@@ -490,7 +509,13 @@ async fn test_restarting_vs_cluster_does_not_break_setup(actors: TestActors) {
         .await;
 
     info!("Creating index");
-    let index = create_index(&session, &clients, &table, "embedding").await;
+    let index = create_index(CreateIndexQuery::new(
+        &session,
+        &clients,
+        &table,
+        "embedding",
+    ))
+    .await;
 
     info!("Stopping VS cluster");
     actors.vs.stop().await;

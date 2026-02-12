@@ -77,7 +77,7 @@ async fn test_secondary_uri_works_correctly(actors: TestActors) {
             .expect("failed to insert data");
     }
 
-    let index = create_index(&session, &clients, &table, "v").await;
+    let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
 
     for client in &clients {
         let index_status = wait_for_index(client, &index).await;

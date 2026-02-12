@@ -148,7 +148,7 @@ async fn vs_works_when_permission_granted(actors: TestActors) {
     let table = create_table(&session, "pk INT PRIMARY KEY, v1 VECTOR<FLOAT, 3>", None).await;
 
     // Create index on column v1
-    let index = create_index(&session, &clients, &table, "v1").await;
+    let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v1")).await;
 
     info!("Waiting for index to be ready");
     for client in clients.iter() {
