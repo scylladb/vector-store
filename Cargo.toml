@@ -30,6 +30,7 @@ httpclient = { path = "crates/httpclient" }
 humantime = "2.2.0"
 itertools = "0.14.0"
 macros = { path = "crates/macros" }
+mimalloc = "0.1.48"
 mockall = "0.13.1"
 neli = { version = "0.7.4", default-features = false, features = ["async"] }
 ntest = "0.9.3"
