@@ -35,6 +35,7 @@ futures.workspace = true
 humantime.workspace = true
 itertools.workspace = true
 macros.workspace = true
+mimalloc.workspace = true
 ntest.workspace = true
 rustls.workspace = true
 rustls-pki-types.workspace = true
