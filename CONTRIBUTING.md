@@ -23,6 +23,10 @@ After submitting a compliant PR, it will be reviewed by one or more maintainers.
 **Current maintainers:**
 - Paweł Pery (@ewienik)
 
+## Rust Coding Conventions
+
+For detailed Rust coding conventions and best practices used in this project, see [docs/rust_instructions.md](docs/rust_instructions.md).
+
 ## Static Checks
 
 To ensure code quality, we use several static analysis tools. All static checks must pass before merging.
