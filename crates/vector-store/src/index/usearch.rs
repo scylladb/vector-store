@@ -72,7 +72,7 @@ impl IndexFactory for UsearchIndexFactory {
                     connectivity: index.connectivity.0,
                     expansion_add: index.expansion_add.0,
                     expansion_search: index.expansion_search.0,
-                    metric: metric_kind(index.quantization, index.space_type),
+                    metric: metric_kind(index.quantization, index.space_type)?,
                     quantization: index.quantization.into(),
                     ..Default::default()
                 };
@@ -147,13 +147,13 @@ trait UsearchIndex {
         &self,
         vector: &Vector,
         limit: Limit,
-    ) -> anyhow::Result<impl Iterator<Item = (Key, Distance)>>;
+    ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<(Key, Distance)>>>;
     fn filtered_search(
         &self,
         vector: &Vector,
         limit: Limit,
         filter: impl Fn(Key) -> bool,
-    ) -> anyhow::Result<impl Iterator<Item = (Key, Distance)>>;
+    ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<(Key, Distance)>>>;
 
     fn stop(&self);
 }
@@ -162,6 +162,7 @@ struct ThreadedUsearchIndex {
     inner: usearch::Index,
     threads: usize,
     quantization: usearch::ScalarKind,
+    space_type: usearch::MetricKind,
 }
 
 impl ThreadedUsearchIndex {
@@ -170,6 +171,7 @@ impl ThreadedUsearchIndex {
             inner: usearch::Index::new(&options)?,
             threads,
             quantization: options.quantization,
+            space_type: options.metric,
         })
     }
 }
@@ -205,7 +207,7 @@ impl UsearchIndex for ThreadedUsearchIndex {
         &self,
         vector: &Vector,
         limit: Limit,
-    ) -> anyhow::Result<impl Iterator<Item = (Key, Distance)>> {
+    ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<(Key, Distance)>>> {
         let matches = if self.quantization == ScalarKind::B1 {
             let vector = f32_to_b1x8(&vector.0);
             self.inner.search(&vector, limit.0.get())?
@@ -216,7 +218,10 @@ impl UsearchIndex for ThreadedUsearchIndex {
             .keys
             .into_iter()
             .zip(matches.distances)
-            .map(|(key, distance)| (key.into(), distance.into())))
+            .map(|(key, distance)| {
+                Distance::try_from((distance, self.space_type.try_into()?, vector.dim()))
+                    .map(|dist| (key.into(), dist))
+            }))
     }
 
     fn filtered_search(
@@ -224,7 +229,7 @@ impl UsearchIndex for ThreadedUsearchIndex {
         vector: &Vector,
         limit: Limit,
         filter: impl Fn(Key) -> bool,
-    ) -> anyhow::Result<impl Iterator<Item = (Key, Distance)>> {
+    ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<(Key, Distance)>>> {
         let matches = if self.quantization == ScalarKind::B1 {
             let vector = f32_to_b1x8(&vector.0);
             self.inner
@@ -237,7 +242,10 @@ impl UsearchIndex for ThreadedUsearchIndex {
             .keys
             .into_iter()
             .zip(matches.distances)
-            .map(|(key, distance)| (key.into(), distance.into())))
+            .map(|(key, distance)| {
+                Distance::try_from((distance, self.space_type.try_into()?, vector.dim()))
+                    .map(|dist| (key.into(), dist))
+            }))
     }
 
     fn stop(&self) {}
@@ -389,7 +397,7 @@ impl UsearchIndex for RwLock<Simulator> {
         &self,
         _: &Vector,
         limit: Limit,
-    ) -> anyhow::Result<impl Iterator<Item = (Key, Distance)>> {
+    ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<(Key, Distance)>>> {
         let start = Instant::now();
 
         let sim = self.read().unwrap();
@@ -408,7 +416,8 @@ impl UsearchIndex for RwLock<Simulator> {
         };
 
         sim.wait_search(start);
-        Ok(keys.into_iter().map(|key| (key, 0.0.into())))
+        let distance = Distance::new_euclidean(0.0)?;
+        Ok(keys.into_iter().map(move |key| Ok((key, distance))))
     }
 
     fn filtered_search(
@@ -416,7 +425,7 @@ impl UsearchIndex for RwLock<Simulator> {
         vector: &Vector,
         limit: Limit,
         _filter: impl Fn(Key) -> bool,
-    ) -> anyhow::Result<impl Iterator<Item = (Key, Distance)>> {
+    ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<(Key, Distance)>>> {
         self.search(vector, limit)
     }
 
@@ -445,24 +454,60 @@ const RESERVE_THRESHOLD: usize = RESERVE_INCREMENT / 3;
 /// Key for index embeddings
 struct Key(u64);
 
-fn metric_kind(quantization: Quantization, space_type: SpaceType) -> MetricKind {
+struct MetricConfig {
+    quantization: Quantization,
+    space_type: SpaceType,
+}
+
+fn metric_kind(quantization: Quantization, space_type: SpaceType) -> anyhow::Result<MetricKind> {
     // Usearch requires a binary metric (e.g., Hamming, Jaccard) for B1 quantization.
     // Using a non-binary metric would cause a panic during index creation.
     // Since we don't currently support selecting a specific binary space type,
     // we default to Hamming for B1 quantization.
     if quantization == Quantization::B1 {
-        MetricKind::Hamming
-    } else {
-        space_type.into()
+        return Ok(MetricKind::Hamming);
+    }
+
+    MetricConfig {
+        quantization,
+        space_type,
+    }
+    .try_into()
+}
+
+impl TryFrom<MetricConfig> for MetricKind {
+    type Error = anyhow::Error;
+
+    fn try_from(config: MetricConfig) -> Result<Self, Self::Error> {
+        if config.quantization == Quantization::B1 {
+            return match config.space_type {
+                SpaceType::Hamming => Ok(MetricKind::Hamming),
+                _ => anyhow::bail!(
+                    "B1 quantization requires binary space type. Unsupported space type: {:?}",
+                    config.space_type
+                ),
+            };
+        }
+
+        match config.space_type {
+            SpaceType::Cosine => Ok(MetricKind::Cos),
+            SpaceType::Euclidean => Ok(MetricKind::L2sq),
+            SpaceType::DotProduct => Ok(MetricKind::IP),
+            SpaceType::Hamming => anyhow::bail!("Binary space type requires B1 quantization."),
+        }
     }
 }
 
-impl From<SpaceType> for MetricKind {
-    fn from(space_type: SpaceType) -> Self {
-        match space_type {
-            SpaceType::Cosine => MetricKind::Cos,
-            SpaceType::Euclidean => MetricKind::L2sq,
-            SpaceType::DotProduct => MetricKind::IP,
+impl TryFrom<MetricKind> for SpaceType {
+    type Error = anyhow::Error;
+
+    fn try_from(metric_kind: MetricKind) -> Result<Self, Self::Error> {
+        match metric_kind {
+            MetricKind::Cos => Ok(SpaceType::Cosine),
+            MetricKind::L2sq => Ok(SpaceType::Euclidean),
+            MetricKind::IP => Ok(SpaceType::DotProduct),
+            MetricKind::Hamming => Ok(SpaceType::Hamming),
+            _ => anyhow::bail!("Unsupported MetricKind for SpaceType: {:?}", metric_kind),
         }
     }
 }
@@ -857,11 +902,13 @@ fn ann(
                 .and_then(|matches| {
                     let keys = keys.read().unwrap();
                     let (primary_keys, distances) = itertools::process_results(
-                        matches.map(|(key, distance)| {
-                            keys.get_by_right(&key)
-                                .cloned()
-                                .ok_or(anyhow!("not defined primary key column {key}"))
-                                .map(|primary_key| (primary_key, distance))
+                        matches.map(|result| {
+                            result.and_then(|(key, distance)| {
+                                keys.get_by_right(&key)
+                                    .cloned()
+                                    .ok_or(anyhow!("not defined primary key column {key}"))
+                                    .map(|primary_key| (primary_key, distance))
+                            })
                         }),
                         |it| it.unzip(),
                     )?;
@@ -1005,11 +1052,13 @@ fn filtered_ann(
                 .and_then(|matches| {
                     let keys = keys.read().unwrap();
                     let (primary_keys, distances) = itertools::process_results(
-                        matches.map(|(key, distance)| {
-                            keys.get_by_right(&key)
-                                .cloned()
-                                .ok_or(anyhow!("not defined primary key column {key}"))
-                                .map(|primary_key| (primary_key, distance))
+                        matches.map(|result| {
+                            result.and_then(|(key, distance)| {
+                                keys.get_by_right(&key)
+                                    .cloned()
+                                    .ok_or(anyhow!("not defined primary key column {key}"))
+                                    .map(|primary_key| (primary_key, distance))
+                            })
                         }),
                         |it| it.unzip(),
                     )?;

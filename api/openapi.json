@@ -72,7 +72,7 @@
         },
         "responses": {
           "200": {
-            "description": "Successful ANN search. Returns a list of primary keys and their corresponding distances for the most similar vectors found.",
+            "description": "Successful ANN search. Returns a list of primary keys and their corresponding distances and similarity scores for the most similar vectors found.",
             "content": {
               "application/json": {
                 "schema": {
@@ -416,7 +416,8 @@
         "type": "object",
         "required": [
           "primary_keys",
-          "distances"
+          "distances",
+          "similarity_scores"
         ],
         "properties": {
           "distances": {
@@ -434,6 +435,12 @@
             "propertyNames": {
               "type": "string",
               "description": "Name of the column in a db table."
+            }
+          },
+          "similarity_scores": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SimilarityScore"
             }
           }
         }
@@ -724,6 +731,11 @@
           }
         ],
         "description": "A filter restriction used in ANN search requests."
+      },
+      "SimilarityScore": {
+        "type": "number",
+        "format": "float",
+        "description": "Similarity score between vectors derived from the distance. Higher score means more similar."
       },
       "Vector": {
         "type": "array",

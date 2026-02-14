@@ -10,12 +10,13 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use vector_store::ColumnName;
-use vector_store::Distance;
 use vector_store::IndexInfo;
 use vector_store::IndexName;
 use vector_store::KeyspaceName;
 use vector_store::Limit;
+use vector_store::SimilarityScore;
 use vector_store::Vector;
+use vector_store::httproutes::Distance;
 pub use vector_store::httproutes::IndexStatus;
 use vector_store::httproutes::IndexStatusResponse;
 use vector_store::httproutes::InfoResponse;
@@ -61,14 +62,18 @@ impl HttpClient {
         vector: Vector,
         filter: Option<PostIndexAnnFilter>,
         limit: Limit,
-    ) -> (HashMap<ColumnName, Vec<Value>>, Vec<Distance>) {
+    ) -> (
+        HashMap<ColumnName, Vec<Value>>,
+        Vec<Distance>,
+        Vec<SimilarityScore>,
+    ) {
         let resp = self
             .post_ann(keyspace_name, index_name, vector, filter, limit)
             .await
             .json::<PostIndexAnnResponse>()
             .await
             .unwrap();
-        (resp.primary_keys, resp.distances)
+        (resp.primary_keys, resp.distances, resp.similarity_scores)
     }
 
     pub async fn post_ann(
