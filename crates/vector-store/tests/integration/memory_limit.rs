@@ -19,6 +19,7 @@ use tracing::info;
 use uuid::Uuid;
 use vector_store::Config;
 use vector_store::Connectivity;
+use vector_store::DbIndexType;
 use vector_store::ExpansionAdd;
 use vector_store::ExpansionSearch;
 use vector_store::IndexMetadata;
@@ -48,6 +49,8 @@ async fn memory_limit_during_index_build() {
         table_name: "tbl".into(),
         index_name: "idx".into(),
         target_column: "v".into(),
+        index_type: DbIndexType::Global,
+        filtering_columns: Arc::new(Vec::new()),
         dimensions: NonZeroUsize::new(3).unwrap().into(),
         connectivity: Connectivity::default(),
         expansion_add: ExpansionAdd::default(),

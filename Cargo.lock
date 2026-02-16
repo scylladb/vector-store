@@ -4120,12 +4120,13 @@ dependencies = [
  "async-backtrace",
  "futures",
  "httpclient",
+ "itertools 0.14.0",
  "scylla",
  "scylla-proxy",
  "serde_json",
+ "tap",
  "tokio",
  "tracing",
- "uuid",
  "vector-store",
 ]
 

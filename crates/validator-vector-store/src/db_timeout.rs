@@ -56,7 +56,7 @@ async fn client_timeout_doesnt_stop_cdc(actors: TestActors) {
     .await;
 
     info!("Initially, the index should have 0 vectors");
-    let index = create_index(&session, &clients, &table, "v").await;
+    let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
 
     for client in &clients {
         let index_status = wait_for_index(client, &index).await;

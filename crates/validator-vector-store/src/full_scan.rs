@@ -65,7 +65,13 @@ async fn full_scan_is_completed_when_responding_to_messages_concurrently(actors:
         .await;
 
     info!("Creating index");
-    let index = create_index(&session, &clients, &table, "embedding").await;
+    let index = create_index(CreateIndexQuery::new(
+        &session,
+        &clients,
+        &table,
+        "embedding",
+    ))
+    .await;
 
     info!("Checking that full scan isn't completed");
     let result = session

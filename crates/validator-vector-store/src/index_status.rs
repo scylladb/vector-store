@@ -5,10 +5,11 @@
 
 use async_backtrace::framed;
 use tracing::info;
-use vector_search_validator_tests::common::IndexName;
-use vector_search_validator_tests::common::KeyspaceName;
 use vector_search_validator_tests::common::*;
 use vector_search_validator_tests::*;
+use vector_store::IndexName;
+use vector_store::KeyspaceName;
+use vector_store::httproutes::IndexStatus;
 
 #[framed]
 pub(crate) async fn new() -> TestCase {
@@ -49,7 +50,7 @@ async fn status_returned_correctly(actors: TestActors) {
             .expect("failed to insert data");
     }
 
-    let index = create_index(&session, &clients, &table, "v").await;
+    let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
 
     for client in &clients {
         let index_status = wait_for_index(client, &index).await;

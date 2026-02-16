@@ -22,6 +22,7 @@ use vector_store::ColumnName;
 use vector_store::Connectivity;
 use vector_store::DbCustomIndex;
 use vector_store::DbEmbedding;
+use vector_store::DbIndexType;
 use vector_store::Dimensions;
 use vector_store::ExpansionAdd;
 use vector_store::ExpansionSearch;
@@ -315,6 +316,8 @@ fn process_db(db: &DbBasic, msg: Db, node_state: Sender<NodeState>) {
                                 index: index_name.clone(),
                                 table: index.index.table_name.clone(),
                                 target_column: index.index.target_column.clone(),
+                                index_type: DbIndexType::Global,
+                                filtering_columns: Arc::new(Vec::new()),
                             })
                     })
                     .collect()))

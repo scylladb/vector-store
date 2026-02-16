@@ -153,7 +153,8 @@ impl SerializeValue for IndexId {
     serde::Serialize,
     utoipa::ToSchema,
 )]
-#[from(String, &str)]
+#[from(String, &String, &str)]
+#[as_ref(str)]
 /// A keyspace name in a db.
 pub struct KeyspaceName(String);
 
@@ -180,7 +181,8 @@ impl SerializeValue for KeyspaceName {
     derive_more::Display,
     utoipa::ToSchema,
 )]
-#[from(String, &str)]
+#[from(String, &String, &str)]
+#[as_ref(str)]
 /// A name of the vector index in a db.
 pub struct IndexName(String);
 
@@ -207,7 +209,8 @@ impl SerializeValue for IndexName {
     derive_more::Display,
     utoipa::ToSchema,
 )]
-#[from(String, &str)]
+#[from(String, &String, &str)]
+#[as_ref(str)]
 /// A table name of the table with vectors in a db
 pub struct TableName(String);
 
@@ -234,7 +237,8 @@ impl SerializeValue for TableName {
     derive_more::Display,
     utoipa::ToSchema,
 )]
-#[from(String, &str)]
+#[from(String, &String, &str)]
+#[as_ref(str)]
 /// Name of the column in a db table.
 pub struct ColumnName(String);
 
@@ -556,6 +560,8 @@ pub struct IndexMetadata {
     pub index_name: IndexName,
     pub table_name: TableName,
     pub target_column: ColumnName,
+    pub index_type: DbIndexType,
+    pub filtering_columns: Arc<Vec<ColumnName>>,
     pub dimensions: Dimensions,
     pub connectivity: Connectivity,
     pub expansion_add: ExpansionAdd,
@@ -571,12 +577,20 @@ impl IndexMetadata {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum DbIndexType {
+    Global,
+    Local(Arc<Vec<ColumnName>>),
+}
+
 #[derive(Debug)]
 pub struct DbCustomIndex {
     pub keyspace: KeyspaceName,
     pub index: IndexName,
     pub table: TableName,
     pub target_column: ColumnName,
+    pub index_type: DbIndexType,
+    pub filtering_columns: Arc<Vec<ColumnName>>,
 }
 
 impl DbCustomIndex {

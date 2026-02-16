@@ -81,7 +81,7 @@ async fn ann_query_returns_expected_results(actors: TestActors) {
             .expect("failed to insert data");
     }
 
-    let index = create_index(&session, &clients, &table, "v").await;
+    let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
 
     for client in &clients {
         let index_status = wait_for_index(client, &index).await;
@@ -148,7 +148,7 @@ async fn ann_query_returns_expected_results_multicolumn_pk(actors: TestActors) {
             .await
             .expect("failed to insert data");
     }
-    create_index(&session, &clients, &table, "v").await;
+    create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
 
     let result = wait_for_value(
         || async {
@@ -208,7 +208,7 @@ async fn ann_query_respects_limit(actors: TestActors) {
     }
 
     // Create index
-    let index = create_index(&session, &clients, &table, "v").await;
+    let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
 
     for client in &clients {
         let index_status = wait_for_index(client, &index).await;
@@ -275,7 +275,7 @@ async fn ann_query_respects_limit_over_1000_vectors(actors: TestActors) {
             .expect("failed to insert data");
     }
 
-    let index = create_index(&session, &clients, &table, "v").await;
+    let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
 
     for client in &clients {
         let index_status = wait_for_index(client, &index).await;
@@ -351,7 +351,7 @@ async fn ann_query_returns_rows_identified_by_composite_primary_key(actors: Test
             .await
             .expect("failed to insert data");
     }
-    create_index(&session, &clients, &table, "v").await;
+    create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
 
     let result = wait_for_value(
         || async {
@@ -417,7 +417,7 @@ async fn ann_query_returns_rows_using_cdc(actors: TestActors) {
     .await;
 
     info!("Initially, the index should have 0 vectors");
-    let index = create_index(&session, &clients, &table, "v").await;
+    let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
 
     for client in &clients {
         let index_status = wait_for_index(client, &index).await;
