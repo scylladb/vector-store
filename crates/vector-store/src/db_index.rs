@@ -10,10 +10,12 @@ use crate::DbEmbedding;
 use crate::IndexMetadata;
 use crate::KeyspaceName;
 use crate::Percentage;
+use crate::PrimaryKey;
 use crate::Progress;
 use crate::TableName;
 use crate::internals::Internals;
 use crate::internals::InternalsExt;
+use crate::invariant_key::InvariantKey;
 use crate::node_state::Event;
 use crate::node_state::NodeState;
 use crate::node_state::NodeStateExt;
@@ -451,6 +453,15 @@ impl Statements {
                 .collect_vec(),
         );
 
+        anyhow::ensure!(
+            primary_key_columns.len() <= InvariantKey::MAX_COLUMNS,
+            "table {}.{} has {} primary key columns, but at most {} are supported",
+            metadata.keyspace_name,
+            metadata.table_name,
+            primary_key_columns.len(),
+            InvariantKey::MAX_COLUMNS,
+        );
+
         let table_columns = Arc::new(
             table
                 .columns
@@ -752,7 +763,11 @@ impl Statements {
                 else {
                     return None;
                 };
-                let primary_key = primary_key.into();
+                let primary_key = PrimaryKey::from(
+                    InvariantKey::try_new(primary_key)
+                        .inspect_err(|err| debug!("range_scan_stream: {err}"))
+                        .ok()?,
+                );
 
                 Some(DbEmbedding {
                     primary_key,
@@ -825,8 +840,8 @@ impl Consumer for CdcConsumer {
                     "CDC error: primary key column {column} value should exist"
                 ))
             })
-            .collect::<anyhow::Result<Vec<_>>>()?
-            .into();
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let primary_key = PrimaryKey::from(InvariantKey::try_new(primary_key)?);
 
         const HUNDREDS_NANOS_TO_MICROS: u64 = 10;
         let timestamp = (self.0.gregorian_epoch

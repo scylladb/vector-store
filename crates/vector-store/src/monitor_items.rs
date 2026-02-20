@@ -103,6 +103,7 @@ async fn add(
 
 #[cfg(test)]
 mod tests {
+    use crate::invariant_key::InvariantKey;
     use crate::metrics::Metrics;
 
     use super::*;
@@ -126,7 +127,7 @@ mod tests {
         tx_embeddings
             .send((
                 DbEmbedding {
-                    primary_key: vec![CqlValue::Int(1)].into(),
+                    primary_key: InvariantKey::new(vec![CqlValue::Int(1)]).into(),
                     embedding: Some(vec![1.].into()),
                     timestamp: OffsetDateTime::from_unix_timestamp(10).unwrap().into(),
                 },
@@ -137,7 +138,7 @@ mod tests {
         tx_embeddings
             .send((
                 DbEmbedding {
-                    primary_key: vec![CqlValue::Int(2)].into(),
+                    primary_key: InvariantKey::new(vec![CqlValue::Int(2)]).into(),
                     embedding: Some(vec![2.].into()),
                     timestamp: OffsetDateTime::from_unix_timestamp(11).unwrap().into(),
                 },
@@ -149,7 +150,7 @@ mod tests {
             .send((
                 DbEmbedding {
                     // should be dropped
-                    primary_key: vec![CqlValue::Int(1)].into(),
+                    primary_key: InvariantKey::new(vec![CqlValue::Int(1)]).into(),
                     embedding: Some(vec![3.].into()),
                     timestamp: OffsetDateTime::from_unix_timestamp(5).unwrap().into(),
                 },
@@ -161,7 +162,7 @@ mod tests {
             .send((
                 DbEmbedding {
                     // should be accepted
-                    primary_key: vec![CqlValue::Int(2)].into(),
+                    primary_key: InvariantKey::new(vec![CqlValue::Int(2)]).into(),
                     embedding: Some(vec![4.].into()),
                     timestamp: OffsetDateTime::from_unix_timestamp(15).unwrap().into(),
                 },
@@ -172,7 +173,7 @@ mod tests {
         tx_embeddings
             .send((
                 DbEmbedding {
-                    primary_key: vec![CqlValue::Int(1)].into(),
+                    primary_key: InvariantKey::new(vec![CqlValue::Int(1)]).into(),
                     embedding: None,
                     timestamp: OffsetDateTime::from_unix_timestamp(25).unwrap().into(),
                 },
@@ -184,7 +185,7 @@ mod tests {
             .send((
                 DbEmbedding {
                     // should be dropped
-                    primary_key: vec![CqlValue::Int(1)].into(),
+                    primary_key: InvariantKey::new(vec![CqlValue::Int(1)]).into(),
                     embedding: Some(vec![5.].into()),
                     timestamp: OffsetDateTime::from_unix_timestamp(24).unwrap().into(),
                 },
@@ -195,7 +196,7 @@ mod tests {
         tx_embeddings
             .send((
                 DbEmbedding {
-                    primary_key: vec![CqlValue::Int(1)].into(),
+                    primary_key: InvariantKey::new(vec![CqlValue::Int(1)]).into(),
                     embedding: Some(vec![6.].into()),
                     timestamp: OffsetDateTime::from_unix_timestamp(26).unwrap().into(),
                 },
@@ -212,7 +213,10 @@ mod tests {
         else {
             unreachable!();
         };
-        assert_eq!(primary_key, vec![CqlValue::Int(1)].into());
+        assert_eq!(
+            primary_key,
+            InvariantKey::new(vec![CqlValue::Int(1)]).into()
+        );
         assert_eq!(embedding, vec![1.].into());
 
         let Some(Index::Add {
@@ -223,7 +227,10 @@ mod tests {
         else {
             unreachable!();
         };
-        assert_eq!(primary_key, vec![CqlValue::Int(2)].into());
+        assert_eq!(
+            primary_key,
+            InvariantKey::new(vec![CqlValue::Int(2)]).into()
+        );
         assert_eq!(embedding, vec![2.].into());
 
         // The entry is already present, so it's removed first.
@@ -234,7 +241,10 @@ mod tests {
         else {
             unreachable!();
         };
-        assert_eq!(primary_key, vec![CqlValue::Int(2)].into());
+        assert_eq!(
+            primary_key,
+            InvariantKey::new(vec![CqlValue::Int(2)]).into()
+        );
         let Some(Index::Add {
             primary_key,
             embedding,
@@ -243,7 +253,10 @@ mod tests {
         else {
             unreachable!();
         };
-        assert_eq!(primary_key, vec![CqlValue::Int(2)].into());
+        assert_eq!(
+            primary_key,
+            InvariantKey::new(vec![CqlValue::Int(2)]).into()
+        );
         assert_eq!(embedding, vec![4.].into());
 
         let Some(Index::Remove {
@@ -253,7 +266,10 @@ mod tests {
         else {
             unreachable!();
         };
-        assert_eq!(primary_key, vec![CqlValue::Int(1)].into());
+        assert_eq!(
+            primary_key,
+            InvariantKey::new(vec![CqlValue::Int(1)]).into()
+        );
 
         // The entry is already present, so it's removed first.
         let Some(Index::Remove {
@@ -263,7 +279,10 @@ mod tests {
         else {
             unreachable!();
         };
-        assert_eq!(primary_key, vec![CqlValue::Int(1)].into());
+        assert_eq!(
+            primary_key,
+            InvariantKey::new(vec![CqlValue::Int(1)]).into()
+        );
         let Some(Index::Add {
             primary_key,
             embedding,
@@ -272,7 +291,10 @@ mod tests {
         else {
             unreachable!();
         };
-        assert_eq!(primary_key, vec![CqlValue::Int(1)].into());
+        assert_eq!(
+            primary_key,
+            InvariantKey::new(vec![CqlValue::Int(1)]).into()
+        );
         assert_eq!(embedding, vec![6.].into());
 
         drop(tx_embeddings);

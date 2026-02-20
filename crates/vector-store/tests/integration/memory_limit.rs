@@ -26,6 +26,7 @@ use vector_store::IndexMetadata;
 use vector_store::Quantization;
 use vector_store::SpaceType;
 use vector_store::httproutes::NodeStatus;
+use vector_store::invariant_key::InvariantKey;
 
 #[tokio::test]
 /// The test case scenario:
@@ -87,7 +88,7 @@ async fn memory_limit_during_index_build() {
         &index.target_column,
         (0..VECTOR_COUNT).map(|i| {
             (
-                vec![CqlValue::Int(i)].into(),
+                InvariantKey::new(vec![CqlValue::Int(i)]).into(),
                 Some(vec![0.0, 0.0, 0.0].into()),
                 OffsetDateTime::from_unix_timestamp(10).unwrap().into(),
             )
