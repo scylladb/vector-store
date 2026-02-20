@@ -4,7 +4,6 @@
  */
 
 use crate::ColumnName;
-use crate::Distance;
 use crate::Filter;
 use crate::IndexId;
 use crate::IndexName;
@@ -13,8 +12,10 @@ use crate::Limit;
 use crate::Progress;
 use crate::Quantization;
 use crate::Restriction;
+use crate::SimilarityScore;
 use crate::Vector;
 use crate::db_index::DbIndexExt;
+use crate::distance;
 use crate::engine::Engine;
 use crate::engine::EngineExt;
 use crate::index::IndexExt;
@@ -452,10 +453,45 @@ pub struct PostIndexAnnRequest {
     pub limit: Limit,
 }
 
+#[derive(
+    Copy,
+    Debug,
+    Clone,
+    PartialEq,
+    serde::Deserialize,
+    derive_more::Deref,
+    derive_more::AsRef,
+    utoipa::ToSchema,
+    serde::Serialize,
+    PartialOrd,
+)]
+/// Distance between vectors measured using the distance function defined while creating the index.
+pub struct Distance(f32);
+
+impl From<distance::DistanceValue> for Distance {
+    fn from(v: distance::DistanceValue) -> Self {
+        Self(v.into())
+    }
+}
+
+impl From<distance::Distance> for Distance {
+    fn from(d: distance::Distance) -> Self {
+        let val: distance::DistanceValue = d.into();
+        val.into()
+    }
+}
+
+impl From<Distance> for f32 {
+    fn from(val: Distance) -> Self {
+        val.0
+    }
+}
+
 #[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
 pub struct PostIndexAnnResponse {
     pub primary_keys: HashMap<ColumnName, Vec<Value>>,
     pub distances: Vec<Distance>,
+    pub similarity_scores: Vec<SimilarityScore>,
 }
 
 #[utoipa::path(
@@ -475,7 +511,7 @@ If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
     responses(
         (
             status = 200,
-            description = "Successful ANN search. Returns a list of primary keys and their corresponding distances for the most similar vectors found.",
+            description = "Successful ANN search. Returns a list of primary keys and their corresponding distances and similarity scores for the most similar vectors found.",
             body = PostIndexAnnResponse
         ),
         (
@@ -598,6 +634,11 @@ async fn post_index_ann(
                 debug!("post_index_ann: {msg}");
                 (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
             } else {
+                let similarity_scores: Vec<SimilarityScore> = distances
+                    .iter()
+                    .map(|distance| SimilarityScore::from(*distance))
+                    .collect();
+
                 let primary_keys: anyhow::Result<_> = primary_key_columns
                     .iter()
                     .cloned()
@@ -633,7 +674,8 @@ async fn post_index_ann(
                         StatusCode::OK,
                         response::Json(PostIndexAnnResponse {
                             primary_keys,
-                            distances,
+                            distances: distances.into_iter().map(|d| d.into()).collect(),
+                            similarity_scores,
                         }),
                     )
                         .into_response(),

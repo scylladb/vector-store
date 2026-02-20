@@ -5,6 +5,7 @@
 
 pub mod db;
 pub mod db_index;
+mod distance;
 mod engine;
 pub mod httproutes;
 mod httpserver;
@@ -16,10 +17,13 @@ mod metrics;
 mod monitor_indexes;
 mod monitor_items;
 pub mod node_state;
+mod similarity;
 
+pub use crate::distance::Distance;
 use crate::internals::Internals;
 use crate::metrics::Metrics;
 use crate::node_state::NodeState;
+pub use crate::similarity::SimilarityScore;
 use db::Db;
 pub use httproutes::DataType;
 pub use httproutes::IndexInfo;
@@ -270,30 +274,6 @@ impl PartialEq for PrimaryKey {
 impl Eq for PrimaryKey {}
 
 #[derive(
-    Clone,
-    Debug,
-    serde::Serialize,
-    serde::Deserialize,
-    derive_more::From,
-    utoipa::ToSchema,
-    PartialEq,
-    PartialOrd,
-    Copy,
-)]
-/// Distance between vectors measured using the distance function defined while creating the index.
-pub struct Distance(f32);
-
-impl SerializeValue for Distance {
-    fn serialize<'b>(
-        &self,
-        typ: &ColumnType,
-        writer: CellWriter<'b>,
-    ) -> Result<WrittenCellProof<'b>, SerializationError> {
-        <f32 as SerializeValue>::serialize(&self.0, typ, writer)
-    }
-}
-
-#[derive(
     Copy,
     Clone,
     Debug,
@@ -305,6 +285,7 @@ impl SerializeValue for Distance {
     derive_more::AsRef,
     derive_more::From,
     derive_more::Display,
+    PartialOrd,
 )]
 /// Dimensions of embeddings
 pub struct Dimensions(NonZeroUsize);
@@ -395,6 +376,7 @@ pub enum SpaceType {
     #[default]
     Cosine,
     DotProduct,
+    Hamming,
 }
 
 impl FromStr for SpaceType {
@@ -405,6 +387,7 @@ impl FromStr for SpaceType {
             "EUCLIDEAN" => Ok(Self::Euclidean),
             "COSINE" => Ok(Self::Cosine),
             "DOT_PRODUCT" => Ok(Self::DotProduct),
+            "HAMMING" => Ok(Self::Hamming),
             _ => Err(anyhow::anyhow!("Unknown space type: {s}")),
         }
     }
@@ -456,6 +439,12 @@ impl FromStr for Quantization {
 )]
 /// The vector to use for the Approximate Nearest Neighbor search. The format of data must match the data_type of the index.
 pub struct Vector(Vec<f32>);
+
+impl Vector {
+    pub fn dim(&self) -> Option<Dimensions> {
+        NonZeroUsize::new(self.0.len()).map(Dimensions)
+    }
+}
 
 #[derive(
     Clone,
