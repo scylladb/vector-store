@@ -23,8 +23,10 @@ service supports also `.env` files.
 | `VECTOR_STORE_CQL_KEEPALIVE_TIMEOUT`       | CQL Driver's keepalive timeout. The value is in human readable value (ie. `30s`)                                         | (driver default)  |
 | `VECTOR_STORE_CQL_TCP_KEEPALIVE_INTERVAL`  | CQL Driver's TCP keepalive interval. The value is in human readable value (ie. `20s`)                                    | (driver default)  |
 | `VECTOR_STORE_CQL_URI_TRANSLATION_MAP`     | For testing. Use specific translation map for cql cluster addresses. (`{"ip_src:port": "ip_dst:port"}`).                 |                   | 
-| `VECTOR_STORE_CDC_SAFETY_INTERVAL`         | CDC Driver's safety interval. The value is in human readable value (ie. `30s`)                                           | (driver default)  |
-| `VECTOR_STORE_CDC_SLEEP_INTERVAL`          | CDC Driver's sleep interval. The value is in human readable value (ie. `10s`)                                            | (driver default)  |
+| `VECTOR_STORE_CDC_WIDE_SAFETY_INTERVAL`    | Wide-framed CDC reader's safety interval. The value is in human readable value (ie. `30s`)                               | `30s`             |
+| `VECTOR_STORE_CDC_WIDE_SLEEP_INTERVAL`     | Wide-framed CDC reader's sleep interval. The value is in human readable value (ie. `10s`)                                | `10s`             |
+| `VECTOR_STORE_CDC_FINE_SAFETY_INTERVAL`    | Fine-grained CDC reader's safety interval for low-latency updates (ie. `100ms`)                                          | `100ms`           |
+| `VECTOR_STORE_CDC_FINE_SLEEP_INTERVAL`     | Fine-grained CDC reader's sleep interval for low-latency updates (ie. `500ms`)                                           | `500ms`           |
 | `VECTOR_STORE_USEARCH_SIMULATOR`           | Enable simulator for USearch. Provides human readable delays for simulated operations (`search:add-remove:reserve`).     |                   | 
 
 ## Development builds

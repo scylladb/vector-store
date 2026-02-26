@@ -29,7 +29,6 @@ use std::pin::pin;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::SystemTime;
-use tap::Pipe;
 use tokio::sync::Notify;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
@@ -44,7 +43,50 @@ use tracing::warn;
 
 const CHECKPOINT_TIMESTAMP_OFFSET: Duration = Duration::from_mins(10);
 
-/// Spawns a CDC actor that watches for session changes and manages the CDC reader lifecycle.
+// Default parameters for the wide-framed CDC reader (consistency-focused).
+const DEFAULT_CONSISTENT_SAFETY_INTERVAL: Duration = Duration::from_secs(30);
+const DEFAULT_CONSISTENT_SLEEP_INTERVAL: Duration = Duration::from_secs(10);
+
+// Default parameters for the fine-grained CDC reader (latency-focused).
+const DEFAULT_REALTIME_SAFETY_INTERVAL: Duration = Duration::from_millis(100);
+const DEFAULT_REALTIME_SLEEP_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Parameters for a CDC reader instance.
+#[derive(Clone, Debug)]
+struct CdcReaderParams {
+    /// Safety interval: how far behind "now" to read CDC log.
+    /// Higher values ensure data consistency but increase latency.
+    safety_interval: Duration,
+    /// Sleep interval: how often to poll for new CDC data.
+    /// Lower values reduce latency but increase system load.
+    sleep_interval: Duration,
+}
+
+impl CdcReaderParams {
+    fn wide(config: &Config) -> Self {
+        Self {
+            safety_interval: config
+                .cdc_wide_safety_interval
+                .unwrap_or(DEFAULT_CONSISTENT_SAFETY_INTERVAL),
+            sleep_interval: config
+                .cdc_wide_sleep_interval
+                .unwrap_or(DEFAULT_CONSISTENT_SLEEP_INTERVAL),
+        }
+    }
+
+    fn fine(config: &Config) -> Self {
+        Self {
+            safety_interval: config
+                .cdc_fine_safety_interval
+                .unwrap_or(DEFAULT_REALTIME_SAFETY_INTERVAL),
+            sleep_interval: config
+                .cdc_fine_sleep_interval
+                .unwrap_or(DEFAULT_REALTIME_SLEEP_INTERVAL),
+        }
+    }
+}
+
+/// Spawns a CDC actor that watches for session changes and manages the CDC readers lifecycle.
 pub(crate) fn new(
     config_rx: watch::Receiver<Arc<Config>>,
     mut session_rx: watch::Receiver<Option<Arc<Session>>>,
@@ -61,11 +103,10 @@ pub(crate) fn new(
         async move {
             debug!("starting");
 
-            let cdc_now = || SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
-            let mut cdc_start = cdc_now();
-            let mut cdc_reader: Option<scylla_cdc::log_reader::CDCLogReader> = None;
-            let mut cdc_handler_task: Option<tokio::task::JoinHandle<Duration>> = None;
-            let shutdown_notify = Arc::new(Notify::new());
+            let mut readers = vec![
+                CdcReaderState::new("wide", CdcReaderParams::wide),
+                CdcReaderState::new("fine", CdcReaderParams::fine),
+            ];
 
             loop {
                 // Wait for session changes
@@ -74,106 +115,20 @@ pub(crate) fn new(
                 }
 
                 let session_opt = session_rx.borrow_and_update().clone();
-
-                match session_opt {
-                    Some(session) => {
-                        info!(
-                            "Session available, creating CDC reader for {}",
-                            metadata.key()
-                        );
-
-                        // Stop old CDC reader if exists
-                        if let Some(mut reader) = cdc_reader.take() {
-                            reader.stop();
-                        }
-                        if let Some(task) = cdc_handler_task.take() {
-                            shutdown_notify.notify_one();
-                            cdc_start = task.await.unwrap_or(cdc_now());
-                        }
-
-                        // Disable pending shutdown notifications
-                        if pin!(shutdown_notify.notified()).enable() {
-                            while pin!(shutdown_notify.notified()).enable() {
-                                error!("Internal error: unable to cleanup CDC reader. Lets retry again.");
-                                time::sleep(Duration::from_secs(1)).await;
-                            }
-                        }
-
-                        // Create new CDC reader
-                        let config = config_rx.borrow().clone();
-                        match create_cdc_reader(
-                            cdc_start,
-                            config,
-                            session,
-                            metadata.clone(),
-                            tx_embeddings.clone(),
-                        )
-                        .await
-                        {
-                            Ok((reader, handler)) => {
-                                cdc_reader = Some(reader);
-
-                                // Spawn CDC handler task
-                                let shutdown_notify = Arc::clone(&shutdown_notify);
-                                let cdc_error_notify = Arc::clone(&cdc_error_notify);
-                                let handler_key = metadata.key();
-                                let internals = internals.clone();
-                                let cdc_key = metadata.key();
-                                cdc_handler_task = Some(tokio::spawn(
-                                    async move {
-                                        tokio::select! {
-                                            result = handler => {
-                                                if let Err(err) = result {
-                                                    warn!("CDC handler error: {err}");
-                                                    internals
-                                                        .increment_counter(format!("{handler_key}-cdc-handler-errors"))
-                                                        .await;
-                                                    cdc_error_notify.notify_one();
-                                                }
-                                            }
-                                            _ = shutdown_notify.notified() => {
-                                                debug!("CDC handler: shutdown requested");
-                                            }
-                                        }
-                                        debug!("CDC handler finished");
-                                        cdc_now()
-                                    }
-                                    .instrument(error_span!("cdc", "{cdc_key}")),
-                                ));
-
-                                info!("CDC reader created successfully for {}", metadata.key());
-                            }
-                            Err(e) => {
-                                error!("Failed to create CDC reader: {}", e);
-                            }
-                        }
-                    }
-                    None => {
-                        info!(
-                            "Session became None, stopping CDC reader for {}",
-                            metadata.key()
-                        );
-
-                        // Stop CDC reader
-                        if let Some(mut reader) = cdc_reader.take() {
-                            reader.stop();
-                        }
-                        if let Some(task) = cdc_handler_task.take() {
-                            shutdown_notify.notify_one();
-                            cdc_start = task.await.unwrap_or(cdc_now());
-                        }
-                    }
-                }
+                handle_session_change(
+                    &mut readers,
+                    session_opt,
+                    &config_rx,
+                    &metadata,
+                    &tx_embeddings,
+                    &internals,
+                    &cdc_error_notify,
+                )
+                .await;
             }
 
             // Cleanup
-            if let Some(mut reader) = cdc_reader {
-                reader.stop();
-            }
-            if let Some(task) = cdc_handler_task {
-                shutdown_notify.notify_one();
-                _ = task.await;
-            }
+            stop_all(&mut readers).await;
 
             debug!("finished");
         }
@@ -181,50 +136,220 @@ pub(crate) fn new(
     );
 }
 
-/// Creates a CDC log reader and its handler future.
+/// Handles a session change by restarting or stopping all CDC readers.
+async fn handle_session_change(
+    readers: &mut [CdcReaderState],
+    session_opt: Option<Arc<Session>>,
+    config_rx: &watch::Receiver<Arc<Config>>,
+    metadata: &IndexMetadata,
+    tx_embeddings: &mpsc::Sender<(DbEmbedding, Option<AsyncInProgress>)>,
+    internals: &Sender<Internals>,
+    cdc_error_notify: &Arc<Notify>,
+) {
+    match session_opt {
+        Some(session) => {
+            info!(
+                "Session available, creating CDC readers for {}",
+                metadata.key()
+            );
+
+            let config = config_rx.borrow().clone();
+
+            for reader in readers.iter_mut() {
+                let params = (reader.params_fn)(&config);
+                reader
+                    .restart(
+                        params,
+                        &session,
+                        metadata,
+                        tx_embeddings,
+                        internals,
+                        cdc_error_notify,
+                    )
+                    .await;
+            }
+        }
+        None => {
+            info!(
+                "Session became None, stopping CDC readers for {}",
+                metadata.key()
+            );
+
+            stop_all(readers).await;
+        }
+    }
+}
+
+/// Stops all CDC readers.
+async fn stop_all(readers: &mut [CdcReaderState]) {
+    for reader in readers.iter_mut() {
+        reader.stop().await;
+    }
+}
+
+/// Per-reader state for managing a single CDC reader's lifecycle.
+struct CdcReaderState {
+    reader: Option<scylla_cdc::log_reader::CDCLogReader>,
+    handler_task: Option<tokio::task::JoinHandle<Duration>>,
+    shutdown_notify: Arc<Notify>,
+    start: Duration,
+    name: &'static str,
+    params_fn: fn(&Config) -> CdcReaderParams,
+}
+
+impl CdcReaderState {
+    fn new(name: &'static str, params_fn: fn(&Config) -> CdcReaderParams) -> Self {
+        Self {
+            reader: None,
+            handler_task: None,
+            shutdown_notify: Arc::new(Notify::new()),
+            start: cdc_now(),
+            name,
+            params_fn,
+        }
+    }
+
+    /// Stops the current CDC reader and handler task, preserving the last checkpoint.
+    async fn stop(&mut self) {
+        if let Some(mut reader) = self.reader.take() {
+            reader.stop();
+        }
+        if let Some(task) = self.handler_task.take() {
+            self.shutdown_notify.notify_one();
+            self.start = task.await.unwrap_or(cdc_now());
+        }
+    }
+
+    /// Stops the current reader, drains stale notifications, and starts a new reader with the given parameters.
+    async fn restart(
+        &mut self,
+        params: CdcReaderParams,
+        session: &Arc<Session>,
+        metadata: &IndexMetadata,
+        tx_embeddings: &mpsc::Sender<(DbEmbedding, Option<AsyncInProgress>)>,
+        internals: &Sender<Internals>,
+        cdc_error_notify: &Arc<Notify>,
+    ) {
+        self.stop().await;
+        drain_pending_notifications(&self.shutdown_notify).await;
+
+        match create_cdc_reader(
+            self.start,
+            params.clone(),
+            Arc::clone(session),
+            metadata.clone(),
+            tx_embeddings.clone(),
+            self.name,
+        )
+        .await
+        {
+            Ok((reader, handler)) => {
+                self.reader = Some(reader);
+                self.handler_task = Some(spawn_handler_task(
+                    handler,
+                    Arc::clone(&self.shutdown_notify),
+                    Arc::clone(cdc_error_notify),
+                    internals.clone(),
+                    metadata,
+                    self.name,
+                ));
+                info!(
+                    "{} CDC reader created for {} (safety: {:?}, sleep: {:?})",
+                    self.name,
+                    metadata.key(),
+                    params.safety_interval,
+                    params.sleep_interval
+                );
+            }
+            Err(e) => {
+                error!("Failed to create {} CDC reader: {e}", self.name);
+            }
+        }
+    }
+}
+
+fn cdc_now() -> Duration {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+}
+
+/// Drains any pending shutdown notifications to avoid stale wakeups.
+async fn drain_pending_notifications(notify: &Notify) {
+    if pin!(notify.notified()).enable() {
+        while pin!(notify.notified()).enable() {
+            error!("Internal error: unable to cleanup CDC reader. Retrying.");
+            time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+}
+
+/// Creates a CDC log reader with the given parameters.
 async fn create_cdc_reader(
-    cdc_start: Duration,
-    config: Arc<Config>,
+    start: Duration,
+    params: CdcReaderParams,
     session: Arc<Session>,
     metadata: IndexMetadata,
     tx_embeddings: mpsc::Sender<(DbEmbedding, Option<AsyncInProgress>)>,
+    reader_name: &str,
 ) -> anyhow::Result<(
     scylla_cdc::log_reader::CDCLogReader,
     impl std::future::Future<Output = anyhow::Result<()>>,
 )> {
     let consumer_factory = CdcConsumerFactory::new(Arc::clone(&session), &metadata, tx_embeddings)?;
 
-    let cdc_start = cdc_start - CHECKPOINT_TIMESTAMP_OFFSET;
+    let cdc_start = start - CHECKPOINT_TIMESTAMP_OFFSET;
     info!(
-        "Creating CDC log reader for {} starting from {:?}",
+        "Creating {reader_name} CDC log reader for {} starting from {:?}",
         metadata.key(),
         OffsetDateTime::UNIX_EPOCH + cdc_start
     );
+
     CDCLogReaderBuilder::new()
         .session(session)
         .keyspace(metadata.keyspace_name.as_ref())
         .table_name(metadata.table_name.as_ref())
         .consumer_factory(Arc::new(consumer_factory))
         .start_timestamp(chrono::Duration::from_std(cdc_start)?)
-        .pipe(|builder| {
-            if let Some(interval) = config.cdc_safety_interval {
-                info!("Setting CDC safety interval to {interval:?}");
-                builder.safety_interval(interval)
-            } else {
-                builder
-            }
-        })
-        .pipe(|builder| {
-            if let Some(interval) = config.cdc_sleep_interval {
-                info!("Setting CDC sleep interval to {interval:?}");
-                builder.sleep_interval(interval)
-            } else {
-                builder
-            }
-        })
+        .safety_interval(params.safety_interval)
+        .sleep_interval(params.sleep_interval)
         .build()
         .await
-        .context("Failed to build CDC log reader")
+        .context(format!("Failed to build {reader_name} CDC log reader"))
+}
+
+/// Spawns a task that runs the CDC handler future until completion or shutdown.
+fn spawn_handler_task(
+    handler: impl std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
+    shutdown_notify: Arc<Notify>,
+    cdc_error_notify: Arc<Notify>,
+    internals: Sender<Internals>,
+    metadata: &IndexMetadata,
+    reader_name: &str,
+) -> tokio::task::JoinHandle<Duration> {
+    let handler_key = metadata.key();
+    let span_name = format!("{reader_name}_cdc_handler");
+    let counter_name = format!("{handler_key}-{reader_name}-cdc-handler-errors");
+
+    tokio::spawn(
+        async move {
+            tokio::select! {
+                result = handler => {
+                    if let Err(err) = result {
+                        warn!("CDC handler error: {err}");
+                        internals.increment_counter(counter_name).await;
+                        cdc_error_notify.notify_one();
+                    }
+                }
+                _ = shutdown_notify.notified() => {
+                    debug!("CDC handler: shutdown requested");
+                }
+            }
+            debug!("CDC handler finished");
+            cdc_now()
+        }
+        .instrument(error_span!("cdc_handler", "{}", span_name)),
+    )
 }
 
 struct CdcConsumerData {
