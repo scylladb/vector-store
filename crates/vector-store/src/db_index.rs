@@ -13,21 +13,15 @@ use crate::Percentage;
 use crate::Progress;
 use crate::TableName;
 use crate::Timestamp;
+use crate::db_cdc;
 use crate::internals::Internals;
-use crate::internals::InternalsExt;
 use crate::invariant_key::InvariantKey;
 use crate::node_state::Event;
 use crate::node_state::NodeState;
 use crate::node_state::NodeStateExt;
-use ::time::Date;
-use ::time::Month;
-use ::time::OffsetDateTime;
-use ::time::PrimitiveDateTime;
-use ::time::Time;
 use anyhow::Context;
 use anyhow::anyhow;
 use anyhow::bail;
-use async_trait::async_trait;
 use futures::Stream;
 use futures::StreamExt;
 use futures::TryStreamExt;
@@ -41,19 +35,13 @@ use scylla::routing::Token;
 use scylla::statement::prepared::PreparedStatement;
 use scylla::value::CqlValue;
 use scylla::value::Row;
-use scylla_cdc::consumer::CDCRow;
-use scylla_cdc::consumer::Consumer;
-use scylla_cdc::consumer::ConsumerFactory;
-use scylla_cdc::log_reader::CDCLogReaderBuilder;
 use std::collections::HashMap;
 use std::iter;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
-use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
-use std::time::SystemTime;
 use tap::Pipe;
 use tokio::sync::Notify;
 use tokio::sync::Semaphore;
@@ -61,7 +49,6 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
-use tokio::time;
 use tracing::Instrument;
 use tracing::debug;
 use tracing::error;
@@ -75,7 +62,6 @@ type GetTableColumnsR = Arc<HashMap<ColumnName, NativeType>>;
 type RangeScanResult =
     anyhow::Result<Pin<Box<dyn Stream<Item = DbEmbedding> + std::marker::Send>>, anyhow::Error>;
 
-const CHECKPOINT_TIMESTAMP_OFFSET: Duration = Duration::from_mins(10);
 const START_RETRY_TIMEOUT: Duration = Duration::from_millis(100);
 const RETRY_TIMEOUT_LIMIT: Duration = Duration::from_secs(16);
 const INCREASE_RATE: u32 = 2;
@@ -141,8 +127,8 @@ impl DbIndexExt for mpsc::Sender<DbIndex> {
 }
 
 pub(crate) async fn new(
-    mut config_rx: watch::Receiver<Arc<Config>>,
-    mut session_rx: watch::Receiver<Option<Arc<Session>>>,
+    config_rx: watch::Receiver<Arc<Config>>,
+    session_rx: watch::Receiver<Option<Arc<Session>>>,
     metadata: IndexMetadata,
     node_state: Sender<NodeState>,
     internals: Sender<Internals>,
@@ -158,138 +144,18 @@ pub(crate) async fn new(
     let (tx_index, mut rx_index) = mpsc::channel(CHANNEL_SIZE);
     let (tx_embeddings, rx_embeddings) = mpsc::channel(CHANNEL_SIZE);
 
-    // Mark the receiver to ensure first session update is visible
-    session_rx.mark_changed();
-
-    let mut statements_session_rx = session_rx.clone();
-    let cdc_metadata = metadata.clone();
-    let cdc_tx_embeddings = tx_embeddings.clone();
-    let cdc_key = key.clone();
-    let cdc_manager_key = key.clone();
-
-    // Spawn CDC management task - handles session changes and CDC reader lifecycle
-    tokio::spawn(
-        async move {
-            debug!("CDC manager starting");
-
-            let cdc_now = || SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
-            let mut cdc_start = cdc_now();
-            let mut cdc_reader: Option<scylla_cdc::log_reader::CDCLogReader> = None;
-            let mut cdc_handler_task: Option<tokio::task::JoinHandle<Duration>> = None;
-            let shutdown_notify = Arc::new(Notify::new());
-
-            loop {
-                // Wait for session changes
-                if session_rx.changed().await.is_err() {
-                    // Session sender dropped, cleanup and exit
-                    if let Some(mut reader) = cdc_reader {
-                        reader.stop();
-                    }
-                    if let Some(task) = cdc_handler_task {
-                        shutdown_notify.notify_one();
-                        _ = task.await;
-                    }
-                    break;
-                }
-
-                let session_opt = session_rx.borrow_and_update().clone();
-
-                match session_opt {
-                    Some(session) => {
-                        info!(
-                            "Session available, creating CDC reader for {}",
-                            cdc_metadata.key()
-                        );
-
-                        // Stop old CDC reader if exists
-                        if let Some(mut reader) = cdc_reader.take() {
-                            reader.stop();
-                        }
-                        if let Some(task) = cdc_handler_task.take() {
-                            shutdown_notify.notify_one();
-                            cdc_start = task.await.unwrap_or(cdc_now());
-                        }
-
-                        // Disable pending shutdown notifications
-                        if pin!(shutdown_notify.notified()).enable() {
-                            while pin!(shutdown_notify.notified()).enable() {
-                                error!("Internal error: unable to cleanup CDC reader. Lets retry again.");
-                                time::sleep(Duration::from_secs(1)).await;
-                            }
-                        }
-
-                        // Create new CDC reader
-                        let config = config_rx.borrow_and_update().clone();
-                        match create_cdc_reader(
-                            cdc_start,
-                            config,
-                            session,
-                            cdc_metadata.clone(),
-                            cdc_tx_embeddings.clone(),
-                        )
-                        .await
-                        {
-                            Ok((reader, handler)) => {
-                                cdc_reader = Some(reader);
-
-                                // Spawn CDC handler task
-                                let shutdown_notify = Arc::clone(&shutdown_notify);
-                                let cdc_error_notify = Arc::clone(&cdc_error_notify);
-                                let handler_key = cdc_key.clone();
-                                let internals = internals.clone();
-                                cdc_handler_task = Some(tokio::spawn(
-                                    async move {
-                                        tokio::select! {
-                                            result = handler => {
-                                                if let Err(err) = result {
-                                                    warn!("CDC handler error: {err}");
-                                                    internals
-                                                        .increment_counter(format!("{handler_key}-cdc-handler-errors"))
-                                                        .await;
-                                                    cdc_error_notify.notify_one();
-                                                }
-                                            }
-                                            _ = shutdown_notify.notified() => {
-                                                debug!("CDC handler: shutdown requested");
-                                            }
-                                        }
-                                        debug!("CDC handler finished");
-                                        cdc_now()
-                                    }
-                                    .instrument(error_span!("cdc", "{cdc_key}")),
-                                ));
-
-                                info!("CDC reader created successfully for {}", cdc_metadata.key());
-                            }
-                            Err(e) => {
-                                error!("Failed to create CDC reader: {}", e);
-                            }
-                        }
-                    }
-                    None => {
-                        info!(
-                            "Session became None, stopping CDC reader for {}",
-                            cdc_metadata.key()
-                        );
-
-                        // Stop CDC reader
-                        if let Some(mut reader) = cdc_reader.take() {
-                            reader.stop();
-                        }
-                        if let Some(task) = cdc_handler_task.take() {
-                            shutdown_notify.notify_one();
-                            cdc_start = task.await.unwrap_or(cdc_now());
-                        }
-                    }
-                }
-            }
-
-            debug!("CDC manager finished");
-        }
-        .instrument(error_span!("cdc_manager", "{}", cdc_manager_key)),
+    // Create CDC actor
+    db_cdc::new(
+        config_rx,
+        session_rx.clone(),
+        metadata.clone(),
+        internals,
+        cdc_error_notify,
+        tx_embeddings.clone(),
     );
 
     // Wait for initial session to create statements
+    let mut statements_session_rx = session_rx.clone();
     while statements_session_rx.borrow().is_none() {
         if statements_session_rx.changed().await.is_err() {
             return Err(anyhow::anyhow!(
@@ -349,52 +215,6 @@ pub(crate) async fn new(
     );
 
     Ok((tx_index, rx_embeddings))
-}
-
-// Helper function to create CDC reader - extracted to avoid duplication
-async fn create_cdc_reader(
-    cdc_start: Duration,
-    config: Arc<Config>,
-    session: Arc<Session>,
-    metadata: IndexMetadata,
-    tx_embeddings: mpsc::Sender<(DbEmbedding, Option<AsyncInProgress>)>,
-) -> anyhow::Result<(
-    scylla_cdc::log_reader::CDCLogReader,
-    impl std::future::Future<Output = anyhow::Result<()>>,
-)> {
-    let consumer_factory = CdcConsumerFactory::new(Arc::clone(&session), &metadata, tx_embeddings)?;
-
-    let cdc_start = cdc_start - CHECKPOINT_TIMESTAMP_OFFSET;
-    info!(
-        "Creating CDC log reader for {} starting from {:?}",
-        metadata.key(),
-        OffsetDateTime::UNIX_EPOCH + cdc_start
-    );
-    CDCLogReaderBuilder::new()
-        .session(session)
-        .keyspace(metadata.keyspace_name.as_ref())
-        .table_name(metadata.table_name.as_ref())
-        .consumer_factory(Arc::new(consumer_factory))
-        .start_timestamp(chrono::Duration::from_std(cdc_start)?)
-        .pipe(|builder| {
-            if let Some(interval) = config.cdc_safety_interval {
-                info!("Setting CDC safety interval to {interval:?}");
-                builder.safety_interval(interval)
-            } else {
-                builder
-            }
-        })
-        .pipe(|builder| {
-            if let Some(interval) = config.cdc_sleep_interval {
-                info!("Setting CDC sleep interval to {interval:?}");
-                builder.sleep_interval(interval)
-            } else {
-                builder
-            }
-        })
-        .build()
-        .await
-        .context("Failed to build CDC log reader")
 }
 
 async fn process(statements: Arc<Statements>, msg: DbIndex, completed_scan_length: Arc<AtomicU64>) {
@@ -777,136 +597,6 @@ impl Statements {
                     .flatten()
             })
             .boxed())
-    }
-}
-
-struct CdcConsumerData {
-    primary_key_columns: Vec<ColumnName>,
-    target_column: ColumnName,
-    tx: mpsc::Sender<(DbEmbedding, Option<AsyncInProgress>)>,
-    gregorian_epoch: PrimitiveDateTime,
-}
-
-struct CdcConsumer(Arc<CdcConsumerData>);
-
-#[async_trait]
-impl Consumer for CdcConsumer {
-    async fn consume_cdc(&mut self, mut row: CDCRow<'_>) -> anyhow::Result<()> {
-        if self.0.tx.is_closed() {
-            // a consumer should be closed now, some concurrent tasks could stay in a pipeline
-            return Ok(());
-        }
-
-        let target_column = self.0.target_column.as_ref();
-        if !row.column_deletable(target_column) {
-            bail!("CDC error: target column {target_column} should be deletable");
-        }
-
-        let embedding = row
-            .take_value(target_column)
-            .map(|value| {
-                let CqlValue::Vector(value) = value else {
-                    bail!("CDC error: target column {target_column} should be VECTOR type");
-                };
-                value
-                    .into_iter()
-                    .map(|value| {
-                        value.as_float().ok_or(anyhow!(
-                            "CDC error: target column {target_column} should be VECTOR<float> type"
-                        ))
-                    })
-                    .collect::<anyhow::Result<Vec<_>>>()
-            })
-            .transpose()?
-            .map(|embedding| embedding.into());
-
-        let primary_key = self
-            .0
-            .primary_key_columns
-            .iter()
-            .map(|column| {
-                if !row.column_exists(column.as_ref()) {
-                    bail!("CDC error: primary key column {column} should exist");
-                }
-                if row.column_deletable(column.as_ref()) {
-                    bail!("CDC error: primary key column {column} should not be deletable");
-                }
-                row.take_value(column.as_ref()).ok_or(anyhow!(
-                    "CDC error: primary key column {column} value should exist"
-                ))
-            })
-            .collect::<anyhow::Result<_>>()?;
-
-        const HUNDREDS_NANOS_TO_MICROS: u64 = 10;
-        let timestamp = (self.0.gregorian_epoch
-            + Duration::from_micros(
-                row.time
-                    .get_timestamp()
-                    .ok_or(anyhow!("CDC error: time has no timestamp"))?
-                    .to_gregorian()
-                    .0
-                    / HUNDREDS_NANOS_TO_MICROS,
-            ))
-        .into();
-
-        _ = self
-            .0
-            .tx
-            .send((
-                DbEmbedding {
-                    primary_key,
-                    embedding,
-                    timestamp,
-                },
-                None,
-            ))
-            .await;
-        Ok(())
-    }
-}
-
-struct CdcConsumerFactory(Arc<CdcConsumerData>);
-
-#[async_trait]
-impl ConsumerFactory for CdcConsumerFactory {
-    async fn new_consumer(&self) -> Box<dyn Consumer> {
-        Box::new(CdcConsumer(Arc::clone(&self.0)))
-    }
-}
-
-impl CdcConsumerFactory {
-    fn new(
-        session: Arc<Session>,
-        metadata: &IndexMetadata,
-        tx: mpsc::Sender<(DbEmbedding, Option<AsyncInProgress>)>,
-    ) -> anyhow::Result<Self> {
-        let cluster_state = session.get_cluster_state();
-        let table = cluster_state
-            .get_keyspace(metadata.keyspace_name.as_ref())
-            .ok_or_else(|| anyhow!("keyspace {} does not exist", metadata.keyspace_name))?
-            .tables
-            .get(metadata.table_name.as_ref())
-            .ok_or_else(|| anyhow!("table {} does not exist", metadata.table_name))?;
-
-        let primary_key_columns = table
-            .partition_key
-            .iter()
-            .chain(table.clustering_key.iter())
-            .cloned()
-            .map(ColumnName::from)
-            .collect();
-
-        let gregorian_epoch = PrimitiveDateTime::new(
-            Date::from_calendar_date(1582, Month::October, 15)?,
-            Time::MIDNIGHT,
-        );
-
-        Ok(Self(Arc::new(CdcConsumerData {
-            primary_key_columns,
-            target_column: metadata.target_column.clone(),
-            tx,
-            gregorian_epoch,
-        })))
     }
 }
 

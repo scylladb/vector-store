@@ -4,6 +4,7 @@
  */
 
 pub mod db;
+mod db_cdc;
 pub mod db_index;
 mod distance;
 mod engine;
