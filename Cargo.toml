@@ -32,7 +32,6 @@ itertools = "0.14.0"
 macros = { path = "crates/macros" }
 mimalloc = "0.1.48"
 mockall = "0.13.1"
-neli = { version = "0.7.4", default-features = false, features = ["async"] }
 ntest = "0.9.3"
 rustls = "0.23"
 rustls-pki-types = "1.13.1"
@@ -72,3 +71,4 @@ vector-search-validator-vector-store = { path = "crates/validator-vector-store" 
 vector-store = { path = "crates/vector-store" }
 secrecy = "0.10.3"
 rayon = "1.11.0"
+nftables = "0.6.3"
