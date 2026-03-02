@@ -49,6 +49,7 @@ enum MetricType {
 }
 
 struct IndexOption {
+    local: bool,
     metric_type: MetricType,
     m: usize,
     ef_construction: usize,
@@ -57,6 +58,11 @@ struct IndexOption {
 
 #[derive(Subcommand)]
 enum Command {
+    BuildLevels {
+        #[clap(long)]
+        data_dir: PathBuf,
+    },
+
     BuildTable {
         #[clap(long)]
         data_dir: PathBuf,
@@ -72,6 +78,9 @@ enum Command {
 
         #[clap(long)]
         passwd_path: Option<PathBuf>,
+
+        #[clap(long)]
+        local: bool,
 
         #[clap(long)]
         rf: usize,
@@ -107,6 +116,9 @@ enum Command {
 
         #[clap(long, required = true)]
         vector_store: Vec<SocketAddr>,
+
+        #[clap(long)]
+        local: bool,
 
         #[clap(long)]
         metric_type: MetricType,
@@ -177,6 +189,9 @@ enum Command {
         #[clap(long, default_value = TABLE)]
         table: String,
 
+        #[clap(long)]
+        level: Option<u8>,
+
         #[clap(long, value_parser = clap::value_parser!(u32).range(1..=100))]
         limit: u32,
 
@@ -232,18 +247,28 @@ async fn main() {
         .init();
 
     match Args::parse().command {
+        Command::BuildLevels { data_dir } => {
+            let mut dataset = data::new(data_dir).await;
+            dataset.build_levels().await;
+            dataset.write_levels().await;
+        }
+
         Command::BuildTable {
             data_dir,
             data_multiplicity,
             scylla,
             user,
             passwd_path,
+            local,
             rf,
             keyspace,
             table,
             concurrency,
         } => {
-            let dataset = data::new(data_dir).await;
+            let mut dataset = data::new(data_dir).await;
+            if local {
+                dataset.read_levels().await;
+            }
             let dimension = dataset.dimension().await;
             let data_multiplicity = data_multiplicity.unwrap_or(1);
             let scylla = Scylla::new(scylla, user, passwd_path, &keyspace, &table).await;
@@ -255,6 +280,7 @@ async fn main() {
                         .upload_vectors(
                             &keyspace,
                             &table,
+                            dataset.level_fn(local),
                             dataset.vector_stream().await,
                             concurrency as usize,
                         )
@@ -273,6 +299,7 @@ async fn main() {
             table,
             index,
             vector_store,
+            local,
             metric_type,
             m,
             ef_construction,
@@ -287,6 +314,7 @@ async fn main() {
                         &table,
                         &index,
                         IndexOption {
+                            local,
                             metric_type,
                             m,
                             ef_construction,
@@ -338,14 +366,18 @@ async fn main() {
             passwd_path,
             keyspace,
             table,
+            level,
             limit,
             duration,
             concurrency,
             from,
             delay,
         } => {
-            let dataset = data::new(data_dir).await;
-            let queries = Arc::new(dataset.queries(limit as usize).await);
+            let mut dataset = data::new(data_dir).await;
+            if level.is_some() {
+                dataset.read_levels().await;
+            }
+            let queries = Arc::new(dataset.queries(level, limit as usize).await);
             let notify = Arc::new(Notify::new());
             let scylla = Scylla::new(scylla, user, passwd_path, &keyspace, &table).await;
 
@@ -364,7 +396,8 @@ async fn main() {
                         notify.notified().await;
                         while SystemTime::now() < stop {
                             let query = random(&queries);
-                            let (duration, recall) = measure_duration(scylla.search(query)).await;
+                            let (duration, recall) =
+                                measure_duration(scylla.search(level, query)).await;
                             measurement.record(duration, recall);
                             if let Some(delay) = delay {
                                 let start = Instant::now();
@@ -412,7 +445,7 @@ async fn main() {
             let dataset = data::new(data_dir).await;
             let keyspace = Arc::new(keyspace.into());
             let index = Arc::new(index.into());
-            let queries = Arc::new(dataset.queries(limit as usize).await);
+            let queries = Arc::new(dataset.queries(None, limit as usize).await);
             let notify = Arc::new(Notify::new());
             assert!(!vector_store.is_empty());
             let clients = Arc::new(vs::new_http_clients(vector_store));

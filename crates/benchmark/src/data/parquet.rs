@@ -157,6 +157,31 @@ fn extract_embedding(
     ids.zip(embs).collect_vec()
 }
 
+pub(crate) async fn ids_stream(path: Arc<PathBuf>, config: Arc<Config>) -> BoxStream<'static, i64> {
+    train_files(path, Arc::clone(&config))
+        .await
+        .then(|path| async move {
+            ParquetRecordBatchStreamBuilder::new(File::open(path).await.unwrap())
+                .await
+                .unwrap()
+                .build()
+                .unwrap()
+        })
+        .flatten()
+        .map(move |batch| batch.unwrap())
+        .map(move |batch| {
+            let ids = batch
+                .column_by_name(&config.id_column)
+                .unwrap()
+                .as_primitive::<Int64Type>();
+            let ids = ids.iter().map(|id| id.unwrap()).collect_vec();
+
+            stream::iter(ids)
+        })
+        .flatten()
+        .boxed()
+}
+
 pub(crate) async fn vector_stream(
     path: Arc<PathBuf>,
     config: Arc<Config>,
@@ -202,7 +227,12 @@ pub(crate) async fn vector_stream(
         .boxed()
 }
 
-pub(crate) async fn queries(path: Arc<PathBuf>, config: Arc<Config>, limit: usize) -> Vec<Query> {
+pub(crate) async fn queries(
+    path: Arc<PathBuf>,
+    config: Arc<Config>,
+    id_ok: impl Fn(i64) -> bool,
+    limit: usize,
+) -> Vec<Query> {
     let stream = ParquetRecordBatchStreamBuilder::new(
         File::open(path.join(&config.test_file_name)).await.unwrap(),
     )
@@ -271,12 +301,16 @@ pub(crate) async fn queries(path: Arc<PathBuf>, config: Arc<Config>, limit: usiz
                     let neighbor = neighbor.as_primitive::<Int64Type>();
                     neighbor
                         .iter()
+                        .filter(|id| id_ok(id.unwrap()))
                         .take(limit)
                         .map(|v| v.unwrap())
                         .collect::<HashSet<_>>()
                 });
 
-            let ids_neighbors = ids.zip(neighbors).collect_vec();
+            let ids_neighbors = ids
+                .zip(neighbors)
+                .filter(|(_, map)| !map.is_empty())
+                .collect_vec();
             stream::iter(ids_neighbors)
         })
         .flatten()
