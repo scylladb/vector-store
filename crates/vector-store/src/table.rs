@@ -13,6 +13,7 @@ use crate::Timestamp;
 use crate::Vector;
 use anyhow::anyhow;
 use anyhow::bail;
+use itertools::Itertools;
 use scylla::cluster::metadata::NativeType;
 use scylla::value::CqlDate;
 use scylla::value::CqlTime;
@@ -28,6 +29,7 @@ use std::collections::btree_map::Entry;
 use std::mem;
 use std::net::IpAddr;
 use std::sync::Arc;
+use tap::Pipe;
 use tracing::info;
 use tracing::warn;
 use uuid::Uuid;
@@ -1097,12 +1099,11 @@ impl TableAdd for Table {
 /// A trait that defines the search operations for the table.
 #[cfg_attr(test, mockall::automock)]
 pub(crate) trait TableSearch {
-    #[allow(clippy::needless_lifetimes)] // for mockall
-    fn partition_id<'a>(
+    fn partition_id(
         &self,
         index_key: &IndexKey,
-        restrictions: Option<&'a [Restriction]>,
-    ) -> Option<PartitionId>;
+        restrictions: Option<Vec<Restriction>>,
+    ) -> Option<(PartitionId, Option<Vec<Restriction>>)>;
 
     fn primary_key(
         &self,
@@ -1122,19 +1123,23 @@ impl TableSearch for Table {
     fn partition_id(
         &self,
         index_key: &IndexKey,
-        restrictions: Option<&[Restriction]>,
-    ) -> Option<PartitionId> {
+        restrictions: Option<Vec<Restriction>>,
+    ) -> Option<(PartitionId, Option<Vec<Restriction>>)> {
         let index_id = self.index_ids.get(index_key)?;
         let index = self.indexes.get(index_id)?;
         match &index.data {
-            IndexData::Global => Some(PartitionId::global(*index_id)),
+            IndexData::Global => Some((PartitionId::global(*index_id), restrictions)),
             IndexData::Local {
                 key_columns, map, ..
             } => restrictions
                 .and_then(|restrictions| {
                     partition_key_from_restrictions(key_columns.as_ref(), restrictions)
                 })
-                .and_then(|partition_key| map.get(&partition_key).copied()),
+                .and_then(|(partition_key, restrictions)| {
+                    map.get(&partition_key)
+                        .copied()
+                        .map(|partition_id| (partition_id, restrictions))
+                }),
         }
     }
 
@@ -1248,8 +1253,8 @@ impl TableSearch for Table {
 /// Construct a partition key from the given restrictions.
 fn partition_key_from_restrictions(
     key_columns: &[ColumnName],
-    restrictions: &[Restriction],
-) -> Option<PartitionKey> {
+    restrictions: Vec<Restriction>,
+) -> Option<(PartitionKey, Option<Vec<Restriction>>)> {
     key_columns
         .iter()
         .map(|column| {
@@ -1261,6 +1266,27 @@ fn partition_key_from_restrictions(
                 })
         })
         .collect::<Option<PartitionKey>>()
+        .map(|partition_key| {
+            (
+                partition_key,
+                restrictions
+                    .into_iter()
+                    .filter(|restriction| {
+                        !matches!(
+                            restriction,
+                            Restriction::Eq { lhs, .. } if key_columns.contains(lhs)
+                        )
+                    })
+                    .collect_vec()
+                    .pipe(|restrictions| {
+                        if restrictions.is_empty() {
+                            None
+                        } else {
+                            Some(restrictions)
+                        }
+                    }),
+            )
+        })
 }
 
 /// Compare two CqlValues, returning an Ordering if they are comparable.
@@ -1876,6 +1902,81 @@ mod tests {
                 &[CqlValue::Int(10), CqlValue::Int(15)],
             ),
             None
+        );
+    }
+
+    #[test]
+    fn partition_key_from_restrictions_correctness() {
+        let key_columns = vec!["c1".into(), "c2".into()];
+
+        assert_eq!(partition_key_from_restrictions(&key_columns, vec![]), None);
+        assert_eq!(
+            partition_key_from_restrictions(
+                &key_columns,
+                vec![
+                    Restriction::Eq {
+                        lhs: "c1".into(),
+                        rhs: CqlValue::Int(1)
+                    },
+                    Restriction::Eq {
+                        lhs: "c4".into(),
+                        rhs: CqlValue::Int(1)
+                    },
+                ]
+            ),
+            None
+        );
+        assert_eq!(
+            partition_key_from_restrictions(
+                &key_columns,
+                vec![Restriction::Eq {
+                    lhs: "c2".into(),
+                    rhs: CqlValue::Int(2)
+                },]
+            ),
+            None,
+        );
+        assert_eq!(
+            partition_key_from_restrictions(
+                &key_columns,
+                vec![
+                    Restriction::Eq {
+                        lhs: "c1".into(),
+                        rhs: CqlValue::Int(1)
+                    },
+                    Restriction::Eq {
+                        lhs: "c2".into(),
+                        rhs: CqlValue::Int(2)
+                    },
+                ],
+            ),
+            Some(([CqlValue::Int(1), CqlValue::Int(2)].into(), None))
+        );
+        assert_eq!(
+            partition_key_from_restrictions(
+                &key_columns,
+                vec![
+                    Restriction::Eq {
+                        lhs: "c1".into(),
+                        rhs: CqlValue::Int(1)
+                    },
+                    Restriction::Eq {
+                        lhs: "c2".into(),
+                        rhs: CqlValue::Int(2)
+                    },
+                    Restriction::Eq {
+                        lhs: "c4".into(),
+                        rhs: CqlValue::Int(4)
+                    },
+                ]
+            ),
+            Some((
+                [CqlValue::Int(1), CqlValue::Int(2)].into(),
+                Some(vec![Restriction::Eq {
+                    lhs: "c4".into(),
+                    rhs: CqlValue::Int(4)
+                }]),
+            ))
         );
     }
 }

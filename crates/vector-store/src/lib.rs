@@ -447,7 +447,7 @@ impl Default for Limit {
 }
 
 /// A restriction provided in a CQL query for filtering ANN search results.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Restriction {
     Eq {
         lhs: ColumnName,

@@ -698,15 +698,14 @@ fn new<I: UsearchIndex + Send + Sync + 'static>(
                         continue;
                     }
 
-                    let Some((state, partition)) = prepare_partition(
+                    let Some((state, partition, msg)) = prepare_partition(
                         index_fn.clone(),
                         &mut states,
                         &mut partitions,
                         table.as_ref(),
                         dimensions,
-                        &msg,
+                        msg,
                     ) else {
-                        handle_no_partition(msg);
                         continue;
                     };
 
@@ -740,8 +739,8 @@ fn prepare_partition<'a, I, T>(
     partitions: &mut BTreeMap<PartitionId, Arc<PartitionState<I>>>,
     table: &RwLock<T>,
     dimensions: Dimensions,
-    msg: &Index,
-) -> Option<(&'a mut IndexState, Arc<PartitionState<I>>)>
+    msg: Index,
+) -> Option<(&'a mut IndexState, Arc<PartitionState<I>>, Index)>
 where
     I: UsearchIndex + Send + Sync + 'static,
     T: TableSearch + Send + Sync + 'static,
@@ -749,15 +748,15 @@ where
     match msg {
         Index::AddVector { partition_id, .. } => {
             let index_id = partition_id.index_id();
-            if let Some(partition) = partitions.get(partition_id) {
+            if let Some(partition) = partitions.get(&partition_id) {
                 let Some(state) = states.get_mut(&index_id) else {
                     error!("index state not found for index {index_id:?}");
                     return None;
                 };
-                return Some((state, Arc::clone(partition)));
+                return Some((state, Arc::clone(partition), msg));
             }
             let partition = Arc::new(PartitionState::new(
-                *partition_id,
+                partition_id,
                 index_fn()
                     .inspect_err(|err| {
                         error!("failed to create index for partition {partition_id:?}: {err}")
@@ -767,96 +766,129 @@ where
             let state = states
                 .entry(index_id)
                 .or_insert_with(|| IndexState::new(dimensions));
-            partitions.insert(*partition_id, Arc::clone(&partition));
-            Some((state, partition))
+            partitions.insert(partition_id, Arc::clone(&partition));
+            Some((state, partition, msg))
         }
 
-        Index::Ann { index_key, .. } => {
-            let Some(partition_id) = table.read().unwrap().partition_id(index_key, None) else {
+        Index::Ann {
+            index_key,
+            embedding,
+            limit,
+            tx,
+        } => {
+            let Some((partition_id, _)) = table.read().unwrap().partition_id(&index_key, None)
+            else {
                 warn!("partition id not found for index key {index_key:?} during ann");
+                _ = tx.send(Ok((vec![], vec![])));
                 return None;
             };
             let index_id = partition_id.index_id();
-            states
+            let Some((state, partition)) = states
                 .get_mut(&index_id)
                 .zip(partitions.get(&partition_id))
                 .map(|(state, partition)| (state, Arc::clone(partition)))
-                .or_else(|| {
-                    warn!("state or partition not found for index key {index_key:?} during ann");
-                    None
-                })
+            else {
+                warn!("state or partition not found for index key {index_key:?} during ann");
+                _ = tx.send(Ok((vec![], vec![])));
+                return None;
+            };
+            Some((
+                state,
+                partition,
+                Index::Ann {
+                    embedding,
+                    limit,
+                    tx,
+                    index_key,
+                },
+            ))
         }
 
         Index::FilteredAnn {
-            index_key, filter, ..
+            index_key,
+            embedding,
+            filter,
+            limit,
+            tx,
         } => {
-            let Some(partition_id) = table
+            let Some((partition_id, restrictions)) = table
                 .read()
                 .unwrap()
-                .partition_id(index_key, Some(&filter.restrictions))
+                .partition_id(&index_key, Some(filter.restrictions))
             else {
                 warn!("partition id not found for index key {index_key:?} during filtered ann");
+                _ = tx.send(Ok((vec![], vec![])));
                 return None;
             };
             let index_id = partition_id.index_id();
-            states
+            let Some((state, partition)) = states
                 .get_mut(&index_id)
                 .zip(partitions.get(&partition_id))
                 .map(|(state, partition)| (state, Arc::clone(partition)))
-                .or_else(|| {
-                    warn!("state or partition not found for index key {index_key:?} during filtered ann");
-                    None
-                })
+            else {
+                warn!(
+                    "state or partition not found for index key {index_key:?} \
+                        during filtered ann"
+                );
+                _ = tx.send(Ok((vec![], vec![])));
+                return None;
+            };
+            let msg = if let Some(restrictions) = restrictions {
+                Index::FilteredAnn {
+                    embedding,
+                    limit,
+                    filter: Filter {
+                        restrictions,
+                        allow_filtering: filter.allow_filtering,
+                    },
+                    tx,
+                    index_key,
+                }
+            } else {
+                Index::Ann {
+                    embedding,
+                    limit,
+                    tx,
+                    index_key,
+                }
+            };
+            Some((state, partition, msg))
         }
 
-        Index::Count { index_key, .. } => {
-            let Some(partition_id) = table.read().unwrap().partition_id(index_key, None) else {
-                warn!("partition id not found for index key {index_key:?} during count");
+        Index::Count { index_key, tx } => {
+            let Some((partition_id, _)) = table.read().unwrap().partition_id(&index_key, None)
+            else {
+                let err = anyhow!("partition id not found for index key {index_key:?}");
+                warn!("index count: {err}");
+                _ = tx.send(Err(err));
                 return None;
             };
             let index_id = partition_id.index_id();
-            states
+            let Some((state, partition)) = states
                 .get_mut(&index_id)
                 .zip(partitions.get(&partition_id))
                 .map(|(state, partition)| (state, Arc::clone(partition)))
-                .or_else(|| {
-                    warn!("state or partition not found for index key {index_key:?} during count");
-                    None
-                })
+            else {
+                _ = tx.send(Ok(0));
+                return None;
+            };
+            Some((state, partition, Index::Count { index_key, tx }))
         }
 
         Index::RemoveVector { partition_id, .. } => {
             let index_id = partition_id.index_id();
             states
                 .get_mut(&index_id)
-                .zip(partitions.get(partition_id))
-                .map(|(state, partition)| (state, Arc::clone(partition)))
+                .zip(partitions.get(&partition_id))
+                .map(|(state, partition)| (state, Arc::clone(partition), msg))
         }
 
         Index::RemovePartition { partition_id } => {
-            if let Some(idx) = partitions.remove(partition_id) {
+            if let Some(idx) = partitions.remove(&partition_id) {
                 idx.stop();
             };
             None
         }
-    }
-}
-
-fn handle_no_partition(msg: Index) {
-    match msg {
-        Index::Ann { tx, .. } => {
-            _ = tx.send(Ok((vec![], vec![])));
-        }
-
-        Index::FilteredAnn { tx, .. } => {
-            _ = tx.send(Ok((vec![], vec![])));
-        }
-
-        Index::Count { tx, .. } => {
-            _ = tx.send(Ok(0));
-        }
-
-        _ => {}
     }
 }
 
@@ -1258,7 +1290,7 @@ mod tests {
             move |key, restrictions| {
                 assert_eq!(key, &index_key);
                 assert!(restrictions.is_none());
-                Some(partition_id)
+                Some((partition_id, None))
             }
         });
         time::timeout(Duration::from_secs(10), async {
@@ -1399,7 +1431,7 @@ mod tests {
             move |key, restrictions| {
                 assert_eq!(key, &index_key);
                 assert!(restrictions.is_none());
-                Some(partition_id)
+                Some((partition_id, None))
             }
         });
 
@@ -1461,7 +1493,7 @@ mod tests {
             move |key, restrictions| {
                 assert_eq!(key, &index_key);
                 assert!(restrictions.is_none());
-                Some(partition_id)
+                Some((partition_id, None))
             }
         });
         let add_handles = add_concurrently(
