@@ -11,12 +11,14 @@ use crate::ExpansionSearch;
 use crate::IndexFactory;
 use crate::IndexKey;
 use crate::Limit;
+use crate::PartitionId;
 use crate::SpaceType;
 use crate::Vector;
 use crate::index::actor::Index;
 use crate::index::factory::IndexConfiguration;
 use crate::index::validator;
 use crate::memory::Memory;
+use crate::table::IndexIdGenerator;
 use crate::table::PrimaryId;
 use crate::table::Table;
 use crate::table::TableSearch;
@@ -412,6 +414,10 @@ async fn ann(
         _ = tx_ann.send(Err(anyhow!("ann: unable to search for embedding")));
         return;
     }
+    // We need to setup global index for opensearch, so we can run tests
+    let index_id = IndexIdGenerator::new().next(true).unwrap();
+    let partition_id = PartitionId::global(index_id);
+
     let hits = {
         let table = table.read().unwrap();
         hits.unwrap()
@@ -420,7 +426,7 @@ async fn ann(
                 let id = hit["_id"].as_str().unwrap();
                 let score = hit["_score"].as_f64().unwrap();
                 let primary_id = PrimaryId::from(id.parse::<u64>().unwrap());
-                let primary_key = table.primary_key(0.into(), primary_id).unwrap();
+                let primary_key = table.primary_key(partition_id, primary_id).unwrap();
                 (primary_key, score)
             })
             .collect::<Vec<_>>()

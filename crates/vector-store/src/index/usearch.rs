@@ -436,11 +436,13 @@ impl UsearchIndex for RwLock<Simulator> {
 
 // Initial and incremental number for the index vectors reservation.
 // The value was taken for initial benchmarks (size similar to benchmark size)
-const RESERVE_INCREMENT: usize = 1000000;
+const RESERVE_INCREMENT_GLOBAL: usize = 1000000;
+const RESERVE_INCREMENT_LOCAL: usize = 1000;
 
 // When free space for index vectors drops below this, will reserve more space
 // The ratio was taken for initial benchmarks
-const RESERVE_THRESHOLD: usize = RESERVE_INCREMENT / 3;
+const RESERVE_THRESHOLD_GLOBAL: usize = RESERVE_INCREMENT_GLOBAL / 3;
+const RESERVE_THRESHOLD_LOCAL: usize = RESERVE_INCREMENT_LOCAL / 3;
 
 struct MetricConfig {
     quantization: Quantization,
@@ -903,10 +905,11 @@ async fn dispatch_task<I, T>(
 {
     if let Index::AddVector { .. } = &msg {
         let operation_permit = state.operation.permit_for_capacity_and_size().await;
-        if needs_more_capacity(partition.idx.as_ref()).is_some() {
+        let is_global = partition.partition_id.index_id().is_global();
+        if needs_more_capacity(partition.idx.as_ref(), is_global).is_some() {
             drop(operation_permit);
             let operation_permit = state.operation.permit_for_reserve().await;
-            if let Some(capacity) = needs_more_capacity(partition.idx.as_ref()) {
+            if let Some(capacity) = needs_more_capacity(partition.idx.as_ref(), is_global) {
                 let permit = Arc::clone(rayon_semaphore).acquire_owned().await.unwrap();
                 let idx = Arc::clone(&partition.idx);
                 rayon::spawn(move || {
@@ -1007,12 +1010,17 @@ fn reserve(idx: &impl UsearchIndex, capacity: usize) {
     }
 }
 
-fn needs_more_capacity(idx: &impl UsearchIndex) -> Option<usize> {
+fn needs_more_capacity(idx: &impl UsearchIndex, is_global: bool) -> Option<usize> {
     let capacity = idx.capacity();
     let free_space = capacity - idx.size();
+    let (increment, threshold) = if is_global {
+        (RESERVE_INCREMENT_GLOBAL, RESERVE_THRESHOLD_GLOBAL)
+    } else {
+        (RESERVE_INCREMENT_LOCAL, RESERVE_THRESHOLD_LOCAL)
+    };
 
-    if free_space < RESERVE_THRESHOLD {
-        Some(capacity + RESERVE_INCREMENT)
+    if free_space < threshold {
+        Some(capacity + increment)
     } else {
         None
     }
@@ -1185,6 +1193,7 @@ mod tests {
     use crate::IndexKey;
     use crate::index::IndexExt;
     use crate::memory;
+    use crate::table::IndexIdGenerator;
     use crate::table::MockTableSearch;
     use mockall::predicate::*;
     use scylla::value::CqlValue;
@@ -1273,7 +1282,8 @@ mod tests {
         )
         .unwrap();
 
-        let partition_id = 0.into();
+        let index_id = IndexIdGenerator::new().next(true).unwrap();
+        let partition_id = PartitionId::global(index_id);
         actor
             .add_vector(partition_id, 1.into(), vec![1., 1., 1.].into(), None)
             .await;
@@ -1283,6 +1293,13 @@ mod tests {
         actor
             .add_vector(partition_id, 3.into(), vec![3., 3., 3.].into(), None)
             .await;
+
+        table
+            .write()
+            .unwrap()
+            .expect_index_id()
+            .with(eq(index_key.clone()))
+            .returning(move |_| Some(index_id));
 
         table.write().unwrap().expect_partition_id().returning({
             let index_key = index_key.clone();
@@ -1419,20 +1436,19 @@ mod tests {
             _ = tx.send(Allocate::Cannot);
             memory_rx
         });
-        let partition_id = 0.into();
+        let index_id = IndexIdGenerator::new().next(true).unwrap();
+        let partition_id = PartitionId::global(index_id);
         actor
             .add_vector(partition_id, 1.into(), vec![1., 1., 1.].into(), None)
             .await;
         let mut memory_rx = memory_respond.await.unwrap();
 
-        table.write().unwrap().expect_partition_id().returning({
-            let index_key = index_key.clone();
-            move |key, restrictions| {
-                assert_eq!(key, &index_key);
-                assert!(restrictions.is_none());
-                Some((partition_id, None))
-            }
-        });
+        table
+            .write()
+            .unwrap()
+            .expect_index_id()
+            .with(eq(index_key.clone()))
+            .returning(move |_| Some(index_id));
 
         assert_eq!(actor.count(index_key.clone()).await.unwrap(), 0);
 
@@ -1486,7 +1502,8 @@ mod tests {
         let threads = Handle::current().metrics().num_workers();
 
         let adds_per_worker = 50;
-        let partition_id = 0.into();
+        let index_id = IndexIdGenerator::new().next(true).unwrap();
+        let partition_id = PartitionId::global(index_id);
         table.write().unwrap().expect_partition_id().returning({
             let index_key = index_key.clone();
             move |key, restrictions| {
@@ -1516,6 +1533,13 @@ mod tests {
         for handle in search_handles {
             handle.await.unwrap();
         }
+
+        table
+            .write()
+            .unwrap()
+            .expect_index_id()
+            .with(eq(index_key.clone()))
+            .returning(move |_| Some(index_id));
 
         // Wait for expected number of vectors to be added.
         time::timeout(Duration::from_secs(10), async {

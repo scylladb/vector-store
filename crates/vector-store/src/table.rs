@@ -140,9 +140,9 @@ mod partition_id {
 
     impl PartitionId {
         const INDEX_ID_SHIFT: usize = (mem::size_of::<u64>() - mem::size_of::<IndexId>()) * 8;
-        const MAX: u64 = !((IndexId::MAX as u64) << Self::INDEX_ID_SHIFT);
+        const MAX: u64 = !((IndexId::MASK as u64) << Self::INDEX_ID_SHIFT);
 
-        pub(super) fn try_new(idx: usize, index_id: IndexId) -> anyhow::Result<Self> {
+        pub(crate) fn try_new(idx: usize, index_id: IndexId) -> anyhow::Result<Self> {
             if idx as u64 > Self::MAX {
                 bail!("PartitionId is too large: {idx}");
             }
@@ -151,7 +151,7 @@ mod partition_id {
             ))
         }
 
-        pub(super) fn global(index_id: IndexId) -> Self {
+        pub(crate) fn global(index_id: IndexId) -> Self {
             Self((*index_id.as_ref() as u64) << Self::INDEX_ID_SHIFT)
         }
 
@@ -167,40 +167,46 @@ mod partition_id {
     }
 
     /// IndexId provides unique IndexIds for indexes in the table. We can have up to
-    /// IndexId::MAX indexes (~65k), which seems reasonable for a single table.
+    /// IndexId::MAX indexes (0x7fff), which seems reasonable for a single table.
     /// IndexId::MAX is used as a sentinel to mark that there are no more IndexIds
-    /// available.
+    /// available. IndexId::GLOBAL_BIT is used to mark that the index is global.
     #[derive(
         Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::AsRef, derive_more::From,
     )]
     pub(crate) struct IndexId(u16);
 
     impl IndexId {
-        const MAX: u16 = u16::MAX;
+        const MASK: u16 = u16::MAX;
+        const GLOBAL_BIT: u16 = 1 << (u16::BITS - 1);
+        const MAX: u16 = Self::MASK & !Self::GLOBAL_BIT;
+
+        pub(crate) fn is_global(&self) -> bool {
+            self.0 & IndexId::GLOBAL_BIT != 0
+        }
     }
 
     #[derive(Debug)]
-    pub(super) struct IndexIdGenerator {
+    pub(crate) struct IndexIdGenerator {
         next: u16,
     }
 
     impl IndexIdGenerator {
-        pub(super) fn new() -> Self {
+        pub(crate) fn new() -> Self {
             Self { next: 0 }
         }
 
-        pub(super) fn next(&mut self) -> anyhow::Result<IndexId> {
+        pub(crate) fn next(&mut self, global: bool) -> anyhow::Result<IndexId> {
             if self.next == IndexId::MAX {
                 bail!("No more IndexIds available");
             }
-            let index_id = IndexId(self.next);
+            let index_id = IndexId(self.next | if global { IndexId::GLOBAL_BIT } else { 0 });
             self.next += 1;
             Ok(index_id)
         }
     }
 }
 pub(crate) use partition_id::IndexId;
-use partition_id::IndexIdGenerator;
+pub(crate) use partition_id::IndexIdGenerator;
 pub use partition_id::PartitionId;
 
 /// A newtype for partition size
@@ -865,7 +871,7 @@ impl Table {
         let mut index_id_generator = IndexIdGenerator::new();
         let mut indexes = BTreeMap::new();
         let mut index_ids = BTreeMap::new();
-        let index_id = index_id_generator.next()?;
+        let index_id = index_id_generator.next(partition_key_columns.is_none())?;
         let index = if let Some(partition_key_columns) = partition_key_columns.as_ref() {
             Index::new_partition(
                 index_id,
