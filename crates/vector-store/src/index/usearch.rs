@@ -14,7 +14,6 @@ use crate::Quantization;
 use crate::SpaceType;
 use crate::Vector;
 use crate::index::actor::AnnR;
-use crate::index::actor::CountR;
 use crate::index::actor::Index;
 use crate::index::factory::IndexConfiguration;
 use crate::index::validator;
@@ -32,6 +31,8 @@ use std::collections::HashSet;
 use std::iter;
 use std::sync::Arc;
 use std::sync::RwLock;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
 use tokio::runtime::Handle;
@@ -531,8 +532,9 @@ mod operation {
             match msg {
                 Index::AddVector { .. } => Mode::Insert,
                 Index::RemoveVector { .. } => Mode::Remove,
-                Index::Ann { .. } | Index::FilteredAnn { .. } | Index::Count { .. } => Mode::Search,
+                Index::Ann { .. } | Index::FilteredAnn { .. } => Mode::Search,
                 Index::RemovePartition { .. } => todo!(),
+                Index::Count { .. } => unreachable!(),
             }
         }
     }
@@ -654,6 +656,7 @@ where
 
 struct IndexState {
     dimensions: Dimensions,
+    size: Arc<AtomicUsize>,
     operation: operation::Operation,
 }
 
@@ -661,6 +664,7 @@ impl IndexState {
     fn new(dimensions: Dimensions) -> Self {
         Self {
             dimensions,
+            size: Arc::new(AtomicUsize::new(0)),
             operation: operation::Operation::new(),
         }
     }
@@ -856,23 +860,17 @@ where
         }
 
         Index::Count { index_key, tx } => {
-            let Some((partition_id, _)) = table.read().unwrap().partition_id(&index_key, None)
-            else {
-                let err = anyhow!("partition id not found for index key {index_key:?}");
+            let Some(index_id) = table.read().unwrap().index_id(&index_key) else {
+                let err = anyhow!("index id not found for index key {index_key:?}");
                 warn!("index count: {err}");
                 _ = tx.send(Err(err));
                 return None;
             };
-            let index_id = partition_id.index_id();
-            let Some((state, partition)) = states
+            _ = tx.send(Ok(states
                 .get_mut(&index_id)
-                .zip(partitions.get(&partition_id))
-                .map(|(state, partition)| (state, Arc::clone(partition)))
-            else {
-                _ = tx.send(Ok(0));
-                return None;
-            };
-            Some((state, partition, Index::Count { index_key, tx }))
+                .map(|state| state.size.load(Ordering::Relaxed))
+                .unwrap_or(0)));
+            None
         }
 
         Index::RemoveVector { partition_id, .. } => {
@@ -924,11 +922,12 @@ async fn dispatch_task<I, T>(
 
     let table = Arc::clone(table);
     let dimensions = state.dimensions;
+    let size = Arc::clone(&state.size);
     if should_run_on_tokio(&msg) {
         let permit = Arc::clone(tokio_semaphore).acquire_owned().await.unwrap();
         tokio::spawn(async move {
             crate::move_to_the_end_of_async_runtime_queue().await;
-            process(partition, table, dimensions, msg);
+            process(partition, table, dimensions, size, msg);
             drop(permit);
             drop(operation_permit);
         });
@@ -936,20 +935,21 @@ async fn dispatch_task<I, T>(
     }
     let permit = Arc::clone(rayon_semaphore).acquire_owned().await.unwrap();
     rayon::spawn(move || {
-        process(partition, table, dimensions, msg);
+        process(partition, table, dimensions, size, msg);
         drop(permit);
         drop(operation_permit);
     });
 }
 
 fn should_run_on_tokio(msg: &Index) -> bool {
-    matches!(msg, Index::Ann { .. } | Index::Count { .. })
+    matches!(msg, Index::Ann { .. })
 }
 
 fn process<I, T>(
     partition: Arc<PartitionState<I>>,
     table: Arc<RwLock<T>>,
     dimensions: Dimensions,
+    size: Arc<AtomicUsize>,
     msg: Index,
 ) where
     I: UsearchIndex + Send + Sync + 'static,
@@ -961,7 +961,7 @@ fn process<I, T>(
             embedding,
             in_progress: _in_progress,
             ..
-        } => add(partition.idx.as_ref(), primary_id, &embedding),
+        } => add(partition.idx.as_ref(), primary_id, &embedding, &size),
 
         Index::Ann {
             embedding,
@@ -986,13 +986,13 @@ fn process<I, T>(
             }
         }
 
-        Index::Count { tx, .. } => count(Arc::clone(&partition.idx), tx),
+        Index::Count { .. } => unreachable!(),
 
         Index::RemoveVector {
             primary_id,
             in_progress: _in_progress,
             ..
-        } => remove(partition.idx.as_ref(), primary_id),
+        } => remove(partition.idx.as_ref(), primary_id, &size),
 
         Index::RemovePartition { .. } => unreachable!(),
     }
@@ -1018,16 +1018,20 @@ fn needs_more_capacity(idx: &impl UsearchIndex) -> Option<usize> {
     }
 }
 
-fn add(idx: &impl UsearchIndex, primary_id: PrimaryId, embedding: &Vector) {
+fn add(idx: &impl UsearchIndex, primary_id: PrimaryId, embedding: &Vector, size: &AtomicUsize) {
     if let Err(err) = idx.add(primary_id, embedding) {
         warn!("add: unable to add embedding: {err}");
-    };
+    } else {
+        size.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
-fn remove(idx: &impl UsearchIndex, row_id: PrimaryId) {
+fn remove(idx: &impl UsearchIndex, row_id: PrimaryId, size: &AtomicUsize) {
     if let Err(err) = idx.remove(row_id) {
         warn!("remove: unable to remove embeddings: {err}");
-    };
+    } else {
+        size.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 fn validate_dimensions(
@@ -1122,11 +1126,6 @@ fn filtered_ann<I>(
                 }),
         )
         .unwrap_or_else(|_| trace!("ann: unable to send response"));
-}
-
-fn count(idx: Arc<impl UsearchIndex>, tx: oneshot::Sender<CountR>) {
-    tx.send(Ok(idx.size()))
-        .unwrap_or_else(|_| trace!("count: unable to send response"));
 }
 
 async fn check_memory_allocation(

@@ -1099,6 +1099,8 @@ impl TableAdd for Table {
 /// A trait that defines the search operations for the table.
 #[cfg_attr(test, mockall::automock)]
 pub(crate) trait TableSearch {
+    fn index_id(&self, index_key: &IndexKey) -> Option<IndexId>;
+
     fn partition_id(
         &self,
         index_key: &IndexKey,
@@ -1120,6 +1122,10 @@ pub(crate) trait TableSearch {
 }
 
 impl TableSearch for Table {
+    fn index_id(&self, index_key: &IndexKey) -> Option<IndexId> {
+        self.index_ids.get(index_key).copied()
+    }
+
     fn partition_id(
         &self,
         index_key: &IndexKey,
