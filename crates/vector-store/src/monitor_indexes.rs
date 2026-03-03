@@ -175,7 +175,7 @@ async fn get_indexes(db: &Sender<Db>) -> anyhow::Result<HashSet<IndexMetadata>> 
         };
 
         if !db.is_valid_index(metadata.clone()).await {
-            let msg = format!("get_indexes: not valid index {}", metadata.id());
+            let msg = format!("get_indexes: not valid index {}", metadata.key());
             debug!(msg);
             bail!(msg);
         }
@@ -216,7 +216,7 @@ async fn add_indexes(
 
 async fn del_indexes(engine: &Sender<Engine>, idxs: impl Iterator<Item = IndexMetadata>) {
     for idx in idxs {
-        engine.del_index(idx.id()).await;
+        engine.del_index(idx.key()).await;
     }
 }
 
@@ -225,7 +225,7 @@ mod tests {
     use super::*;
     use crate::DbCustomIndex;
     use crate::DbIndexType;
-    use crate::IndexId;
+    use crate::IndexKey;
     use crate::IndexName;
     use crate::db;
     use crate::db::LatestSchemaVersionR;
@@ -314,7 +314,7 @@ mod tests {
     #[tokio::test]
     #[ntest::timeout(5_000)]
     async fn index_metadata_are_removed_once() {
-        type IndexesT = HashSet<IndexId>;
+        type IndexesT = HashSet<IndexKey>;
 
         // Dummy db index for testing
         fn sample_db_index(name: &str) -> DbCustomIndex {
@@ -342,7 +342,7 @@ mod tests {
             // Notify to signal changes
             notify: Arc<Notify>,
             // Count of delete calls for each index
-            del_calls: Arc<Mutex<HashMap<IndexId, usize>>>,
+            del_calls: Arc<Mutex<HashMap<IndexKey, usize>>>,
         }
 
         impl TestState {
@@ -398,7 +398,7 @@ mod tests {
             move |metadata, tx| {
                 let state = state.clone();
                 async move {
-                    state.engine_indexes.lock().unwrap().insert(metadata.id());
+                    state.engine_indexes.lock().unwrap().insert(metadata.key());
                     tx.send(Ok(())).unwrap();
                     state.notify.notify_waiters();
                 }
@@ -511,45 +511,45 @@ mod tests {
         // Add two indexes
         let index1 = sample_db_index("index1");
         let index2 = sample_db_index("index2");
-        let index1_id = index1.id();
-        let index2_id = index2.id();
+        let index1_key = index1.key();
+        let index2_key = index2.key();
 
         state.add_index(index1).await;
         state.add_index(index2).await;
 
         let engine_indexes = state.engine_indexes.lock().unwrap().clone();
         assert!(
-            engine_indexes.contains(&index1_id) && engine_indexes.contains(&index2_id),
+            engine_indexes.contains(&index1_key) && engine_indexes.contains(&index2_key),
             "Both indexes should be present"
         );
 
         // Remove index2 from the list
-        state.del_index(index2_id.index()).await;
+        state.del_index(index2_key.index()).await;
 
         let engine_indexes = state.engine_indexes.lock().unwrap().clone();
         assert!(
-            engine_indexes.contains(&index1_id) && !engine_indexes.contains(&index2_id),
+            engine_indexes.contains(&index1_key) && !engine_indexes.contains(&index2_key),
             "Only index1 should remain"
         );
 
         // Remove index1 from the list
-        state.del_index(index1_id.index()).await;
+        state.del_index(index1_key.index()).await;
 
         let engine_indexes = state.engine_indexes.lock().unwrap().clone();
         assert!(
-            !engine_indexes.contains(&index1_id) && !engine_indexes.contains(&index2_id),
+            !engine_indexes.contains(&index1_key) && !engine_indexes.contains(&index2_key),
             "Both indexes should be removed"
         );
 
         // Assert del_index called only once per index
         let calls = state.del_calls.lock().unwrap();
         assert_eq!(
-            calls.get(&index1_id).copied().unwrap_or(0),
+            calls.get(&index1_key).copied().unwrap_or(0),
             1,
             "index1 should be removed once"
         );
         assert_eq!(
-            calls.get(&index2_id).copied().unwrap_or(0),
+            calls.get(&index2_key).copied().unwrap_or(0),
             1,
             "index2 should be removed once"
         );

@@ -59,18 +59,18 @@ async fn init_keyspace_table(
     .await;
 
     const DATASET_SIZE: i32 = 100;
-    const CK_OFFSET: i32 = 1000;
-    const F_OFFSET: i32 = 2000;
 
     info!("Insert some vectors into the table");
     for i in 0..DATASET_SIZE {
-        session
-            .query_unpaged(
-                format!("INSERT INTO {table} (pk, ck, f, v) VALUES (?, ?, ?, ?)"),
-                (i, i + CK_OFFSET, i + F_OFFSET, &vec![i as f32; 3]),
-            )
-            .await
-            .expect("failed to insert data");
+        for j in 0..DATASET_SIZE {
+            session
+                .query_unpaged(
+                    format!("INSERT INTO {table} (pk, ck, f, v) VALUES (?, ?, ?, ?)"),
+                    (i, j, j, &vec![i as f32; 3]),
+                )
+                .await
+                .expect("failed to insert data");
+        }
     }
     (session, clients, keyspace, table)
 }
@@ -164,7 +164,7 @@ async fn local_index_without_filtering_columns(actors: TestActors) {
 
     info!("Query the index");
     let results = common::get_query_results(
-        format!("SELECT pk FROM {table} ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10"),
+        format!("SELECT ck FROM {table} WHERE pk = 1 ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10"),
         &session,
     )
     .await;
@@ -194,7 +194,7 @@ async fn local_index_with_filtering_columns(actors: TestActors) {
 
     info!("Query the index");
     let results = common::get_query_results(
-        format!("SELECT pk FROM {table} ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10"),
+        format!("SELECT ck FROM {table} WHERE pk = 1 ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10"),
         &session,
     )
     .await;

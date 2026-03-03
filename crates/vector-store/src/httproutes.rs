@@ -5,7 +5,7 @@
 
 use crate::ColumnName;
 use crate::Filter;
-use crate::IndexId;
+use crate::IndexKey;
 use crate::IndexName;
 use crate::KeyspaceName;
 use crate::Limit;
@@ -218,12 +218,12 @@ impl IndexInfo {
 async fn get_indexes(State(state): State<RoutesInnerState>) -> Response {
     let indexes: Vec<_> = state
         .engine
-        .get_index_ids()
+        .get_index_keys()
         .await
         .iter()
-        .map(|(id, quantization)| IndexInfo {
-            keyspace: id.keyspace(),
-            index: id.index(),
+        .map(|(key, quantization)| IndexInfo {
+            keyspace: key.keyspace(),
+            index: key.index(),
             data_type: (*quantization).into(),
         })
         .collect();
@@ -303,11 +303,8 @@ async fn get_index_status(
     State(state): State<RoutesInnerState>,
     Path((keyspace_name, index_name)): Path<(KeyspaceName, IndexName)>,
 ) -> Response {
-    let Some((index, _)) = state
-        .engine
-        .get_index(IndexId::new(&keyspace_name, &index_name))
-        .await
-    else {
+    let index_key = IndexKey::new(&keyspace_name, &index_name);
+    let Some((index, _)) = state.engine.get_index(index_key.clone()).await else {
         let msg = format!("missing index: {keyspace_name}.{index_name}");
         debug!("get_index_status: {msg}");
         return (StatusCode::NOT_FOUND, msg).into_response();
@@ -317,7 +314,7 @@ async fn get_index_status(
         .get_index_status(keyspace_name.as_ref(), index_name.as_ref())
         .await
     {
-        match index.count().await {
+        match index.count(index_key).await {
             Err(err) => {
                 let msg = format!("index.count request error: {err}");
                 debug!("get_index_status: {msg}");
@@ -346,9 +343,9 @@ async fn get_metrics(
     for (keyspace_str, index_name_str) in state.metrics.take_dirty_indexes() {
         let keyspace = KeyspaceName::from(keyspace_str);
         let index_name = IndexName::from(index_name_str);
-        let id = IndexId::new(&keyspace, &index_name);
-        if let Some((index, _)) = state.engine.get_index(id).await
-            && let Ok(count) = index.count().await
+        let key = IndexKey::new(&keyspace, &index_name);
+        if let Some((index, _)) = state.engine.get_index(key.clone()).await
+            && let Ok(count) = index.count(key).await
         {
             state
                 .metrics
@@ -570,11 +567,8 @@ async fn post_index_ann(
         .with_label_values(&[keyspace.as_ref(), index_name.as_ref()])
         .start_timer();
 
-    let Some((index, db_index)) = state
-        .engine
-        .get_index(IndexId::new(&keyspace, &index_name))
-        .await
-    else {
+    let index_key = IndexKey::new(&keyspace, &index_name);
+    let Some((index, db_index)) = state.engine.get_index(index_key.clone()).await else {
         timer.observe_duration();
         let msg = format!("missing index: {keyspace}.{index_name}");
         debug!("post_index_ann: {msg}");
@@ -606,10 +600,10 @@ async fn post_index_ann(
             }
         };
         index
-            .filtered_ann(request.vector, filter, request.limit)
+            .filtered_ann(index_key, request.vector, filter, request.limit)
             .await
     } else {
-        index.ann(request.vector, request.limit).await
+        index.ann(index_key, request.vector, request.limit).await
     };
 
     // Record duration in Prometheus

@@ -31,12 +31,12 @@ use scylla::value::CqlTimeuuid;
 use scylla::value::CqlValue;
 use std::fmt;
 use std::hash::Hash;
+#[cfg(test)]
 use std::hash::Hasher;
 use std::iter::FusedIterator;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
-use std::sync::Arc;
 use uuid::Uuid;
 
 // Type tag constants for the compact encoding.
@@ -98,27 +98,24 @@ const UUID_SIZE: usize = 16;
 /// and more correct than the previous `format!("{:?}")` hashing approach.
 ///
 /// The inner buffer is reference-counted via [`Arc`], so cloning is O(1).
-#[derive(Clone, Hash, PartialEq, Eq)]
-pub struct InvariantKey {
-    data: Arc<[u8]>,
+#[derive(Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct InvariantKey {
+    data: Box<[u8]>,
 }
 
 impl InvariantKey {
     /// The maximum number of columns an `InvariantKey` can hold.
     ///
     /// The column count is stored as a single `u8`, so the hard limit is 255.
-    pub const MAX_COLUMNS: usize = u8::MAX as usize;
+    pub(crate) const MAX_COLUMNS: usize = u8::MAX as usize;
 
     /// Encode a vector of CQL values into a compact representation.
-    ///
-    /// Prefer [`InvariantKeyBuilder`] when constructing from individual values
-    /// to avoid creating an intermediate `Vec<CqlValue>`.
     ///
     /// # Panics
     ///
     /// Panics if `values.len() > 255` or if a value has an unsupported CQL type
     /// for primary key columns (e.g., collections, UDTs).
-    pub fn new(values: Vec<CqlValue>) -> Self {
+    pub(crate) fn new(values: Vec<CqlValue>) -> Self {
         assert!(
             values.len() <= Self::MAX_COLUMNS,
             "InvariantKey supports at most {} columns, got {}",
@@ -135,7 +132,8 @@ impl InvariantKey {
     /// Returns an error instead of panicking when `values.len() > 255`.
     /// Use this when the input comes from an external source (e.g. ScyllaDB)
     /// where the column count is not under our control.
-    pub fn try_new(values: Vec<CqlValue>) -> anyhow::Result<Self> {
+    #[cfg(test)]
+    pub(crate) fn try_new(values: Vec<CqlValue>) -> anyhow::Result<Self> {
         anyhow::ensure!(
             values.len() <= Self::MAX_COLUMNS,
             "InvariantKey supports at most {} columns, got {}",
@@ -151,7 +149,7 @@ impl InvariantKey {
     /// # Precondition
     ///
     /// `values.len() <= 255` — callers must validate before calling.
-    fn encode(values: Vec<CqlValue>) -> Self {
+    pub(crate) fn encode(values: Vec<CqlValue>) -> Self {
         debug_assert!(values.len() <= Self::MAX_COLUMNS);
 
         let total: usize = COUNT_SIZE + values.iter().map(encoded_size).sum::<usize>();
@@ -162,16 +160,18 @@ impl InvariantKey {
         }
         debug_assert_eq!(buf.len(), total);
 
-        InvariantKey { data: buf.into() }
+        InvariantKey {
+            data: buf.into_boxed_slice(),
+        }
     }
 
     /// Returns the number of values in this key.
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.data[0] as usize
     }
 
     /// Returns `true` if this key has no values.
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.data[0] == 0
     }
 
@@ -180,7 +180,7 @@ impl InvariantKey {
     /// For N values, this scans through the first `index` values to find the
     /// offset (O(index)), then decodes the value. Since primary keys typically
     /// have 1–3 columns, this is effectively O(1).
-    pub fn get(&self, index: usize) -> Option<CqlValue> {
+    pub(crate) fn get(&self, index: usize) -> Option<CqlValue> {
         let count = self.data[0] as usize;
         if index >= count {
             return None;
@@ -206,7 +206,8 @@ impl InvariantKey {
     /// # Panics
     ///
     /// Panics if `n > self.len()`.
-    pub fn hash_prefix<H: Hasher>(&self, state: &mut H, n: usize) {
+    #[cfg(test)]
+    pub(crate) fn hash_prefix<H: Hasher>(&self, state: &mut H, n: usize) {
         let count = self.data[0] as usize;
         assert!(
             n <= count,
@@ -224,7 +225,7 @@ impl InvariantKey {
     }
 
     /// Iterate over all decoded values.
-    pub fn iter(&self) -> InvariantKeyIter<'_> {
+    pub(crate) fn iter(&self) -> InvariantKeyIter<'_> {
         InvariantKeyIter {
             data: &self.data,
             offset: COUNT_SIZE,
@@ -244,64 +245,21 @@ impl InvariantKey {
     }
 }
 
-/// A builder for constructing an [`InvariantKey`] from individual [`CqlValue`]s.
-///
-/// This avoids the need to create an intermediate `Vec<CqlValue>` when
-/// building an [`InvariantKey`] from values that are available one at a time.
-///
-/// # Example
-///
-/// ```ignore
-/// let mut builder = InvariantKeyBuilder::new();
-/// builder.push(&CqlValue::Int(42));
-/// builder.push(&CqlValue::Text("hello".to_string()));
-/// let key = builder.build();
-/// ```
-pub struct InvariantKeyBuilder {
-    buf: Vec<u8>,
-}
-
-impl InvariantKeyBuilder {
-    /// Create a new builder.
-    pub fn new() -> Self {
-        // Reserve the count byte (initially 0).
-        InvariantKeyBuilder { buf: vec![0] }
-    }
-
-    /// Append a value to the key being built.
-    ///
-    /// # Panics
-    ///
-    /// Panics if more than 255 values are pushed, or if the value has an
-    /// unsupported CQL type.
-    pub fn push(&mut self, value: &CqlValue) -> &mut Self {
-        let count = self.buf[0];
-        assert!(
-            (count as usize) < InvariantKey::MAX_COLUMNS,
-            "InvariantKey supports at most {} columns",
-            InvariantKey::MAX_COLUMNS
-        );
-        encode_value(&mut self.buf, value);
-        self.buf[0] = count + 1;
-        self
-    }
-
-    /// Finalize the builder and return the [`InvariantKey`].
-    pub fn build(self) -> InvariantKey {
-        InvariantKey {
-            data: self.buf.into(),
+impl FromIterator<CqlValue> for InvariantKey {
+    fn from_iter<I: IntoIterator<Item = CqlValue>>(iter: I) -> Self {
+        let mut buf = vec![0];
+        iter.into_iter().take(Self::MAX_COLUMNS).for_each(|value| {
+            encode_value(&mut buf, &value);
+            buf[0] += 1;
+        });
+        Self {
+            data: buf.into_boxed_slice(),
         }
     }
 }
 
-impl Default for InvariantKeyBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Iterator over the decoded [`CqlValue`]s in an [`InvariantKey`].
-pub struct InvariantKeyIter<'a> {
+pub(crate) struct InvariantKeyIter<'a> {
     data: &'a [u8],
     offset: usize,
     remaining: usize,
@@ -633,7 +591,7 @@ fn decode_value(data: &[u8]) -> (CqlValue, usize) {
 mod tests {
     use super::*;
 
-    // Static assertion: InvariantKey must be exactly 16 bytes (Arc<[u8]> = ptr + len).
+    // Static assertion: InvariantKey must be exactly 16 bytes (Box<[u8]> = ptr + len).
     const _: () = assert!(std::mem::size_of::<InvariantKey>() == 16);
 
     #[test]
@@ -763,48 +721,6 @@ mod tests {
     }
 
     #[test]
-    fn builder_produces_same_result_as_new() {
-        let values = vec![
-            CqlValue::Int(42),
-            CqlValue::Text("hello".to_string()),
-            CqlValue::Boolean(true),
-        ];
-        let from_new = InvariantKey::new(values.clone());
-        let mut builder = InvariantKeyBuilder::new();
-        builder.push(&CqlValue::Int(42));
-        builder.push(&CqlValue::Text("hello".to_string()));
-        builder.push(&CqlValue::Boolean(true));
-        let from_builder = builder.build();
-
-        assert_eq!(from_new, from_builder);
-    }
-
-    #[test]
-    fn builder_empty() {
-        let ik = InvariantKeyBuilder::new().build();
-        assert_eq!(ik.len(), 0);
-        assert!(ik.is_empty());
-        assert_eq!(ik.get(0), None);
-    }
-
-    #[test]
-    fn builder_single_value() {
-        let mut builder = InvariantKeyBuilder::new();
-        builder.push(&CqlValue::Int(99));
-        let ik = builder.build();
-        assert_eq!(ik.len(), 1);
-        assert_eq!(ik.get(0), Some(CqlValue::Int(99)));
-    }
-
-    #[test]
-    fn clone_is_cheap_arc() {
-        let ik1: InvariantKey = vec![CqlValue::Int(42)].into();
-        let ik2 = ik1.clone();
-        // Arc clone shares the same allocation
-        assert!(Arc::ptr_eq(&ik1.data, &ik2.data));
-    }
-
-    #[test]
     fn max_255_columns_is_accepted() {
         let values: Vec<CqlValue> = (0..255).map(CqlValue::Int).collect();
         let ik = InvariantKey::new(values);
@@ -833,15 +749,5 @@ mod tests {
     fn more_than_255_columns_panics() {
         let values: Vec<CqlValue> = (0..256).map(CqlValue::Int).collect();
         let _ik = InvariantKey::new(values);
-    }
-
-    #[test]
-    #[should_panic(expected = "InvariantKey supports at most 255 columns")]
-    fn builder_more_than_255_columns_panics() {
-        let mut builder = InvariantKeyBuilder::new();
-        for i in 0..256 {
-            builder.push(&CqlValue::Int(i));
-        }
-        let _ik = builder.build();
     }
 }

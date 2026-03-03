@@ -10,28 +10,37 @@ mod engine;
 pub mod httproutes;
 mod httpserver;
 mod index;
+mod index_key;
 mod info;
 mod internals;
-pub mod invariant_key;
+mod invariant_key;
 mod memory;
 mod metrics;
 mod monitor_indexes;
 mod monitor_items;
 pub mod node_state;
+mod partition_key;
 mod primary_key;
 mod similarity;
+mod table;
+mod timestamp;
 
 pub use crate::distance::Distance;
+pub use crate::index_key::IndexKey;
 use crate::internals::Internals;
 use crate::metrics::Metrics;
 use crate::node_state::NodeState;
+pub use crate::partition_key::PartitionKey;
+pub use crate::primary_key::PrimaryKey;
 pub use crate::similarity::SimilarityScore;
+pub use crate::table::PartitionId;
+pub use crate::table::PrimaryId;
+pub use crate::timestamp::Timestamp;
 use db::Db;
 pub use httproutes::DataType;
 pub use httproutes::IndexInfo;
 use index::factory;
 pub use index::factory::IndexFactory;
-pub use primary_key::PrimaryKey;
 use scylla::cluster::metadata::ColumnType;
 use scylla::serialize::SerializationError;
 use scylla::serialize::value::SerializeValue;
@@ -40,12 +49,12 @@ use scylla::serialize::writers::WrittenCellProof;
 use scylla::value::CqlValue;
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use time::OffsetDateTime;
 use tokio::runtime::Builder;
 use tokio::runtime::Handle;
 use tokio::signal;
@@ -117,35 +126,6 @@ pub struct Credentials {
 }
 
 #[derive(
-    Clone, Hash, Eq, PartialEq, Debug, PartialOrd, Ord, derive_more::Display, derive_more::AsRef,
-)]
-pub struct IndexId(String);
-
-impl IndexId {
-    pub fn new(keyspace: &KeyspaceName, index: &IndexName) -> Self {
-        Self(format!("{}.{}", keyspace.0, index.0))
-    }
-
-    pub fn keyspace(&self) -> KeyspaceName {
-        self.0.split_once('.').unwrap().0.to_string().into()
-    }
-
-    pub fn index(&self) -> IndexName {
-        self.0.split_once('.').unwrap().1.to_string().into()
-    }
-}
-
-impl SerializeValue for IndexId {
-    fn serialize<'b>(
-        &self,
-        typ: &ColumnType,
-        writer: CellWriter<'b>,
-    ) -> Result<WrittenCellProof<'b>, SerializationError> {
-        <String as SerializeValue>::serialize(&self.0, typ, writer)
-    }
-}
-
-#[derive(
     Clone,
     Debug,
     Eq,
@@ -179,6 +159,8 @@ impl SerializeValue for KeyspaceName {
     PartialEq,
     Eq,
     Hash,
+    PartialOrd,
+    Ord,
     derive_more::From,
     derive_more::AsRef,
     serde::Serialize,
@@ -235,6 +217,8 @@ impl SerializeValue for TableName {
     PartialEq,
     Eq,
     Hash,
+    Ord,
+    PartialOrd,
     derive_more::From,
     derive_more::AsRef,
     serde::Serialize,
@@ -463,7 +447,7 @@ impl Default for Limit {
 }
 
 /// A restriction provided in a CQL query for filtering ANN search results.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Restriction {
     Eq {
         lhs: ColumnName,
@@ -545,8 +529,8 @@ pub struct IndexMetadata {
 }
 
 impl IndexMetadata {
-    pub fn id(&self) -> IndexId {
-        IndexId::new(&self.keyspace_name, &self.index_name)
+    pub fn key(&self) -> IndexKey {
+        IndexKey::new(&self.keyspace_name, &self.index_name)
     }
 }
 
@@ -567,15 +551,12 @@ pub struct DbCustomIndex {
 }
 
 impl DbCustomIndex {
-    pub fn id(&self) -> IndexId {
-        IndexId::new(&self.keyspace, &self.index)
+    pub fn key(&self) -> IndexKey {
+        IndexKey::new(&self.keyspace, &self.index)
     }
 }
 
-#[derive(Clone, Copy, Debug, derive_more::From, derive_more::AsRef)]
-pub struct Timestamp(OffsetDateTime);
-
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DbEmbedding {
     pub primary_key: PrimaryKey,
     pub embedding: Option<Vector>,

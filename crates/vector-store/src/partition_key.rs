@@ -6,12 +6,12 @@
 use crate::invariant_key::InvariantKey;
 use scylla::value::CqlValue;
 
-/// This is a thin newtype around [`InvariantKey`] providing primary-key-specific
+/// This is a thin newtype around [`InvariantKey`] providing partition-key-specific
 /// semantics.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PrimaryKey(InvariantKey);
+pub struct PartitionKey(InvariantKey);
 
-impl PrimaryKey {
+impl PartitionKey {
     pub fn len(&self) -> usize {
         self.0.len()
     }
@@ -25,13 +25,13 @@ impl PrimaryKey {
     }
 }
 
-impl FromIterator<CqlValue> for PrimaryKey {
+impl FromIterator<CqlValue> for PartitionKey {
     fn from_iter<I: IntoIterator<Item = CqlValue>>(iter: I) -> Self {
         Self(InvariantKey::from_iter(iter))
     }
 }
 
-impl<I: IntoIterator<Item = CqlValue>> From<I> for PrimaryKey {
+impl<I: IntoIterator<Item = CqlValue>> From<I> for PartitionKey {
     fn from(iter: I) -> Self {
         Self(InvariantKey::from_iter(iter))
     }

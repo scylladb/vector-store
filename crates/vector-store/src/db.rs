@@ -856,11 +856,11 @@ impl Statements {
 
     async fn is_valid_index(&self, metadata: IndexMetadata) -> IsValidIndexR {
         let Some(session) = self.session_rx.borrow().clone() else {
-            debug!("is_valid_index: no active session for {}", metadata.id());
+            debug!("is_valid_index: no active session for {}", metadata.key());
             return false;
         };
         let Ok(version_begin) = session.await_schema_agreement().await else {
-            debug!("is_valid_index: schema not agreed for {}", metadata.id());
+            debug!("is_valid_index: schema not agreed for {}", metadata.key());
             return false;
         };
         let cluster_state = session.get_cluster_state();
@@ -869,7 +869,7 @@ impl Statements {
         let Some(keyspace) = cluster_state.get_keyspace(metadata.keyspace_name.as_ref()) else {
             debug!(
                 "is_valid_index: no keyspace in a cluster state for {}",
-                metadata.id()
+                metadata.key()
             );
             // missing the keyspace in the cluster_state, metadata should be refreshed
             session.refresh_metadata().await.unwrap_or(());
@@ -878,7 +878,7 @@ impl Statements {
 
         // check a table
         if !keyspace.tables.contains_key(metadata.table_name.as_ref()) {
-            debug!("is_valid_index: no table for {}", metadata.id());
+            debug!("is_valid_index: no table for {}", metadata.key());
             // missing the table in the cluster_state, metadata should be refreshed
             session.refresh_metadata().await.unwrap_or(());
             return false;
@@ -889,7 +889,7 @@ impl Statements {
             .tables
             .contains_key(&format!("{}_scylla_cdc_log", metadata.table_name))
         {
-            debug!("is_valid_index: no cdc log for {}", metadata.id());
+            debug!("is_valid_index: no cdc log for {}", metadata.key());
             // missing the cdc log in the cluster_state, metadata should be refreshed
             session.refresh_metadata().await.unwrap_or(());
             return false;
@@ -899,7 +899,7 @@ impl Statements {
         let Ok(Some(version_end)) = session.check_schema_agreement().await else {
             debug!(
                 "is_valid_index: schema not agreed for {} finally",
-                metadata.id()
+                metadata.key()
             );
             return false;
         };

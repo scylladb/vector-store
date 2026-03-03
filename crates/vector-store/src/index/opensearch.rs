@@ -3,24 +3,26 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
-use crate::ColumnName;
 use crate::Connectivity;
 use crate::Dimensions;
 use crate::Distance;
 use crate::ExpansionAdd;
 use crate::ExpansionSearch;
 use crate::IndexFactory;
-use crate::IndexId;
+use crate::IndexKey;
 use crate::Limit;
-use crate::PrimaryKey;
+use crate::PartitionId;
 use crate::SpaceType;
 use crate::Vector;
 use crate::index::actor::Index;
 use crate::index::factory::IndexConfiguration;
 use crate::index::validator;
 use crate::memory::Memory;
+use crate::table::IndexIdGenerator;
+use crate::table::PrimaryId;
+use crate::table::Table;
+use crate::table::TableSearch;
 use anyhow::anyhow;
-use bimap::BiMap;
 use opensearch::DeleteParts;
 use opensearch::IndexParts;
 use opensearch::OpenSearch;
@@ -33,8 +35,6 @@ use serde_json::json;
 use std::fmt::Display;
 use std::sync::Arc;
 use std::sync::RwLock;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
 use tokio::sync::Notify;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
@@ -87,16 +87,17 @@ impl IndexFactory for OpenSearchIndexFactory {
     fn create_index(
         &self,
         index: IndexConfiguration,
-        _: Arc<Vec<ColumnName>>,
+        table: Arc<RwLock<Table>>,
         _: mpsc::Sender<Memory>,
     ) -> anyhow::Result<mpsc::Sender<Index>> {
         new(
-            index.id,
+            index.key,
             index.dimensions,
             index.connectivity,
             index.expansion_add,
             index.expansion_search,
             index.space_type,
+            table,
             self.client.clone(),
         )
     }
@@ -146,22 +147,8 @@ pub fn new_opensearch(
     Ok(factory)
 }
 
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    PartialEq,
-    Eq,
-    Hash,
-    derive_more::From,
-    derive_more::AsRef,
-    derive_more::Display,
-)]
-/// Key for index embeddings
-struct Key(u64);
-
 async fn create_index(
-    id: &IndexId,
+    key: &IndexKey,
     dimensions: Dimensions,
     connectivity: Connectivity,
     expansion_add: ExpansionAdd,
@@ -171,7 +158,7 @@ async fn create_index(
 ) -> Result<opensearch::http::response::Response, ()> {
     let response: Result<opensearch::http::response::Response, ()> = client
         .indices()
-        .create(IndicesCreateParts::Index(&id.0))
+        .create(IndicesCreateParts::Index(key.as_ref()))
         .body(json!({
             "settings": {
                 "index.knn": true
@@ -213,31 +200,34 @@ async fn create_index(
             opensearch::http::response::Response::error_for_status_code,
         )
         .map_err(|err| {
-            error!("engine::new: unable to create index with id {id}: {err}");
+            error!("engine::new: unable to create index with key {key}: {err}");
         });
 
     response
 }
 
+// TODO: remove allow
+#[allow(clippy::too_many_arguments)]
 pub fn new(
-    id: IndexId,
+    key: IndexKey,
     dimensions: Dimensions,
     connectivity: Connectivity,
     expansion_add: ExpansionAdd,
     expansion_search: ExpansionSearch,
     space_type: SpaceType,
+    table: Arc<RwLock<impl TableSearch + Send + Sync + 'static>>,
     client: Arc<OpenSearch>,
 ) -> anyhow::Result<mpsc::Sender<Index>> {
-    info!("Creating new index with id: {id}");
+    info!("Creating new index with key: {key}");
     // TODO: The value of channel size was taken from initial benchmarks. Needs more testing
     const CHANNEL_SIZE: usize = 10;
     let (tx, mut rx) = mpsc::channel(CHANNEL_SIZE);
 
     tokio::spawn({
-        let cloned_id = id.clone();
+        let cloned_key = key.clone();
         async move {
             let response = create_index(
-                &id,
+                &key,
                 dimensions,
                 connectivity,
                 expansion_add,
@@ -248,17 +238,11 @@ pub fn new(
             .await;
 
             if response.is_err() {
-                error!("engine::new: unable to create index with id {id}");
+                error!("engine::new: unable to create index with key {key}");
                 return;
             }
 
             debug!("starting");
-
-            // bimap between PrimaryKey and Key for an opensearch index
-            let keys = Arc::new(RwLock::new(BiMap::new()));
-
-            // Incremental key for a opensearch index
-            let opensearch_key = Arc::new(AtomicU64::new(0));
 
             // This semaphore decides how many tasks are queued for an opensearch process.
             // We are currently using SingleNodeConnectionPool, so we can only have one
@@ -266,26 +250,16 @@ pub fn new(
             // so we set the semaphore to 2, so we always have something in queue.
             let semaphore = Arc::new(Semaphore::new(2));
 
-            let id = Arc::new(id);
+            let key = Arc::new(key);
 
             while let Some(msg) = rx.recv().await {
                 let permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
                 tokio::spawn({
-                    let id = Arc::clone(&id);
-                    let keys = Arc::clone(&keys);
-                    let opensearch_key = Arc::clone(&opensearch_key);
+                    let key = Arc::clone(&key);
+                    let table = Arc::clone(&table);
                     let client = Arc::clone(&client);
                     async move {
-                        process(
-                            msg,
-                            dimensions,
-                            space_type,
-                            id,
-                            keys,
-                            opensearch_key,
-                            client,
-                        )
-                        .await;
+                        process(msg, dimensions, space_type, key, table, client).await;
                         drop(permit);
                     }
                 });
@@ -293,7 +267,7 @@ pub fn new(
 
             debug!("finished");
         }
-        .instrument(debug_span!("opensearch", "{cloned_id}"))
+        .instrument(debug_span!("opensearch", "{cloned_key}"))
     });
 
     Ok(tx)
@@ -303,81 +277,51 @@ async fn process(
     msg: Index,
     dimensions: Dimensions,
     space_type: SpaceType,
-    id: Arc<IndexId>,
-    keys: Arc<RwLock<BiMap<PrimaryKey, Key>>>,
-    opensearch_key: Arc<AtomicU64>,
+    index_key: Arc<IndexKey>,
+    table: Arc<RwLock<impl TableSearch>>,
     client: Arc<OpenSearch>,
 ) {
     match msg {
-        Index::Add {
-            primary_key,
+        Index::AddVector {
+            primary_id,
             embedding,
             in_progress: _in_progress,
-        } => add_or_replace(id, keys, opensearch_key, primary_key, embedding, client).await,
-        Index::Remove {
-            primary_key,
+            ..
+        } => add(index_key, primary_id, &embedding, client).await,
+        Index::RemoveVector {
+            primary_id,
             in_progress: _in_progress,
-        } => remove(id, keys, primary_key, client).await,
+            ..
+        } => remove(index_key, primary_id, client).await,
         Index::Ann {
             embedding,
             limit,
             tx,
+            ..
         } => {
             ann(
-                id, tx, keys, embedding, dimensions, limit, space_type, client,
+                index_key, tx, embedding, dimensions, limit, space_type, table, client,
             )
             .await
         }
         Index::FilteredAnn { tx, .. } => filtered_ann(tx).await,
-        Index::Count { tx } => count(id, tx, client).await,
+        Index::Count { tx, .. } => count(index_key, tx, client).await,
+
+        _ => todo!(),
     }
 }
 
-async fn add_or_replace(
-    id: Arc<IndexId>,
-    keys: Arc<RwLock<BiMap<PrimaryKey, Key>>>,
-    opensearch_key: Arc<AtomicU64>,
-    primary_key: PrimaryKey,
-    embeddings: Vector,
+async fn add(
+    index_key: Arc<IndexKey>,
+    primary_id: PrimaryId,
+    embeddings: &Vector,
     client: Arc<OpenSearch>,
 ) {
-    let key = opensearch_key.fetch_add(1, Ordering::Relaxed).into();
-
-    let (key, remove) = if keys
-        .write()
-        .unwrap()
-        .insert_no_overwrite(primary_key.clone(), key)
-        .is_ok()
-    {
-        (key, false)
-    } else {
-        opensearch_key.fetch_sub(1, Ordering::Relaxed);
-        (
-            *keys.read().unwrap().get_by_left(&primary_key).unwrap(),
-            true,
-        )
-    };
-
-    if remove {
-        let response = client
-            .delete(DeleteParts::IndexId(&id.0, &key.0.to_string()))
-            .send()
-            .await
-            .map_or_else(
-                Err,
-                opensearch::http::response::Response::error_for_status_code,
-            )
-            .map_err(|err| {
-                error!("add_or_replace: unable to remove embedding for key {key}: {err}");
-            });
-
-        if response.is_err() {
-            return;
-        }
-    }
-
-    let response = client
-        .index(IndexParts::IndexId(&id.0, &key.0.to_string()))
+    _ = client
+        .index(IndexParts::IndexId(
+            index_key.as_ref().as_ref(),
+            &primary_id.as_ref().to_string(),
+        ))
         .body(json!({
             "vector": embeddings.0,
         }))
@@ -388,24 +332,16 @@ async fn add_or_replace(
             opensearch::http::response::Response::error_for_status_code,
         )
         .map_err(|err| {
-            error!("add_or_replace: unable to add embedding for key {key}: {err}");
+            error!("add: unable to add embedding for primary_id {primary_id:?}: {err}");
         });
-
-    if response.is_err() {
-        keys.write().unwrap().remove_by_right(&key);
-    }
 }
 
-async fn remove(
-    id: Arc<IndexId>,
-    keys: Arc<RwLock<BiMap<PrimaryKey, Key>>>,
-    primary_key: PrimaryKey,
-    client: Arc<OpenSearch>,
-) {
-    let (primary_key, key) = keys.write().unwrap().remove_by_left(&primary_key).unwrap();
-
-    let response = client
-        .delete(DeleteParts::IndexId(&id.0, &key.0.to_string()))
+async fn remove(index_key: Arc<IndexKey>, primary_id: PrimaryId, client: Arc<OpenSearch>) {
+    _ = client
+        .delete(DeleteParts::IndexId(
+            index_key.as_ref().as_ref(),
+            &primary_id.as_ref().to_string(),
+        ))
         .send()
         .await
         .map_or_else(
@@ -413,23 +349,19 @@ async fn remove(
             opensearch::http::response::Response::error_for_status_code,
         )
         .map_err(|err| {
-            error!("remove: unable to remove embedding for key {key}: {err}");
+            error!("remove: unable to remove embedding for primary_id {primary_id:?}: {err}");
         });
-
-    if response.is_err() {
-        keys.write().unwrap().insert(primary_key, key);
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn ann(
-    id: Arc<IndexId>,
+    key: Arc<IndexKey>,
     tx_ann: oneshot::Sender<AnnR>,
-    keys: Arc<RwLock<BiMap<PrimaryKey, Key>>>,
     embedding: Vector,
     dimensions: Dimensions,
     limit: Limit,
     space_type: SpaceType,
+    table: Arc<RwLock<impl TableSearch>>,
     client: Arc<OpenSearch>,
 ) {
     if let Err(err) = validator::embedding_dimensions(&embedding, dimensions) {
@@ -439,7 +371,7 @@ async fn ann(
     }
 
     let response = client
-        .search(opensearch::SearchParts::Index(&[&id.0]))
+        .search(opensearch::SearchParts::Index(&[key.as_ref().as_ref()]))
         .body(json!({
             "query": {
                 "knn": {
@@ -482,17 +414,23 @@ async fn ann(
         _ = tx_ann.send(Err(anyhow!("ann: unable to search for embedding")));
         return;
     }
-    let hits = hits
-        .unwrap()
-        .iter()
-        .map(|hit| {
-            let id = hit["_id"].as_str().unwrap();
-            let score = hit["_score"].as_f64().unwrap();
-            let keys = keys.read().unwrap();
-            let key = keys.get_by_right(&Key(id.parse::<u64>().unwrap())).unwrap();
-            (key.clone(), score)
-        })
-        .collect::<Vec<_>>();
+    // We need to setup global index for opensearch, so we can run tests
+    let index_id = IndexIdGenerator::new().next(true).unwrap();
+    let partition_id = PartitionId::global(index_id);
+
+    let hits = {
+        let table = table.read().unwrap();
+        hits.unwrap()
+            .iter()
+            .map(|hit| {
+                let id = hit["_id"].as_str().unwrap();
+                let score = hit["_score"].as_f64().unwrap();
+                let primary_id = PrimaryId::from(id.parse::<u64>().unwrap());
+                let primary_key = table.primary_key(partition_id, primary_id).unwrap();
+                (primary_key, score)
+            })
+            .collect::<Vec<_>>()
+    };
 
     let (keys, scores): (Vec<_>, Vec<_>) = hits.iter().cloned().unzip();
     let distances: anyhow::Result<Vec<_>> = scores
@@ -516,9 +454,9 @@ async fn filtered_ann(tx_ann: oneshot::Sender<AnnR>) {
     _ = tx_ann.send(Err(anyhow!("Filtering not supported")));
 }
 
-async fn count(id: Arc<IndexId>, tx: oneshot::Sender<CountR>, client: Arc<OpenSearch>) {
+async fn count(key: Arc<IndexKey>, tx: oneshot::Sender<CountR>, client: Arc<OpenSearch>) {
     let response = client
-        .count(opensearch::CountParts::Index(&[&id.0]))
+        .count(opensearch::CountParts::Index(&[key.as_ref().as_ref()]))
         .send()
         .await
         .map_or_else(

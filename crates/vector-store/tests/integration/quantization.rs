@@ -9,16 +9,15 @@ use crate::wait_for;
 use crate::wait_for_value;
 use scylla::value::CqlValue;
 use std::num::NonZeroUsize;
-use time::OffsetDateTime;
 use vector_store::ColumnName;
 use vector_store::DataType;
 use vector_store::DbIndexType;
 use vector_store::Distance;
 use vector_store::Quantization;
+use vector_store::Timestamp;
 use vector_store::httproutes;
 use vector_store::httproutes::PostIndexAnnFilter;
 use vector_store::httproutes::PostIndexAnnRestriction;
-use vector_store::invariant_key::InvariantKey;
 
 #[tokio::test]
 // This test verifies that quantization is applied correctly by observing its effect on search results.
@@ -45,9 +44,9 @@ async fn quantization_is_effectively_applied() {
         search_vector: Vec<f32>,
     ) -> httproutes::Distance {
         let values = [(
-            InvariantKey::new(vec![CqlValue::Int(1)]).into(),
+            [CqlValue::Int(1)].into(),
             Some(add_vector.into()),
-            OffsetDateTime::from_unix_timestamp(10).unwrap().into(),
+            Timestamp::from_unix_timestamp(10),
         )];
         let (run, index, _db, _node_state) = setup_store_with_quantization(
             test_config(),
@@ -163,9 +162,9 @@ async fn search_with_quantization(quantization: Quantization, filter: Option<Pos
     let pk_value = 1;
     let pk_column: ColumnName = "pk".into();
     let vectors = vec![(
-        InvariantKey::new(vec![CqlValue::Int(pk_value)]).into(),
+        [CqlValue::Int(pk_value)].into(),
         Some(vector.clone().into()),
-        OffsetDateTime::from_unix_timestamp(10).unwrap().into(),
+        Timestamp::from_unix_timestamp(10),
     )];
 
     let (run, index, _db, _node_state) = setup_store_with_quantization(
@@ -266,9 +265,9 @@ async fn binary_quantization_with_non_divisible_by_8_dimensions() {
     let pk_value = 1;
     let pk_column: ColumnName = "pk".into();
     let vectors = vec![(
-        InvariantKey::new(vec![CqlValue::Int(pk_value)]).into(),
+        [CqlValue::Int(pk_value)].into(),
         Some(vector.clone().into()),
-        OffsetDateTime::from_unix_timestamp(10).unwrap().into(),
+        Timestamp::from_unix_timestamp(10),
     )];
 
     let (run, index, _db, _node_state) = setup_store_with_quantization(

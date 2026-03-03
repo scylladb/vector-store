@@ -10,9 +10,9 @@ use crate::DbEmbedding;
 use crate::IndexMetadata;
 use crate::KeyspaceName;
 use crate::Percentage;
-use crate::PrimaryKey;
 use crate::Progress;
 use crate::TableName;
+use crate::Timestamp;
 use crate::internals::Internals;
 use crate::internals::InternalsExt;
 use crate::invariant_key::InvariantKey;
@@ -22,6 +22,7 @@ use crate::node_state::NodeStateExt;
 use ::time::Date;
 use ::time::Month;
 use ::time::OffsetDateTime;
+use ::time::PrimitiveDateTime;
 use ::time::Time;
 use anyhow::Context;
 use anyhow::anyhow;
@@ -150,7 +151,7 @@ pub(crate) async fn new(
     mpsc::Sender<DbIndex>,
     mpsc::Receiver<(DbEmbedding, Option<AsyncInProgress>)>,
 )> {
-    let id = metadata.id();
+    let key = metadata.key();
 
     // TODO: The value of channel size was taken from initial benchmarks. Needs more testing
     const CHANNEL_SIZE: usize = 10;
@@ -163,8 +164,8 @@ pub(crate) async fn new(
     let mut statements_session_rx = session_rx.clone();
     let cdc_metadata = metadata.clone();
     let cdc_tx_embeddings = tx_embeddings.clone();
-    let cdc_id = id.clone();
-    let cdc_manager_id = id.clone();
+    let cdc_key = key.clone();
+    let cdc_manager_key = key.clone();
 
     // Spawn CDC management task - handles session changes and CDC reader lifecycle
     tokio::spawn(
@@ -197,7 +198,7 @@ pub(crate) async fn new(
                     Some(session) => {
                         info!(
                             "Session available, creating CDC reader for {}",
-                            cdc_metadata.id()
+                            cdc_metadata.key()
                         );
 
                         // Stop old CDC reader if exists
@@ -234,7 +235,7 @@ pub(crate) async fn new(
                                 // Spawn CDC handler task
                                 let shutdown_notify = Arc::clone(&shutdown_notify);
                                 let cdc_error_notify = Arc::clone(&cdc_error_notify);
-                                let handler_id = cdc_id.clone();
+                                let handler_key = cdc_key.clone();
                                 let internals = internals.clone();
                                 cdc_handler_task = Some(tokio::spawn(
                                     async move {
@@ -243,7 +244,7 @@ pub(crate) async fn new(
                                                 if let Err(err) = result {
                                                     warn!("CDC handler error: {err}");
                                                     internals
-                                                        .increment_counter(format!("{handler_id}-cdc-handler-errors"))
+                                                        .increment_counter(format!("{handler_key}-cdc-handler-errors"))
                                                         .await;
                                                     cdc_error_notify.notify_one();
                                                 }
@@ -255,10 +256,10 @@ pub(crate) async fn new(
                                         debug!("CDC handler finished");
                                         cdc_now()
                                     }
-                                    .instrument(error_span!("cdc", "{cdc_id}")),
+                                    .instrument(error_span!("cdc", "{cdc_key}")),
                                 ));
 
-                                info!("CDC reader created successfully for {}", cdc_metadata.id());
+                                info!("CDC reader created successfully for {}", cdc_metadata.key());
                             }
                             Err(e) => {
                                 error!("Failed to create CDC reader: {}", e);
@@ -268,7 +269,7 @@ pub(crate) async fn new(
                     None => {
                         info!(
                             "Session became None, stopping CDC reader for {}",
-                            cdc_metadata.id()
+                            cdc_metadata.key()
                         );
 
                         // Stop CDC reader
@@ -285,7 +286,7 @@ pub(crate) async fn new(
 
             debug!("CDC manager finished");
         }
-        .instrument(error_span!("cdc_manager", "{}", cdc_manager_id)),
+        .instrument(error_span!("cdc_manager", "{}", cdc_manager_key)),
     );
 
     // Wait for initial session to create statements
@@ -308,7 +309,7 @@ pub(crate) async fn new(
                 .send_event(Event::FullScanStarted(metadata.clone()))
                 .await;
 
-            info!("starting full scan on {}", metadata.id());
+            info!("starting full scan on {}", metadata.key());
 
             let mut initial_scan = Box::pin(statements.initial_scan(
                 tx_embeddings.clone(),
@@ -335,7 +336,7 @@ pub(crate) async fn new(
                 }
             }
 
-            info!("finished full scan on {}", metadata.id());
+            info!("finished full scan on {}", metadata.key());
 
             // Continue processing messages after scan completes
             while let Some(msg) = rx_index.recv().await {
@@ -344,7 +345,7 @@ pub(crate) async fn new(
 
             debug!("finished");
         }
-        .instrument(error_span!("db_index", "{}", id)),
+        .instrument(error_span!("db_index", "{}", key)),
     );
 
     Ok((tx_index, rx_embeddings))
@@ -366,7 +367,7 @@ async fn create_cdc_reader(
     let cdc_start = cdc_start - CHECKPOINT_TIMESTAMP_OFFSET;
     info!(
         "Creating CDC log reader for {} starting from {:?}",
-        metadata.id(),
+        metadata.key(),
         OffsetDateTime::UNIX_EPOCH + cdc_start
     );
     CDCLogReaderBuilder::new()
@@ -727,8 +728,7 @@ impl Statements {
                     debug!("range_scan_stream: bad type of a writetime");
                     return None;
                 };
-                let timestamp =
-                    (OffsetDateTime::UNIX_EPOCH + Duration::from_micros(timestamp as u64)).into();
+                let timestamp = Timestamp::UNIX_EPOCH + Duration::from_micros(timestamp as u64);
 
                 let Some(CqlValue::Vector(embedding)) = row.columns.pop().unwrap() else {
                     debug!("range_scan_stream: bad type of an embedding");
@@ -758,16 +758,11 @@ impl Statements {
                         };
                         Ok(value)
                     })
-                    .collect::<anyhow::Result<Vec<_>>>()
+                    .collect::<anyhow::Result<_>>()
                     .inspect_err(|err| debug!("range_scan_stream: {err}"))
                 else {
                     return None;
                 };
-                let primary_key = PrimaryKey::from(
-                    InvariantKey::try_new(primary_key)
-                        .inspect_err(|err| debug!("range_scan_stream: {err}"))
-                        .ok()?,
-                );
 
                 Some(DbEmbedding {
                     primary_key,
@@ -789,7 +784,7 @@ struct CdcConsumerData {
     primary_key_columns: Vec<ColumnName>,
     target_column: ColumnName,
     tx: mpsc::Sender<(DbEmbedding, Option<AsyncInProgress>)>,
-    gregorian_epoch: OffsetDateTime,
+    gregorian_epoch: PrimitiveDateTime,
 }
 
 struct CdcConsumer(Arc<CdcConsumerData>);
@@ -840,8 +835,7 @@ impl Consumer for CdcConsumer {
                     "CDC error: primary key column {column} value should exist"
                 ))
             })
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        let primary_key = PrimaryKey::from(InvariantKey::try_new(primary_key)?);
+            .collect::<anyhow::Result<_>>()?;
 
         const HUNDREDS_NANOS_TO_MICROS: u64 = 10;
         let timestamp = (self.0.gregorian_epoch
@@ -902,7 +896,7 @@ impl CdcConsumerFactory {
             .map(ColumnName::from)
             .collect();
 
-        let gregorian_epoch = OffsetDateTime::new_utc(
+        let gregorian_epoch = PrimitiveDateTime::new(
             Date::from_calendar_date(1582, Month::October, 15)?,
             Time::MIDNIGHT,
         );

@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
-use crate::IndexId;
+use crate::IndexKey;
 use crate::IndexMetadata;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -83,13 +83,13 @@ impl NodeStateExt for mpsc::Sender<NodeState> {
     }
 }
 
-fn update_indexes(idxs: &mut HashMap<IndexId, IndexStatus>, ids: HashSet<IndexId>) {
+fn update_indexes(idxs: &mut HashMap<IndexKey, IndexStatus>, keys: HashSet<IndexKey>) {
     // Remove indexes that are no longer present
-    idxs.retain(|idx, _| ids.contains(idx));
+    idxs.retain(|idx, _| keys.contains(idx));
 
-    for id in ids.into_iter() {
+    for key in keys.into_iter() {
         // Add index only if not already present
-        if let Vacant(e) = idxs.entry(id) {
+        if let Vacant(e) = idxs.entry(key) {
             e.insert(IndexStatus::Initializing);
         }
     }
@@ -105,7 +105,7 @@ pub(crate) async fn new() -> mpsc::Sender<NodeState> {
 
             let mut status = NodeStatus::Initializing;
             let mut initial_idxs = HashSet::new();
-            let mut idxs = HashMap::<IndexId, IndexStatus>::new();
+            let mut idxs = HashMap::<IndexKey, IndexStatus>::new();
             while let Some(msg) = rx.recv().await {
                 match msg {
                     NodeState::SendEvent(event) => match event {
@@ -127,7 +127,7 @@ pub(crate) async fn new() -> mpsc::Sender<NodeState> {
 
                             update_indexes(
                                 &mut idxs,
-                                indexes.iter().map(|meta| meta.id()).collect(),
+                                indexes.iter().map(|meta| meta.key()).collect(),
                             );
 
                             if status == NodeStatus::DiscoveringIndexes {
@@ -136,12 +136,12 @@ pub(crate) async fn new() -> mpsc::Sender<NodeState> {
                             }
                         }
                         Event::FullScanStarted(metadata) => {
-                            if let Some(index_status) = idxs.get_mut(&metadata.id()) {
+                            if let Some(index_status) = idxs.get_mut(&metadata.key()) {
                                 *index_status = IndexStatus::FullScanning;
                             }
                         }
                         Event::FullScanFinished(metadata) => {
-                            if let Some(index_status) = idxs.get_mut(&metadata.id()) {
+                            if let Some(index_status) = idxs.get_mut(&metadata.key()) {
                                 *index_status = IndexStatus::Serving;
                             }
 
@@ -158,7 +158,7 @@ pub(crate) async fn new() -> mpsc::Sender<NodeState> {
                         });
                     }
                     NodeState::GetIndexStatus(tx, keyspace, index) => {
-                        if let Some(index_status) = idxs.get(&IndexId::new(
+                        if let Some(index_status) = idxs.get(&IndexKey::new(
                             &crate::KeyspaceName(keyspace.clone()),
                             &crate::IndexName(index.clone()),
                         )) {

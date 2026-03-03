@@ -3,35 +3,35 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
-use crate::ColumnName;
 use crate::Config;
 use crate::Dimensions;
 use crate::Distance;
 use crate::Filter;
 use crate::IndexFactory;
-use crate::IndexId;
+use crate::IndexKey;
 use crate::Limit;
-use crate::PrimaryKey;
 use crate::Quantization;
-use crate::Restriction;
 use crate::SpaceType;
 use crate::Vector;
 use crate::index::actor::AnnR;
-use crate::index::actor::CountR;
 use crate::index::actor::Index;
 use crate::index::factory::IndexConfiguration;
 use crate::index::validator;
 use crate::memory::Allocate;
 use crate::memory::Memory;
 use crate::memory::MemoryExt;
+use crate::table::IndexId;
+use crate::table::PartitionId;
+use crate::table::PrimaryId;
+use crate::table::Table;
+use crate::table::TableSearch;
 use anyhow::anyhow;
-use bimap::BiMap;
-use scylla::value::CqlValue;
+use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::iter;
 use std::sync::Arc;
 use std::sync::RwLock;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
@@ -47,6 +47,7 @@ use tracing::debug_span;
 use tracing::error;
 use tracing::info;
 use tracing::trace;
+use tracing::warn;
 use usearch::IndexOptions;
 use usearch::MetricKind;
 use usearch::ScalarKind;
@@ -62,7 +63,7 @@ impl IndexFactory for UsearchIndexFactory {
     fn create_index(
         &self,
         index: IndexConfiguration,
-        primary_key_columns: Arc<Vec<ColumnName>>,
+        table: Arc<RwLock<Table>>,
         memory: mpsc::Sender<Memory>,
     ) -> anyhow::Result<mpsc::Sender<Index>> {
         match &self.mode {
@@ -78,29 +79,30 @@ impl IndexFactory for UsearchIndexFactory {
                 };
                 let threads =
                     Handle::current().metrics().num_workers() + rayon::current_num_threads();
-                let idx = Arc::new(ThreadedUsearchIndex::new(options, threads)?);
                 new(
-                    idx,
-                    index.id,
+                    move || Ok(Arc::new(ThreadedUsearchIndex::new(options, threads)?)),
+                    index.key,
                     index.dimensions,
-                    primary_key_columns,
+                    table,
                     Arc::clone(&self.tokio_semaphore),
                     Arc::clone(&self.rayon_semaphore),
                     memory,
                 )
             }
-            Mode::Simulator { config, config_rx } => {
-                let sim = Simulator::new(config.clone(), config_rx.clone(), index.id.clone());
-                new(
-                    sim,
-                    index.id,
-                    index.dimensions,
-                    primary_key_columns,
-                    Arc::clone(&self.tokio_semaphore),
-                    Arc::clone(&self.rayon_semaphore),
-                    memory,
-                )
-            }
+            Mode::Simulator { config, config_rx } => new(
+                {
+                    let config = Arc::clone(config);
+                    let index_key = index.key.clone();
+                    let config_rx = config_rx.clone();
+                    move || Ok(Simulator::new(config.clone(), config_rx.clone(), index_key))
+                },
+                index.key,
+                index.dimensions,
+                table,
+                Arc::clone(&self.tokio_semaphore),
+                Arc::clone(&self.rayon_semaphore),
+                memory,
+            ),
         }
     }
 
@@ -141,19 +143,19 @@ trait UsearchIndex {
     fn reserve(&self, size: usize) -> anyhow::Result<()>;
     fn size(&self) -> usize;
     fn capacity(&self) -> usize;
-    fn add(&self, key: Key, vector: &Vector) -> anyhow::Result<()>;
-    fn remove(&self, key: Key) -> anyhow::Result<()>;
+    fn add(&self, primary_id: PrimaryId, vector: &Vector) -> anyhow::Result<()>;
+    fn remove(&self, primary_id: PrimaryId) -> anyhow::Result<()>;
     fn search(
         &self,
         vector: &Vector,
         limit: Limit,
-    ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<(Key, Distance)>>>;
+    ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<(PrimaryId, Distance)>>>;
     fn filtered_search(
         &self,
         vector: &Vector,
         limit: Limit,
-        filter: impl Fn(Key) -> bool,
-    ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<(Key, Distance)>>>;
+        filter: impl Fn(PrimaryId) -> bool,
+    ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<(PrimaryId, Distance)>>>;
 
     fn stop(&self);
 }
@@ -191,23 +193,23 @@ impl UsearchIndex for ThreadedUsearchIndex {
         self.inner.size()
     }
 
-    fn add(&self, key: Key, vector: &Vector) -> anyhow::Result<()> {
+    fn add(&self, primary_id: PrimaryId, vector: &Vector) -> anyhow::Result<()> {
         if self.quantization == ScalarKind::B1 {
             let vector = f32_to_b1x8(&vector.0);
-            return Ok(self.inner.add(key.0, &vector)?);
+            return Ok(self.inner.add(primary_id.into(), &vector)?);
         }
-        Ok(self.inner.add(key.0, &vector.0)?)
+        Ok(self.inner.add(primary_id.into(), &vector.0)?)
     }
 
-    fn remove(&self, key: Key) -> anyhow::Result<()> {
-        Ok(self.inner.remove(key.0).map(|_| ())?)
+    fn remove(&self, primary_id: PrimaryId) -> anyhow::Result<()> {
+        Ok(self.inner.remove(primary_id.into()).map(|_| ())?)
     }
 
     fn search(
         &self,
         vector: &Vector,
         limit: Limit,
-    ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<(Key, Distance)>>> {
+    ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<(PrimaryId, Distance)>>> {
         let matches = if self.quantization == ScalarKind::B1 {
             let vector = f32_to_b1x8(&vector.0);
             self.inner.search(&vector, limit.0.get())?
@@ -218,9 +220,9 @@ impl UsearchIndex for ThreadedUsearchIndex {
             .keys
             .into_iter()
             .zip(matches.distances)
-            .map(|(key, distance)| {
+            .map(|(primary_id, distance)| {
                 Distance::try_from((distance, self.space_type.try_into()?, vector.dim()))
-                    .map(|dist| (key.into(), dist))
+                    .map(|dist| (primary_id.into(), dist))
             }))
     }
 
@@ -228,23 +230,23 @@ impl UsearchIndex for ThreadedUsearchIndex {
         &self,
         vector: &Vector,
         limit: Limit,
-        filter: impl Fn(Key) -> bool,
-    ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<(Key, Distance)>>> {
+        filter: impl Fn(PrimaryId) -> bool,
+    ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<(PrimaryId, Distance)>>> {
         let matches = if self.quantization == ScalarKind::B1 {
             let vector = f32_to_b1x8(&vector.0);
             self.inner
-                .filtered_search(&vector, limit.0.get(), |key| filter(Key(key)))?
+                .filtered_search(&vector, limit.0.get(), |row_id| filter(row_id.into()))?
         } else {
             self.inner
-                .filtered_search(&vector.0, limit.0.get(), |key| filter(Key(key)))?
+                .filtered_search(&vector.0, limit.0.get(), |row_id| filter(row_id.into()))?
         };
         Ok(matches
             .keys
             .into_iter()
             .zip(matches.distances)
-            .map(|(key, distance)| {
+            .map(|(primary_id, distance)| {
                 Distance::try_from((distance, self.space_type.try_into()?, vector.dim()))
-                    .map(|dist| (key.into(), dist))
+                    .map(|dist| (primary_id.into(), dist))
             }))
     }
 
@@ -256,7 +258,7 @@ struct Simulator {
     search: Duration,
     add_remove: Duration,
     reserve: Duration,
-    keys: RwLock<HashSet<Key>>,
+    keys: RwLock<HashSet<PrimaryId>>,
     notify: Arc<Notify>,
 }
 
@@ -268,7 +270,7 @@ impl Simulator {
     fn new(
         config: Arc<Config>,
         mut config_rx: watch::Receiver<Arc<Config>>,
-        id: IndexId,
+        key: IndexKey,
     ) -> Arc<RwLock<Self>> {
         let mut sim = Self {
             config: Arc::new(Config::default()),
@@ -299,7 +301,7 @@ impl Simulator {
                     }
                 }
             }
-            .instrument(debug_span!("simulator", "{}", id)),
+            .instrument(debug_span!("simulator", "{}", key)),
         );
 
         sim
@@ -373,21 +375,21 @@ impl UsearchIndex for RwLock<Simulator> {
         self.read().unwrap().keys.read().unwrap().len()
     }
 
-    fn add(&self, key: Key, _: &Vector) -> anyhow::Result<()> {
+    fn add(&self, row_id: PrimaryId, _: &Vector) -> anyhow::Result<()> {
         let start = Instant::now();
 
         let sim = self.read().unwrap();
-        sim.keys.write().unwrap().insert(key);
+        sim.keys.write().unwrap().insert(row_id);
 
         sim.wait_add_remove(start);
         Ok(())
     }
 
-    fn remove(&self, key: Key) -> anyhow::Result<()> {
+    fn remove(&self, row_id: PrimaryId) -> anyhow::Result<()> {
         let start = Instant::now();
 
         let sim = self.read().unwrap();
-        sim.keys.write().unwrap().remove(&key);
+        sim.keys.write().unwrap().remove(&row_id);
 
         sim.wait_add_remove(start);
         Ok(())
@@ -397,7 +399,7 @@ impl UsearchIndex for RwLock<Simulator> {
         &self,
         _: &Vector,
         limit: Limit,
-    ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<(Key, Distance)>>> {
+    ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<(PrimaryId, Distance)>>> {
         let start = Instant::now();
 
         let sim = self.read().unwrap();
@@ -408,8 +410,8 @@ impl UsearchIndex for RwLock<Simulator> {
             } else {
                 let keys = sim.keys.read().unwrap();
                 iter::repeat_with(|| rand::random_range(0..len))
-                    .map(Key)
-                    .filter(|key| keys.contains(key))
+                    .map(PrimaryId::from)
+                    .filter(|row_id| keys.contains(row_id))
                     .take(limit.0.get())
                     .collect()
             }
@@ -417,15 +419,15 @@ impl UsearchIndex for RwLock<Simulator> {
 
         sim.wait_search(start);
         let distance = Distance::new_euclidean(0.0)?;
-        Ok(keys.into_iter().map(move |key| Ok((key, distance))))
+        Ok(keys.into_iter().map(move |row_id| Ok((row_id, distance))))
     }
 
     fn filtered_search(
         &self,
         vector: &Vector,
         limit: Limit,
-        _filter: impl Fn(Key) -> bool,
-    ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<(Key, Distance)>>> {
+        _filter: impl Fn(PrimaryId) -> bool,
+    ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<(PrimaryId, Distance)>>> {
         self.search(vector, limit)
     }
 
@@ -434,25 +436,13 @@ impl UsearchIndex for RwLock<Simulator> {
 
 // Initial and incremental number for the index vectors reservation.
 // The value was taken for initial benchmarks (size similar to benchmark size)
-const RESERVE_INCREMENT: usize = 1000000;
+const RESERVE_INCREMENT_GLOBAL: usize = 1000000;
+const RESERVE_INCREMENT_LOCAL: usize = 1000;
 
 // When free space for index vectors drops below this, will reserve more space
 // The ratio was taken for initial benchmarks
-const RESERVE_THRESHOLD: usize = RESERVE_INCREMENT / 3;
-
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    PartialEq,
-    Eq,
-    Hash,
-    derive_more::From,
-    derive_more::AsRef,
-    derive_more::Display,
-)]
-/// Key for index embeddings
-struct Key(u64);
+const RESERVE_THRESHOLD_GLOBAL: usize = RESERVE_INCREMENT_GLOBAL / 3;
+const RESERVE_THRESHOLD_LOCAL: usize = RESERVE_INCREMENT_LOCAL / 3;
 
 struct MetricConfig {
     quantization: Quantization,
@@ -542,9 +532,11 @@ mod operation {
     impl From<&Index> for Mode {
         fn from(msg: &Index) -> Self {
             match msg {
-                Index::Add { .. } => Mode::Insert,
-                Index::Remove { .. } => Mode::Remove,
-                Index::Ann { .. } | Index::FilteredAnn { .. } | Index::Count { .. } => Mode::Search,
+                Index::AddVector { .. } => Mode::Insert,
+                Index::RemoveVector { .. } => Mode::Remove,
+                Index::Ann { .. } | Index::FilteredAnn { .. } => Mode::Search,
+                Index::RemovePartition { .. } => todo!(),
+                Index::Count { .. } => unreachable!(),
             }
         }
     }
@@ -626,8 +618,8 @@ mod operation {
             self.permit(Mode::Reserve).await
         }
 
-        /// Capacity permit cannot be concurrent only with reserve mode.
-        pub(super) async fn permit_for_capacity(&mut self) -> Permit {
+        /// Capacity and size permit cannot be concurrent only with reserve mode.
+        pub(super) async fn permit_for_capacity_and_size(&mut self) -> Permit {
             while self.mode == Mode::Reserve {
                 if self.counter.load(Ordering::Relaxed) == 0 {
                     // checking for capacity is during add, so insert mode is fine
@@ -646,21 +638,17 @@ mod operation {
     }
 }
 
-struct IndexState<I: UsearchIndex + Send + Sync + 'static> {
+struct PartitionState<I: UsearchIndex + Send + Sync + 'static> {
+    partition_id: PartitionId,
     idx: Arc<I>,
-    keys: RwLock<BiMap<PrimaryKey, Key>>,
-    dimensions: Dimensions,
-    usearch_key: AtomicU64,
 }
 
-impl<I: UsearchIndex + Send + Sync + 'static> IndexState<I> {
-    fn new(idx: Arc<I>, dimensions: Dimensions) -> Self {
-        Self {
-            idx,
-            keys: RwLock::new(BiMap::new()),
-            dimensions,
-            usearch_key: AtomicU64::new(0),
-        }
+impl<I> PartitionState<I>
+where
+    I: UsearchIndex + Send + Sync + 'static,
+{
+    fn new(partition_id: PartitionId, idx: Arc<I>) -> Self {
+        Self { partition_id, idx }
     }
 
     fn stop(&self) {
@@ -668,16 +656,32 @@ impl<I: UsearchIndex + Send + Sync + 'static> IndexState<I> {
     }
 }
 
-fn new<I: UsearchIndex + Send + Sync + 'static>(
-    idx: Arc<I>,
-    id: IndexId,
+struct IndexState {
     dimensions: Dimensions,
-    primary_key_columns: Arc<Vec<ColumnName>>,
+    size: Arc<AtomicUsize>,
+    operation: operation::Operation,
+}
+
+impl IndexState {
+    fn new(dimensions: Dimensions) -> Self {
+        Self {
+            dimensions,
+            size: Arc::new(AtomicUsize::new(0)),
+            operation: operation::Operation::new(),
+        }
+    }
+}
+
+fn new<I: UsearchIndex + Send + Sync + 'static>(
+    index_fn: impl FnOnce() -> anyhow::Result<Arc<I>> + Clone + Send + Sync + 'static,
+    index_key: IndexKey,
+    dimensions: Dimensions,
+    table: Arc<RwLock<impl TableSearch + Send + Sync + 'static>>,
     tokio_semaphore: Arc<Semaphore>,
     rayon_semaphore: Arc<Semaphore>,
     memory: mpsc::Sender<Memory>,
 ) -> anyhow::Result<mpsc::Sender<Index>> {
-    idx.reserve(RESERVE_INCREMENT)?;
+    //idx.reserve(RESERVE_INCREMENT)?;
 
     // TODO: The value of channel size was taken from initial benchmarks. Needs more testing
     const CHANNEL_SIZE: usize = 10;
@@ -685,57 +689,229 @@ fn new<I: UsearchIndex + Send + Sync + 'static>(
 
     tokio::spawn(
         {
-            let id = id.clone();
+            let index_key = index_key.clone();
             async move {
                 debug!("starting");
-                let idx = Arc::new(IndexState::new(Arc::clone(&idx), dimensions));
+                //let idx = Arc::new(IndexState::new(Arc::clone(&idx), dimensions, table));
+                let mut states = BTreeMap::new();
+                let mut partitions = BTreeMap::new();
 
                 let mut allocate_prev = Allocate::Can;
-                let mut operation = operation::Operation::new();
 
                 while let Some(msg) = rx.recv().await {
-                    if !check_memory_allocation(&msg, &memory, &mut allocate_prev, &id).await {
+                    if !check_memory_allocation(&msg, &memory, &mut allocate_prev, &index_key).await
+                    {
                         continue;
                     }
 
-                    dispatch_task(
-                        &mut operation,
+                    let Some((state, partition, msg)) = prepare_partition(
+                        index_fn.clone(),
+                        &mut states,
+                        &mut partitions,
+                        table.as_ref(),
+                        dimensions,
                         msg,
-                        Arc::clone(&idx),
-                        Arc::clone(&primary_key_columns),
+                    ) else {
+                        continue;
+                    };
+
+                    dispatch_task(
+                        state,
+                        partition,
+                        &table,
                         &tokio_semaphore,
                         &rayon_semaphore,
+                        msg,
                     )
                     .await;
                 }
 
-                idx.stop();
+                partitions
+                    .into_values()
+                    .for_each(|partition| partition.stop());
 
                 debug!("finished");
             }
         }
-        .instrument(debug_span!("usearch", "{id}")),
+        .instrument(debug_span!("usearch", "{index_key}")),
     );
 
     Ok(tx)
 }
 
-async fn dispatch_task(
-    operation: &mut operation::Operation,
+fn prepare_partition<'a, I, T>(
+    index_fn: impl FnOnce() -> anyhow::Result<Arc<I>>,
+    states: &'a mut BTreeMap<IndexId, IndexState>,
+    partitions: &mut BTreeMap<PartitionId, Arc<PartitionState<I>>>,
+    table: &RwLock<T>,
+    dimensions: Dimensions,
     msg: Index,
-    idx: Arc<IndexState<impl UsearchIndex + Send + Sync + 'static>>,
-    primary_key_columns: Arc<Vec<ColumnName>>,
+) -> Option<(&'a mut IndexState, Arc<PartitionState<I>>, Index)>
+where
+    I: UsearchIndex + Send + Sync + 'static,
+    T: TableSearch + Send + Sync + 'static,
+{
+    match msg {
+        Index::AddVector { partition_id, .. } => {
+            let index_id = partition_id.index_id();
+            if let Some(partition) = partitions.get(&partition_id) {
+                let Some(state) = states.get_mut(&index_id) else {
+                    error!("index state not found for index {index_id:?}");
+                    return None;
+                };
+                return Some((state, Arc::clone(partition), msg));
+            }
+            let partition = Arc::new(PartitionState::new(
+                partition_id,
+                index_fn()
+                    .inspect_err(|err| {
+                        error!("failed to create index for partition {partition_id:?}: {err}")
+                    })
+                    .ok()?,
+            ));
+            let state = states
+                .entry(index_id)
+                .or_insert_with(|| IndexState::new(dimensions));
+            partitions.insert(partition_id, Arc::clone(&partition));
+            Some((state, partition, msg))
+        }
+
+        Index::Ann {
+            index_key,
+            embedding,
+            limit,
+            tx,
+        } => {
+            let Some((partition_id, _)) = table.read().unwrap().partition_id(&index_key, None)
+            else {
+                warn!("partition id not found for index key {index_key:?} during ann");
+                _ = tx.send(Ok((vec![], vec![])));
+                return None;
+            };
+            let index_id = partition_id.index_id();
+            let Some((state, partition)) = states
+                .get_mut(&index_id)
+                .zip(partitions.get(&partition_id))
+                .map(|(state, partition)| (state, Arc::clone(partition)))
+            else {
+                warn!("state or partition not found for index key {index_key:?} during ann");
+                _ = tx.send(Ok((vec![], vec![])));
+                return None;
+            };
+            Some((
+                state,
+                partition,
+                Index::Ann {
+                    embedding,
+                    limit,
+                    tx,
+                    index_key,
+                },
+            ))
+        }
+
+        Index::FilteredAnn {
+            index_key,
+            embedding,
+            filter,
+            limit,
+            tx,
+        } => {
+            let Some((partition_id, restrictions)) = table
+                .read()
+                .unwrap()
+                .partition_id(&index_key, Some(filter.restrictions))
+            else {
+                warn!("partition id not found for index key {index_key:?} during filtered ann");
+                _ = tx.send(Ok((vec![], vec![])));
+                return None;
+            };
+            let index_id = partition_id.index_id();
+            let Some((state, partition)) = states
+                .get_mut(&index_id)
+                .zip(partitions.get(&partition_id))
+                .map(|(state, partition)| (state, Arc::clone(partition)))
+            else {
+                warn!(
+                    "state or partition not found for index key {index_key:?} \
+                        during filtered ann"
+                );
+                _ = tx.send(Ok((vec![], vec![])));
+                return None;
+            };
+            let msg = if let Some(restrictions) = restrictions {
+                Index::FilteredAnn {
+                    embedding,
+                    limit,
+                    filter: Filter {
+                        restrictions,
+                        allow_filtering: filter.allow_filtering,
+                    },
+                    tx,
+                    index_key,
+                }
+            } else {
+                Index::Ann {
+                    embedding,
+                    limit,
+                    tx,
+                    index_key,
+                }
+            };
+            Some((state, partition, msg))
+        }
+
+        Index::Count { index_key, tx } => {
+            let Some(index_id) = table.read().unwrap().index_id(&index_key) else {
+                let err = anyhow!("index id not found for index key {index_key:?}");
+                warn!("index count: {err}");
+                _ = tx.send(Err(err));
+                return None;
+            };
+            _ = tx.send(Ok(states
+                .get_mut(&index_id)
+                .map(|state| state.size.load(Ordering::Relaxed))
+                .unwrap_or(0)));
+            None
+        }
+
+        Index::RemoveVector { partition_id, .. } => {
+            let index_id = partition_id.index_id();
+            states
+                .get_mut(&index_id)
+                .zip(partitions.get(&partition_id))
+                .map(|(state, partition)| (state, Arc::clone(partition), msg))
+        }
+
+        Index::RemovePartition { partition_id } => {
+            if let Some(idx) = partitions.remove(&partition_id) {
+                idx.stop();
+            };
+            None
+        }
+    }
+}
+
+async fn dispatch_task<I, T>(
+    state: &mut IndexState,
+    partition: Arc<PartitionState<I>>,
+    table: &Arc<RwLock<T>>,
     tokio_semaphore: &Arc<Semaphore>,
     rayon_semaphore: &Arc<Semaphore>,
-) {
-    if let Index::Add { .. } = &msg {
-        let operation_permit = operation.permit_for_capacity().await;
-        if needs_more_capacity(idx.idx.as_ref(), &idx.keys).is_some() {
+    msg: Index,
+) where
+    I: UsearchIndex + Send + Sync + 'static,
+    T: TableSearch + Send + Sync + 'static,
+{
+    if let Index::AddVector { .. } = &msg {
+        let operation_permit = state.operation.permit_for_capacity_and_size().await;
+        let is_global = partition.partition_id.index_id().is_global();
+        if needs_more_capacity(partition.idx.as_ref(), is_global).is_some() {
             drop(operation_permit);
-            let operation_permit = operation.permit_for_reserve().await;
-            if let Some(capacity) = needs_more_capacity(idx.idx.as_ref(), &idx.keys) {
+            let operation_permit = state.operation.permit_for_reserve().await;
+            if let Some(capacity) = needs_more_capacity(partition.idx.as_ref(), is_global) {
                 let permit = Arc::clone(rayon_semaphore).acquire_owned().await.unwrap();
-                let idx = Arc::clone(&idx.idx);
+                let idx = Arc::clone(&partition.idx);
                 rayon::spawn(move || {
                     reserve(idx.as_ref(), capacity);
                     drop(permit);
@@ -745,13 +921,16 @@ async fn dispatch_task(
         }
     }
 
-    let operation_permit = operation.permit_for_message(&msg).await;
+    let operation_permit = state.operation.permit_for_message(&msg).await;
 
+    let table = Arc::clone(table);
+    let dimensions = state.dimensions;
+    let size = Arc::clone(&state.size);
     if should_run_on_tokio(&msg) {
         let permit = Arc::clone(tokio_semaphore).acquire_owned().await.unwrap();
         tokio::spawn(async move {
             crate::move_to_the_end_of_async_runtime_queue().await;
-            process(msg, &idx, &primary_key_columns);
+            process(partition, table, dimensions, size, msg);
             drop(permit);
             drop(operation_permit);
         });
@@ -759,69 +938,66 @@ async fn dispatch_task(
     }
     let permit = Arc::clone(rayon_semaphore).acquire_owned().await.unwrap();
     rayon::spawn(move || {
-        process(msg, &idx, &primary_key_columns);
+        process(partition, table, dimensions, size, msg);
         drop(permit);
         drop(operation_permit);
     });
 }
 
 fn should_run_on_tokio(msg: &Index) -> bool {
-    matches!(msg, Index::Ann { .. } | Index::Count { .. })
+    matches!(msg, Index::Ann { .. })
 }
 
-fn process<I: UsearchIndex + Send + Sync + 'static>(
+fn process<I, T>(
+    partition: Arc<PartitionState<I>>,
+    table: Arc<RwLock<T>>,
+    dimensions: Dimensions,
+    size: Arc<AtomicUsize>,
     msg: Index,
-    index: &IndexState<I>,
-    primary_key_columns: &[ColumnName],
-) {
+) where
+    I: UsearchIndex + Send + Sync + 'static,
+    T: TableSearch + Send + Sync + 'static,
+{
     match msg {
-        Index::Add {
-            primary_key,
+        Index::AddVector {
+            primary_id,
             embedding,
             in_progress: _in_progress,
-        } => {
-            add(
-                index.idx.as_ref(),
-                &index.keys,
-                &index.usearch_key,
-                primary_key,
-                embedding,
-            );
-        }
+            ..
+        } => add(partition.idx.as_ref(), primary_id, &embedding, &size),
+
         Index::Ann {
             embedding,
             limit,
             tx,
+            ..
         } => {
-            if let Some(tx) = validate_dimensions(tx, &embedding, index.dimensions) {
-                ann(Arc::clone(&index.idx), tx, &index.keys, embedding, limit);
+            if let Some(tx) = validate_dimensions(tx, &embedding, dimensions) {
+                ann(partition, tx, &table, embedding, limit);
             }
         }
+
         Index::FilteredAnn {
             embedding,
             limit,
             filter,
             tx,
+            ..
         } => {
-            if let Some(tx) = validate_dimensions(tx, &embedding, index.dimensions) {
-                filtered_ann(
-                    Arc::clone(&index.idx),
-                    tx,
-                    &index.keys,
-                    primary_key_columns,
-                    embedding,
-                    filter,
-                    limit,
-                );
+            if let Some(tx) = validate_dimensions(tx, &embedding, dimensions) {
+                filtered_ann(partition, tx, &table, embedding, filter, limit);
             }
         }
-        Index::Count { tx } => {
-            count(Arc::clone(&index.idx), tx);
-        }
-        Index::Remove {
-            primary_key,
+
+        Index::Count { .. } => unreachable!(),
+
+        Index::RemoveVector {
+            primary_id,
             in_progress: _in_progress,
-        } => remove(index.idx.as_ref(), &index.keys, primary_key),
+            ..
+        } => remove(partition.idx.as_ref(), primary_id, &size),
+
+        Index::RemovePartition { .. } => unreachable!(),
     }
 }
 
@@ -834,43 +1010,36 @@ fn reserve(idx: &impl UsearchIndex, capacity: usize) {
     }
 }
 
-fn needs_more_capacity(
-    idx: &impl UsearchIndex,
-    keys: &RwLock<BiMap<PrimaryKey, Key>>,
-) -> Option<usize> {
+fn needs_more_capacity(idx: &impl UsearchIndex, is_global: bool) -> Option<usize> {
     let capacity = idx.capacity();
-    let free_space = capacity - keys.read().unwrap().len();
+    let free_space = capacity - idx.size();
+    let (increment, threshold) = if is_global {
+        (RESERVE_INCREMENT_GLOBAL, RESERVE_THRESHOLD_GLOBAL)
+    } else {
+        (RESERVE_INCREMENT_LOCAL, RESERVE_THRESHOLD_LOCAL)
+    };
 
-    if free_space < RESERVE_THRESHOLD {
-        Some(capacity + RESERVE_INCREMENT)
+    if free_space < threshold {
+        Some(capacity + increment)
     } else {
         None
     }
 }
 
-fn add(
-    idx: &impl UsearchIndex,
-    keys: &RwLock<BiMap<PrimaryKey, Key>>,
-    usearch_key: &AtomicU64,
-    primary_key: PrimaryKey,
-    embedding: Vector,
-) {
-    let key = usearch_key.fetch_add(1, Ordering::Relaxed).into();
-    if let Err(err) = idx.add(key, &embedding) {
-        debug!("add: unable to add embedding for key {key}: {err}");
-        return;
-    };
-    let _ = keys.write().unwrap().insert(primary_key.clone(), key);
+fn add(idx: &impl UsearchIndex, primary_id: PrimaryId, embedding: &Vector, size: &AtomicUsize) {
+    if let Err(err) = idx.add(primary_id, embedding) {
+        warn!("add: unable to add embedding: {err}");
+    } else {
+        size.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
-fn remove(idx: &impl UsearchIndex, keys: &RwLock<BiMap<PrimaryKey, Key>>, primary_key: PrimaryKey) {
-    let Some((_, key)) = keys.write().unwrap().remove_by_left(&primary_key) else {
-        return;
-    };
-
-    if let Err(err) = idx.remove(key) {
-        debug!("remove: unable to remove embeddings for key {key}: {err}");
-    };
+fn remove(idx: &impl UsearchIndex, row_id: PrimaryId, size: &AtomicUsize) {
+    if let Err(err) = idx.remove(row_id) {
+        warn!("remove: unable to remove embeddings: {err}");
+    } else {
+        size.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 fn validate_dimensions(
@@ -888,25 +1057,30 @@ fn validate_dimensions(
     }
 }
 
-fn ann(
-    idx: Arc<impl UsearchIndex>,
+fn ann<I>(
+    partition: Arc<PartitionState<I>>,
     tx_ann: oneshot::Sender<AnnR>,
-    keys: &RwLock<BiMap<PrimaryKey, Key>>,
+    table: &Arc<RwLock<impl TableSearch>>,
     embedding: Vector,
     limit: Limit,
-) {
+) where
+    I: UsearchIndex + Send + Sync + 'static,
+{
     tx_ann
         .send(
-            idx.search(&embedding, limit)
+            partition.idx.search(&embedding, limit)
                 .map_err(|err| anyhow!("ann: search failed: {err}"))
                 .and_then(|matches| {
-                    let keys = keys.read().unwrap();
+                    let table = table.read().unwrap();
                     let (primary_keys, distances) = itertools::process_results(
                         matches.map(|result| {
-                            result.and_then(|(key, distance)| {
-                                keys.get_by_right(&key)
-                                    .cloned()
-                                    .ok_or(anyhow!("not defined primary key column {key}"))
+                            result.and_then(|(primary_id, distance)| {
+                                table
+                                    .primary_key(partition.partition_id, primary_id)
+                                    .ok_or(anyhow!(
+                                        "not defined primary_key for partition_id {partition_id:?} and primary_id {primary_id:?}",
+                                        partition_id = partition.partition_id,
+                                    ))
                                     .map(|primary_key| (primary_key, distance))
                             })
                         }),
@@ -918,147 +1092,39 @@ fn ann(
         .unwrap_or_else(|_| trace!("ann: unable to send response"));
 }
 
-/// Compare two CqlValues, returning an Ordering if they are comparable.
-/// Only Numeric, Text, Date, Time, and Timestamp types support comparison operators.
-fn cql_cmp(lhs: &CqlValue, rhs: &CqlValue) -> Option<std::cmp::Ordering> {
-    match (lhs, rhs) {
-        // Numeric types
-        (CqlValue::TinyInt(a), CqlValue::TinyInt(b)) => Some(a.cmp(b)),
-        (CqlValue::SmallInt(a), CqlValue::SmallInt(b)) => Some(a.cmp(b)),
-        (CqlValue::Int(a), CqlValue::Int(b)) => Some(a.cmp(b)),
-        (CqlValue::BigInt(a), CqlValue::BigInt(b)) => Some(a.cmp(b)),
-        (CqlValue::Float(a), CqlValue::Float(b)) => a.partial_cmp(b),
-        (CqlValue::Double(a), CqlValue::Double(b)) => a.partial_cmp(b),
-        (CqlValue::Counter(a), CqlValue::Counter(b)) => Some(a.0.cmp(&b.0)),
-        // Text types
-        (CqlValue::Text(a), CqlValue::Text(b)) => Some(a.cmp(b)),
-        (CqlValue::Ascii(a), CqlValue::Ascii(b)) => Some(a.cmp(b)),
-        // Date and Time types (access inner values directly)
-        (CqlValue::Date(a), CqlValue::Date(b)) => Some(a.0.cmp(&b.0)),
-        (CqlValue::Time(a), CqlValue::Time(b)) => Some(a.0.cmp(&b.0)),
-        (CqlValue::Timestamp(a), CqlValue::Timestamp(b)) => Some(a.0.cmp(&b.0)),
-        // Unsupported or mismatched types
-        _ => None,
-    }
-}
-
-/// Lexicographically compare tuple values.
-/// Returns the ordering of the first non-equal pair, or Equal if all pairs are equal.
-fn cql_cmp_tuple(
-    primary_key: &PrimaryKey,
-    primary_key_value: impl Fn(&PrimaryKey, &ColumnName) -> Option<CqlValue>,
-    lhs: &[ColumnName],
-    rhs: &[CqlValue],
-) -> Option<std::cmp::Ordering> {
-    for (col, rhs_val) in lhs.iter().zip(rhs.iter()) {
-        let lhs_val = primary_key_value(primary_key, col)?;
-        match cql_cmp(&lhs_val, rhs_val)? {
-            std::cmp::Ordering::Equal => continue,
-            other => return Some(other),
-        }
-    }
-    Some(std::cmp::Ordering::Equal)
-}
-
-fn filtered_ann(
-    idx: Arc<impl UsearchIndex>,
+fn filtered_ann<I>(
+    partition: Arc<PartitionState<I>>,
     tx_ann: oneshot::Sender<AnnR>,
-    keys: &RwLock<BiMap<PrimaryKey, Key>>,
-    primary_key_columns: &[ColumnName],
+    table: &Arc<RwLock<impl TableSearch>>,
     embedding: Vector,
     filter: Filter,
     limit: Limit,
-) {
-    fn annotate<F>(f: F) -> F
-    where
-        F: Fn(&PrimaryKey, &ColumnName) -> Option<CqlValue>,
-    {
-        f
-    }
-
-    let primary_key_value = annotate(
-        |primary_key: &PrimaryKey, name: &ColumnName| -> Option<CqlValue> {
-            primary_key_columns
-                .iter()
-                .position(|key_column| key_column == name)
-                .and_then(move |idx| primary_key.get(idx))
-        },
-    );
-
-    let id_ok = |key: Key| {
-        let Some(primary_key) = keys.read().unwrap().get_by_right(&key).cloned() else {
-            return false;
-        };
+) where
+    I: UsearchIndex + Send + Sync + 'static,
+{
+    let id_ok = |primary_id: PrimaryId| {
+        let table = table.read().unwrap();
         filter
             .restrictions
             .iter()
-            .all(|restriction| match restriction {
-                Restriction::Eq { lhs, rhs } => {
-                    primary_key_value(&primary_key, lhs).as_ref() == Some(rhs)
-                }
-                Restriction::In { lhs, rhs } => {
-                    let value = primary_key_value(&primary_key, lhs);
-                    rhs.iter().any(|rhs| value.as_ref() == Some(rhs))
-                }
-                Restriction::Lt { lhs, rhs } => primary_key_value(&primary_key, lhs)
-                    .and_then(|value| cql_cmp(&value, rhs))
-                    .is_some_and(|ord| ord.is_lt()),
-                Restriction::Lte { lhs, rhs } => primary_key_value(&primary_key, lhs)
-                    .and_then(|value| cql_cmp(&value, rhs))
-                    .is_some_and(|ord| ord.is_le()),
-                Restriction::Gt { lhs, rhs } => primary_key_value(&primary_key, lhs)
-                    .and_then(|value| cql_cmp(&value, rhs))
-                    .is_some_and(|ord| ord.is_gt()),
-                Restriction::Gte { lhs, rhs } => primary_key_value(&primary_key, lhs)
-                    .and_then(|value| cql_cmp(&value, rhs))
-                    .is_some_and(|ord| ord.is_ge()),
-                Restriction::EqTuple { lhs, rhs } => lhs
-                    .iter()
-                    .zip(rhs.iter())
-                    .all(|(lhs, rhs)| primary_key_value(&primary_key, lhs).as_ref() == Some(rhs)),
-                Restriction::InTuple { lhs, rhs } => {
-                    let values: Vec<_> = lhs
-                        .iter()
-                        .map(|lhs| primary_key_value(&primary_key, lhs))
-                        .collect();
-                    rhs.iter().any(|rhs| {
-                        values
-                            .iter()
-                            .zip(rhs.iter())
-                            .all(|(value, rhs)| value.as_ref() == Some(rhs))
-                    })
-                }
-                Restriction::LtTuple { lhs, rhs } => {
-                    cql_cmp_tuple(&primary_key, primary_key_value, lhs, rhs)
-                        .is_some_and(|ord| ord.is_lt())
-                }
-                Restriction::LteTuple { lhs, rhs } => {
-                    cql_cmp_tuple(&primary_key, primary_key_value, lhs, rhs)
-                        .is_some_and(|ord| ord.is_le())
-                }
-                Restriction::GtTuple { lhs, rhs } => {
-                    cql_cmp_tuple(&primary_key, primary_key_value, lhs, rhs)
-                        .is_some_and(|ord| ord.is_gt())
-                }
-                Restriction::GteTuple { lhs, rhs } => {
-                    cql_cmp_tuple(&primary_key, primary_key_value, lhs, rhs)
-                        .is_some_and(|ord| ord.is_ge())
-                }
-            })
+            .all(|restriction| table.is_valid_for(partition.partition_id, primary_id, restriction))
     };
 
     tx_ann
         .send(
-            idx.filtered_search(&embedding, limit, id_ok)
+            partition.idx.filtered_search(&embedding, limit, id_ok)
                 .map_err(|err| anyhow!("ann: search failed: {err}"))
                 .and_then(|matches| {
-                    let keys = keys.read().unwrap();
+                    let table = table.read().unwrap();
                     let (primary_keys, distances) = itertools::process_results(
                         matches.map(|result| {
-                            result.and_then(|(key, distance)| {
-                                keys.get_by_right(&key)
-                                    .cloned()
-                                    .ok_or(anyhow!("not defined primary key column {key}"))
+                            result.and_then(|(primary_id, distance)| {
+                                table
+                                    .primary_key(partition.partition_id, primary_id)
+                                    .ok_or(anyhow!(
+                                        "not defined primary key for partition_id {partition_id:?} and primary_id {primary_id:?}",
+                                        partition_id = partition.partition_id,
+                                    ))
                                     .map(|primary_key| (primary_key, distance))
                             })
                         }),
@@ -1068,27 +1134,22 @@ fn filtered_ann(
                 }),
         )
         .unwrap_or_else(|_| trace!("ann: unable to send response"));
-}
-
-fn count(idx: Arc<impl UsearchIndex>, tx: oneshot::Sender<CountR>) {
-    tx.send(Ok(idx.size()))
-        .unwrap_or_else(|_| trace!("count: unable to send response"));
 }
 
 async fn check_memory_allocation(
     msg: &Index,
     memory: &mpsc::Sender<Memory>,
     allocate_prev: &mut Allocate,
-    id: &IndexId,
+    key: &IndexKey,
 ) -> bool {
-    if !matches!(msg, Index::Add { .. }) {
+    if !matches!(msg, Index::AddVector { .. }) {
         return true;
     }
 
     let allocate = memory.can_allocate().await;
     if allocate == Allocate::Cannot {
         if *allocate_prev == Allocate::Can {
-            error!("Unable to add vector for index {id}: not enough memory to reserve more space");
+            error!("Unable to add vector for index {key}: not enough memory to reserve more space");
         }
         *allocate_prev = allocate;
         return false;
@@ -1129,13 +1190,12 @@ fn f32_to_b1x8(f32_vec: &[f32]) -> Vec<b1x8> {
 mod tests {
     use super::*;
     use crate::Config;
-    use crate::Connectivity;
-    use crate::ExpansionAdd;
-    use crate::ExpansionSearch;
-    use crate::IndexId;
+    use crate::IndexKey;
     use crate::index::IndexExt;
-    use crate::invariant_key::InvariantKey;
     use crate::memory;
+    use crate::table::IndexIdGenerator;
+    use crate::table::MockTableSearch;
+    use mockall::predicate::*;
     use scylla::value::CqlValue;
     use std::num::NonZeroUsize;
     use std::time::Duration;
@@ -1146,6 +1206,7 @@ mod tests {
     use usearch::b1x8;
 
     fn add_concurrently(
+        partition_id: PartitionId,
         index: mpsc::Sender<Index>,
         threads: usize,
         adds_per_worker: usize,
@@ -1156,10 +1217,11 @@ mod tests {
             let actor = index.clone();
             add_handles.push(tokio::spawn(async move {
                 for offset in 0..adds_per_worker {
-                    let id = worker * adds_per_worker + offset;
+                    let id = (worker * adds_per_worker + offset) as u64;
                     actor
-                        .add(
-                            InvariantKey::new(vec![CqlValue::Int(id as i32)]).into(),
+                        .add_vector(
+                            partition_id,
+                            id.into(),
                             vec![0.0f32; dimensions.get()].into(),
                             None,
                         )
@@ -1171,6 +1233,7 @@ mod tests {
     }
 
     fn search_concurrently(
+        index_key: IndexKey,
         index: mpsc::Sender<Index>,
         threads: usize,
         searches_per_worker: usize,
@@ -1179,11 +1242,16 @@ mod tests {
         let mut search_handles = Vec::new();
         for _ in 0..threads {
             let actor = index.clone();
+            let index_key = index_key.clone();
             search_handles.push(tokio::spawn(async move {
                 for _ in 0..searches_per_worker {
                     let limit = NonZeroUsize::new(5).unwrap().into();
                     let _ = actor
-                        .ann(vec![0.0f32; dimensions.get()].into(), limit)
+                        .ann(
+                            index_key.clone(),
+                            vec![0.0f32; dimensions.get()].into(),
+                            limit,
+                        )
                         .await;
                 }
             }));
@@ -1195,60 +1263,71 @@ mod tests {
     async fn add_or_replace_size_ann() {
         let (_, config_rx) = watch::channel(Arc::new(Config::default()));
 
-        let factory = UsearchIndexFactory {
-            tokio_semaphore: Arc::new(Semaphore::new(4)),
-            rayon_semaphore: Arc::new(Semaphore::new(4)),
-            mode: Mode::Usearch,
+        let options = IndexOptions {
+            dimensions: 3,
+            metric: MetricKind::L2sq,
+            ..Default::default()
         };
-        let actor = factory
-            .create_index(
-                IndexConfiguration {
-                    id: IndexId::new(&"vector".to_string().into(), &"store".to_string().into()),
-                    dimensions: NonZeroUsize::new(3).unwrap().into(),
-                    connectivity: Connectivity::default(),
-                    expansion_add: ExpansionAdd::default(),
-                    expansion_search: ExpansionSearch::default(),
-                    space_type: SpaceType::Euclidean,
-                    quantization: Quantization::default(),
-                },
-                Arc::new(vec![]),
-                memory::new(config_rx),
-            )
-            .unwrap();
+        let threads = Handle::current().metrics().num_workers() + rayon::current_num_threads();
+        let table = Arc::new(RwLock::new(MockTableSearch::new()));
+        let index_key = IndexKey::new(&"vector".into(), &"store".into());
+        let actor = new(
+            move || Ok(Arc::new(ThreadedUsearchIndex::new(options, threads)?)),
+            index_key.clone(),
+            NonZeroUsize::new(3).unwrap().into(),
+            Arc::clone(&table),
+            Arc::new(Semaphore::new(4)),
+            Arc::new(Semaphore::new(4)),
+            memory::new(config_rx),
+        )
+        .unwrap();
 
+        let index_id = IndexIdGenerator::new().next(true).unwrap();
+        let partition_id = PartitionId::global(index_id);
         actor
-            .add(
-                InvariantKey::new(vec![CqlValue::Int(1), CqlValue::Text("one".to_string())]).into(),
-                vec![1., 1., 1.].into(),
-                None,
-            )
+            .add_vector(partition_id, 1.into(), vec![1., 1., 1.].into(), None)
             .await;
         actor
-            .add(
-                InvariantKey::new(vec![CqlValue::Int(2), CqlValue::Text("two".to_string())]).into(),
-                vec![2., -2., 2.].into(),
-                None,
-            )
+            .add_vector(partition_id, 2.into(), vec![2., -2., 2.].into(), None)
             .await;
         actor
-            .add(
-                InvariantKey::new(vec![CqlValue::Int(3), CqlValue::Text("three".to_string())])
-                    .into(),
-                vec![3., 3., 3.].into(),
-                None,
-            )
+            .add_vector(partition_id, 3.into(), vec![3., 3., 3.].into(), None)
             .await;
 
+        table
+            .write()
+            .unwrap()
+            .expect_index_id()
+            .with(eq(index_key.clone()))
+            .returning(move |_| Some(index_id));
+
+        table.write().unwrap().expect_partition_id().returning({
+            let index_key = index_key.clone();
+            move |key, restrictions| {
+                assert_eq!(key, &index_key);
+                assert!(restrictions.is_none());
+                Some((partition_id, None))
+            }
+        });
         time::timeout(Duration::from_secs(10), async {
-            while actor.count().await.unwrap() != 3 {
+            while actor.count(index_key.clone()).await.unwrap() != 3 {
                 task::yield_now().await;
             }
         })
         .await
         .unwrap();
 
+        table
+            .write()
+            .unwrap()
+            .expect_primary_key()
+            .with(eq(partition_id), eq(PrimaryId::from(2)))
+            .once()
+            .returning(|_, _| Some(Arc::new([CqlValue::Int(2)].into())));
+
         let (primary_keys, distances) = actor
             .ann(
+                index_key.clone(),
                 vec![2.2, -2.2, 2.2].into(),
                 NonZeroUsize::new(1).unwrap().into(),
             )
@@ -1257,29 +1336,27 @@ mod tests {
         assert_eq!(primary_keys.len(), 1);
         assert_eq!(distances.len(), 1);
         assert_eq!(
-            primary_keys.first().unwrap(),
-            &InvariantKey::new(vec![CqlValue::Int(2), CqlValue::Text("two".to_string())]).into(),
+            primary_keys.first().unwrap().as_ref(),
+            &[CqlValue::Int(2)].into()
         );
 
+        actor.remove_vector(partition_id, 3.into(), None).await;
         actor
-            .remove(
-                InvariantKey::new(vec![CqlValue::Int(3), CqlValue::Text("three".to_string())])
-                    .into(),
-                None,
-            )
+            .add_vector(partition_id, 3.into(), vec![2.1, -2.1, 2.1].into(), None)
             .await;
-        actor
-            .add(
-                InvariantKey::new(vec![CqlValue::Int(3), CqlValue::Text("three".to_string())])
-                    .into(),
-                vec![2.1, -2.1, 2.1].into(),
-                None,
-            )
-            .await;
+
+        table
+            .write()
+            .unwrap()
+            .expect_primary_key()
+            .with(eq(partition_id), eq(PrimaryId::from(3)))
+            .once()
+            .returning(|_, _| Some(Arc::new([CqlValue::Int(3)].into())));
 
         time::timeout(Duration::from_secs(10), async {
             while actor
                 .ann(
+                    index_key.clone(),
                     vec![2.2, -2.2, 2.2].into(),
                     NonZeroUsize::new(1).unwrap().into(),
                 )
@@ -1288,8 +1365,8 @@ mod tests {
                 .0
                 .first()
                 .unwrap()
-                != &InvariantKey::new(vec![CqlValue::Int(3), CqlValue::Text("three".to_string())])
-                    .into()
+                .as_ref()
+                != &[CqlValue::Int(3)].into()
             {
                 task::yield_now().await;
             }
@@ -1297,24 +1374,27 @@ mod tests {
         .await
         .unwrap();
 
-        actor
-            .remove(
-                InvariantKey::new(vec![CqlValue::Int(3), CqlValue::Text("three".to_string())])
-                    .into(),
-                None,
-            )
-            .await;
+        actor.remove_vector(partition_id, 3.into(), None).await;
 
         time::timeout(Duration::from_secs(10), async {
-            while actor.count().await.unwrap() != 2 {
+            while actor.count(index_key.clone()).await.unwrap() != 2 {
                 task::yield_now().await;
             }
         })
         .await
         .unwrap();
 
+        table
+            .write()
+            .unwrap()
+            .expect_primary_key()
+            .with(eq(partition_id), eq(PrimaryId::from(2)))
+            .once()
+            .returning(|_, _| Some(Arc::new([CqlValue::Int(2)].into())));
+
         let (primary_keys, distances) = actor
             .ann(
+                index_key,
                 vec![2.2, -2.2, 2.2].into(),
                 NonZeroUsize::new(1).unwrap().into(),
             )
@@ -1323,8 +1403,8 @@ mod tests {
         assert_eq!(primary_keys.len(), 1);
         assert_eq!(distances.len(), 1);
         assert_eq!(
-            primary_keys.first().unwrap(),
-            &InvariantKey::new(vec![CqlValue::Int(2), CqlValue::Text("two".to_string())]).into(),
+            primary_keys.first().unwrap().as_ref(),
+            &[CqlValue::Int(2)].into(),
         );
     }
 
@@ -1332,280 +1412,63 @@ mod tests {
     async fn allocate_parameter_works() {
         let (memory_tx, mut memory_rx) = mpsc::channel(1);
 
-        let factory = UsearchIndexFactory {
-            tokio_semaphore: Arc::new(Semaphore::new(4)),
-            rayon_semaphore: Arc::new(Semaphore::new(4)),
-            mode: Mode::Usearch,
+        let options = IndexOptions {
+            dimensions: 3,
+            metric: MetricKind::L2sq,
+            ..Default::default()
         };
-        let actor = factory
-            .create_index(
-                IndexConfiguration {
-                    id: IndexId::new(&"vector".to_string().into(), &"store".to_string().into()),
-                    dimensions: NonZeroUsize::new(3).unwrap().into(),
-                    connectivity: Connectivity::default(),
-                    expansion_add: ExpansionAdd::default(),
-                    expansion_search: ExpansionSearch::default(),
-                    space_type: SpaceType::Euclidean,
-                    quantization: Quantization::default(),
-                },
-                Arc::new(vec![]),
-                memory_tx,
-            )
-            .unwrap();
+        let threads = Handle::current().metrics().num_workers() + rayon::current_num_threads();
+        let table = Arc::new(RwLock::new(MockTableSearch::new()));
+        let index_key = IndexKey::new(&"vector".into(), &"store".into());
+        let actor = new(
+            move || Ok(Arc::new(ThreadedUsearchIndex::new(options, threads)?)),
+            index_key.clone(),
+            NonZeroUsize::new(3).unwrap().into(),
+            Arc::clone(&table),
+            Arc::new(Semaphore::new(4)),
+            Arc::new(Semaphore::new(4)),
+            memory_tx,
+        )
+        .unwrap();
 
         let memory_respond = tokio::spawn(async move {
             let Memory::CanAllocate { tx } = memory_rx.recv().await.unwrap();
             _ = tx.send(Allocate::Cannot);
             memory_rx
         });
+        let index_id = IndexIdGenerator::new().next(true).unwrap();
+        let partition_id = PartitionId::global(index_id);
         actor
-            .add(
-                InvariantKey::new(vec![CqlValue::Int(1)]).into(),
-                vec![1., 1., 1.].into(),
-                None,
-            )
+            .add_vector(partition_id, 1.into(), vec![1., 1., 1.].into(), None)
             .await;
         let mut memory_rx = memory_respond.await.unwrap();
-        assert_eq!(actor.count().await.unwrap(), 0);
+
+        table
+            .write()
+            .unwrap()
+            .expect_index_id()
+            .with(eq(index_key.clone()))
+            .returning(move |_| Some(index_id));
+
+        assert_eq!(actor.count(index_key.clone()).await.unwrap(), 0);
 
         let memory_respond = tokio::spawn(async move {
             let Memory::CanAllocate { tx } = memory_rx.recv().await.unwrap();
             _ = tx.send(Allocate::Can);
         });
         actor
-            .add(
-                InvariantKey::new(vec![CqlValue::Int(1)]).into(),
-                vec![1., 1., 1.].into(),
-                None,
-            )
+            .add_vector(partition_id, 1.into(), vec![1., 1., 1.].into(), None)
             .await;
         memory_respond.await.unwrap();
 
         // Wait for the add operation to complete, as it runs in a separate task.
         time::timeout(Duration::from_secs(10), async {
-            while actor.count().await.unwrap() != 1 {
+            while actor.count(index_key.clone()).await.unwrap() != 1 {
                 task::yield_now().await;
             }
         })
         .await
         .unwrap();
-    }
-
-    mod cql_cmp_tests {
-        use super::super::cql_cmp;
-        use scylla::value::CqlValue;
-        use std::cmp::Ordering;
-
-        #[test]
-        fn compare_integers() {
-            assert_eq!(
-                cql_cmp(&CqlValue::Int(1), &CqlValue::Int(2)),
-                Some(Ordering::Less)
-            );
-            assert_eq!(
-                cql_cmp(&CqlValue::Int(2), &CqlValue::Int(2)),
-                Some(Ordering::Equal)
-            );
-            assert_eq!(
-                cql_cmp(&CqlValue::Int(3), &CqlValue::Int(2)),
-                Some(Ordering::Greater)
-            );
-        }
-
-        #[test]
-        fn compare_bigints() {
-            assert_eq!(
-                cql_cmp(&CqlValue::BigInt(100), &CqlValue::BigInt(200)),
-                Some(Ordering::Less)
-            );
-            assert_eq!(
-                cql_cmp(&CqlValue::BigInt(-50), &CqlValue::BigInt(-50)),
-                Some(Ordering::Equal)
-            );
-        }
-
-        #[test]
-        fn compare_floats() {
-            assert_eq!(
-                cql_cmp(&CqlValue::Float(1.0), &CqlValue::Float(2.0)),
-                Some(Ordering::Less)
-            );
-            assert_eq!(
-                cql_cmp(&CqlValue::Float(2.5), &CqlValue::Float(2.5)),
-                Some(Ordering::Equal)
-            );
-            // NaN comparison returns None
-            assert_eq!(
-                cql_cmp(&CqlValue::Float(f32::NAN), &CqlValue::Float(1.0)),
-                None
-            );
-        }
-
-        #[test]
-        fn compare_doubles() {
-            assert_eq!(
-                cql_cmp(&CqlValue::Double(1.0), &CqlValue::Double(2.0)),
-                Some(Ordering::Less)
-            );
-            assert_eq!(
-                cql_cmp(&CqlValue::Double(f64::NAN), &CqlValue::Double(1.0)),
-                None
-            );
-        }
-
-        #[test]
-        fn compare_text() {
-            assert_eq!(
-                cql_cmp(
-                    &CqlValue::Text("apple".to_string()),
-                    &CqlValue::Text("banana".to_string())
-                ),
-                Some(Ordering::Less)
-            );
-            assert_eq!(
-                cql_cmp(
-                    &CqlValue::Text("same".to_string()),
-                    &CqlValue::Text("same".to_string())
-                ),
-                Some(Ordering::Equal)
-            );
-        }
-
-        #[test]
-        fn compare_ascii() {
-            assert_eq!(
-                cql_cmp(
-                    &CqlValue::Ascii("aaa".to_string()),
-                    &CqlValue::Ascii("bbb".to_string())
-                ),
-                Some(Ordering::Less)
-            );
-        }
-
-        #[test]
-        fn compare_smallint_and_tinyint() {
-            assert_eq!(
-                cql_cmp(&CqlValue::SmallInt(10), &CqlValue::SmallInt(20)),
-                Some(Ordering::Less)
-            );
-            assert_eq!(
-                cql_cmp(&CqlValue::TinyInt(5), &CqlValue::TinyInt(3)),
-                Some(Ordering::Greater)
-            );
-        }
-
-        #[test]
-        fn mismatched_types_return_none() {
-            assert_eq!(cql_cmp(&CqlValue::Int(1), &CqlValue::BigInt(1)), None);
-            assert_eq!(
-                cql_cmp(&CqlValue::Int(1), &CqlValue::Text("1".to_string())),
-                None
-            );
-            assert_eq!(cql_cmp(&CqlValue::Float(1.0), &CqlValue::Double(1.0)), None);
-        }
-
-        #[test]
-        fn unsupported_types_return_none() {
-            assert_eq!(
-                cql_cmp(
-                    &CqlValue::Blob(vec![1, 2, 3]),
-                    &CqlValue::Blob(vec![1, 2, 3])
-                ),
-                None
-            );
-            assert_eq!(
-                cql_cmp(&CqlValue::Boolean(true), &CqlValue::Boolean(false)),
-                None
-            );
-        }
-    }
-
-    mod cql_cmp_tuple_tests {
-        use super::super::{ColumnName, PrimaryKey, cql_cmp_tuple};
-        use crate::invariant_key::InvariantKey;
-        use scylla::value::CqlValue;
-        use std::cmp::Ordering;
-
-        fn make_primary_key(values: Vec<CqlValue>) -> PrimaryKey {
-            InvariantKey::new(values).into()
-        }
-
-        fn primary_key_value_fn(
-            columns: &[ColumnName],
-        ) -> impl Fn(&PrimaryKey, &ColumnName) -> Option<CqlValue> + use<'_> {
-            move |pk: &PrimaryKey, name: &ColumnName| {
-                columns
-                    .iter()
-                    .position(|col| col == name)
-                    .and_then(|idx| pk.get(idx))
-            }
-        }
-
-        #[test]
-        fn equal_tuples() {
-            let columns: Vec<ColumnName> = vec!["a".to_string().into(), "b".to_string().into()];
-            let pk = make_primary_key(vec![CqlValue::Int(1), CqlValue::Int(2)]);
-            let lhs: Vec<ColumnName> = vec!["a".to_string().into(), "b".to_string().into()];
-            let rhs = vec![CqlValue::Int(1), CqlValue::Int(2)];
-
-            let result = cql_cmp_tuple(&pk, primary_key_value_fn(&columns), &lhs, &rhs);
-            assert_eq!(result, Some(Ordering::Equal));
-        }
-
-        #[test]
-        fn first_element_differs() {
-            let columns: Vec<ColumnName> = vec!["a".to_string().into(), "b".to_string().into()];
-            let pk = make_primary_key(vec![CqlValue::Int(1), CqlValue::Int(2)]);
-            let lhs: Vec<ColumnName> = vec!["a".to_string().into(), "b".to_string().into()];
-            let rhs = vec![CqlValue::Int(2), CqlValue::Int(2)];
-
-            let result = cql_cmp_tuple(&pk, primary_key_value_fn(&columns), &lhs, &rhs);
-            assert_eq!(result, Some(Ordering::Less));
-        }
-
-        #[test]
-        fn second_element_differs() {
-            let columns: Vec<ColumnName> = vec!["a".to_string().into(), "b".to_string().into()];
-            let pk = make_primary_key(vec![CqlValue::Int(1), CqlValue::Int(3)]);
-            let lhs: Vec<ColumnName> = vec!["a".to_string().into(), "b".to_string().into()];
-            let rhs = vec![CqlValue::Int(1), CqlValue::Int(2)];
-
-            let result = cql_cmp_tuple(&pk, primary_key_value_fn(&columns), &lhs, &rhs);
-            assert_eq!(result, Some(Ordering::Greater));
-        }
-
-        #[test]
-        fn missing_column_returns_none() {
-            let columns: Vec<ColumnName> = vec!["a".to_string().into()];
-            let pk = make_primary_key(vec![CqlValue::Int(1)]);
-            let lhs: Vec<ColumnName> = vec!["a".to_string().into(), "b".to_string().into()];
-            let rhs = vec![CqlValue::Int(1), CqlValue::Int(2)];
-
-            let result = cql_cmp_tuple(&pk, primary_key_value_fn(&columns), &lhs, &rhs);
-            assert_eq!(result, None);
-        }
-
-        #[test]
-        fn incomparable_types_returns_none() {
-            let columns: Vec<ColumnName> = vec!["a".to_string().into()];
-            let pk = make_primary_key(vec![CqlValue::Int(1)]);
-            let lhs: Vec<ColumnName> = vec!["a".to_string().into()];
-            let rhs = vec![CqlValue::BigInt(1)]; // Different type
-
-            let result = cql_cmp_tuple(&pk, primary_key_value_fn(&columns), &lhs, &rhs);
-            assert_eq!(result, None);
-        }
-
-        #[test]
-        fn empty_tuples_are_equal() {
-            let columns: Vec<ColumnName> = vec![];
-            let pk = make_primary_key(vec![]);
-            let lhs: Vec<ColumnName> = vec![];
-            let rhs: Vec<CqlValue> = vec![];
-
-            let result = cql_cmp_tuple(&pk, primary_key_value_fn(&columns), &lhs, &rhs);
-            assert_eq!(result, Some(Ordering::Equal));
-        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1615,33 +1478,54 @@ mod tests {
         // Exceeding this limit results in a "No available threads to lock" error.
         // This test verifies our concurrency control by spawning a high number of parallel adds and searches (2 x num of cores).
         let (_, config_rx) = watch::channel(Arc::new(Config::default()));
+
         let dimensions = NonZeroUsize::new(1024).unwrap();
-        let factory = UsearchIndexFactory {
-            tokio_semaphore: Arc::new(Semaphore::new(Semaphore::MAX_PERMITS)),
-            rayon_semaphore: Arc::new(Semaphore::new(Semaphore::MAX_PERMITS)),
-            mode: Mode::Usearch,
+        let options = IndexOptions {
+            dimensions: dimensions.get(),
+            metric: MetricKind::L2sq,
+            ..Default::default()
         };
-        let index = factory
-            .create_index(
-                IndexConfiguration {
-                    id: IndexId::new(&"vector".to_string().into(), &"store".to_string().into()),
-                    dimensions: dimensions.into(),
-                    connectivity: Connectivity::default(),
-                    expansion_add: ExpansionAdd::default(),
-                    expansion_search: ExpansionSearch::default(),
-                    space_type: SpaceType::Euclidean,
-                    quantization: Quantization::default(),
-                },
-                Arc::new(vec![]),
-                memory::new(config_rx),
-            )
-            .unwrap();
+        let threads = Handle::current().metrics().num_workers() + rayon::current_num_threads();
+        let table = Arc::new(RwLock::new(MockTableSearch::new()));
+        let index_key = IndexKey::new(&"vector".into(), &"store".into());
+        let index = new(
+            move || Ok(Arc::new(ThreadedUsearchIndex::new(options, threads)?)),
+            index_key.clone(),
+            dimensions.into(),
+            Arc::clone(&table),
+            Arc::new(Semaphore::new(Semaphore::MAX_PERMITS)),
+            Arc::new(Semaphore::new(Semaphore::MAX_PERMITS)),
+            memory::new(config_rx),
+        )
+        .unwrap();
+
         let threads = Handle::current().metrics().num_workers();
 
         let adds_per_worker = 50;
-        let add_handles = add_concurrently(index.clone(), threads, adds_per_worker, dimensions);
-        let search_handles =
-            search_concurrently(index.clone(), threads, adds_per_worker, dimensions);
+        let index_id = IndexIdGenerator::new().next(true).unwrap();
+        let partition_id = PartitionId::global(index_id);
+        table.write().unwrap().expect_partition_id().returning({
+            let index_key = index_key.clone();
+            move |key, restrictions| {
+                assert_eq!(key, &index_key);
+                assert!(restrictions.is_none());
+                Some((partition_id, None))
+            }
+        });
+        let add_handles = add_concurrently(
+            partition_id,
+            index.clone(),
+            threads,
+            adds_per_worker,
+            dimensions,
+        );
+        let search_handles = search_concurrently(
+            index_key.clone(),
+            index.clone(),
+            threads,
+            adds_per_worker,
+            dimensions,
+        );
 
         for handle in add_handles {
             handle.await.unwrap();
@@ -1650,9 +1534,16 @@ mod tests {
             handle.await.unwrap();
         }
 
+        table
+            .write()
+            .unwrap()
+            .expect_index_id()
+            .with(eq(index_key.clone()))
+            .returning(move |_| Some(index_id));
+
         // Wait for expected number of vectors to be added.
         time::timeout(Duration::from_secs(10), async {
-            while index.count().await.unwrap() != threads * adds_per_worker {
+            while index.count(index_key.clone()).await.unwrap() != threads * adds_per_worker {
                 task::yield_now().await;
             }
         })

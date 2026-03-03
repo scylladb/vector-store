@@ -255,7 +255,7 @@ impl DbBasic {
                 column
                     .entry(primary_key)
                     .and_modify(|(entry_embedding, entry_timestamp)| {
-                        if entry_timestamp.as_ref() < timestamp.as_ref() {
+                        if *entry_timestamp < timestamp {
                             *entry_embedding = embedding.clone();
                             *entry_timestamp = timestamp;
                         }

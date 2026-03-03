@@ -49,6 +49,11 @@ pub(crate) async fn dimension(path: Arc<PathBuf>, config: Arc<Config>) -> usize 
         .dimension as usize
 }
 
+pub(crate) async fn ids_stream(path: Arc<PathBuf>, config: Arc<Config>) -> BoxStream<'static, i64> {
+    let header = Header::header(&path.join(&config.data_fbin)).await;
+    stream::iter(0..header.count as i64).boxed()
+}
+
 pub(crate) async fn vector_stream(
     path: Arc<PathBuf>,
     config: Arc<Config>,
@@ -79,7 +84,12 @@ pub(crate) async fn vector_stream(
     .boxed()
 }
 
-pub(crate) async fn queries(path: Arc<PathBuf>, config: Arc<Config>, limit: usize) -> Vec<Query> {
+pub(crate) async fn queries(
+    path: Arc<PathBuf>,
+    config: Arc<Config>,
+    _id_ok: impl Fn(i64) -> bool,
+    limit: usize,
+) -> Vec<Query> {
     let header_fbin = Header::header(&path.join(&config.query_fbin)).await;
     let header_ibin = Header::header(&path.join(&config.query_ibin)).await;
     assert_eq!(header_fbin.count, header_ibin.count);
