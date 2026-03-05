@@ -195,30 +195,30 @@ class InstanceType:
 # types for Vector Store nodes.
 # AWS prices as of 2026-02-26 (us-east-1 region).
 AWS_INSTANCES: list[InstanceType] = [
-    InstanceType("t4g.medium",     2,    4,    0.134,    0.0784),
-    InstanceType("r7g.medium",     1,    8,    0.214,    0.1324),
-    InstanceType("r7g.large",      2,   16,    0.428,    0.2644),
-    InstanceType("r7g.xlarge",     4,   32,    0.857,    0.5288),
-    InstanceType("r7g.2xlarge",    8,   64,    1.714,    1.058),
-    InstanceType("r7g.4xlarge",   16,  128,    3.427,    2.116),
-    InstanceType("r7g.8xlarge",   32,  256,    6.854,    4.232),
-    InstanceType("r7g.12xlarge",  48,  384,   10.282,    6.348),
-    InstanceType("r7g.16xlarge",  64,  512,   13.709,    8.464),
-    InstanceType("r7i.24xlarge",  96,  768,   25.402,   15.6832),
-    InstanceType("r7i.48xlarge", 192, 1536,   50.803,   31.3656),
+    InstanceType("t4g.medium",     2,    4,    0.067,    0.0392),
+    InstanceType("r7g.medium",     1,    8,    0.107,    0.0662),
+    InstanceType("r7g.large",      2,   16,    0.214,    0.1322),
+    InstanceType("r7g.xlarge",     4,   32,    0.4285,   0.2644),
+    InstanceType("r7g.2xlarge",    8,   64,    0.857,    0.529),
+    InstanceType("r7g.4xlarge",   16,  128,    1.7135,   1.058),
+    InstanceType("r7g.8xlarge",   32,  256,    3.427,    2.116),
+    InstanceType("r7g.12xlarge",  48,  384,    5.141,    3.174),
+    InstanceType("r7g.16xlarge",  64,  512,    6.8545,   4.232),
+    InstanceType("r7i.24xlarge",  96,  768,   12.701,    7.8416),
+    InstanceType("r7i.48xlarge", 192, 1536,   25.4015,  15.6828),
 ]
 
 # GCP prices as of 2026-02-26 (us-east1 region).
 GCP_INSTANCES: list[InstanceType] = [
-    InstanceType("e2-medium",      2,    4,    0.134,    0.13402284),
-    InstanceType("n4-highmem-2",   2,   16,    0.476,    0.29992),
-    InstanceType("n4-highmem-4",   4,   32,    0.952,    0.59984),
-    InstanceType("n4-highmem-8",   8,   64,    1.904,    1.19968),
-    InstanceType("n4-highmem-16", 16,  128,    3.809,    2.39936),
-    InstanceType("n4-highmem-32", 32,  256,    7.617,    4.79872),
-    InstanceType("n4-highmem-48", 48,  384,   11.426,    7.19808),
-    InstanceType("n4-highmem-64", 64,  512,   15.235,    9.59744),
-    InstanceType("n4-highmem-80", 80,  640,   19.043,   11.9968),
+    InstanceType("e2-medium",      2,    4,    0.067,    0.06701142),
+    InstanceType("n4-highmem-2",   2,   16,    0.238,    0.14996),
+    InstanceType("n4-highmem-4",   4,   32,    0.476,    0.29992),
+    InstanceType("n4-highmem-8",   8,   64,    0.952,    0.59984),
+    InstanceType("n4-highmem-16", 16,  128,    1.9045,   1.19968),
+    InstanceType("n4-highmem-32", 32,  256,    3.8085,   2.39936),
+    InstanceType("n4-highmem-48", 48,  384,    5.713,    3.59904),
+    InstanceType("n4-highmem-64", 64,  512,    7.6175,   4.79872),
+    InstanceType("n4-highmem-80", 80,  640,    9.5215,   5.9984),
 ]
 
 # Default instance list (AWS) for backward compatibility.
