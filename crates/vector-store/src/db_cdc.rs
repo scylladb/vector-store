@@ -19,6 +19,7 @@ use anyhow::Context;
 use anyhow::anyhow;
 use anyhow::bail;
 use async_trait::async_trait;
+use futures::future::select_all;
 use scylla::client::session::Session;
 use scylla::value::CqlValue;
 use scylla_cdc::consumer::CDCRow;
@@ -50,6 +51,13 @@ const DEFAULT_CONSISTENT_SLEEP_INTERVAL: Duration = Duration::from_secs(10);
 // Default parameters for the fine-grained CDC reader (latency-focused).
 const DEFAULT_REALTIME_SAFETY_INTERVAL: Duration = Duration::from_millis(100);
 const DEFAULT_REALTIME_SLEEP_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Maximum consecutive errors before a CDC reader with Backoff policy escalates to session teardown.
+const DEFAULT_MAX_CONSECUTIVE_ERRORS: u32 = 3;
+
+/// Base backoff duration for CDC reader restarts after errors.
+/// The actual backoff is `DEFAULT_BACKOFF_BASE * consecutive_error_count`.
+const DEFAULT_BACKOFF_BASE: Duration = Duration::from_secs(5);
 
 /// Parameters for a CDC reader instance.
 #[derive(Clone, Debug)]
@@ -103,28 +111,48 @@ pub(crate) fn new(
         async move {
             debug!("starting");
 
+            let session_error_notify = Arc::clone(&cdc_error_notify);
+
             let mut readers = vec![
-                CdcReaderState::new("wide", CdcReaderParams::wide),
-                CdcReaderState::new("fine", CdcReaderParams::fine),
+                CdcReaderState::new(
+                    "wide",
+                    CdcErrorPolicy::propagate(cdc_error_notify),
+                    CdcReaderParams::wide,
+                ),
+                CdcReaderState::new(
+                    "fine",
+                    CdcErrorPolicy::backoff_and_retry(session_error_notify),
+                    CdcReaderParams::fine,
+                ),
             ];
 
             loop {
-                // Wait for session changes
-                if session_rx.changed().await.is_err() {
-                    break;
-                }
+                tokio::select! {
+                    // Wait for session changes
+                    result = session_rx.changed() => {
+                        if result.is_err() {
+                            break;
+                        }
 
-                let session_opt = session_rx.borrow_and_update().clone();
-                handle_session_change(
-                    &mut readers,
-                    session_opt,
-                    &config_rx,
-                    &metadata,
-                    &tx_embeddings,
-                    &internals,
-                    &cdc_error_notify,
-                )
-                .await;
+                        let session_opt = session_rx.borrow_and_update().clone();
+                        handle_session_change(
+                            &mut readers, session_opt, &config_rx,
+                            &metadata, &tx_embeddings, &internals,
+                        ).await;
+                    }
+
+                    (index, _, _) = select_all(
+                        readers.iter().enumerate().map(|(i, r)| {
+                            let n = Arc::clone(&r.error_notify);
+                            Box::pin(async move { n.notified().await; i })
+                        })
+                    ) => {
+                        readers[index].handle_error(
+                            &session_rx, &config_rx, &metadata,
+                            &tx_embeddings, &internals,
+                        ).await;
+                    }
+                }
             }
 
             // Cleanup
@@ -144,7 +172,6 @@ async fn handle_session_change(
     metadata: &IndexMetadata,
     tx_embeddings: &mpsc::Sender<(DbEmbedding, Option<AsyncInProgress>)>,
     internals: &Sender<Internals>,
-    cdc_error_notify: &Arc<Notify>,
 ) {
     match session_opt {
         Some(session) => {
@@ -156,16 +183,10 @@ async fn handle_session_change(
             let config = config_rx.borrow().clone();
 
             for reader in readers.iter_mut() {
+                reader.reset_on_session_change();
                 let params = (reader.params_fn)(&config);
                 reader
-                    .restart(
-                        params,
-                        &session,
-                        metadata,
-                        tx_embeddings,
-                        internals,
-                        cdc_error_notify,
-                    )
+                    .restart(params, &session, metadata, tx_embeddings, internals)
                     .await;
             }
         }
@@ -187,24 +208,63 @@ async fn stop_all(readers: &mut [CdcReaderState]) {
     }
 }
 
+/// Defines how a CDC reader handles errors from its handler task.
+enum CdcErrorPolicy {
+    /// Propagate errors to the session level via the provided notify,
+    /// causing a session teardown and reconnect.
+    Propagate(Arc<Notify>),
+    /// Handle errors locally with backoff and retry.
+    /// After `max_consecutive_errors` consecutive failures, escalate to
+    /// session teardown via `session_notify`.
+    BackoffAndRetry {
+        max_consecutive_errors: u32,
+        backoff_base: Duration,
+        consecutive_errors: u32,
+        session_notify: Arc<Notify>,
+    },
+}
+
+impl CdcErrorPolicy {
+    fn propagate(session_notify: Arc<Notify>) -> Self {
+        Self::Propagate(session_notify)
+    }
+
+    fn backoff_and_retry(session_notify: Arc<Notify>) -> Self {
+        Self::BackoffAndRetry {
+            max_consecutive_errors: DEFAULT_MAX_CONSECUTIVE_ERRORS,
+            backoff_base: DEFAULT_BACKOFF_BASE,
+            consecutive_errors: 0,
+            session_notify,
+        }
+    }
+}
+
 /// Per-reader state for managing a single CDC reader's lifecycle.
 struct CdcReaderState {
     reader: Option<scylla_cdc::log_reader::CDCLogReader>,
     handler_task: Option<tokio::task::JoinHandle<Duration>>,
     shutdown_notify: Arc<Notify>,
+    error_notify: Arc<Notify>,
     start: Duration,
     name: &'static str,
+    error_policy: CdcErrorPolicy,
     params_fn: fn(&Config) -> CdcReaderParams,
 }
 
 impl CdcReaderState {
-    fn new(name: &'static str, params_fn: fn(&Config) -> CdcReaderParams) -> Self {
+    fn new(
+        name: &'static str,
+        error_policy: CdcErrorPolicy,
+        params_fn: fn(&Config) -> CdcReaderParams,
+    ) -> Self {
         Self {
             reader: None,
             handler_task: None,
             shutdown_notify: Arc::new(Notify::new()),
+            error_notify: Arc::new(Notify::new()),
             start: cdc_now(),
             name,
+            error_policy,
             params_fn,
         }
     }
@@ -220,6 +280,17 @@ impl CdcReaderState {
         }
     }
 
+    /// Drains stale error notifications and resets the consecutive error counter.
+    fn reset_on_session_change(&mut self) {
+        let _ = pin!(self.error_notify.notified()).enable();
+        if let CdcErrorPolicy::BackoffAndRetry {
+            consecutive_errors, ..
+        } = &mut self.error_policy
+        {
+            *consecutive_errors = 0;
+        }
+    }
+
     /// Stops the current reader, drains stale notifications, and starts a new reader with the given parameters.
     async fn restart(
         &mut self,
@@ -228,7 +299,6 @@ impl CdcReaderState {
         metadata: &IndexMetadata,
         tx_embeddings: &mpsc::Sender<(DbEmbedding, Option<AsyncInProgress>)>,
         internals: &Sender<Internals>,
-        cdc_error_notify: &Arc<Notify>,
     ) {
         self.stop().await;
         drain_pending_notifications(&self.shutdown_notify).await;
@@ -248,7 +318,7 @@ impl CdcReaderState {
                 self.handler_task = Some(spawn_handler_task(
                     handler,
                     Arc::clone(&self.shutdown_notify),
-                    Arc::clone(cdc_error_notify),
+                    Arc::clone(&self.error_notify),
                     internals.clone(),
                     metadata,
                     self.name,
@@ -263,6 +333,56 @@ impl CdcReaderState {
             }
             Err(e) => {
                 error!("Failed to create {} CDC reader: {e}", self.name);
+            }
+        }
+    }
+
+    /// Handles an error notification according to the reader's [`CdcErrorPolicy`].
+    async fn handle_error(
+        &mut self,
+        session_rx: &watch::Receiver<Option<Arc<Session>>>,
+        config_rx: &watch::Receiver<Arc<Config>>,
+        metadata: &IndexMetadata,
+        tx_embeddings: &mpsc::Sender<(DbEmbedding, Option<AsyncInProgress>)>,
+        internals: &Sender<Internals>,
+    ) {
+        match &mut self.error_policy {
+            CdcErrorPolicy::Propagate(session_notify) => {
+                session_notify.notify_one();
+            }
+            CdcErrorPolicy::BackoffAndRetry {
+                max_consecutive_errors,
+                backoff_base,
+                consecutive_errors,
+                session_notify,
+            } => {
+                *consecutive_errors += 1;
+                let count = *consecutive_errors;
+                let limit = *max_consecutive_errors;
+
+                if count >= limit {
+                    let session_notify = Arc::clone(session_notify);
+                    warn!(
+                        "{} CDC reader failed {count} consecutive times, escalating to session teardown",
+                        self.name
+                    );
+                    session_notify.notify_one();
+                } else {
+                    let backoff = *backoff_base * count;
+                    warn!(
+                        "{} CDC reader error ({count}/{limit}), restarting after {backoff:?} backoff",
+                        self.name,
+                    );
+                    time::sleep(backoff).await;
+
+                    let session = session_rx.borrow().clone();
+                    if let Some(session) = session {
+                        let config = config_rx.borrow().clone();
+                        let params = (self.params_fn)(&config);
+                        self.restart(params, &session, metadata, tx_embeddings, internals)
+                            .await;
+                    }
+                }
             }
         }
     }
