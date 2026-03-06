@@ -131,6 +131,15 @@ FLOAT32_BYTES = 4
 # Minimum number of Vector Store node replicas for production availability.
 MIN_VECTOR_STORE_REPLICAS = 2
 
+# When the initial (smallest-fit) selection requires more than this many
+# instances, the algorithm tries larger instance types to reduce the count.
+INSTANCE_UPSCALE_TRIGGER = 3
+
+# Maximum cost increase factor when upscaling instance size.  The total
+# hourly cost after upscaling must not exceed this factor times the initial
+# cost (e.g. 1.1 means at most 10 % more expensive).
+INSTANCE_UPSCALE_COST_FACTOR = 1.1
+
 # Dimensionality bounds.
 MIN_DIMENSIONS = 1
 MAX_DIMENSIONS = 16_000
@@ -544,18 +553,25 @@ def _select_instance(
     required_vcpus: int,
     cloud_provider: CloudProvider = CloudProvider.AWS,
 ) -> InstanceSelection:
-    """Select the cheapest instance configuration for Vector Store-node replicas.
+    """Select the instance configuration for Vector Store-node replicas.
 
-    Each Vector Store replica holds the full HNSW index in RAM, so every
-    instance must have at least *index_ram_gb* of memory.  The query load is
-    distributed across all replicas, so the aggregate vCPU count must meet
-    *required_vcpus*.  At least ``MIN_VECTOR_STORE_REPLICAS`` instances are
-    always provisioned for high availability at reasonable cost.  When more than
-    two replicas are needed, the count is rounded up to the next multiple of 3 so
-    that replicas can be evenly distributed across availability zones.
+    The algorithm works in two phases:
 
-    The function evaluates every entry in ``AVAILABLE_INSTANCES`` and returns
-    the option with the lowest total hourly cost.
+    1. **Smallest-fit selection** — find the *smallest* instance type whose
+       RAM is at least *index_ram_gb* (every replica holds the full HNSW
+       index in memory).  Compute how many replicas are needed to meet the
+       aggregate *required_vcpus* (at least ``MIN_VECTOR_STORE_REPLICAS``
+       for high availability).
+
+    2. **Upscale optimisation** — if the initial selection requires more than
+       ``INSTANCE_UPSCALE_TRIGGER`` instances, try progressively larger
+       instance types.  Accept a larger instance when the total hourly cost
+       does not exceed ``INSTANCE_UPSCALE_COST_FACTOR`` times the initial
+       cost **and** the number of instances is strictly reduced.
+
+    When more than two replicas are needed, the count is rounded up to the
+    next multiple of 3 so that replicas can be evenly distributed across
+    availability zones.
 
     Raises
     ------
@@ -563,12 +579,20 @@ def _select_instance(
         If no available instance has enough RAM for the index.
     """
     instances = get_instances(cloud_provider)
-    best: InstanceSelection | None = None
 
-    for inst in instances:
-        if inst.ram_gb < index_ram_gb:
-            continue
+    # Sort by RAM ascending (vCPUs as tiebreaker) so that eligible[0] is
+    # the smallest instance that can hold the index.
+    sorted_instances = sorted(instances, key=lambda i: (i.ram_gb, i.vcpus))
+    eligible = [i for i in sorted_instances if i.ram_gb >= index_ram_gb]
 
+    if not eligible:
+        raise ValueError(
+            f"No available instance has enough RAM ({index_ram_gb:.2f} GB) "
+            f"for the HNSW index. Consider using quantization to reduce "
+            f"memory requirements."
+        )
+
+    def _build_candidate(inst: InstanceType) -> InstanceSelection:
         if required_vcpus > 0 and inst.vcpus > 0:
             num = max(
                 MIN_VECTOR_STORE_REPLICAS,
@@ -585,7 +609,7 @@ def _select_instance(
         total_cost = num * inst.cost_per_hour
         total_cost_yearly = num * inst.cost_per_hour_yearly
 
-        candidate = InstanceSelection(
+        return InstanceSelection(
             instance_type=inst,
             num_instances=num,
             total_vcpus=num * inst.vcpus,
@@ -594,15 +618,21 @@ def _select_instance(
             total_cost_per_hour_yearly=round(total_cost_yearly, 2),
         )
 
-        if best is None or candidate.total_cost_per_hour < best.total_cost_per_hour:
-            best = candidate
+    # Phase 1: start with the smallest eligible instance.
+    best = _build_candidate(eligible[0])
 
-    if best is None:
-        raise ValueError(
-            f"No available instance has enough RAM ({index_ram_gb:.2f} GB) "
-            f"for the HNSW index. Consider using quantization to reduce "
-            f"memory requirements."
-        )
+    # Phase 2: if too many instances are needed, try larger ones to reduce
+    # the instance count while staying within the cost threshold.
+    if best.num_instances > INSTANCE_UPSCALE_TRIGGER:
+        initial_cost = best.num_instances * eligible[0].cost_per_hour
+        max_cost = initial_cost * INSTANCE_UPSCALE_COST_FACTOR
+
+        for inst in eligible[1:]:
+            candidate = _build_candidate(inst)
+            candidate_cost = candidate.num_instances * inst.cost_per_hour
+            if (candidate_cost <= max_cost
+                    and candidate.num_instances < best.num_instances):
+                best = candidate
 
     return best
 
