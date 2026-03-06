@@ -5,6 +5,7 @@
 
 mod ann;
 mod auth;
+mod cdc;
 mod crud;
 mod db_timeout;
 mod full_scan;
@@ -24,6 +25,7 @@ pub async fn test_cases() -> impl Iterator<Item = (String, TestCase)> {
     vec![
         ("ann", ann::new().await),
         ("auth", auth::new().await),
+        ("cdc", cdc::new().await),
         ("crud", crud::new().await),
         ("db_timeout", db_timeout::new().await),
         ("full_scan", full_scan::new().await),

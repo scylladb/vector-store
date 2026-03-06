@@ -4,6 +4,7 @@
  */
 
 pub mod db;
+mod db_cdc;
 pub mod db_index;
 mod distance;
 mod engine;
@@ -87,8 +88,10 @@ pub struct Config {
     pub cql_keepalive_timeout: Option<Duration>,
     pub cql_tcp_keepalive_interval: Option<Duration>,
     pub cql_uri_translation_map: Option<HashMap<SocketAddr, SocketAddr>>,
-    pub cdc_safety_interval: Option<Duration>,
-    pub cdc_sleep_interval: Option<Duration>,
+    pub cdc_wide_safety_interval: Option<Duration>,
+    pub cdc_wide_sleep_interval: Option<Duration>,
+    pub cdc_fine_safety_interval: Option<Duration>,
+    pub cdc_fine_sleep_interval: Option<Duration>,
     pub disable_colors: bool,
     pub tls_cert_path: Option<std::path::PathBuf>,
     pub tls_key_path: Option<std::path::PathBuf>,
@@ -112,8 +115,10 @@ impl Default for Config {
             cql_keepalive_timeout: None,
             cql_tcp_keepalive_interval: None,
             cql_uri_translation_map: None,
-            cdc_safety_interval: None,
-            cdc_sleep_interval: None,
+            cdc_wide_safety_interval: None,
+            cdc_wide_sleep_interval: None,
+            cdc_fine_safety_interval: None,
+            cdc_fine_sleep_interval: None,
         }
     }
 }
