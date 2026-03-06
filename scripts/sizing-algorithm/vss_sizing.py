@@ -26,7 +26,7 @@ Input Parameters
 - **target_qps** (int) - Desired queries-per-second at P99 <= 15 ms latency.
   Min: 10, Max: 1 000 000, Default: 1 000.
 - **recall** (int) - Target recall accuracy as a percentage.
-  Min: 70, Max: 99, Default: 90.
+  Min: 70, Max: 99, Default: 95.
   Higher recall dramatically reduces throughput per vCPU.
 - **k** (int) - Number of nearest-neighbour results per query.
   Min: 1, Max: 1 000, Default: 10.
