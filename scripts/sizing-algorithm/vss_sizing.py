@@ -26,7 +26,7 @@ Input Parameters
 - **target_qps** (int) - Desired queries-per-second at P99 <= 15 ms latency.
   Min: 10, Max: 1 000 000, Default: 1 000.
 - **recall** (int) - Target recall accuracy as a percentage.
-  Min: 70, Max: 99, Default: 90.
+  Min: 70, Max: 99, Default: 95.
   Higher recall dramatically reduces throughput per vCPU.
 - **k** (int) - Number of nearest-neighbour results per query.
   Min: 1, Max: 1 000, Default: 10.
@@ -131,6 +131,15 @@ FLOAT32_BYTES = 4
 # Minimum number of Vector Store node replicas for production availability.
 MIN_VECTOR_STORE_REPLICAS = 2
 
+# When the initial (smallest-fit) selection requires more than this many
+# instances, the algorithm tries larger instance types to reduce the count.
+INSTANCE_UPSCALE_TRIGGER = 3
+
+# Maximum cost increase factor when upscaling instance size.  The total
+# hourly cost after upscaling must not exceed this factor times the initial
+# cost (e.g. 1.1 means at most 10 % more expensive).
+INSTANCE_UPSCALE_COST_FACTOR = 1.1
+
 # Dimensionality bounds.
 MIN_DIMENSIONS = 1
 MAX_DIMENSIONS = 16_000
@@ -195,30 +204,30 @@ class InstanceType:
 # types for Vector Store nodes.
 # AWS prices as of 2026-02-26 (us-east-1 region).
 AWS_INSTANCES: list[InstanceType] = [
-    InstanceType("t4g.medium",     2,    4,    0.134,    0.0784),
-    InstanceType("r7g.medium",     1,    8,    0.214,    0.1324),
-    InstanceType("r7g.large",      2,   16,    0.428,    0.2644),
-    InstanceType("r7g.xlarge",     4,   32,    0.857,    0.5288),
-    InstanceType("r7g.2xlarge",    8,   64,    1.714,    1.058),
-    InstanceType("r7g.4xlarge",   16,  128,    3.427,    2.116),
-    InstanceType("r7g.8xlarge",   32,  256,    6.854,    4.232),
-    InstanceType("r7g.12xlarge",  48,  384,   10.282,    6.348),
-    InstanceType("r7g.16xlarge",  64,  512,   13.709,    8.464),
-    InstanceType("r7i.24xlarge",  96,  768,   25.402,   15.6832),
-    InstanceType("r7i.48xlarge", 192, 1536,   50.803,   31.3656),
+    InstanceType("t4g.medium",     2,    4,    0.067,    0.0392),
+    InstanceType("r7g.medium",     1,    8,    0.107,    0.0662),
+    InstanceType("r7g.large",      2,   16,    0.214,    0.1322),
+    InstanceType("r7g.xlarge",     4,   32,    0.4285,   0.2644),
+    InstanceType("r7g.2xlarge",    8,   64,    0.857,    0.529),
+    InstanceType("r7g.4xlarge",   16,  128,    1.7135,   1.058),
+    InstanceType("r7g.8xlarge",   32,  256,    3.427,    2.116),
+    InstanceType("r7g.12xlarge",  48,  384,    5.141,    3.174),
+    InstanceType("r7g.16xlarge",  64,  512,    6.8545,   4.232),
+    InstanceType("r7i.24xlarge",  96,  768,   12.701,    7.8416),
+    InstanceType("r7i.48xlarge", 192, 1536,   25.4015,  15.6828),
 ]
 
 # GCP prices as of 2026-02-26 (us-east1 region).
 GCP_INSTANCES: list[InstanceType] = [
-    InstanceType("e2-medium",      2,    4,    0.134,    0.13402284),
-    InstanceType("n4-highmem-2",   2,   16,    0.476,    0.29992),
-    InstanceType("n4-highmem-4",   4,   32,    0.952,    0.59984),
-    InstanceType("n4-highmem-8",   8,   64,    1.904,    1.19968),
-    InstanceType("n4-highmem-16", 16,  128,    3.809,    2.39936),
-    InstanceType("n4-highmem-32", 32,  256,    7.617,    4.79872),
-    InstanceType("n4-highmem-48", 48,  384,   11.426,    7.19808),
-    InstanceType("n4-highmem-64", 64,  512,   15.235,    9.59744),
-    InstanceType("n4-highmem-80", 80,  640,   19.043,   11.9968),
+    InstanceType("e2-medium",      2,    4,    0.067,    0.06701142),
+    InstanceType("n4-highmem-2",   2,   16,    0.238,    0.14996),
+    InstanceType("n4-highmem-4",   4,   32,    0.476,    0.29992),
+    InstanceType("n4-highmem-8",   8,   64,    0.952,    0.59984),
+    InstanceType("n4-highmem-16", 16,  128,    1.9045,   1.19968),
+    InstanceType("n4-highmem-32", 32,  256,    3.8085,   2.39936),
+    InstanceType("n4-highmem-48", 48,  384,    5.713,    3.59904),
+    InstanceType("n4-highmem-64", 64,  512,    7.6175,   4.79872),
+    InstanceType("n4-highmem-80", 80,  640,    9.5215,   5.9984),
 ]
 
 # Default instance list (AWS) for backward compatibility.
@@ -544,18 +553,25 @@ def _select_instance(
     required_vcpus: int,
     cloud_provider: CloudProvider = CloudProvider.AWS,
 ) -> InstanceSelection:
-    """Select the cheapest instance configuration for Vector Store-node replicas.
+    """Select the instance configuration for Vector Store-node replicas.
 
-    Each Vector Store replica holds the full HNSW index in RAM, so every
-    instance must have at least *index_ram_gb* of memory.  The query load is
-    distributed across all replicas, so the aggregate vCPU count must meet
-    *required_vcpus*.  At least ``MIN_VECTOR_STORE_REPLICAS`` instances are
-    always provisioned for high availability at reasonable cost.  When more than
-    two replicas are needed, the count is rounded up to the next multiple of 3 so
-    that replicas can be evenly distributed across availability zones.
+    The algorithm works in two phases:
 
-    The function evaluates every entry in ``AVAILABLE_INSTANCES`` and returns
-    the option with the lowest total hourly cost.
+    1. **Smallest-fit selection** — find the *smallest* instance type whose
+       RAM is at least *index_ram_gb* (every replica holds the full HNSW
+       index in memory).  Compute how many replicas are needed to meet the
+       aggregate *required_vcpus* (at least ``MIN_VECTOR_STORE_REPLICAS``
+       for high availability).
+
+    2. **Upscale optimisation** — if the initial selection requires more than
+       ``INSTANCE_UPSCALE_TRIGGER`` instances, try progressively larger
+       instance types.  Accept a larger instance when the total hourly cost
+       does not exceed ``INSTANCE_UPSCALE_COST_FACTOR`` times the initial
+       cost **and** the number of instances is strictly reduced.
+
+    When more than two replicas are needed, the count is rounded up to the
+    next multiple of 3 so that replicas can be evenly distributed across
+    availability zones.
 
     Raises
     ------
@@ -563,12 +579,20 @@ def _select_instance(
         If no available instance has enough RAM for the index.
     """
     instances = get_instances(cloud_provider)
-    best: InstanceSelection | None = None
 
-    for inst in instances:
-        if inst.ram_gb < index_ram_gb:
-            continue
+    # Sort by RAM ascending (vCPUs as tiebreaker) so that eligible[0] is
+    # the smallest instance that can hold the index.
+    sorted_instances = sorted(instances, key=lambda i: (i.ram_gb, i.vcpus))
+    eligible = [i for i in sorted_instances if i.ram_gb >= index_ram_gb]
 
+    if not eligible:
+        raise ValueError(
+            f"No available instance has enough RAM ({index_ram_gb:.2f} GB) "
+            f"for the HNSW index. Consider using quantization to reduce "
+            f"memory requirements."
+        )
+
+    def _build_candidate(inst: InstanceType) -> InstanceSelection:
         if required_vcpus > 0 and inst.vcpus > 0:
             num = max(
                 MIN_VECTOR_STORE_REPLICAS,
@@ -585,7 +609,7 @@ def _select_instance(
         total_cost = num * inst.cost_per_hour
         total_cost_yearly = num * inst.cost_per_hour_yearly
 
-        candidate = InstanceSelection(
+        return InstanceSelection(
             instance_type=inst,
             num_instances=num,
             total_vcpus=num * inst.vcpus,
@@ -594,15 +618,21 @@ def _select_instance(
             total_cost_per_hour_yearly=round(total_cost_yearly, 2),
         )
 
-        if best is None or candidate.total_cost_per_hour < best.total_cost_per_hour:
-            best = candidate
+    # Phase 1: start with the smallest eligible instance.
+    best = _build_candidate(eligible[0])
 
-    if best is None:
-        raise ValueError(
-            f"No available instance has enough RAM ({index_ram_gb:.2f} GB) "
-            f"for the HNSW index. Consider using quantization to reduce "
-            f"memory requirements."
-        )
+    # Phase 2: if too many instances are needed, try larger ones to reduce
+    # the instance count while staying within the cost threshold.
+    if best.num_instances > INSTANCE_UPSCALE_TRIGGER:
+        initial_cost = best.num_instances * eligible[0].cost_per_hour
+        max_cost = initial_cost * INSTANCE_UPSCALE_COST_FACTOR
+
+        for inst in eligible[1:]:
+            candidate = _build_candidate(inst)
+            candidate_cost = candidate.num_instances * inst.cost_per_hour
+            if (candidate_cost <= max_cost
+                    and candidate.num_instances < best.num_instances):
+                best = candidate
 
     return best
 

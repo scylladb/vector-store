@@ -718,6 +718,72 @@ class TestInstanceSelection(unittest.TestCase):
             self.assertEqual(sel.num_instances % 3, 0)
 
 
+class TestInstanceUpscaling(unittest.TestCase):
+    """Tests for the upscale optimisation phase of instance selection."""
+
+    def test_no_upscale_when_three_or_fewer_instances(self) -> None:
+        """When <= 3 instances suffice, the smallest eligible is returned."""
+        sel = vs._select_instance(index_ram_gb=2.0, required_vcpus=4)
+        # t4g.medium (2 vCPUs, 4 GB): ceil(4/2)=2 instances, no upscale.
+        self.assertEqual(sel.instance_type.name, "t4g.medium")
+        self.assertEqual(sel.num_instances, 2)
+
+    def test_upscale_reduces_instance_count(self) -> None:
+        """Upscaling should pick a larger instance to reduce instance count."""
+        # Smallest eligible for 22 GB RAM: r7g.xlarge (32 GB, 4 vCPUs).
+        # With 40 vCPUs: ceil(40/4) = 10 -> 12 instances (>3, triggers upscale).
+        # r7g.4xlarge (128 GB, 16 vCPUs): ceil(40/16) = 3 instances, cost
+        # within 10% threshold.
+        sel = vs._select_instance(index_ram_gb=22.0, required_vcpus=40)
+        self.assertLessEqual(sel.num_instances, vs.INSTANCE_UPSCALE_TRIGGER)
+        self.assertEqual(sel.instance_type.name, "r7g.4xlarge")
+        self.assertEqual(sel.num_instances, 3)
+
+    def test_upscale_respects_cost_threshold(self) -> None:
+        """Upscaling must not exceed INSTANCE_UPSCALE_COST_FACTOR × initial cost."""
+        # Smallest eligible for 22 GB RAM: r7g.xlarge (32 GB, 4 vCPUs).
+        # 40 vCPUs → 12 instances → initial cost = 12 × $0.4285 = $5.142.
+        # Max cost = $5.142 × 1.1 = $5.6562.
+        # r7g.8xlarge (32 vCPUs): 2 instances → $6.854 (exceeds threshold).
+        # So r7g.4xlarge (3 instances, ~$5.14) should be picked, not r7g.8xlarge.
+        sel = vs._select_instance(index_ram_gb=22.0, required_vcpus=40)
+        cost = sel.num_instances * sel.instance_type.cost_per_hour
+        initial_cost = 12 * 0.4285  # r7g.xlarge × 12
+        self.assertLessEqual(cost, initial_cost * vs.INSTANCE_UPSCALE_COST_FACTOR)
+
+    def test_upscale_not_applied_when_all_larger_exceed_budget(self) -> None:
+        """If all larger instances exceed the cost threshold, keep the initial."""
+        # t4g.medium (2 vCPUs, $0.067): 100 vCPUs → 51 instances → $3.417.
+        # Max cost $3.759.  All larger instances need ≥50 replicas at higher
+        # per-unit cost, so none fit within 10%.
+        sel = vs._select_instance(index_ram_gb=2.0, required_vcpus=100)
+        self.assertEqual(sel.instance_type.name, "t4g.medium")
+        self.assertEqual(sel.num_instances, 51)
+
+    def test_upscale_picks_smallest_that_fits_budget(self) -> None:
+        """Among multiple candidates within budget, pick the one with fewest instances."""
+        # r7g.xlarge (4 vCPUs): 40 vCPUs → 12 instances.
+        # r7g.2xlarge (8 vCPUs): 6 instances, within budget.
+        # r7g.4xlarge (16 vCPUs): 3 instances, within budget (fewest).
+        # r7g.8xlarge (32 vCPUs): 2 instances, exceeds budget.
+        sel = vs._select_instance(index_ram_gb=22.0, required_vcpus=40)
+        self.assertEqual(sel.num_instances, 3)
+        self.assertEqual(sel.instance_type.name, "r7g.4xlarge")
+
+    def test_upscale_gcp(self) -> None:
+        """Upscaling works with GCP instances too."""
+        # Smallest GCP for 10 GB RAM: n4-highmem-2 (16 GB, 2 vCPUs).
+        # With 20 vCPUs: ceil(20/2) = 10 → 12 instances.
+        # n4-highmem-4 (4 vCPUs): 6 instances.
+        # n4-highmem-8 (8 vCPUs): 3 instances.
+        # Check that upscaling reduces count.
+        sel = vs._select_instance(
+            index_ram_gb=10.0, required_vcpus=20,
+            cloud_provider=vs.CloudProvider.GCP,
+        )
+        self.assertLessEqual(sel.num_instances, vs.INSTANCE_UPSCALE_TRIGGER)
+
+
 class TestEndToEndRAG(unittest.TestCase):
     """End-to-end scenario: RAG application."""
 
@@ -762,8 +828,11 @@ class TestEndToEndImageSearch(unittest.TestCase):
         self.assertLess(result.vector_store_node.total_ram_gb, 50)
         self.assertEqual(result.compression_ratio, vs.SCALAR_COMPRESSION_RATIO)
         self.assertGreater(result.vector_store_node.required_vcpus, 0)
-        self.assertEqual(result.instance_selection.instance_type.name, "r7g.xlarge")
-        self.assertEqual(result.instance_selection.num_instances, 12)
+        # Smallest eligible is r7g.xlarge (32 GB, 4 vCPUs) → 12 instances,
+        # but the upscale optimisation reduces to r7g.4xlarge (128 GB,
+        # 16 vCPUs) with only 3 instances at comparable cost.
+        self.assertEqual(result.instance_selection.instance_type.name, "r7g.4xlarge")
+        self.assertEqual(result.instance_selection.num_instances, 3)
 
 
 class TestEndToEndLargeScale(unittest.TestCase):
