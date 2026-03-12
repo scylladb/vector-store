@@ -695,6 +695,16 @@ fn new<I: UsearchIndex + Send + Sync + 'static>(
                         continue;
                     }
 
+                    // Count must aggregate across all partitions for local indexes.
+                    if let Index::Count { tx, .. } = msg {
+                        let total: usize = partitions
+                            .values()
+                            .map(|p: &Arc<PartitionState<I>>| p.idx.size())
+                            .sum();
+                        _ = tx.send(Ok(total));
+                        continue;
+                    }
+
                     let Some((state, partition)) = prepare_partition(
                         index_fn.clone(),
                         &mut states,
@@ -806,21 +816,7 @@ where
                 })
         }
 
-        Index::Count { index_key, .. } => {
-            let Some(partition_id) = table.read().unwrap().partition_id(index_key, None) else {
-                warn!("partition id not found for index key {index_key:?} during count");
-                return None;
-            };
-            let index_id = partition_id.index_id();
-            states
-                .get_mut(&index_id)
-                .zip(partitions.get(&partition_id))
-                .map(|(state, partition)| (state, Arc::clone(partition)))
-                .or_else(|| {
-                    warn!("state or partition not found for index key {index_key:?} during count");
-                    None
-                })
-        }
+        Index::Count { .. } => unreachable!("Count is handled in the actor loop"),
 
         Index::RemoveVector { partition_id, .. } => {
             let index_id = partition_id.index_id();
@@ -847,10 +843,6 @@ fn handle_no_partition(msg: Index) {
 
         Index::FilteredAnn { tx, .. } => {
             _ = tx.send(Ok((vec![], vec![])));
-        }
-
-        Index::Count { tx, .. } => {
-            _ = tx.send(Ok(0));
         }
 
         _ => {}
