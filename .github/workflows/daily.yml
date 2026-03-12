@@ -16,8 +16,188 @@ env:
   RUST_BACKTRACE: full
 
 jobs:
-  empty:
+  daily-get-scylla-nightly-digest:
     runs-on: ubuntu-latest
     steps:
-      - name: Empty step
-        run: echo "This is a daily workflow that runs at midnight."
+    - name: Get scylla-nightly digest for latest tag
+      run: wget -q -O - "https://hub.docker.com/v2/namespaces/scylladb/repositories/scylla-nightly/tags/latest" | jq -r .digest > scylla-nightly-digest
+
+    - name: Show scylla-nightly digest
+      run: cat scylla-nightly-digest
+
+    - name: Upload scylla-nightly digest as artifact
+      uses: actions/upload-artifact@v6
+      with:
+        name: daily-scylla-nightly-digest
+        path: scylla-nightly-digest
+
+  daily-build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+        include:
+          - os: ubuntu-latest
+            arch: amd64
+          - os: ubuntu-24.04-arm
+            arch: arm64
+    outputs:
+      testcases: ${{ steps.testcases.outputs.testcases }}
+
+    steps:
+    - name: Try to download vector-store artifact
+      id: download-vector-store
+      continue-on-error: true
+      uses: dawidd6/action-download-artifact@v17
+      with:
+        workflow: daily.yml
+        #name: daily-vector-store-${{matrix.arch}}-${{github.sha}}
+        name: daily-vector-store-${{matrix.arch}}
+        workflow_conclusion: ""
+        search_artifacts: true
+ 
+    - name: Try to download vector-search-validator artifact
+      id: download-vector-search-validator
+      continue-on-error: true
+      uses: dawidd6/action-download-artifact@v17
+      with:
+        workflow: daily.yml
+        #name: daily-vector-search-validator-${{matrix.arch}}-${{github.sha}}
+        name: daily-vector-search-validator-${{matrix.arch}}
+        workflow_conclusion: ""
+        search_artifacts: true
+ 
+    - name: Chmod a+x vector-search-validator
+      if: steps.download-vector-search-validator.outcome == 'success'
+      run: chmod a+x vector-search-validator-${{matrix.arch}}
+
+    - uses: actions/checkout@v6
+      if: steps.download-vector-store.outcome == 'failure' || steps.download-vector-search-validator.outcome == 'failure'
+      with:
+        fetch-depth: 0
+        fetch-tags: true
+ 
+    - name: Setup local rust toolchain
+      if: steps.download-vector-store.outcome == 'failure' || steps.download-vector-search-validator.outcome == 'failure'
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+ 
+    - name: Print release toolchain rustc version
+      if: steps.download-vector-store.outcome == 'failure' || steps.download-vector-search-validator.outcome == 'failure'
+      run: ./scripts/run-with-release-toolchain rustc --version
+ 
+    - name: Fetching dependencies
+      if: steps.download-vector-store.outcome == 'failure' || steps.download-vector-search-validator.outcome == 'failure'
+      run: ./scripts/run-with-release-toolchain cargo fetch
+ 
+    - name: Build vector-store
+      if: steps.download-vector-store.outcome == 'failure'
+      run: ./scripts/run-with-release-toolchain cargo build --release --bin vector-store
+ 
+    - name: Copy vector-store
+      if: steps.download-vector-store.outcome == 'failure'
+      run: cp target/amd64/release/vector-store vector-store-${{matrix.arch}}
+ 
+    - name: Build vector-search-validator
+      if: steps.download-vector-search-validator.outcome == 'failure'
+      run: ./scripts/run-with-release-toolchain cargo build --release --bin vector-search-validator -p vector-search-validator
+ 
+    - name: Copy vector-search-validator
+      if: steps.download-vector-search-validator.outcome == 'failure'
+      run: cp target/amd64/release/vector-search-validator vector-search-validator-${{matrix.arch}}
+ 
+    - name: Upload vector-store as artifact
+      uses: actions/upload-artifact@v6
+      with:
+        #name: daily-vector-store-${{github.sha}}
+        name: daily-vector-store-${{matrix.arch}}
+        path: vector-store-${{matrix.arch}}
+ 
+    - name: Upload vector-search-validator as artifact
+      uses: actions/upload-artifact@v6
+      with:
+        #name: daily-vector-search-validator-${{github.sha}}
+        name: daily-vector-search-validator-${{matrix.arch}}
+        path: vector-search-validator-${{matrix.arch}}
+
+  daily-get-testcases:
+    needs: daily-build
+    runs-on: ubuntu-latest
+    outputs:
+      testcases: ${{ steps.testcases.outputs.testcases }}
+
+    steps:
+    - name: Download vector-search-validator artifact
+      uses: actions/download-artifact@v8
+      with:
+        #name: daily-vector-search-validator-amd64-${{github.sha}}
+        name: daily-vector-search-validator-amd64
+ 
+    - name: Chmod a+x vector-search-validator
+      run: chmod a+x vector-search-validator-amd64
+
+    - name: Set testcases output
+      id: testcases
+      run: |
+        echo "testcases=[$(./vector-search-validator-amd64 list | cut -d : -f 1 | sort | uniq | xargs -n 1 -I '{}' echo \"{}\" | paste -sd,)]" >> "$GITHUB_OUTPUT"
+ 
+
+  daily-validator-tests:
+    needs: ["daily-get-scylla-nightly-digest", "daily-get-testcases"]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        testcase: ${{fromJSON(needs.daily-get-testcases.outputs.testcases)}}
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+        include:
+          - os: ubuntu-latest
+            arch: amd64
+          - os: ubuntu-24.04-arm
+            arch: arm64
+    steps:
+    - uses: actions/checkout@v6
+ 
+    - name: Download scylla-nightly digest artifact
+      uses: actions/download-artifact@v8
+      with:
+        name: daily-scylla-nightly-digest
+ 
+    - name: Download vector-store artifact
+      uses: actions/download-artifact@v8
+      with:
+        #name: daily-vector-store-${{matrix.arch}}-${{github.sha}}
+        name: daily-vector-store-${{matrix.arch}}
+ 
+    - name: Download vector-search-validator artifact
+      uses: actions/download-artifact@v8
+      with:
+        #name: daily-vector-search-validator-${{matrix.arch}}-${{github.sha}}
+        name: daily-vector-search-validator-${{matrix.arch}}
+ 
+    - name: Chmod a+x vector-store and vector-search-validator
+      run: chmod a+x vector-store vector-search-validator
+
+    - name: Run the Validator tests for testcase ${{matrix.testcase}}
+      env:
+        testcase: ${{matrix.testcase}}
+        TARGETARCH: ${{matrix.arch}}
+      run: |
+        ./scripts/run-validator-with-scylla-docker scylladb/scylla-nightly@$(cat scylla-nightly-digest) vector-store vector-search-validator ${testcase}:: --verbose
+
+  daily-save-scylla-nightly-digest:
+    needs: daily-validator-tests
+    runs-on: ubuntu-latest
+    steps:
+    - name: Download scylla-nightly digest artifact
+      uses: actions/download-artifact@v8
+      with:
+        name: daily-scylla-nightly-digest
+
+    - name: Show scylla-nightly digest
+      run: cat scylla-nightly-digest
+
+    - name: Upload scylla-nightly digest artifact as artifact
+      uses: actions/upload-artifact@v6
+      with:
+        name: scylla-nightly-digest
+        path: scylla-nightly-digest
