@@ -13,3 +13,56 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
   RUST_BACKTRACE: full
+
+jobs:
+  get-scylla-nightly-latest-digest:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Get latest scylla-nightly digest
+      run: wget -q -O - "https://hub.docker.com/v2/namespaces/scylladb/repositories/scylla-nightly/tags/latest" | jq -r .digest > scylla-nightly-latest-digest.txt
+
+    - name: Upload scylla-nightly latest digest as artifact
+      uses: actions/upload-artifact@v6
+      with:
+        name: scylla-nightly-latest-digest
+        path: scylla-nightly-latest-digest.txt
+
+  validate-scylla-nightly:
+    needs: get-scylla-nightly-latest-digest
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+        fetch-tags: true
+
+    - name: Setup local rust toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+
+    - name: Print release toolchain rustc version
+      run: ./scripts/run-with-release-toolchain rustc --version
+
+    - name: Fetching dependencies
+      run: ./scripts/run-with-release-toolchain cargo fetch
+
+    - name: Build release
+      run: ./scripts/run-with-release-toolchain cargo build --release --workspace
+
+    - name: Run the Validator tests
+      run: ./scripts/run-validator-with-scylla-docker scylladb/scylla-nightly@$(cat scylla-nightly-latest-digest.txt) target/amd64/release/vector-store target/amd64/release/vector-search-validator --verbose
+
+  save-scylla-nightly-latest-digest:
+    needs: validate-scylla-nightly
+    runs-on: ubuntu-latest
+    steps:
+    - name: Download scylla-nightly latest digest artifact
+      uses: actions/download-artifact@v8
+      with:
+        name: scylla-nightly-latest-digest
+        path: scylla-nightly-latest-digest.txt
+
+    - name: Upload scylla-nightly digest artifact as artifact
+      uses: actions/upload-artifact@v6
+      with:
+        name: scylla-nightly-digest
+        path: scylla-nightly-latest-digest.txt
