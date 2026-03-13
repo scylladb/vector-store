@@ -83,13 +83,15 @@ async fn add(
                 primary_id,
                 partition_id,
                 vector,
+                is_update,
             } => {
+                let op_label = if is_update { "update" } else { "insert" };
                 index
                     .add_vector(partition_id, primary_id, vector, in_progress.take())
                     .await;
                 metrics
                     .modified
-                    .with_label_values(&[key.keyspace().as_ref(), key.index().as_ref(), "update"])
+                    .with_label_values(&[key.keyspace().as_ref(), key.index().as_ref(), op_label])
                     .inc();
             }
             Operation::RemoveBeforeAddVector {
@@ -128,6 +130,31 @@ mod tests {
     use anyhow::anyhow;
     use mockall::predicate::*;
     use scylla::value::CqlValue;
+
+    // prometheus counter returns f64, so we need to compare with f64 values
+    fn assert_modified_metric_counts(metrics: &Metrics, insert: f64, update: f64, remove: f64) {
+        assert_eq!(
+            metrics
+                .modified
+                .with_label_values(&["vector", "store", "insert"])
+                .get(),
+            insert,
+        );
+        assert_eq!(
+            metrics
+                .modified
+                .with_label_values(&["vector", "store", "update"])
+                .get(),
+            update,
+        );
+        assert_eq!(
+            metrics
+                .modified
+                .with_label_values(&["vector", "store", "remove"])
+                .get(),
+            remove,
+        );
+    }
 
     #[tokio::test]
     async fn do_nothing_on_error() {
@@ -176,7 +203,7 @@ mod tests {
             Arc::clone(&table),
             rx_embeddings,
             tx_index,
-            metrics,
+            Arc::clone(&metrics),
         )
         .await
         .unwrap();
@@ -198,6 +225,7 @@ mod tests {
                     primary_id: 2.into(),
                     partition_id: 3.into(),
                     vector: vec![4.].into(),
+                    is_update: false,
                 }])
             });
         tx_embeddings
@@ -220,6 +248,7 @@ mod tests {
 
         drop(tx_embeddings);
         assert!(rx_index.recv().await.is_none());
+        assert_modified_metric_counts(&metrics, 1., 0., 0.);
     }
 
     #[tokio::test]
@@ -234,7 +263,7 @@ mod tests {
             Arc::clone(&table),
             rx_embeddings,
             tx_index,
-            metrics,
+            Arc::clone(&metrics),
         )
         .await
         .unwrap();
@@ -255,6 +284,7 @@ mod tests {
                     primary_id: 2.into(),
                     partition_id: 3.into(),
                     vector: vec![4.].into(),
+                    is_update: false,
                 }])
             });
         tx_embeddings.send((embedding, None)).await.unwrap();
@@ -274,6 +304,7 @@ mod tests {
 
         drop(tx_embeddings);
         assert!(rx_index.recv().await.is_none());
+        assert_modified_metric_counts(&metrics, 1., 0., 0.);
     }
 
     #[tokio::test]
@@ -288,7 +319,7 @@ mod tests {
             Arc::clone(&table),
             rx_embeddings,
             tx_index,
-            metrics,
+            Arc::clone(&metrics),
         )
         .await
         .unwrap();
@@ -314,6 +345,7 @@ mod tests {
                         primary_id: 3.into(),
                         partition_id: 3.into(),
                         vector: vec![4.].into(),
+                        is_update: true,
                     },
                 ])
             });
@@ -345,6 +377,105 @@ mod tests {
 
         drop(tx_embeddings);
         assert!(rx_index.recv().await.is_none());
+        assert_modified_metric_counts(&metrics, 0., 1., 0.);
+    }
+
+    #[tokio::test]
+    async fn insert_and_update_in_single_batch() {
+        let (tx_embeddings, rx_embeddings) = mpsc::channel(10);
+        let (tx_index, mut rx_index) = mpsc::channel(10);
+        let metrics: Arc<Metrics> = Arc::new(Metrics::new());
+        let table = Arc::new(RwLock::new(MockTableAdd::new()));
+        let index_key = IndexKey::new(&"vector".to_string().into(), &"store".to_string().into());
+        let _actor = new(
+            index_key.clone(),
+            Arc::clone(&table),
+            rx_embeddings,
+            tx_index,
+            Arc::clone(&metrics),
+        )
+        .await
+        .unwrap();
+
+        let embedding = DbEmbedding {
+            primary_key: [CqlValue::Int(1)].into(),
+            embedding: Some(vec![1.].into()),
+            timestamp: Timestamp::from_unix_timestamp(10),
+        };
+        table
+            .write()
+            .unwrap()
+            .expect_add()
+            .with(eq(index_key), eq(embedding.clone()))
+            .once()
+            .returning(|_, _| {
+                Ok(vec![
+                    // Plain insert
+                    Operation::AddVector {
+                        primary_id: 1.into(),
+                        partition_id: 2.into(),
+                        vector: vec![10.].into(),
+                        is_update: false,
+                    },
+                    // Update (remove + add)
+                    Operation::RemoveBeforeAddVector {
+                        primary_id: 3.into(),
+                        partition_id: 4.into(),
+                    },
+                    Operation::AddVector {
+                        primary_id: 5.into(),
+                        partition_id: 4.into(),
+                        vector: vec![20.].into(),
+                        is_update: true,
+                    },
+                ])
+            });
+        tx_embeddings.send((embedding, None)).await.unwrap();
+
+        // First: plain insert
+        let Some(Index::AddVector {
+            partition_id,
+            primary_id,
+            embedding,
+            in_progress,
+        }) = rx_index.recv().await
+        else {
+            unreachable!();
+        };
+        assert_eq!(primary_id, 1.into());
+        assert_eq!(partition_id, 2.into());
+        assert_eq!(embedding, vec![10.].into());
+        assert!(in_progress.is_none());
+
+        // Second: remove half of the update
+        let Some(Index::RemoveVector {
+            partition_id,
+            primary_id,
+            in_progress: None,
+        }) = rx_index.recv().await
+        else {
+            unreachable!();
+        };
+        assert_eq!(primary_id, 3.into());
+        assert_eq!(partition_id, 4.into());
+
+        // Third: add half of the update
+        let Some(Index::AddVector {
+            partition_id,
+            primary_id,
+            embedding,
+            in_progress: None,
+        }) = rx_index.recv().await
+        else {
+            unreachable!();
+        };
+        assert_eq!(primary_id, 5.into());
+        assert_eq!(partition_id, 4.into());
+        assert_eq!(embedding, vec![20.].into());
+
+        drop(tx_embeddings);
+        assert!(rx_index.recv().await.is_none());
+        assert_modified_metric_counts(&metrics, 1., 1., 0.);
     }
 
     #[tokio::test]
@@ -359,7 +490,7 @@ mod tests {
             Arc::clone(&table),
             rx_embeddings,
             tx_index,
-            metrics,
+            Arc::clone(&metrics),
         )
         .await
         .unwrap();
@@ -396,6 +527,7 @@ mod tests {
 
         drop(tx_embeddings);
         assert!(rx_index.recv().await.is_none());
+        assert_modified_metric_counts(&metrics, 0., 0., 1.);
     }
 
     #[tokio::test]
@@ -410,7 +542,7 @@ mod tests {
             Arc::clone(&table),
             rx_embeddings,
             tx_index,
-            metrics,
+            Arc::clone(&metrics),
         )
         .await
         .unwrap();
@@ -440,5 +572,6 @@ mod tests {
 
         drop(tx_embeddings);
         assert!(rx_index.recv().await.is_none());
+        assert_modified_metric_counts(&metrics, 0., 0., 0.);
     }
 }
