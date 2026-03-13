@@ -1054,6 +1054,7 @@ impl TableAdd for Table {
                             primary_id,
                             partition_id,
                             vector: vector.clone(),
+                            is_update: vector_already_exists,
                         });
                         index
                             .vector_timestamps
@@ -1107,6 +1108,7 @@ impl TableAdd for Table {
                                 primary_id,
                                 partition_id,
                                 vector: vector.clone(),
+                                is_update: false,
                             });
                             Ok(())
                         },
@@ -1371,6 +1373,7 @@ pub(crate) enum Operation {
         primary_id: PrimaryId,
         partition_id: PartitionId,
         vector: Vector,
+        is_update: bool,
     },
     RemoveBeforeAddVector {
         primary_id: PrimaryId,
@@ -1426,6 +1429,7 @@ mod tests {
                     primary_id,
                     partition_id,
                     vector,
+                    is_update: false,
                 } => {
                     assert_eq!(vector, &vec![0.1, 0.2, 0.3].into());
                     (*primary_id, *partition_id)
@@ -1450,6 +1454,7 @@ mod tests {
                     primary_id,
                     partition_id,
                     vector,
+                    is_update: false,
                 } => {
                     assert_eq!(vector, &vec![0.2, 0.2, 0.3].into());
                     (*primary_id, *partition_id)
@@ -1476,6 +1481,7 @@ mod tests {
                     primary_id,
                     partition_id,
                     vector,
+                    is_update: false,
                 } => {
                     assert_eq!(vector, &vec![0.3, 0.2, 0.3].into());
                     (*primary_id, *partition_id)
@@ -1564,6 +1570,7 @@ mod tests {
                     primary_id,
                     partition_id,
                     vector,
+                    is_update: true,
                 } => {
                     assert_eq!(vector, &vec![0.5, 0.5, 0.3].into());
                     (*primary_id, *partition_id)
