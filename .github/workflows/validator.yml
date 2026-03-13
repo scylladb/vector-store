@@ -20,7 +20,7 @@ env:
   RUST_BACKTRACE: full
 
 jobs:
-  tests:
+  validator-tests:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v6
