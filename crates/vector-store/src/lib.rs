@@ -670,6 +670,14 @@ pub fn block_on<Output>(threads: Option<usize>, f: impl AsyncFnOnce() -> Output)
         .block_on(async move { f().await })
 }
 
+fn http_server_config(config: &Config) -> httpserver::HttpServerConfig {
+    httpserver::HttpServerConfig {
+        addr: config.vector_store_addr,
+        tls_cert_path: config.tls_cert_path.clone(),
+        tls_key_path: config.tls_key_path.clone(),
+    }
+}
+
 pub async fn run(
     node_state: Sender<NodeState>,
     db_actor: Sender<Db>,
@@ -693,6 +701,7 @@ pub async fn run(
         internals,
         index_engine_version,
         config_rx,
+        http_server_config,
     )
     .await
 }
