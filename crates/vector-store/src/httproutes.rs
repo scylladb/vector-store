@@ -29,6 +29,7 @@ use crate::node_state::NodeStateExt;
 use anyhow::anyhow;
 use anyhow::bail;
 use axum::Router;
+use axum::body::Bytes;
 use axum::extract;
 use axum::extract::Path;
 use axum::extract::State;
@@ -102,6 +103,36 @@ use utoipa_swagger_ui::SwaggerUi;
 )]
 // TODO: modify HTTP API after design
 struct ApiDoc;
+
+/// JSON response that appends a trailing newline to the body.
+/// This ensures that `curl` output doesn't glue with the shell prompt.
+struct JsonLn<T>(T);
+
+impl<T: serde::Serialize> IntoResponse for JsonLn<T> {
+    fn into_response(self) -> Response {
+        match serde_json::to_vec(&self.0) {
+            Ok(mut bytes) => {
+                bytes.push(b'\n');
+                (
+                    [(header::CONTENT_TYPE, "application/json")],
+                    Bytes::from(bytes),
+                )
+                    .into_response()
+            }
+            Err(err) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                err.to_string(),
+            )
+                .into_response(),
+        }
+    }
+}
+
+/// Builds a plain-text error response with a trailing newline.
+fn text_response(status: StatusCode, msg: impl std::fmt::Display) -> Response {
+    (status, format!("{msg}\n")).into_response()
+}
 
 #[derive(Clone)]
 struct RoutesInnerState {
@@ -229,7 +260,7 @@ async fn get_indexes(State(state): State<RoutesInnerState>) -> Response {
             data_type: (*quantization).into(),
         })
         .collect();
-    (StatusCode::OK, response::Json(indexes)).into_response()
+    (StatusCode::OK, JsonLn(indexes)).into_response()
 }
 
 /// A human-readable description of the error that occurred.
@@ -309,7 +340,7 @@ async fn get_index_status(
     let Some((index, _)) = state.engine.get_index(index_key.clone()).await else {
         let msg = format!("missing index: {keyspace_name}.{index_name}");
         debug!("get_index_status: {msg}");
-        return (StatusCode::NOT_FOUND, msg).into_response();
+        return text_response(StatusCode::NOT_FOUND, msg);
     };
     if let Some(index_status) = state
         .node_state
@@ -320,11 +351,11 @@ async fn get_index_status(
             Err(err) => {
                 let msg = format!("index.count request error: {err}");
                 debug!("get_index_status: {msg}");
-                (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
+                text_response(StatusCode::INTERNAL_SERVER_ERROR, msg)
             }
             Ok(count) => (
                 StatusCode::OK,
-                response::Json(IndexStatusResponse {
+                JsonLn(IndexStatusResponse {
                     status: IndexStatus::from(index_status),
                     count,
                 }),
@@ -334,7 +365,7 @@ async fn get_index_status(
     } else {
         let msg = format!("missing index status: {keyspace_name}.{index_name}");
         debug!("get_index_status: {msg}");
-        (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
+        text_response(StatusCode::INTERNAL_SERVER_ERROR, msg)
     }
 }
 
@@ -993,12 +1024,16 @@ pub struct InfoResponse {
         (status = 200, description = "Vector Store indexing service information.", body = InfoResponse)
     )
 )]
-async fn get_info(State(state): State<RoutesInnerState>) -> response::Json<InfoResponse> {
-    response::Json(InfoResponse {
-        version: Info::version().to_string(),
-        service: Info::name().to_string(),
-        engine: state.index_engine_version.clone(),
-    })
+async fn get_info(State(state): State<RoutesInnerState>) -> Response {
+    (
+        StatusCode::OK,
+        JsonLn(InfoResponse {
+            version: Info::version().to_string(),
+            service: Info::name().to_string(),
+            engine: state.index_engine_version.clone(),
+        }),
+    )
+        .into_response()
 }
 
 #[derive(ToEnumSchema, serde::Deserialize, serde::Serialize, PartialEq, Debug)]
@@ -1039,7 +1074,7 @@ impl From<crate::node_state::NodeStatus> for NodeStatus {
 async fn get_status(State(state): State<RoutesInnerState>) -> Response {
     (
         StatusCode::OK,
-        response::Json(NodeStatus::from(state.node_state.get_status().await)),
+        JsonLn(NodeStatus::from(state.node_state.get_status().await)),
     )
         .into_response()
 }
@@ -1054,12 +1089,10 @@ fn new_internals() -> Router<RoutesInnerState> {
         .route("/session-counters", get(get_internal_session_counters))
 }
 
-async fn get_internal_counters(State(state): State<RoutesInnerState>) -> Response {
-    (
-        StatusCode::OK,
-        response::Json(state.internals.counters().await),
-    )
-        .into_response()
+async fn get_internal_counters(
+    State(state): State<RoutesInnerState>,
+) -> response::Json<std::collections::BTreeMap<String, u64>> {
+    response::Json(state.internals.counters().await)
 }
 
 async fn delete_internal_counters(State(state): State<RoutesInnerState>) {
@@ -1070,12 +1103,10 @@ async fn put_internal_counter(State(state): State<RoutesInnerState>, Path(id): P
     state.internals.start_counter(id).await;
 }
 
-async fn get_internal_session_counters(State(state): State<RoutesInnerState>) -> Response {
-    (
-        StatusCode::OK,
-        response::Json(state.internals.session_counters().await),
-    )
-        .into_response()
+async fn get_internal_session_counters(
+    State(state): State<RoutesInnerState>,
+) -> response::Json<std::collections::BTreeMap<String, u64>> {
+    response::Json(state.internals.session_counters().await)
 }
 
 #[cfg(test)]
