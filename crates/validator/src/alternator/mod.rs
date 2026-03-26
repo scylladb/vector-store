@@ -18,6 +18,7 @@ use aws_sdk_dynamodb::operation::create_table::CreateTableError;
 use aws_sdk_dynamodb::operation::create_table::CreateTableOutput;
 use aws_sdk_dynamodb::operation::delete_table::DeleteTableError;
 use aws_sdk_dynamodb::types::AttributeDefinition;
+use aws_sdk_dynamodb::types::AttributeValue;
 use aws_sdk_dynamodb::types::BillingMode;
 use aws_sdk_dynamodb::types::KeySchemaElement;
 use aws_sdk_dynamodb::types::KeyType;
@@ -31,14 +32,21 @@ use aws_smithy_types::config_bag::ConfigBag;
 use e2etest::TestCase;
 use http::HeaderValue;
 use http::header::CONTENT_LENGTH;
+use httpapi::ColumnName;
 use httpapi::IndexInfo;
 use httpapi::IndexName;
 use httpapi::KeyspaceName;
+use httpapi::Limit;
+use httpapi::Vector;
 use httpclient::HttpClient;
 use serde_json::Map;
 use serde_json::Value;
+use std::collections::HashMap;
+use std::fmt::Write;
 use std::net::Ipv4Addr;
+use std::num::NonZeroUsize;
 use std::sync::atomic::AtomicUsize;
+use std::time::Duration;
 use tracing::info;
 use tracing::warn;
 
@@ -220,6 +228,51 @@ async fn make_clients(actors: &TestActors) -> (Client, Vec<HttpClient>) {
     (dynamodb_client, vs_clients)
 }
 
+fn float_list(values: impl IntoIterator<Item = f32>) -> AttributeValue {
+    AttributeValue::L(
+        values
+            .into_iter()
+            .map(|value| AttributeValue::N(value.to_string()))
+            .collect(),
+    )
+}
+
+/// Builder for a single DynamoDB test item.
+#[derive(Debug, Clone)]
+struct Item(pub HashMap<String, AttributeValue>);
+
+impl Item {
+    const VEC_DIMS: usize = 3;
+
+    fn new(pk_attr: &str, pk_val: AttributeValue) -> Self {
+        let mut map = HashMap::new();
+        map.insert(pk_attr.to_string(), pk_val);
+        Self(map)
+    }
+
+    /// Constructs key attributes depending on whether sort key exists.
+    /// HASH-only -> `pk="{prefix}-{suffix}"`,
+    /// HASH+RANGE -> `pk=prefix, sk=suffix`.
+    fn key(pk_attr: &str, sk_attr: Option<&str>, pk_prefix: &str, suffix: &str) -> Self {
+        if let Some(sk) = sk_attr {
+            Self::new(pk_attr, AttributeValue::S(pk_prefix.to_string()))
+                .sk(sk, AttributeValue::S(suffix.to_string()))
+        } else {
+            Self::new(pk_attr, AttributeValue::S(format!("{pk_prefix}-{suffix}")))
+        }
+    }
+
+    fn sk(mut self, sk_attr: &str, sk_val: AttributeValue) -> Self {
+        self.0.insert(sk_attr.to_string(), sk_val);
+        self
+    }
+
+    fn vec(mut self, vec_attr: &str, v: [f32; Self::VEC_DIMS]) -> Self {
+        self.0.insert(vec_attr.to_string(), float_list(v));
+        self
+    }
+}
+
 async fn wait_for_index(clients: &[HttpClient], index: &IndexInfo) {
     for client in clients {
         common::wait_for_index(client, index).await;
@@ -229,6 +282,132 @@ async fn wait_for_index(clients: &[HttpClient], index: &IndexInfo) {
 async fn wait_for_no_index(clients: &[HttpClient], index: &IndexInfo) {
     for client in clients {
         common::wait_for_no_index(client, index).await;
+    }
+}
+
+async fn wait_for_index_count(clients: &[HttpClient], index: &IndexInfo, expected_count: usize) {
+    for client in clients {
+        common::wait_for(
+            || async {
+                client
+                    .index_status(&index.keyspace, &index.index)
+                    .await
+                    .is_ok_and(|resp| {
+                        resp.status == httpapi::IndexStatus::Serving && resp.count == expected_count
+                    })
+            },
+            format!(
+                "index '{}/{}' to report count {} at {}",
+                index.keyspace,
+                index.index,
+                expected_count,
+                client.url()
+            ),
+            Duration::from_secs(60),
+        )
+        .await;
+    }
+}
+
+/// Polls ANN until the returned keys match `expected` position-by-position.
+async fn wait_for_ann(
+    clients: &[HttpClient],
+    index: &IndexInfo,
+    pk_name: &str,
+    sk_name: Option<&str>,
+    query_vector: [f32; Item::VEC_DIMS],
+    expected: &[Item],
+) {
+    let pk_column: ColumnName = pk_name.into();
+    let sk_column: Option<ColumnName> = sk_name.map(|s| s.into());
+    let expect_count = expected.len();
+
+    let expected_keys: Vec<(String, Option<String>)> = expected
+        .iter()
+        .map(|item| {
+            let pk = av_to_key_string(item.0.get(pk_name).expect("expected Item has no pk attr"));
+            let sk = sk_name
+                .map(|sk| av_to_key_string(item.0.get(sk).expect("expected Item has no sk attr")));
+            (pk, sk)
+        })
+        .collect();
+
+    for client in clients {
+        common::wait_for(
+            || async {
+                let (primary_keys, _distances, _scores) = client
+                    .ann(
+                        &index.keyspace,
+                        &index.index,
+                        Vector::from(query_vector.to_vec()),
+                        None,
+                        Limit::from(
+                            NonZeroUsize::new(expect_count)
+                                .expect("expected ANN result set is non-empty"),
+                        ),
+                    )
+                    .await;
+
+                let Some(pk_values) = primary_keys.get(&pk_column) else {
+                    return false;
+                };
+                if pk_values.len() != expect_count {
+                    return false;
+                }
+
+                let sk_values: Option<&Vec<Value>> = match sk_column.as_ref() {
+                    None => None,
+                    Some(col) => primary_keys.get(col),
+                };
+                if sk_column.is_some() && sk_values.is_none() {
+                    return false;
+                }
+
+                for (i, (exp_pk, exp_sk)) in expected_keys.iter().enumerate() {
+                    let got_pk = json_value_to_key_string(&pk_values[i]);
+                    if got_pk != *exp_pk {
+                        return false;
+                    }
+                    if let (Some(sk_vals), Some(exp_sk_str)) = (sk_values, exp_sk) {
+                        let got_sk = json_value_to_key_string(&sk_vals[i]);
+                        if got_sk != *exp_sk_str {
+                            return false;
+                        }
+                    }
+                }
+
+                true
+            },
+            format!(
+                "index '{}/{}' to return expected ANN keys at {}",
+                index.keyspace,
+                index.index,
+                client.url()
+            ),
+            Duration::from_secs(60),
+        )
+        .await;
+    }
+}
+
+fn av_to_key_string(av: &AttributeValue) -> String {
+    match av {
+        AttributeValue::S(s) => s.clone(),
+        AttributeValue::N(n) => n.clone(),
+        AttributeValue::B(b) => b.as_ref().iter().fold(String::new(), |mut s, byte| {
+            let _ = write!(s, "{byte:02x}");
+            s
+        }),
+        other => format!("{other:?}"),
+    }
+}
+
+/// Strips `0x` prefix from blob hex values.
+fn json_value_to_key_string(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.strip_prefix("0x").unwrap_or(s).to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        other => panic!("unexpected ANN key JSON value: {other:?}"),
     }
 }
 
@@ -531,6 +710,7 @@ struct TableContext {
     pub vs_clients: Vec<HttpClient>,
     pub table_name: String,
     pub index: IndexInfo,
+    pub shape: TableShape,
 }
 
 impl TableContext {
@@ -563,7 +743,78 @@ impl TableContext {
             vs_clients,
             table_name,
             index,
+            shape: shape.clone(),
         }
+    }
+
+    async fn put(&self, item: &Item) {
+        let mut req = self.client.put_item().table_name(&self.table_name);
+        for (attr_name, attr_val) in &item.0 {
+            req = req.item(attr_name, attr_val.clone());
+        }
+        req.send().await.expect("PutItem should succeed");
+    }
+
+    /// Creates a table, inserts items, and adds a vector index via
+    /// `UpdateTable`. Waits for VS to serve the index with the correct count.
+    async fn create_with_data(actors: &TestActors, shape: &TableShape, items: &[Item]) -> Self {
+        let no_vec_shape = TableShape {
+            vec_name: None,
+            ..shape.clone()
+        };
+        let ctx = Self::create(actors, &no_vec_shape).await;
+
+        for item in items {
+            ctx.put(item).await;
+        }
+
+        let vec_attr = match &shape.vec_name {
+            None => return ctx,
+            Some(va) => va,
+        };
+
+        // Add the vector index via UpdateTable (initial-scan path).
+        update_table_vector_indexes(
+            &ctx.client,
+            &ctx.table_name,
+            serde_json::json!([{
+                "Create": {
+                    "IndexName": ctx.index.index.as_ref(),
+                    "VectorAttribute": {
+                        "AttributeName": vec_attr,
+                        "Dimensions": Item::VEC_DIMS
+                    }
+                }
+            }]),
+        )
+        .await;
+
+        ctx.wait_for_count(items.len()).await;
+
+        Self {
+            shape: TableShape {
+                vec_name: Some(vec_attr.clone()),
+                ..ctx.shape
+            },
+            ..ctx
+        }
+    }
+
+    async fn wait_for_count(&self, n: usize) {
+        wait_for_index_count(&self.vs_clients, &self.index, n).await;
+    }
+
+    /// Waits until ANN returns exactly the expected items in the expected order.
+    async fn wait_for_ann(&self, qvec: [f32; 3], expected: &[Item]) {
+        wait_for_ann(
+            &self.vs_clients,
+            &self.index,
+            self.shape.pk(),
+            self.shape.sk(),
+            qvec,
+            expected,
+        )
+        .await
     }
 
     /// Idempotent.
