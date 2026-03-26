@@ -122,6 +122,67 @@ async fn create_vector_index_via_update_table_with_preexisting_data(actors: Test
     info!("finished");
 }
 
+/// Verifies that the initial-scan path skips non-indexable rows.
+#[framed]
+async fn create_vector_index_via_update_table_with_invalid_data(actors: TestActors) {
+    info!("started");
+
+    for shape in &alternator::name_patterns() {
+        let vec_attr = shape.vec().unwrap_or("vec");
+        info!("Testing shape: {shape:?}");
+
+        let vec_with_string_elem = AttributeValue::L(vec![
+            AttributeValue::N("1.0".into()),
+            AttributeValue::N("2.0".into()),
+            AttributeValue::S("3.0".into()),
+        ]);
+        let vec_with_null_elem = AttributeValue::L(vec![
+            AttributeValue::N("1.0".into()),
+            AttributeValue::N("2.0".into()),
+            AttributeValue::Null(true),
+        ]);
+        let valid_items = [
+            Item::key(shape.pk(), shape.sk(), "pk", "a").vec(vec_attr, [1.0, 1.0, 1.0]),
+            Item::key(shape.pk(), shape.sk(), "pk", "b").vec(vec_attr, [1.0, 2.0, 4.0]),
+            Item::key(shape.pk(), shape.sk(), "pk", "c").vec(vec_attr, [1.0, 4.0, 8.0]),
+        ];
+        let invalid_items = [
+            Item::key(shape.pk(), shape.sk(), "pk", "no-vec"),
+            Item::key(shape.pk(), shape.sk(), "pk", "wrong-type-string")
+                .attr(vec_attr, AttributeValue::S("not-a-vector".into())),
+            Item::key(
+                shape.pk(),
+                shape.sk(),
+                "pk",
+                "wrong-type-mostly-float-one-s",
+            )
+            .attr(vec_attr, vec_with_string_elem),
+            Item::key(
+                shape.pk(),
+                shape.sk(),
+                "pk",
+                "wrong-type-mostly-float-one-null",
+            )
+            .attr(vec_attr, vec_with_null_elem),
+            Item::key(shape.pk(), shape.sk(), "pk", "wrong-type-too-short")
+                .attr(vec_attr, alternator::float_list([1.0_f32, 1.0])),
+            Item::key(shape.pk(), shape.sk(), "pk", "wrong-type-too-long")
+                .attr(vec_attr, alternator::float_list([1.0_f32, 1.0, 1.0, 1.0])),
+        ];
+
+        let ctx =
+            TableContext::create_with_invalid_data(&actors, shape, &valid_items, &invalid_items)
+                .await;
+
+        ctx.wait_for_ann([1.0, 1.0, 1.0], &valid_items).await;
+
+        ctx.done().await;
+        info!("Shape {shape:?} passed");
+    }
+
+    info!("finished");
+}
+
 /// Deletes a vector index via UpdateTable and verifies writes succeed after.
 #[framed]
 async fn delete_vector_index_via_update_table(actors: TestActors) {
@@ -185,6 +246,11 @@ pub(super) async fn new() -> TestCase<TestActors> {
             "create_vector_index_via_update_table_with_preexisting_data",
             common::DEFAULT_TEST_TIMEOUT,
             create_vector_index_via_update_table_with_preexisting_data,
+        )
+        .with_test(
+            "create_vector_index_via_update_table_with_invalid_data",
+            common::DEFAULT_TEST_TIMEOUT,
+            create_vector_index_via_update_table_with_invalid_data,
         )
         .with_test(
             "delete_vector_index_via_update_table",

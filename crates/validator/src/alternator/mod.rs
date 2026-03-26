@@ -762,14 +762,29 @@ impl TableContext {
 
     /// Creates a table, inserts items, and adds a vector index via
     /// `UpdateTable`. Waits for VS to serve the index with the correct count.
+    /// All `items` must carry a valid vector. Use
+    /// [`Self::create_with_invalid_data`] when the dataset includes items VS
+    /// should skip.
     async fn create_with_data(actors: &TestActors, shape: &TableShape, items: &[Item]) -> Self {
+        Self::create_with_invalid_data(actors, shape, items, &[]).await
+    }
+
+    /// Like [`Self::create_with_data`] but also pre-inserts `invalid_items`
+    /// (wrong type, missing vector, wrong dimensions) that VS should skip.
+    /// Only `items` count toward the expected index count.
+    async fn create_with_invalid_data(
+        actors: &TestActors,
+        shape: &TableShape,
+        items: &[Item],
+        invalid_items: &[Item],
+    ) -> Self {
         let no_vec_shape = TableShape {
             vec_name: None,
             ..shape.clone()
         };
         let ctx = Self::create(actors, &no_vec_shape).await;
 
-        for item in items {
+        for item in items.iter().chain(invalid_items.iter()) {
             ctx.put(item).await;
         }
 
@@ -810,7 +825,7 @@ impl TableContext {
     }
 
     /// Waits until ANN returns exactly the expected items in the expected order.
-    async fn wait_for_ann(&self, qvec: [f32; 3], expected: &[Item]) {
+    async fn wait_for_ann(&self, qvec: [f32; Item::VEC_DIMS], expected: &[Item]) {
         wait_for_ann(
             &self.vs_clients,
             &self.index,
