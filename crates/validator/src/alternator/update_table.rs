@@ -6,6 +6,7 @@
 use crate::TestActors;
 use crate::common;
 use async_backtrace::framed;
+use aws_sdk_dynamodb::types::AttributeValue;
 use e2etest::TestCase;
 use serde_json::Value;
 use tracing::info;
@@ -121,6 +122,56 @@ async fn create_vector_index_via_update_table_with_preexisting_data(actors: Test
     info!("finished");
 }
 
+/// Deletes a vector index via UpdateTable and verifies writes succeed after.
+#[framed]
+async fn delete_vector_index_via_update_table(actors: TestActors) {
+    info!("started");
+
+    for shape in &alternator::name_patterns() {
+        info!("Testing shape: {shape:?}");
+
+        let vec_attr = shape.vec().unwrap();
+        let items = [
+            Item::key(shape.pk(), shape.sk(), "pk", "a").vec(vec_attr, [1.0, 1.0, 1.0]),
+            Item::key(shape.pk(), shape.sk(), "pk", "b").vec(vec_attr, [1.0, 2.0, 4.0]),
+        ];
+        let ctx = TableContext::create_with_data(&actors, shape, &items).await;
+
+        info!(
+            "Issuing UpdateTable for '{}' to delete vector index '{}'",
+            ctx.table_name, ctx.index.index
+        );
+        alternator::update_table_vector_indexes(
+            &ctx.client,
+            &ctx.table_name,
+            serde_json::json!([{
+                "Delete": {
+                    "IndexName": ctx.index.index.as_ref()
+                }
+            }]),
+        )
+        .await;
+
+        info!(
+            "Waiting for Vector Store to drop index '{}/{}'",
+            ctx.index.keyspace, ctx.index.index
+        );
+        alternator::wait_for_no_index(&ctx.vs_clients, &ctx.index).await;
+
+        info!("Confirming arbitrary writes are accepted after index deletion");
+        ctx.put(
+            &Item::key(shape.pk(), shape.sk(), "pk", "c")
+                .attr(vec_attr, AttributeValue::S("not-a-vector".into())),
+        )
+        .await;
+
+        ctx.done().await;
+        info!("Shape {shape:?} passed");
+    }
+
+    info!("finished");
+}
+
 pub(super) async fn new() -> TestCase<TestActors> {
     TestCase::empty()
         .with_init(common::DEFAULT_TEST_TIMEOUT, alternator::init)
@@ -134,5 +185,10 @@ pub(super) async fn new() -> TestCase<TestActors> {
             "create_vector_index_via_update_table_with_preexisting_data",
             common::DEFAULT_TEST_TIMEOUT,
             create_vector_index_via_update_table_with_preexisting_data,
+        )
+        .with_test(
+            "delete_vector_index_via_update_table",
+            common::DEFAULT_TEST_TIMEOUT,
+            delete_vector_index_via_update_table,
         )
 }

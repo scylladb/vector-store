@@ -271,6 +271,11 @@ impl Item {
         self.0.insert(vec_attr.to_string(), float_list(v));
         self
     }
+
+    fn attr(mut self, name: &str, val: AttributeValue) -> Self {
+        self.0.insert(name.to_string(), val);
+        self
+    }
 }
 
 async fn wait_for_index(clients: &[HttpClient], index: &IndexInfo) {
