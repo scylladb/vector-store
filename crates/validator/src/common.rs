@@ -491,6 +491,29 @@ pub async fn wait_for_index(client: &HttpClient, index: &IndexInfo) -> IndexStat
     .await
 }
 
+/// Polls the VS HTTP endpoint until the given index is no longer visible
+/// (i.e. `index_status` returns an error).  Used to confirm that a delete
+/// action (via `UpdateTable` or `DeleteTable`) has been processed and
+/// propagated to the Vector Store.
+pub async fn wait_for_no_index(client: &HttpClient, index: &IndexInfo) {
+    wait_for(
+        || async {
+            client
+                .index_status(&index.keyspace, &index.index)
+                .await
+                .is_err()
+        },
+        format!(
+            "index '{}/{}' to be gone at {}",
+            index.keyspace,
+            index.index,
+            client.url()
+        ),
+        Duration::from_secs(60),
+    )
+    .await;
+}
+
 #[framed]
 pub async fn get_query_results(query: impl Into<String>, session: &Session) -> QueryRowsResult {
     let mut stmt = Statement::new(query);
