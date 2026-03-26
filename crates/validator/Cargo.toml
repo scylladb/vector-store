@@ -9,6 +9,11 @@ license.workspace = true
 
 [dependencies]
 async-backtrace.workspace = true
+aws-config.workspace = true
+aws-credential-types.workspace = true
+aws-sdk-dynamodb.workspace = true
+aws-smithy-runtime-api.workspace = true
+aws-smithy-types.workspace = true
 bcrypt.workspace = true
 clap.workspace = true
 derive_more.workspace = true
@@ -19,6 +24,7 @@ e2etest-scylla-cluster.workspace = true
 e2etest-scylla-proxy-cluster.workspace = true
 e2etest-tls.workspace = true
 e2etest-vector-store-cluster.workspace = true
+http.workspace = true
 httpapi.workspace = true
 httpclient.workspace = true
 itertools.workspace = true
