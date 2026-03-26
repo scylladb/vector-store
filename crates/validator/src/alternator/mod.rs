@@ -4,6 +4,7 @@
  */
 
 mod create_table;
+mod update_table;
 
 use crate::TestActors;
 use crate::common;
@@ -15,6 +16,7 @@ use aws_sdk_dynamodb::config::Region;
 use aws_sdk_dynamodb::error::SdkError;
 use aws_sdk_dynamodb::operation::create_table::CreateTableError;
 use aws_sdk_dynamodb::operation::create_table::CreateTableOutput;
+use aws_sdk_dynamodb::operation::delete_table::DeleteTableError;
 use aws_sdk_dynamodb::types::AttributeDefinition;
 use aws_sdk_dynamodb::types::BillingMode;
 use aws_sdk_dynamodb::types::KeySchemaElement;
@@ -38,6 +40,7 @@ use serde_json::Value;
 use std::net::Ipv4Addr;
 use std::sync::atomic::AtomicUsize;
 use tracing::info;
+use tracing::warn;
 
 static TABLE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static INDEX_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -76,7 +79,10 @@ const MAX_ALTERNATOR_ATTRIBUTE_NAME_LEN: usize = 255;
 
 #[framed]
 pub(crate) async fn test_cases() -> Vec<(String, TestCase<TestActors>)> {
-    vec![("alternator_create_table".into(), create_table::new().await)]
+    vec![
+        ("alternator_create_table".into(), create_table::new().await),
+        ("alternator_update_table".into(), update_table::new().await),
+    ]
 }
 
 const ALTERNATOR_PORT: u16 = 8000;
@@ -301,6 +307,24 @@ async fn create_table(
     }
 }
 
+async fn update_table_vector_indexes(
+    client: &Client,
+    table_name: &str,
+    vector_index_updates: Value,
+) {
+    client
+        .update_table()
+        .table_name(table_name)
+        .customize()
+        .interceptor(JsonBodyInjectInterceptor::new([(
+            "VectorIndexUpdates",
+            vector_index_updates,
+        )]))
+        .send()
+        .await
+        .expect("UpdateTable with VectorIndexUpdates should succeed");
+}
+
 async fn delete_table(client: &Client, table_name: &str) {
     client
         .delete_table()
@@ -496,4 +520,73 @@ fn resolve_table_names(shape: &TableShape) -> (String, IndexInfo) {
     };
     let index = IndexInfo::new(keyspace(&table_name).as_ref(), &index_name);
     (table_name, index)
+}
+
+// ---------------------------------------------------------------------------
+
+/// Test fixture that encapsulates the create-table -> wait -> operate -> cleanup
+/// cycle. `done()` is idempotent (swallows `ResourceNotFoundException`).
+struct TableContext {
+    pub client: Client,
+    pub vs_clients: Vec<HttpClient>,
+    pub table_name: String,
+    pub index: IndexInfo,
+}
+
+impl TableContext {
+    /// Creates a new Alternator table and (optionally) a vector index.
+    async fn create(actors: &TestActors, shape: &TableShape) -> Self {
+        let (client, vs_clients) = make_clients(actors).await;
+
+        let (table_name, index) = resolve_table_names(shape);
+
+        let indexes: Vec<(&str, &str, usize)> = match shape.vec() {
+            Some(va) => vec![(index.index.as_ref(), va, 3)],
+            None => vec![],
+        };
+        create_table(
+            &client,
+            &table_name,
+            shape.pk(),
+            shape.pk_type.clone(),
+            shape.sk(),
+            &indexes,
+        )
+        .await
+        .expect("CreateTable should succeed");
+        if shape.vec().is_some() {
+            wait_for_index(&vs_clients, &index).await;
+        }
+
+        Self {
+            client,
+            vs_clients,
+            table_name,
+            index,
+        }
+    }
+
+    /// Idempotent.
+    async fn done(&self) {
+        match self
+            .client
+            .delete_table()
+            .table_name(&self.table_name)
+            .send()
+            .await
+        {
+            Ok(_) => {}
+            Err(err) => {
+                if !err
+                    .as_service_error()
+                    .is_some_and(|e| matches!(e, DeleteTableError::ResourceNotFoundException(_)))
+                {
+                    warn!(
+                        "DeleteTable for '{}' failed unexpectedly: {err}",
+                        self.table_name
+                    );
+                }
+            }
+        }
+    }
 }
