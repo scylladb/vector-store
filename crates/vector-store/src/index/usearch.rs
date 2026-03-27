@@ -26,6 +26,7 @@ use crate::table::PrimaryId;
 use crate::table::Table;
 use crate::table::TableSearch;
 use anyhow::anyhow;
+use itertools::Itertools;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -1069,21 +1070,24 @@ fn ann<I>(
 {
     tx_ann
         .send(
-            partition.idx.search(&embedding, limit)
+            partition
+                .idx
+                .search(&embedding, limit)
                 .map_err(|err| anyhow!("ann: search failed: {err}"))
                 .and_then(|matches| {
                     let table = table.read().unwrap();
                     let (primary_keys, distances) = itertools::process_results(
-                        matches.map(|result| {
-                            result.and_then(|(primary_id, distance)| {
-                                table
-                                    .primary_key(partition.partition_id, primary_id)
-                                    .ok_or(anyhow!(
-                                        "not defined primary_key for partition_id {partition_id:?} and primary_id {primary_id:?}",
+                        matches.filter_map_ok(|(primary_id, distance)| {
+                            table
+                                .primary_key(partition.partition_id, primary_id)
+                                .or_else(|| {
+                                    warn!(
+                                        "not defined primary key for partition_id {partition_id:?} and primary_id {primary_id:?}",
                                         partition_id = partition.partition_id,
-                                    ))
-                                    .map(|primary_key| (primary_key, distance))
-                            })
+                                    );
+                                    None
+                                })
+                                .map(|primary_key| (primary_key, distance))
                         }),
                         |it| it.unzip(),
                     )?;
