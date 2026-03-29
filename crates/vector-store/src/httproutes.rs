@@ -306,7 +306,7 @@ async fn get_index_status(
     Path((keyspace_name, index_name)): Path<(KeyspaceName, IndexName)>,
 ) -> Response {
     let index_key = IndexKey::new(&keyspace_name, &index_name);
-    let Some((index, _)) = state.engine.get_index(index_key.clone()).await else {
+    let Some((index, db_index)) = state.engine.get_index(index_key.clone()).await else {
         let msg = format!("missing index: {keyspace_name}.{index_name}");
         debug!("get_index_status: {msg}");
         return (StatusCode::NOT_FOUND, msg).into_response();
@@ -316,6 +316,13 @@ async fn get_index_status(
         .get_index_status(keyspace_name.as_ref(), index_name.as_ref())
         .await
     {
+        // Use the same full-scan-progress check as the ANN endpoint: if the scan
+        // is still in progress, report BOOTSTRAPPING even if the state machine
+        // already transitioned to Serving.
+        let status = match db_index.full_scan_progress().await {
+            Progress::InProgress(_) => IndexStatus::Bootstrapping,
+            Progress::Done => IndexStatus::from(index_status),
+        };
         match index.count(index_key).await {
             Err(err) => {
                 let msg = format!("index.count request error: {err}");
@@ -324,10 +331,7 @@ async fn get_index_status(
             }
             Ok(count) => (
                 StatusCode::OK,
-                response::Json(IndexStatusResponse {
-                    status: IndexStatus::from(index_status),
-                    count,
-                }),
+                response::Json(IndexStatusResponse { status, count }),
             )
                 .into_response(),
         }
