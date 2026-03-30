@@ -3,7 +3,12 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+mod batch_write_item;
 mod create_table;
+mod delete_item;
+mod put_item;
+mod ttl;
+mod update_item;
 mod update_table;
 
 use async_backtrace::framed;
@@ -107,7 +112,12 @@ pub(crate) async fn new() -> TestCase {
         .with_cleanup(common::DEFAULT_TEST_TIMEOUT, common::cleanup);
 
     let test_case = create_table::register(test_case);
-    update_table::register(test_case)
+    let test_case = update_table::register(test_case);
+    let test_case = put_item::register(test_case);
+    let test_case = delete_item::register(test_case);
+    let test_case = update_item::register(test_case);
+    let test_case = batch_write_item::register(test_case);
+    ttl::register(test_case)
 }
 
 pub(super) const ALTERNATOR_PORT: u16 = 8000;
