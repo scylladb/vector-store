@@ -3,7 +3,12 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+mod batch_write_item;
 mod create_table;
+mod delete_item;
+mod put_item;
+mod ttl;
+mod update_item;
 mod update_table;
 
 use crate::TestActors;
@@ -112,7 +117,12 @@ pub(crate) async fn new() -> TestCase<TestActors> {
         .with_cleanup(common::DEFAULT_TEST_TIMEOUT, common::cleanup);
 
     let test_case = create_table::register(test_case);
-    update_table::register(test_case)
+    let test_case = update_table::register(test_case);
+    let test_case = put_item::register(test_case);
+    let test_case = delete_item::register(test_case);
+    let test_case = update_item::register(test_case);
+    let test_case = batch_write_item::register(test_case);
+    ttl::register(test_case)
 }
 
 pub(super) const ALTERNATOR_PORT: u16 = 8000;
@@ -557,6 +567,24 @@ pub(super) async fn delete_alternator_table(client: &Client, table_name: &str) {
         .expect("DeleteTable should succeed");
 }
 
+/// Asserts that an SDK result is a service error containing `expected_err`.
+pub(super) fn assert_service_error<O, E>(
+    result: Result<O, aws_sdk_dynamodb::error::SdkError<E>>,
+    expected_err: &str,
+) where
+    O: std::fmt::Debug,
+    E: aws_smithy_types::error::metadata::ProvideErrorMetadata,
+{
+    use aws_sdk_dynamodb::error::ProvideErrorMetadata as _;
+    let err = result.expect_err("operation should have been rejected");
+    let code = err.code().unwrap_or("");
+    let message = err.message().unwrap_or("");
+    assert!(
+        code.contains(expected_err) || message.contains(expected_err),
+        "expected error containing {expected_err:?}, got code={code:?} message={message:?}"
+    );
+}
+
 /// Standard test init: starts ScyllaDB with the Alternator endpoint enabled on
 /// each node's own IP, alongside the Vector Store.
 #[framed]
@@ -814,6 +842,15 @@ impl TableContext {
         req.send().await.expect("PutItem should succeed");
     }
 
+    /// Inserts an item, asserting that Scylla rejects it with `expected_err`.
+    pub(super) async fn put_expecting_error(&self, item: &Item, expected_err: &str) {
+        let mut req = self.client.put_item().table_name(&self.table_name);
+        for (attr_name, attr_val) in &item.0 {
+            req = req.item(attr_name, attr_val.clone());
+        }
+        assert_service_error(req.send().await, expected_err);
+    }
+
     /// Creates a table, inserts items, and adds a vector index via
     /// `UpdateTable`. Waits for VS to serve the index with the correct count.
     /// All `items` must carry a valid vector. Use
@@ -824,6 +861,18 @@ impl TableContext {
         shape: &TableShape,
         items: &[Item],
     ) -> Self {
+        Self::create_with_invalid_data(actors, shape, items, &[]).await
+    }
+
+    /// Like [`Self::create_with_data`] but also pre-inserts `invalid_items`
+    /// (wrong type, missing vector, wrong dimensions) that VS should skip.
+    /// Only `items` count toward the expected index count.
+    pub(super) async fn create_with_invalid_data(
+        actors: &TestActors,
+        shape: &TableShape,
+        items: &[Item],
+        invalid_items: &[Item],
+    ) -> Self {
         // 1. Create table without a vector index.
         let no_vec_shape = TableShape {
             vec: None,
@@ -833,7 +882,7 @@ impl TableContext {
         let ctx = Self::create(actors, &no_vec_shape).await;
 
         // 2. Insert all items — write every attribute in the item verbatim.
-        for item in items {
+        for item in items.iter().chain(invalid_items.iter()) {
             ctx.put(item).await;
         }
 
@@ -859,7 +908,8 @@ impl TableContext {
         )
         .await;
 
-        // 4. Wait for VS to serve the index with all items.
+        // 4. Wait for VS to serve the index.  Only `items` (the valid ones)
+        //    are counted; `invalid_items` are skipped by VS.
         ctx.wait_for_count(items.len()).await;
 
         // 5. Return context with vec_attr correctly set.
