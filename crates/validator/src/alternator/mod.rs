@@ -9,6 +9,7 @@ mod delete_item;
 mod put_item;
 mod query;
 mod ttl;
+mod types;
 mod update_item;
 mod update_table;
 
@@ -104,6 +105,7 @@ pub(crate) async fn test_cases() -> Vec<(String, TestCase<TestActors>)> {
         ),
         ("alternator_ttl".into(), ttl::new().await),
         ("alternator_query".into(), query::new().await),
+        ("alternator_types".into(), types::new().await),
     ]
 }
 
