@@ -3,7 +3,12 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+mod batch_write_item;
 mod create_table;
+mod delete_item;
+mod put_item;
+mod ttl;
+mod update_item;
 mod update_table;
 
 use crate::TestActors;
@@ -89,6 +94,14 @@ pub(crate) async fn test_cases() -> Vec<(String, TestCase<TestActors>)> {
     vec![
         ("alternator_create_table".into(), create_table::new().await),
         ("alternator_update_table".into(), update_table::new().await),
+        ("alternator_put_item".into(), put_item::new().await),
+        ("alternator_delete_item".into(), delete_item::new().await),
+        ("alternator_update_item".into(), update_item::new().await),
+        (
+            "alternator_batch_write_item".into(),
+            batch_write_item::new().await,
+        ),
+        ("alternator_ttl".into(), ttl::new().await),
     ]
 }
 
@@ -508,6 +521,22 @@ async fn delete_alternator_table(client: &Client, table_name: &str) {
         .expect("DeleteTable should succeed");
 }
 
+/// Asserts that an SDK result is a service error containing `expected_err`.
+fn assert_service_error<O, E>(result: Result<O, SdkError<E>>, expected_err: &str)
+where
+    O: std::fmt::Debug,
+    E: aws_smithy_types::error::metadata::ProvideErrorMetadata,
+{
+    use aws_sdk_dynamodb::error::ProvideErrorMetadata as _;
+    let err = result.expect_err("operation should have been rejected");
+    let code = err.code().unwrap_or("");
+    let message = err.message().unwrap_or("");
+    assert!(
+        code.contains(expected_err) || message.contains(expected_err),
+        "expected error containing {expected_err:?}, got code={code:?} message={message:?}"
+    );
+}
+
 /// Standard test init: starts ScyllaDB with the Alternator endpoint enabled on
 /// each node's own IP, alongside the Vector Store.
 #[framed]
@@ -746,7 +775,6 @@ impl TableContext {
         }
     }
 
-
     /// Inserts an item into the table.
     async fn put(&self, item: &Item) {
         let mut req = self.client.put_item().table_name(&self.table_name);
@@ -756,12 +784,33 @@ impl TableContext {
         req.send().await.expect("PutItem should succeed");
     }
 
+    /// Inserts an item, asserting that Scylla rejects it with `expected_err`.
+    async fn put_expecting_error(&self, item: &Item, expected_err: &str) {
+        let mut req = self.client.put_item().table_name(&self.table_name);
+        for (attr_name, attr_val) in &item.0 {
+            req = req.item(attr_name, attr_val.clone());
+        }
+        assert_service_error(req.send().await, expected_err);
+    }
+
     /// Creates a table, inserts items, and adds a vector index via
     /// `UpdateTable`. Waits for VS to serve the index with the correct count.
     /// All `items` must carry a valid vector. Use
     /// [`Self::create_with_invalid_data`] when the dataset includes items VS
     /// should skip.
     async fn create_with_data(actors: &TestActors, shape: &TableShape, items: &[Item]) -> Self {
+        Self::create_with_invalid_data(actors, shape, items, &[]).await
+    }
+
+    /// Like [`Self::create_with_data`] but also pre-inserts `invalid_items`
+    /// (wrong type, missing vector, wrong dimensions) that VS should skip.
+    /// Only `items` count toward the expected index count.
+    async fn create_with_invalid_data(
+        actors: &TestActors,
+        shape: &TableShape,
+        items: &[Item],
+        invalid_items: &[Item],
+    ) -> Self {
         let no_vec_shape = TableShape {
             vec_name: None,
             pk_type: shape.pk_type.clone(),
@@ -769,7 +818,7 @@ impl TableContext {
         };
         let ctx = Self::create(actors, &no_vec_shape).await;
 
-        for item in items {
+        for item in items.iter().chain(invalid_items.iter()) {
             ctx.put(item).await;
         }
 
@@ -805,7 +854,6 @@ impl TableContext {
         }
     }
 
-
     async fn wait_for_count(&self, n: usize) {
         wait_for_index_count(&self.vs_client, &self.index, n).await;
     }
@@ -822,7 +870,6 @@ impl TableContext {
         )
         .await
     }
-
 
     /// Deletes the Alternator table. Idempotent.
     async fn done(&self) {
