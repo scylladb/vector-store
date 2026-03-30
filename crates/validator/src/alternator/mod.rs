@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+mod auth;
 mod batch_write_item;
 mod create_table;
 mod delete_item;
@@ -134,6 +135,11 @@ pub(crate) async fn new() -> TestCase<TestActors> {
 pub(crate) async fn new_with_always_lwt() -> TestCase<TestActors> {
     let test_case = TestCase::empty().with_cleanup(common::DEFAULT_TEST_TIMEOUT, common::cleanup);
     lwt::register(test_case)
+}
+
+pub(crate) async fn new_with_auth() -> TestCase<TestActors> {
+    let test_case = TestCase::empty().with_cleanup(common::DEFAULT_TEST_TIMEOUT, common::cleanup);
+    auth::register(test_case)
 }
 
 pub(super) const ALTERNATOR_PORT: u16 = 8000;
