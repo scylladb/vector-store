@@ -11,6 +11,7 @@
 
 use async_backtrace::framed;
 use aws_sdk_dynamodb::types::AttributeValue;
+use aws_sdk_dynamodb::types::Select;
 use aws_sdk_dynamodb::types::TimeToLiveSpecification;
 use tracing::info;
 use vector_search_validator_tests::TestActors;
@@ -20,6 +21,7 @@ use vector_search_validator_tests::common;
 use super::Item;
 use super::TableContext;
 use super::TableShape;
+use super::query::QueryBuilderExt;
 
 /// Enables DynamoDB TTL on `ttl_attribute` for the given table.
 async fn enable_ttl(client: &aws_sdk_dynamodb::Client, table_name: &str, ttl_attribute: &str) {
@@ -115,10 +117,106 @@ async fn ttl_expiration_removes_vector(actors: TestActors) {
     info!("finished");
 }
 
+// ---------------------------------------------------------------------------
+// Test: TTL expiration verified via Alternator Query with AllProjectedAttributes
+// ---------------------------------------------------------------------------
+
+/// Combines TTL expiration with an Alternator `Query` using
+/// `Select::AllProjectedAttributes` to verify that both the VS index and the
+/// Alternator Query endpoint agree that the expired item is gone.
+///
+/// Inserts 3 items (2 permanent + 1 expiring) via the initial-scan path,
+/// then enables TTL.  After the expired row disappears, issues a VectorSearch
+/// `Query` with `Select::AllProjectedAttributes` — an index-only read that
+/// skips the base table — and asserts that the expired item is absent and
+/// only the 2 permanent items are returned.
+#[framed]
+async fn ttl_expiration_verified_via_query_with_all_projected(actors: TestActors) {
+    info!("started");
+
+    let shape = TableShape {
+        table_prefix: "",
+        index_prefix: "",
+        pk: "Pk-TTLProj",
+        sk: None,
+        vec: Some("Vec-TTLProj"),
+        pk_type: super::ScalarAttributeType::S,
+    };
+    let ttl_attribute = "ttl_expiry";
+
+    let perm1 = Item::key("Pk-TTLProj", shape.sk, "pk", "1").vec("Vec-TTLProj", [1.0, 1.0, 1.0]);
+    let perm2 = Item::key("Pk-TTLProj", shape.sk, "pk", "2").vec("Vec-TTLProj", [1.0, 2.0, 4.0]);
+    let expiring = Item::key("Pk-TTLProj", shape.sk, "pk", "expiring")
+        .vec("Vec-TTLProj", [1.0, 4.0, 8.0])
+        .attr(ttl_attribute, AttributeValue::N(ttl_epoch(2).to_string()));
+
+    let ctx =
+        TableContext::create_with_data(&actors, &shape, &[perm1.clone(), perm2.clone(), expiring])
+            .await;
+
+    info!(
+        "Enabling TTL on attribute '{ttl_attribute}' for '{}'",
+        ctx.table_name
+    );
+    enable_ttl(&ctx.client, &ctx.table_name, ttl_attribute).await;
+
+    info!("Waiting for TTL to expire the item and for VS to remove it");
+    ctx.wait_for_count(2).await;
+
+    // Query via Alternator with Select::AllProjectedAttributes — an index-only
+    // read that confirms the expired item is gone from the VS index.
+    info!("Querying via Alternator with Select::AllProjectedAttributes after TTL expiration");
+    let items = ctx
+        .client
+        .query()
+        .table_name(&ctx.table_name)
+        .index_name(ctx.index.index.as_ref())
+        .limit(5)
+        .select(Select::AllProjectedAttributes)
+        .vector_search([1.0, 1.0, 1.0])
+        .send()
+        .await
+        .expect("Query with VectorSearch should succeed")
+        .items()
+        .to_vec();
+
+    info!("Query returned {} items after TTL expiration", items.len());
+
+    assert_eq!(
+        items.len(),
+        2,
+        "only the 2 permanent items should remain after TTL expiration, got {}",
+        items.len()
+    );
+
+    let returned_pks: Vec<&str> = items
+        .iter()
+        .filter_map(|item| match item.get(ctx.pk.as_str()) {
+            Some(AttributeValue::S(s)) => Some(s.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        !returned_pks.contains(&"pk-expiring"),
+        "expired item should not appear in Query results, got: {returned_pks:?}"
+    );
+
+    ctx.done().await;
+
+    info!("finished");
+}
+
 pub(super) fn register(test_case: TestCase) -> TestCase {
-    test_case.with_test(
-        "ttl_expiration_removes_vector",
-        common::DEFAULT_TEST_TIMEOUT,
-        ttl_expiration_removes_vector,
-    )
+    test_case
+        .with_test(
+            "ttl_expiration_removes_vector",
+            common::DEFAULT_TEST_TIMEOUT,
+            ttl_expiration_removes_vector,
+        )
+        .with_test(
+            "ttl_expiration_verified_via_query_with_all_projected",
+            common::DEFAULT_TEST_TIMEOUT,
+            ttl_expiration_verified_via_query_with_all_projected,
+        )
 }
