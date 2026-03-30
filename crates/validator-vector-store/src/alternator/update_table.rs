@@ -4,6 +4,7 @@
  */
 
 use async_backtrace::framed;
+use aws_sdk_dynamodb::types::AttributeValue;
 use serde_json::Value;
 use tracing::info;
 use vector_search_validator_tests::TestActors;
@@ -111,13 +112,18 @@ async fn create_vector_index_via_update_table(actors: TestActors) {
 /// and verifies that Vector Store indexed the already-present rows via the
 /// initial full-scan path.
 ///
-/// The vector values are stored as extra attributes on each item (via
-/// [`Item::attr`] + [`dynamo_float_list`]) so that [`TableContext::create_with_data`]
-/// can be called with `shape.vec = None` — this inserts the rows (with
-/// vectors already present) without creating an index.  After confirming no
-/// index exists yet, the test issues `UpdateTable` with
-/// `VectorIndexUpdates[{Create: ...}]` and waits for VS to serve the index
-/// with the correct item count.
+/// In addition to the valid rows, two rows with non-indexable vector values
+/// are pre-filled before the index is created:
+/// - one row **without** the vector attribute at all
+/// - one row whose vector attribute is a DynamoDB `String` (`S`) instead of
+///   a `List` of numbers
+/// - one row whose vector attribute is a `List` with two valid `N` elements
+///   and one `S` element (numeric-looking) — almost valid but wrong element type
+/// - one row whose vector attribute is a `List` with two valid `N` elements
+///   and one `NULL` element
+///
+/// The full-scan should skip those rows so the final count equals only the
+/// number of valid items.
 ///
 /// Items are constructed with [`Item::key`] so the same dataset works for
 /// both HASH-only and HASH+RANGE shapes.  Loops
@@ -136,9 +142,21 @@ async fn create_vector_index_via_update_table_with_preexisting_data(actors: Test
             ..*shape
         };
 
-        // Vectors are stored as extra attributes so create_with_data inserts
-        // them even though no_vec_shape.vec is None (no index created yet).
-        let dataset = vec![
+        // Build the full dataset: valid items (will be indexed) plus
+        // non-indexable rows (no vector, wrong type) that the full-scan
+        // should skip.  No index exists yet so Alternator accepts any
+        // vector type at write time; all puts succeed.
+        let vec_with_string_elem = AttributeValue::L(vec![
+            AttributeValue::N("1.0".into()),
+            AttributeValue::N("2.0".into()),
+            AttributeValue::S("3.0".into()),
+        ]);
+        let vec_with_null_elem = AttributeValue::L(vec![
+            AttributeValue::N("1.0".into()),
+            AttributeValue::N("2.0".into()),
+            AttributeValue::Null(true),
+        ]);
+        let valid_items = [
             Item::key(shape.pk, shape.sk, "pk", "a")
                 .attr(vec_attr, dynamo_float_list([1.0, 1.0, 1.0])),
             Item::key(shape.pk, shape.sk, "pk", "b")
@@ -146,8 +164,32 @@ async fn create_vector_index_via_update_table_with_preexisting_data(actors: Test
             Item::key(shape.pk, shape.sk, "pk", "c")
                 .attr(vec_attr, dynamo_float_list([1.0, 4.0, 8.0])),
         ];
+        let mut all_items = valid_items.to_vec();
+        all_items.extend([
+            // No vector attribute — full-scan should skip this row.
+            Item::key(shape.pk, shape.sk, "pk", "no-vec"),
+            // Vector attribute is a String, not a List — full-scan should skip.
+            Item::key(shape.pk, shape.sk, "pk", "wrong-type-string")
+                .attr(vec_attr, AttributeValue::S("not-a-vector".into())),
+            // Vector attribute is a List with two valid N elements and one S
+            // element (numeric-looking) — full-scan should skip this row.
+            Item::key(shape.pk, shape.sk, "pk", "wrong-type-mostly-float-one-s")
+                .attr(vec_attr, vec_with_string_elem),
+            // Vector attribute is a List with two valid N elements and one NULL
+            // element — full-scan should skip this row.
+            Item::key(shape.pk, shape.sk, "pk", "wrong-type-mostly-float-one-null")
+                .attr(vec_attr, vec_with_null_elem),
+            // Vector attribute is a List of floats but with too few elements
+            // (2 instead of 3) — full-scan should skip.
+            Item::key(shape.pk, shape.sk, "pk", "wrong-type-too-short")
+                .attr(vec_attr, dynamo_float_list([1.0_f32, 1.0])),
+            // Vector attribute is a List of floats but with too many elements
+            // (4 instead of 3) — full-scan should skip.
+            Item::key(shape.pk, shape.sk, "pk", "wrong-type-too-long")
+                .attr(vec_attr, dynamo_float_list([1.0_f32, 1.0, 1.0, 1.0])),
+        ]);
 
-        let ctx = TableContext::create_with_data(&actors, &no_vec_shape, &dataset).await;
+        let ctx = TableContext::create_with_data(&actors, &no_vec_shape, &all_items).await;
 
         info!("Confirming no index exists yet for '{}'", ctx.table_name);
         wait_for_no_index(&ctx.vs_client, &ctx.index).await;
@@ -168,9 +210,9 @@ async fn create_vector_index_via_update_table_with_preexisting_data(actors: Test
             ctx.index.keyspace, ctx.index.index
         );
         common::wait_for_index(&ctx.vs_client, &ctx.index).await;
-        wait_for_index_count(&ctx.vs_client, &ctx.index, dataset.len()).await;
+        wait_for_index_count(&ctx.vs_client, &ctx.index, valid_items.len()).await;
 
-        ctx.wait_for_ann([1.0, 1.0, 1.0], &dataset).await;
+        ctx.wait_for_ann([1.0, 1.0, 1.0], &valid_items).await;
 
         ctx.done().await;
         info!("Shape {shape:?} passed");
@@ -184,9 +226,12 @@ async fn create_vector_index_via_update_table_with_preexisting_data(actors: Test
 // ---------------------------------------------------------------------------
 
 /// Creates an Alternator table (with a vector index) for each shape in
-/// [`NAME_PATTERNS`], waits for the Vector Store to serve it, then issues
+/// [`NAME_PATTERNS`], inserts data and waits for VS to index it, then issues
 /// `UpdateTable` with `VectorIndexUpdates[{Delete: ...}]` and confirms the
-/// index disappears.  Loops [`NAME_PATTERNS`](NAME_PATTERNS).
+/// index disappears.  After deletion, verifies that Scylla accepts a `PutItem`
+/// with a non-vector value for the previously-indexed attribute (which would
+/// have been rejected as a `ValidationException` while the index was active).
+/// Loops [`NAME_PATTERNS`](NAME_PATTERNS).
 #[framed]
 async fn delete_vector_index_via_update_table(actors: TestActors) {
     info!("started");
@@ -194,7 +239,12 @@ async fn delete_vector_index_via_update_table(actors: TestActors) {
     for shape in NAME_PATTERNS {
         info!("Testing shape: {shape:?}");
 
-        let ctx = TableContext::create(&actors, shape).await;
+        let vec_attr = shape.vec.unwrap();
+        let items = [
+            Item::key(shape.pk, shape.sk, "pk", "a").vec(vec_attr, [1.0, 1.0, 1.0]),
+            Item::key(shape.pk, shape.sk, "pk", "b").vec(vec_attr, [1.0, 2.0, 4.0]),
+        ];
+        let ctx = TableContext::create_with_data(&actors, shape, &items).await;
 
         info!(
             "Issuing UpdateTable for '{}' to delete vector index '{}'",
@@ -212,6 +262,13 @@ async fn delete_vector_index_via_update_table(actors: TestActors) {
             ctx.index.keyspace, ctx.index.index
         );
         wait_for_no_index(&ctx.vs_client, &ctx.index).await;
+
+        info!("Confirming arbitrary writes are accepted after index deletion");
+        ctx.put(
+            &Item::key(shape.pk, shape.sk, "pk", "c")
+                .attr(vec_attr, AttributeValue::S("not-a-vector".into())),
+        )
+        .await;
 
         ctx.done().await;
         info!("Shape {shape:?} passed");
