@@ -668,6 +668,35 @@ pub(super) async fn delete_alternator_table(client: &Client, table_name: &str) {
         .expect("DeleteTable should succeed");
 }
 
+/// Asserts that an operation result is an error whose code or message
+/// contains `expected_err`.
+///
+/// Accepts the raw `Result` returned by any AWS SDK send call, so call
+/// sites read as a single expression:
+///
+/// ```ignore
+/// super::assert_service_error(
+///     batch_write_items(&ctx, &[valid2, wrong_type], &[]).await,
+///     "ValidationException",
+/// );
+/// ```
+pub(super) fn assert_service_error<O, E>(
+    result: Result<O, aws_sdk_dynamodb::error::SdkError<E>>,
+    expected_err: &str,
+) where
+    O: std::fmt::Debug,
+    E: aws_smithy_types::error::metadata::ProvideErrorMetadata,
+{
+    use aws_sdk_dynamodb::error::ProvideErrorMetadata as _;
+    let err = result.expect_err("operation should have been rejected");
+    let code = err.code().unwrap_or("");
+    let message = err.message().unwrap_or("");
+    assert!(
+        code.contains(expected_err) || message.contains(expected_err),
+        "expected error containing {expected_err:?}, got code={code:?} message={message:?}"
+    );
+}
+
 /// Standard test init: starts ScyllaDB with the Alternator endpoint enabled on
 /// each node's own IP, alongside the Vector Store.
 #[framed]
@@ -980,6 +1009,19 @@ impl TableContext {
         req.send().await.expect("PutItem should succeed");
     }
 
+    /// Inserts an item into the table, asserting that Scylla rejects it with
+    /// an error message containing `expected_err`.
+    ///
+    /// Use this when a write is expected to be rejected — e.g. putting an item
+    /// with a wrong vector attribute type when a vector index already exists.
+    pub(super) async fn put_expecting_error(&self, item: &Item, expected_err: &str) {
+        let mut req = self.client.put_item().table_name(&self.table_name);
+        for (attr_name, attr_val) in &item.0 {
+            req = req.item(attr_name, attr_val.clone());
+        }
+        assert_service_error(req.send().await, expected_err);
+    }
+
     /// Creates a table, inserts the given items, and optionally adds a vector
     /// index via `UpdateTable` (the initial-scan path).
     ///
@@ -994,11 +1036,37 @@ impl TableContext {
     /// confirm that no index exists (`wait_for_no_index`), then add the index
     /// itself via `UpdateTable`.
     ///
+    /// All `items` are expected to carry a valid vector and will be counted
+    /// toward the expected index count.  Use [`Self::create_with_invalid_data`]
+    /// when the dataset also contains items with invalid or missing vectors
+    /// that VS should skip.
+    ///
     /// All item attributes (PK, SK, vector, extras) are written verbatim.
     pub(super) async fn create_with_data(
         actors: &TestActors,
         shape: &TableShape,
         items: &[Item],
+    ) -> Self {
+        Self::create_with_invalid_data(actors, shape, items, &[]).await
+    }
+
+    /// Like [`Self::create_with_data`] but also inserts `invalid_items` into
+    /// the table before the index is created.
+    ///
+    /// `items` are the valid rows — they carry a well-formed vector and are
+    /// counted toward the expected index count that VS must reach before the
+    /// function returns.
+    ///
+    /// `invalid_items` are inserted into the table (Scylla accepts any value
+    /// before a vector index exists) but are expected to be skipped by VS
+    /// during the initial scan (wrong type, missing attribute, wrong
+    /// dimensions, etc.).  They are **not** counted toward the expected index
+    /// count.
+    pub(super) async fn create_with_invalid_data(
+        actors: &TestActors,
+        shape: &TableShape,
+        items: &[Item],
+        invalid_items: &[Item],
     ) -> Self {
         // 1. Create table without a vector index.
         let no_vec_shape = TableShape {
@@ -1009,7 +1077,7 @@ impl TableContext {
         let ctx = Self::create(actors, &no_vec_shape).await;
 
         // 2. Insert all items — write every attribute in the item verbatim.
-        for item in items {
+        for item in items.iter().chain(invalid_items.iter()) {
             let mut req = ctx.client.put_item().table_name(&ctx.table_name);
             for (attr_name, attr_val) in &item.0 {
                 req = req.item(attr_name, attr_val.clone());
@@ -1039,7 +1107,8 @@ impl TableContext {
         )
         .await;
 
-        // 4. Wait for VS to serve the index with all items.
+        // 4. Wait for VS to serve the index.  Only `items` (the valid ones)
+        //    are counted; `invalid_items` are skipped by VS.
         common::wait_for_index(&ctx.vs_client, &ctx.index).await;
         wait_for_index_count(&ctx.vs_client, &ctx.index, items.len()).await;
 
