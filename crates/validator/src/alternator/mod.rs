@@ -7,6 +7,7 @@ mod batch_write_item;
 mod create_table;
 mod delete_item;
 mod put_item;
+mod query;
 mod ttl;
 mod update_item;
 mod update_table;
@@ -117,6 +118,7 @@ pub(crate) async fn new() -> TestCase<TestActors> {
     let test_case = delete_item::register(test_case);
     let test_case = update_item::register(test_case);
     let test_case = batch_write_item::register(test_case);
+    let test_case = query::register(test_case);
     ttl::register(test_case)
 }
 
