@@ -7,6 +7,7 @@ mod batch_write_item;
 mod create_table;
 mod delete_item;
 mod put_item;
+mod query;
 mod ttl;
 mod update_item;
 mod update_table;
@@ -102,6 +103,7 @@ pub(crate) async fn test_cases() -> Vec<(String, TestCase<TestActors>)> {
             batch_write_item::new().await,
         ),
         ("alternator_ttl".into(), ttl::new().await),
+        ("alternator_query".into(), query::new().await),
     ]
 }
 
@@ -281,6 +283,14 @@ impl Item {
     fn sk(mut self, sk_attr: &str, sk_val: AttributeValue) -> Self {
         self.0.insert(sk_attr.to_string(), sk_val);
         self
+    }
+
+    fn maybe_sk(self, sk_attr: Option<&str>, sk_val: AttributeValue) -> Self {
+        if let Some(sk) = sk_attr {
+            self.sk(sk, sk_val)
+        } else {
+            self
+        }
     }
 
     fn vec(mut self, vec_attr: &str, v: [f32; 3]) -> Self {
