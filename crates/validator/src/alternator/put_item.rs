@@ -52,6 +52,34 @@ async fn put_item_updates_index(actors: TestActors) {
         ctx.put(&a_replaced).await;
         ctx.wait_for_ann([1.0, 1.0, 1.0], &[b, c, a_replaced]).await;
 
+        // Step 3: conditional PutItem (LWT path).
+        //
+        // Under `only_rmw_uses_lwt`, a PutItem with a ConditionExpression is
+        // treated as RMW and goes through the LWT/Paxos path.  This exercises
+        // the same `learn_decision` CDC path that the `always_use_lwt` test
+        // covers, but inside the normal alternator suite.
+        //
+        // Write a fresh item `d` with `attribute_not_exists(#pk)` — the
+        // condition passes (d does not exist) → VS must index it (count = 4).
+        info!(
+            "Step 3: conditional PutItem (passing condition) in '{}'",
+            ctx.table_name
+        );
+        let d = Item::key(&ctx.pk, ctx.sk.as_deref(), "pk", "d").vec(vec_attr, [1.0, 1.0, 1.0]);
+        let mut req = ctx
+            .client
+            .put_item()
+            .table_name(&ctx.table_name)
+            .condition_expression("attribute_not_exists(#pk)")
+            .expression_attribute_names("#pk", ctx.pk.as_str());
+        for (attr_name, attr_val) in &d.0 {
+            req = req.item(attr_name, attr_val.clone());
+        }
+        req.send()
+            .await
+            .expect("conditional PutItem with passing condition should succeed");
+        ctx.wait_for_count(4).await;
+
         ctx.done().await;
         info!("Shape {shape:?} passed");
     }
@@ -146,7 +174,8 @@ async fn put_item_with_invalid_vector_is_not_indexed(actors: TestActors) {
     // a vector attribute was correctly ignored.
     let valid = Item::key(pk, None, "pk", "valid").vec(vec_attr, [1.0, 1.0, 1.0]);
     ctx.put(&valid).await;
-    ctx.wait_for_ann([1.0, 1.0, 1.0], &[valid.clone()]).await;
+    ctx.wait_for_ann([1.0, 1.0, 1.0], std::slice::from_ref(&valid))
+        .await;
 
     // Replace the valid item with a version that has no vector attribute —
     // Scylla accepts this and removes the vector column from the row, so VS should

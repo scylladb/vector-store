@@ -223,6 +223,7 @@ struct TestActors {
 pub async fn test_cases() -> impl Iterator<Item = (String, TestCase<TestActors>)> {
     vec![
         ("alternator", alternator::new().await),
+        ("alternator_lwt", alternator::new_with_always_lwt().await),
         ("ann", ann::new().await),
         ("auth", auth::new().await),
         ("cdc", cdc::new().await),
