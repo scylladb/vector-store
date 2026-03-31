@@ -54,6 +54,28 @@ async fn delete_item_updates_index(actors: TestActors) {
         ctx.wait_for_count(2).await;
         ctx.wait_for_ann([1.0, 1.0, 1.0], &[b.clone(), c]).await;
 
+        // Conditional DeleteItem exercises the LWT/Paxos path under
+        // `only_rmw_uses_lwt` (ConditionExpression makes it RMW).
+        info!(
+            "Step 2: conditional DeleteItem (passing condition) in '{}'",
+            ctx.table_name
+        );
+        let mut req = ctx
+            .client
+            .delete_item()
+            .table_name(&ctx.table_name)
+            .condition_expression("attribute_exists(#pk)")
+            .expression_attribute_names("#pk", ctx.shape.pk());
+        for attr_name in std::iter::once(ctx.shape.pk()).chain(ctx.shape.sk()) {
+            if let Some(attr_val) = b.0.get(attr_name) {
+                req = req.key(attr_name, attr_val.clone());
+            }
+        }
+        req.send()
+            .await
+            .expect("conditional DeleteItem with passing condition should succeed");
+        ctx.wait_for_count(1).await;
+
         ctx.done().await;
         info!("Shape {shape:?} passed");
     }

@@ -49,6 +49,27 @@ async fn put_item_updates_index(actors: TestActors) {
         ctx.put(&a_replaced).await;
         ctx.wait_for_ann([1.0, 1.0, 1.0], &[b, c, a_replaced]).await;
 
+        // Conditional PutItem exercises the LWT/Paxos path under
+        // `only_rmw_uses_lwt` (ConditionExpression makes it RMW).
+        info!(
+            "Step 3: conditional PutItem (passing condition) in '{}'",
+            ctx.table_name
+        );
+        let d = Item::key(ctx.shape.pk(), ctx.shape.sk(), "pk", "d").vec(vec_attr, [1.0, 1.0, 1.0]);
+        let mut req = ctx
+            .client
+            .put_item()
+            .table_name(&ctx.table_name)
+            .condition_expression("attribute_not_exists(#pk)")
+            .expression_attribute_names("#pk", ctx.shape.pk());
+        for (attr_name, attr_val) in &d.0 {
+            req = req.item(attr_name, attr_val.clone());
+        }
+        req.send()
+            .await
+            .expect("conditional PutItem with passing condition should succeed");
+        ctx.wait_for_count(4).await;
+
         ctx.done().await;
         info!("Shape {shape:?} passed");
     }

@@ -22,11 +22,18 @@ use super::dynamo_float_list;
 /// The expression is supplied by the caller and may reference:
 /// - `#vec` - the vector attribute name (always bound to `ctx.shape.vec_name`)
 /// - `:val` - the new value (bound when `value` is `Some`)
+/// - `#pk`  - the partition-key attribute name (bound to `ctx.pk` only when
+///   `condition_expr` is `Some`; Alternator rejects spurious bindings)
+///
+/// An optional `condition_expr` may be supplied; when `Some` it is set as the
+/// `ConditionExpression` on the request, allowing the caller to exercise the
+/// LWT/Paxos code path under `only_rmw_uses_lwt` write isolation.
 async fn update_item_expr(
     ctx: &TableContext,
     item: &Item,
     update_expr: &str,
     value: Option<AttributeValue>,
+    condition_expr: Option<&str>,
 ) -> Result<UpdateItemOutput, SdkError<UpdateItemError>> {
     let va = ctx.shape.vec().expect("TableContext has no vec_attr");
     let mut req = ctx
@@ -35,6 +42,11 @@ async fn update_item_expr(
         .table_name(&ctx.table_name)
         .update_expression(update_expr)
         .expression_attribute_names("#vec", va);
+    // Only bind #pk when a condition expression actually references it,
+    // otherwise Alternator rejects the request as having a spurious binding.
+    if condition_expr.is_some() {
+        req = req.expression_attribute_names("#pk", ctx.shape.pk());
+    }
     for attr_name in std::iter::once(ctx.shape.pk()).chain(ctx.shape.sk()) {
         if let Some(attr_val) = item.0.get(attr_name) {
             req = req.key(attr_name, attr_val.clone());
@@ -42,6 +54,9 @@ async fn update_item_expr(
     }
     if let Some(val) = value {
         req = req.expression_attribute_values(":val", val);
+    }
+    if let Some(cond) = condition_expr {
+        req = req.condition_expression(cond);
     }
     req.send().await
 }
@@ -80,6 +95,7 @@ async fn update_item_updates_index(actors: TestActors) {
             &b_updated,
             "SET #vec = :val",
             Some(dynamo_float_list(b_vec)),
+            None,
         )
         .await
         .expect("UpdateItem should succeed");
@@ -95,6 +111,7 @@ async fn update_item_updates_index(actors: TestActors) {
             &c_with_vec,
             "SET #vec = :val",
             Some(dynamo_float_list(c_vec)),
+            None,
         )
         .await
         .expect("UpdateItem should succeed");
@@ -103,7 +120,33 @@ async fn update_item_updates_index(actors: TestActors) {
         // a=[1,2,4] has cosine similarity ≈ -0.882 (second).
         // b_updated=[1,1,1] is antipodal to [-1,-1,-1] (similarity=-1, last).
         ctx.wait_for_count(3).await;
-        ctx.wait_for_ann([-1.0, -1.0, -1.0], &[c_with_vec, a, b_updated])
+        ctx.wait_for_ann(
+            [-1.0, -1.0, -1.0],
+            &[c_with_vec.clone(), a.clone(), b_updated.clone()],
+        )
+        .await;
+
+        // Conditional UpdateItem exercises the LWT/Paxos path under
+        // `only_rmw_uses_lwt` (ConditionExpression makes it RMW).
+        info!(
+            "Step 3: conditional UpdateItem (passing condition) in '{}'",
+            ctx.table_name
+        );
+        let a_new_vec = [4.0_f32, 2.0, 1.0];
+        let a_updated = Item::key(shape.pk(), shape.sk(), "pk", "a").vec(vec_attr, a_new_vec);
+        update_item_expr(
+            &ctx,
+            &a_updated,
+            "SET #vec = :val",
+            Some(dynamo_float_list(a_new_vec)),
+            Some("attribute_exists(#pk)"),
+        )
+        .await
+        .expect("conditional UpdateItem with passing condition should succeed");
+        // a_updated=[4,2,1]: ANN([4,2,1]) ->
+        //   a_updated first (sim=1.0), b_updated=[1,1,1] second (sim≈0.882),
+        //   c=[-1,-1,-1] last (sim≈-0.882).
+        ctx.wait_for_ann([4.0, 2.0, 1.0], &[a_updated, b_updated, c_with_vec])
             .await;
 
         ctx.done().await;
@@ -142,7 +185,7 @@ async fn update_item_with_invalid_vector_is_not_indexed(actors: TestActors) {
         AttributeValue::Null(true),
     ]);
 
-    update_item_expr(&ctx, &b, "REMOVE #vec", None)
+    update_item_expr(&ctx, &b, "REMOVE #vec", None, None)
         .await
         .expect("UpdateItem should succeed");
     ctx.wait_for_count(1).await;
@@ -155,18 +198,26 @@ async fn update_item_with_invalid_vector_is_not_indexed(actors: TestActors) {
             &a,
             "SET #vec = :val",
             Some(AttributeValue::S("not-a-vector".into())),
+            None,
         )
         .await,
         "ValidationException",
     );
 
     super::assert_service_error(
-        update_item_expr(&ctx, &a, "SET #vec = :val", Some(vec_with_string_elem)).await,
+        update_item_expr(
+            &ctx,
+            &a,
+            "SET #vec = :val",
+            Some(vec_with_string_elem),
+            None,
+        )
+        .await,
         "ValidationException",
     );
 
     super::assert_service_error(
-        update_item_expr(&ctx, &a, "SET #vec = :val", Some(vec_with_null_elem)).await,
+        update_item_expr(&ctx, &a, "SET #vec = :val", Some(vec_with_null_elem), None).await,
         "ValidationException",
     );
 
@@ -176,6 +227,7 @@ async fn update_item_with_invalid_vector_is_not_indexed(actors: TestActors) {
             &a,
             "SET #vec = :val",
             Some(dynamo_float_list([1.0_f32, 1.0])),
+            None,
         )
         .await,
         "ValidationException",
@@ -187,10 +239,154 @@ async fn update_item_with_invalid_vector_is_not_indexed(actors: TestActors) {
             &a,
             "SET #vec = :val",
             Some(dynamo_float_list([1.0_f32, 1.0, 1.0, 1.0])),
+            None,
         )
         .await,
         "ValidationException",
     );
+
+    ctx.done().await;
+    info!("finished");
+}
+
+/// Tests element-level `UpdateItem` operations on the vector column
+/// (`SET #vec[i]`, `REMOVE #vec[i]`, `list_append`, `ADD #vec[i]`) and
+/// verifies that VS reindexes or de-indexes items correctly.
+///
+/// Starts with 2 valid items and 3 invalid-vector items (mixed types, wrong
+/// dimensions). Steps 1-5 exercise mutations on a valid item (accepted and
+/// rejected). Steps 6-8 fix the invalid items. Step 9 tests ADD (LWT path).
+#[framed]
+async fn update_item_vector_element_operations(actors: TestActors) {
+    info!("started");
+
+    let patterns = super::name_patterns();
+    let shape = &patterns[0]; // plain names, HASH-only
+    let vec_attr = shape.vec().expect("NAME_PATTERNS[0] always has vec");
+    let pk = shape.pk();
+
+    // Two valid items so ANN order is meaningful and vector changes are
+    // detectable.  Invalid items are pre-inserted before the index exists.
+    let valid_a = Item::key(pk, None, "pk", "valid-a").vec(vec_attr, [1.0, 2.0, 4.0]);
+    let valid_b = Item::key(pk, None, "pk", "valid-b").vec(vec_attr, [4.0, 2.0, 1.0]);
+    let mixed = Item::key(pk, None, "pk", "mixed").attr(
+        vec_attr,
+        AttributeValue::L(vec![
+            AttributeValue::N("1.0".into()),
+            AttributeValue::N("2.0".into()),
+            AttributeValue::S("3.0".into()),
+        ]),
+    );
+    let too_short =
+        Item::key(pk, None, "pk", "too-short").attr(vec_attr, dynamo_float_list([1.0_f32, 2.0]));
+    let too_long = Item::key(pk, None, "pk", "too-long")
+        .attr(vec_attr, dynamo_float_list([1.0_f32, 2.0, 4.0, 8.0]));
+
+    let ctx = TableContext::create_with_invalid_data(
+        &actors,
+        shape,
+        &[valid_a.clone(), valid_b.clone()],
+        &[mixed.clone(), too_short.clone(), too_long.clone()],
+    )
+    .await;
+    info!("Step 1: SET #vec[0] on 'valid_a'");
+    update_item_expr(
+        &ctx,
+        &valid_a,
+        "SET #vec[0] = :val",
+        Some(AttributeValue::N("5.0".into())),
+        None,
+    )
+    .await
+    .expect("UpdateItem should succeed");
+    let valid_a_step1 = Item::key(pk, None, "pk", "valid-a").vec(vec_attr, [5.0, 2.0, 4.0]);
+    ctx.wait_for_ann([5.0, 2.0, 4.0], &[valid_a_step1.clone(), valid_b.clone()])
+        .await;
+
+    info!("Step 2: SET #vec[0] = S on 'valid_a' (rejected)");
+    super::assert_service_error(
+        update_item_expr(
+            &ctx,
+            &valid_a,
+            "SET #vec[0] = :val",
+            Some(AttributeValue::S("bad".into())),
+            None,
+        )
+        .await,
+        "ValidationException",
+    );
+
+    info!("Step 3: SET #vec[2] = NULL on 'valid_a' (rejected)");
+    super::assert_service_error(
+        update_item_expr(
+            &ctx,
+            &valid_a,
+            "SET #vec[2] = :val",
+            Some(AttributeValue::Null(true)),
+            None,
+        )
+        .await,
+        "ValidationException",
+    );
+
+    info!("Step 4: REMOVE #vec[0] on 'valid_a' (rejected - wrong dimension)");
+    super::assert_service_error(
+        update_item_expr(&ctx, &valid_a, "REMOVE #vec[0]", None, None).await,
+        "ValidationException",
+    );
+
+    info!("Step 5: list_append on 'valid_a' (rejected - wrong dimension)");
+    super::assert_service_error(
+        update_item_expr(
+            &ctx,
+            &valid_a,
+            "SET #vec = list_append(#vec, :val)",
+            Some(AttributeValue::L(vec![AttributeValue::N("1.0".into())])),
+            None,
+        )
+        .await,
+        "ValidationException",
+    );
+    info!("Step 6: SET #vec[2] on 'mixed'");
+    update_item_expr(
+        &ctx,
+        &mixed,
+        "SET #vec[2] = :val",
+        Some(AttributeValue::N("3.0".into())),
+        None,
+    )
+    .await
+    .expect("UpdateItem should succeed");
+    ctx.wait_for_count(3).await;
+    info!("Step 7: SET #vec[2] on 'too_short' (out-of-range index appends)");
+    update_item_expr(
+        &ctx,
+        &too_short,
+        "SET #vec[2] = :val",
+        Some(AttributeValue::N("4.0".into())),
+        None,
+    )
+    .await
+    .expect("UpdateItem should succeed");
+    ctx.wait_for_count(4).await;
+    info!("Step 8: REMOVE #vec[3] on 'too_long'");
+    update_item_expr(&ctx, &too_long, "REMOVE #vec[3]", None, None)
+        .await
+        .expect("UpdateItem should succeed");
+    ctx.wait_for_count(5).await;
+    info!("Step 9: ADD #vec[0] on 'valid_b' (ADD is always RMW -> LWT path)");
+    update_item_expr(
+        &ctx,
+        &valid_b,
+        "ADD #vec[0] :val",
+        Some(AttributeValue::N("1.0".into())),
+        None,
+    )
+    .await
+    .expect("UpdateItem ADD #vec[0] should succeed");
+    let valid_b_step9 = Item::key(pk, None, "pk", "valid-b").vec(vec_attr, [5.0, 2.0, 1.0]);
+    ctx.wait_for_count(5).await;
+    ctx.wait_for_ann([5.0, 2.0, 1.0], &[valid_b_step9]).await;
 
     ctx.done().await;
     info!("finished");
@@ -209,5 +405,10 @@ pub(super) async fn new() -> TestCase<TestActors> {
             "update_item_with_invalid_vector_is_not_indexed",
             common::DEFAULT_TEST_TIMEOUT,
             update_item_with_invalid_vector_is_not_indexed,
+        )
+        .with_test(
+            "update_item_vector_element_operations",
+            common::DEFAULT_TEST_TIMEOUT,
+            update_item_vector_element_operations,
         )
 }
