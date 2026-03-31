@@ -144,10 +144,12 @@ async fn ttl_expiration_verified_via_query_with_all_projected(actors: TestActors
     };
     let ttl_attribute = "ttl_expiry";
 
-    let perm1 = Item::key("Pk-TTLProj", shape.sk, "pk", "1").vec("Vec-TTLProj", [1.0, 1.0, 1.0]);
-    let perm2 = Item::key("Pk-TTLProj", shape.sk, "pk", "2").vec("Vec-TTLProj", [1.0, 2.0, 4.0]);
-    let expiring = Item::key("Pk-TTLProj", shape.sk, "pk", "expiring")
-        .vec("Vec-TTLProj", [1.0, 4.0, 8.0])
+    let vec_attr = shape.vec.unwrap();
+
+    let perm1 = Item::key(shape.pk, shape.sk, "pk", "1").vec(vec_attr, [1.0, 1.0, 1.0]);
+    let perm2 = Item::key(shape.pk, shape.sk, "pk", "2").vec(vec_attr, [1.0, 2.0, 4.0]);
+    let expiring = Item::key(shape.pk, shape.sk, "pk", "expiring")
+        .vec(vec_attr, [1.0, 4.0, 8.0])
         .attr(ttl_attribute, AttributeValue::N(ttl_epoch(2).to_string()));
 
     let ctx =
