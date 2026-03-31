@@ -7,6 +7,7 @@ mod batch_write_item;
 mod create_table;
 mod delete_item;
 mod key_types;
+mod lwt;
 mod put_item;
 mod query;
 mod ttl;
@@ -124,6 +125,12 @@ pub(crate) async fn new() -> TestCase {
     ttl::register(test_case)
 }
 
+#[framed]
+pub(crate) async fn new_with_always_lwt() -> TestCase {
+    let test_case = TestCase::empty().with_cleanup(common::DEFAULT_TEST_TIMEOUT, common::cleanup);
+    lwt::register(test_case)
+}
+
 pub(super) const ALTERNATOR_PORT: u16 = 8000;
 
 /// In ScyllaDB Alternator, a DynamoDB table named `T` is stored under the CQL
@@ -236,7 +243,7 @@ async fn make_dynamodb_client(db_ip: Ipv4Addr) -> Client {
 /// The Alternator port may become available slightly after the CQL port (which
 /// is what `db.wait_for_ready()` checks), so `init` should call this once after
 /// the cluster has started before any tests run.
-async fn wait_for_alternator(db_ip: Ipv4Addr) {
+pub(super) async fn wait_for_alternator(db_ip: Ipv4Addr) {
     let client = make_dynamodb_client(db_ip).await;
     common::wait_for(
         || {
