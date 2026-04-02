@@ -53,7 +53,7 @@ struct ServerDeps {
 async fn spawn_server_with_retry(
     config: &HttpServerConfig,
     deps: &ServerDeps,
-) -> anyhow::Result<(Handle, SocketAddr, Router)> {
+) -> anyhow::Result<(Handle<SocketAddr>, SocketAddr, Router)> {
     let mut retry_delay = Duration::from_millis(50);
     let max_retries = 10;
 
@@ -181,7 +181,7 @@ pub(crate) async fn new(
 async fn spawn_server(
     config: &HttpServerConfig,
     deps: &ServerDeps,
-) -> anyhow::Result<(Handle, SocketAddr, Router)> {
+) -> anyhow::Result<(Handle<SocketAddr>, SocketAddr, Router)> {
     let protocol = config.protocol_label();
     let addr = config.addr;
 
