@@ -32,6 +32,8 @@ mod vector;
 pub use crate::config_manager::ConfigManager;
 pub use crate::config_manager::load_config;
 pub use crate::distance::Distance;
+pub use crate::httpserver::HttpServer;
+pub use crate::httpserver::HttpServerExt;
 pub use crate::index_key::IndexKey;
 pub use crate::info::Info;
 use crate::internals::Internals;
@@ -676,7 +678,7 @@ pub async fn run(
     internals: Sender<Internals>,
     index_factory: Box<dyn IndexFactory + Send + Sync>,
     config_rx: watch::Receiver<Arc<Config>>,
-) -> anyhow::Result<(impl Sized, SocketAddr)> {
+) -> anyhow::Result<(Sender<HttpServer>, SocketAddr)> {
     let metrics: Arc<Metrics> = Arc::new(metrics::Metrics::new());
     let index_engine_version = index_factory.index_engine_version();
     httpserver::new(
