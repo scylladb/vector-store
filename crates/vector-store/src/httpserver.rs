@@ -9,6 +9,7 @@ use crate::httproutes;
 use crate::internals::Internals;
 use crate::metrics::Metrics;
 use crate::node_state::NodeState;
+use axum::Router;
 use axum_server::Handle;
 use axum_server::accept::NoDelayAcceptor;
 use axum_server::tls_rustls::RustlsConfig;
@@ -17,10 +18,28 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
+use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio::time;
 
-pub(crate) enum HttpServer {}
+pub enum HttpServer {
+    Router { tx: oneshot::Sender<Router> },
+}
+
+pub trait HttpServerExt {
+    fn router(&self) -> impl Future<Output = Router>;
+}
+
+impl HttpServerExt for Sender<HttpServer> {
+    async fn router(&self) -> Router {
+        let (tx, rx) = oneshot::channel();
+        self.send(HttpServer::Router { tx })
+            .await
+            .expect("HttpServerExt::router: internal actor should receive request");
+        rx.await
+            .expect("HttpServerExt::router: internal actor should send response")
+    }
+}
 
 struct ServerDeps {
     state: Sender<NodeState>,
@@ -34,7 +53,7 @@ struct ServerDeps {
 async fn spawn_server_with_retry(
     config: &HttpServerConfig,
     deps: &ServerDeps,
-) -> anyhow::Result<(Handle, SocketAddr)> {
+) -> anyhow::Result<(Handle, SocketAddr, Router)> {
     let mut retry_delay = Duration::from_millis(50);
     let max_retries = 10;
 
@@ -89,7 +108,8 @@ pub(crate) async fn new(
     let initial_config = config_rx.borrow().clone();
 
     // Start initial server and get actual bound address
-    let (initial_handle, actual_addr) = spawn_server_with_retry(&initial_config, &deps).await?;
+    let (initial_handle, actual_addr, mut router) =
+        spawn_server_with_retry(&initial_config, &deps).await?;
 
     // Spawn supervisor task that monitors config changes and manages server restarts
     tokio::spawn(async move {
@@ -98,11 +118,17 @@ pub(crate) async fn new(
 
         loop {
             tokio::select! {
-                result = rx.recv() => {
-                    if result.is_none() {
-                        break;
+                msg = rx.recv() => {
+                    let Some(msg) = msg else {
+                         break;
+                    };
+                    match msg {
+                        HttpServer::Router { tx } => {
+                            _ = tx.send(router.clone());
+                        }
                     }
                 }
+
                 result = config_rx.changed() => {
                     if result.is_err() {
                         break;
@@ -120,9 +146,10 @@ pub(crate) async fn new(
 
                         // Start new server with retry
                         match spawn_server_with_retry(&new_config, &deps).await {
-                            Ok((handle, new_actual_addr)) => {
+                            Ok((handle, new_actual_addr, new_router)) => {
                                 current_handle = handle;
                                 current_config = new_config;
+                                router = new_router;
                                 tracing::info!(
                                     "{} server reloaded successfully on {}",
                                     current_config.protocol_label(),
@@ -154,57 +181,42 @@ pub(crate) async fn new(
 async fn spawn_server(
     config: &HttpServerConfig,
     deps: &ServerDeps,
-) -> anyhow::Result<(Handle, SocketAddr)> {
+) -> anyhow::Result<(Handle, SocketAddr, Router)> {
     let protocol = config.protocol_label();
     let addr = config.addr;
 
     let handle = Handle::new();
 
+    let tls_config = config
+        .tls
+        .as_ref()
+        .map(|t| RustlsConfig::from_config(Arc::clone(t.server_config())));
+
+    let router = httproutes::new(
+        deps.engine.clone(),
+        deps.metrics.clone(),
+        deps.state.clone(),
+        deps.internals.clone(),
+        deps.index_engine_version.clone(),
+        tls_config.is_some(),
+    );
     tokio::spawn({
         let handle = handle.clone();
-        let state = deps.state.clone();
-        let engine = deps.engine.clone();
-        let metrics = deps.metrics.clone();
-        let internals = deps.internals.clone();
-        let index_engine_version = deps.index_engine_version.clone();
-        let tls_config = config
-            .tls
-            .as_ref()
-            .map(|t| RustlsConfig::from_config(Arc::clone(t.server_config())));
+        let router = router.clone();
 
         async move {
             let result = match tls_config {
                 Some(tls_config) => {
                     axum_server_dual_protocol::bind_dual_protocol(addr, tls_config)
                         .handle(handle)
-                        .serve(
-                            httproutes::new(
-                                engine,
-                                metrics,
-                                state,
-                                internals,
-                                index_engine_version,
-                                true,
-                            )
-                            .into_make_service(),
-                        )
+                        .serve(router.into_make_service())
                         .await
                 }
                 _ => {
                     axum_server::bind(addr)
                         .handle(handle)
                         .acceptor(NoDelayAcceptor::new())
-                        .serve(
-                            httproutes::new(
-                                engine,
-                                metrics,
-                                state,
-                                internals,
-                                index_engine_version,
-                                false,
-                            )
-                            .into_make_service(),
-                        )
+                        .serve(router.into_make_service())
                         .await
                 }
             };
@@ -221,7 +233,7 @@ async fn spawn_server(
             "server failed to start - listening notification not received"
         ))?;
 
-    Ok((handle, actual_addr))
+    Ok((handle, actual_addr, router))
 }
 
 fn describe_config_changes(old: &HttpServerConfig, new: &HttpServerConfig) -> String {
