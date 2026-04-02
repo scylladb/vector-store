@@ -69,7 +69,7 @@ async fn spawn_server_with_retry(
     metrics: Arc<Metrics>,
     internals: Sender<Internals>,
     index_engine_version: String,
-) -> anyhow::Result<(Handle, SocketAddr, Router)> {
+) -> anyhow::Result<(Handle<SocketAddr>, SocketAddr, Router)> {
     let mut retry_delay = Duration::from_millis(50);
     let max_retries = 10;
 
@@ -248,7 +248,7 @@ async fn spawn_server(
     metrics: Arc<Metrics>,
     internals: Sender<Internals>,
     index_engine_version: String,
-) -> anyhow::Result<(Handle, SocketAddr, Router)> {
+) -> anyhow::Result<(Handle<SocketAddr>, SocketAddr, Router)> {
     let tls_config = load_tls_config(config).await?;
     let protocol = protocol(&tls_config);
     let addr = config.vector_store_addr;

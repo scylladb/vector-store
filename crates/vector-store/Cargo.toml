@@ -67,6 +67,7 @@ uuid.workspace = true
 rayon.workspace = true
 
 [dev-dependencies]
+axum-test.workspace = true
 criterion.workspace = true
 mockall.workspace = true
 ntest.workspace = true
