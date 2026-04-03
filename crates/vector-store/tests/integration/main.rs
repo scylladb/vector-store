@@ -13,6 +13,7 @@ mod opensearch;
 mod quantization;
 mod routing;
 mod status;
+mod tls_utils;
 mod usearch;
 
 use std::sync::Arc;
