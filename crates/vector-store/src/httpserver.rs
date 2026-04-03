@@ -9,9 +9,15 @@ use crate::httproutes;
 use crate::internals::Internals;
 use crate::metrics::Metrics;
 use crate::node_state::NodeState;
+use anyhow::bail;
 use axum_server::Handle;
 use axum_server::accept::NoDelayAcceptor;
 use axum_server::tls_rustls::RustlsConfig;
+use rustls::RootCertStore;
+use rustls::pki_types::CertificateDer;
+use rustls::pki_types::PrivateKeyDer;
+use rustls::server::WebPkiClientVerifier;
+use rustls_pki_types::pem::PemObject;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -26,6 +32,7 @@ pub(crate) struct HttpServerConfig {
     pub addr: SocketAddr,
     pub tls_cert_path: Option<PathBuf>,
     pub tls_key_path: Option<PathBuf>,
+    pub mtls_ca_cert_path: Option<PathBuf>,
 }
 
 pub(crate) enum HttpServer {}
@@ -38,15 +45,80 @@ struct ServerDeps {
     index_engine_version: String,
 }
 
+async fn load_mtls_config(
+    cert_path: &PathBuf,
+    key_path: &PathBuf,
+    ca_cert_path: &PathBuf,
+) -> anyhow::Result<RustlsConfig> {
+    let ca_pem = tokio::fs::read(ca_cert_path)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to read mTLS CA cert at {ca_cert_path:?}: {e}"))?;
+
+    let ca_certs = CertificateDer::pem_slice_iter(&ca_pem)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| anyhow::anyhow!("Failed to parse mTLS CA certificate PEM: {e}"))?;
+
+    let mut root_store = RootCertStore::empty();
+    let (added, ignored) = root_store.add_parsable_certificates(ca_certs);
+    if added == 0 {
+        bail!("No valid CA certificates found in mTLS CA cert file {ca_cert_path:?}");
+    }
+    if ignored > 0 {
+        tracing::warn!(
+            "{ignored} CA certificate(s) in the mTLS CA bundle could not be parsed and were skipped"
+        );
+    }
+
+    let verifier = WebPkiClientVerifier::builder(Arc::new(root_store))
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to build mTLS client verifier: {e}"))?;
+
+    let cert_pem = tokio::fs::read(cert_path)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to read server cert at {cert_path:?}: {e}"))?;
+    let key_pem = tokio::fs::read(key_path)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to read server key at {key_path:?}: {e}"))?;
+
+    let cert_chain = CertificateDer::pem_slice_iter(&cert_pem)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| anyhow::anyhow!("Failed to parse server certificate PEM: {e}"))?;
+
+    let private_key = PrivateKeyDer::from_pem_slice(&key_pem)
+        .map_err(|e| anyhow::anyhow!("Failed to parse server private key PEM: {e}"))?;
+
+    let server_config = rustls::ServerConfig::builder()
+        .with_client_cert_verifier(verifier)
+        .with_single_cert(cert_chain, private_key)
+        .map_err(|e| anyhow::anyhow!("Failed to build mTLS server config: {e}"))?;
+
+    tracing::info!("mTLS enabled with CA cert from {ca_cert_path:?}");
+
+    Ok(RustlsConfig::from_config(Arc::new(server_config)))
+}
+
 async fn load_tls_config(config: &HttpServerConfig) -> anyhow::Result<Option<RustlsConfig>> {
     match (&config.tls_cert_path, &config.tls_key_path) {
-        (Some(cert_path), Some(key_path)) => {
-            let config = RustlsConfig::from_pem_file(cert_path, key_path)
+        (Some(cert_path), Some(key_path)) => match &config.mtls_ca_cert_path {
+            Some(ca_path) => load_mtls_config(cert_path, key_path, ca_path)
                 .await
-                .map_err(|e| anyhow::anyhow!("Failed to load TLS config: {e}"))?;
-            Ok(Some(config))
+                .map(Some),
+            None => {
+                let tls = RustlsConfig::from_pem_file(cert_path, key_path)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to load TLS config: {e}"))?;
+                Ok(Some(tls))
+            }
+        },
+        _ => {
+            if config.mtls_ca_cert_path.is_some() {
+                bail!(
+                    "mTLS CA certificate path is configured, but TLS certificate or key path is missing"
+                );
+            } else {
+                Ok(None)
+            }
         }
-        _ => Ok(None),
     }
 }
 
@@ -254,14 +326,24 @@ fn describe_config_changes(old: &HttpServerConfig, new: &HttpServerConfig) -> St
         changes.push(format!("address {} -> {}", old.addr, new.addr));
     }
     if old.tls_cert_path != new.tls_cert_path || old.tls_key_path != new.tls_key_path {
-        let label = |c: &HttpServerConfig| {
+        let tls_label = |c: &HttpServerConfig| {
             if c.tls_cert_path.is_some() && c.tls_key_path.is_some() {
                 "enabled"
             } else {
                 "disabled"
             }
         };
-        changes.push(format!("TLS {} -> {}", label(old), label(new)));
+        changes.push(format!("TLS {} -> {}", tls_label(old), tls_label(new)));
+    }
+    if old.mtls_ca_cert_path != new.mtls_ca_cert_path {
+        let mtls_label = |c: &HttpServerConfig| {
+            if c.mtls_ca_cert_path.is_some() {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        };
+        changes.push(format!("mTLS {} -> {}", mtls_label(old), mtls_label(new)));
     }
     changes.join(", ")
 }

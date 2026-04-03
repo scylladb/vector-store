@@ -675,6 +675,7 @@ fn http_server_config(config: &Config) -> Option<httpserver::HttpServerConfig> {
         addr: config.vector_store_addr,
         tls_cert_path: config.tls_cert_path.clone(),
         tls_key_path: config.tls_key_path.clone(),
+        mtls_ca_cert_path: None,
     })
 }
 
