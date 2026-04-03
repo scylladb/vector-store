@@ -169,7 +169,9 @@ async fn spawn_server_with_retry(
 async fn enable_server(config: &HttpServerConfig, deps: &ServerDeps) -> anyhow::Result<Handle> {
     tracing::info!("HTTP server being enabled");
     let (handle, addr) = spawn_server_with_retry(config, deps).await?;
-    let protocol = if config.tls_cert_path.is_some() {
+    let protocol = if config.mtls_ca_cert_path.is_some() {
+        "HTTPS (mTLS)"
+    } else if config.tls_cert_path.is_some() {
         "HTTPS"
     } else {
         "HTTP"
@@ -202,7 +204,9 @@ async fn reload_server(
 
     match spawn_server_with_retry(new_config, deps).await {
         Ok((handle, addr)) => {
-            let protocol = if new_config.tls_cert_path.is_some() {
+            let protocol = if new_config.mtls_ca_cert_path.is_some() {
+                "HTTPS (mTLS)"
+            } else if new_config.tls_cert_path.is_some() {
                 "HTTPS"
             } else {
                 "HTTP"
@@ -355,7 +359,12 @@ async fn spawn_server(
     deps: &ServerDeps,
 ) -> anyhow::Result<(Handle, SocketAddr)> {
     let tls_config = load_tls_config(config).await?;
-    let protocol = protocol(&tls_config);
+    let is_mtls = config.mtls_ca_cert_path.is_some();
+    let protocol = if is_mtls {
+        "HTTPS (mTLS)"
+    } else {
+        protocol(&tls_config)
+    };
     let addr = config.addr;
 
     let handle = Handle::new();
@@ -370,7 +379,25 @@ async fn spawn_server(
 
         async move {
             let result = match tls_config {
+                Some(tls_config) if is_mtls => {
+                    // mTLS requires HTTPS-only (no dual protocol)
+                    axum_server::bind_rustls(addr, tls_config)
+                        .handle(handle)
+                        .serve(
+                            httproutes::new(
+                                engine,
+                                metrics,
+                                state,
+                                internals,
+                                index_engine_version,
+                                true,
+                            )
+                            .into_make_service(),
+                        )
+                        .await
+                }
                 Some(tls_config) => {
+                    // Regular TLS allows dual protocol (HTTP + HTTPS)
                     axum_server_dual_protocol::bind_dual_protocol(addr, tls_config)
                         .handle(handle)
                         .serve(
