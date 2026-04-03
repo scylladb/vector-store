@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::watch;
 use vector_store::Config;
+use vector_store::HttpServerExt;
 use vector_store::httproutes::PostIndexAnnRequest;
 
 async fn run_server(
@@ -35,10 +36,10 @@ async fn run_server(
 
     let (_config_tx, config_rx) = watch::channel(Arc::new(config));
 
-    let (server, addr) =
-        vector_store::run(node_state, db_actor, internals, index_factory, config_rx)
-            .await
-            .unwrap();
+    let server = vector_store::run(node_state, db_actor, internals, index_factory, config_rx)
+        .await
+        .unwrap();
+    let addr = server.get_address().await.unwrap();
 
     (server, addr, _config_tx)
 }

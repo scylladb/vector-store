@@ -24,6 +24,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
+use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio::time;
 
@@ -35,7 +36,41 @@ pub(crate) struct HttpServerConfig {
     pub mtls_ca_cert_path: Option<PathBuf>,
 }
 
-pub(crate) enum HttpServer {}
+pub enum HttpServer {
+    GetAddress {
+        tx: oneshot::Sender<Option<SocketAddr>>,
+    },
+    SubscribeAddress {
+        tx: oneshot::Sender<watch::Receiver<Option<SocketAddr>>>,
+    },
+}
+
+pub trait HttpServerExt {
+    fn get_address(&self) -> impl std::future::Future<Output = Option<SocketAddr>> + Send;
+    fn subscribe_address(
+        &self,
+    ) -> impl std::future::Future<Output = watch::Receiver<Option<SocketAddr>>> + Send;
+}
+
+impl HttpServerExt for mpsc::Sender<HttpServer> {
+    async fn get_address(&self) -> Option<SocketAddr> {
+        let (tx, rx) = oneshot::channel();
+        self.send(HttpServer::GetAddress { tx })
+            .await
+            .expect("HttpServerExt::get_address: internal actor should receive request");
+        rx.await
+            .expect("HttpServerExt::get_address: internal actor should send response")
+    }
+
+    async fn subscribe_address(&self) -> watch::Receiver<Option<SocketAddr>> {
+        let (tx, rx) = oneshot::channel();
+        self.send(HttpServer::SubscribeAddress { tx })
+            .await
+            .expect("HttpServerExt::subscribe_address: internal actor should receive request");
+        rx.await
+            .expect("HttpServerExt::subscribe_address: internal actor should send response")
+    }
+}
 
 struct ServerDeps {
     state: Sender<NodeState>,
@@ -166,7 +201,11 @@ async fn spawn_server_with_retry(
     unreachable!()
 }
 
-async fn enable_server(config: &HttpServerConfig, deps: &ServerDeps) -> anyhow::Result<Handle> {
+async fn enable_server(
+    config: &HttpServerConfig,
+    deps: &ServerDeps,
+    addr_tx: &watch::Sender<Option<SocketAddr>>,
+) -> anyhow::Result<Handle> {
     tracing::info!("HTTP server being enabled");
     let (handle, addr) = spawn_server_with_retry(config, deps).await?;
     let protocol = if config.mtls_ca_cert_path.is_some() {
@@ -177,15 +216,17 @@ async fn enable_server(config: &HttpServerConfig, deps: &ServerDeps) -> anyhow::
         "HTTP"
     };
     tracing::info!("{} server started successfully on {}", protocol, addr);
+    addr_tx.send(Some(addr)).ok();
     Ok(handle)
 }
 
-fn disable_server(handle: Option<Handle>) {
+fn disable_server(handle: Option<Handle>, addr_tx: &watch::Sender<Option<SocketAddr>>) {
     tracing::info!("HTTP server being disabled");
     if let Some(handle) = handle {
         handle.graceful_shutdown(Some(Duration::from_secs(10)));
         tracing::info!("HTTP server shut down");
     }
+    addr_tx.send(None).ok();
 }
 
 async fn reload_server(
@@ -193,6 +234,7 @@ async fn reload_server(
     new_config: &HttpServerConfig,
     current_handle: Option<Handle>,
     deps: &ServerDeps,
+    addr_tx: &watch::Sender<Option<SocketAddr>>,
 ) -> Option<Handle> {
     let changes = describe_config_changes(old_config, new_config);
     tracing::info!("HTTP server configuration changed ({changes}), reloading...");
@@ -212,6 +254,7 @@ async fn reload_server(
                 "HTTP"
             };
             tracing::info!("{} server reloaded successfully on {}", protocol, addr);
+            addr_tx.send(Some(addr)).ok();
             Some(handle)
         }
         Err(e) => {
@@ -219,6 +262,7 @@ async fn reload_server(
             tracing::error!(
                 "HTTP server is now offline - previous server was shut down but new server failed to start"
             );
+            addr_tx.send(None).ok();
             None
         }
     }
@@ -229,10 +273,11 @@ async fn handle_config_change(
     new_config: &Option<HttpServerConfig>,
     current_handle: Option<Handle>,
     deps: &ServerDeps,
+    addr_tx: &watch::Sender<Option<SocketAddr>>,
 ) -> Option<Handle> {
     match (current_config, new_config) {
         (None, None) => current_handle,
-        (None, Some(config)) => match enable_server(config, deps).await {
+        (None, Some(config)) => match enable_server(config, deps, addr_tx).await {
             Ok(handle) => Some(handle),
             Err(e) => {
                 tracing::error!("Failed to start HTTP server: {e}");
@@ -240,10 +285,10 @@ async fn handle_config_change(
             }
         },
         (Some(_), None) => {
-            disable_server(current_handle);
+            disable_server(current_handle, addr_tx);
             None
         }
-        (Some(old), Some(new)) => reload_server(old, new, current_handle, deps).await,
+        (Some(old), Some(new)) => reload_server(old, new, current_handle, deps, addr_tx).await,
     }
 }
 
@@ -255,13 +300,15 @@ pub(crate) async fn new<F>(
     index_engine_version: String,
     mut config_rx: watch::Receiver<Arc<Config>>,
     get_server_config: F,
-) -> anyhow::Result<(Sender<HttpServer>, SocketAddr)>
+) -> anyhow::Result<Sender<HttpServer>>
 where
     F: Fn(&Config) -> Option<HttpServerConfig> + Send + 'static,
 {
     // minimal size as channel is used as a lifetime guard
     const CHANNEL_SIZE: usize = 1;
     let (tx, mut rx) = mpsc::channel(CHANNEL_SIZE);
+
+    let (addr_tx, addr_rx) = watch::channel::<Option<SocketAddr>>(None);
 
     let deps = ServerDeps {
         state: state.clone(),
@@ -274,12 +321,13 @@ where
     let initial_config = get_server_config(&config_rx.borrow());
 
     // Start initial server if config is provided
-    let (mut current_handle, actual_addr) = if let Some(ref config) = initial_config {
+    let mut current_handle = if let Some(ref config) = initial_config {
         let (handle, addr) = spawn_server_with_retry(config, &deps).await?;
-        (Some(handle), addr)
+        addr_tx.send(Some(addr)).ok();
+        Some(handle)
     } else {
         tracing::info!("HTTP server disabled by configuration");
-        (None, "0.0.0.0:0".parse().unwrap())
+        None
     };
 
     // Spawn supervisor task that monitors config changes and manages server restarts
@@ -290,8 +338,14 @@ where
             loop {
                 tokio::select! {
                     result = rx.recv() => {
-                        if result.is_none() {
-                            break;
+                        match result {
+                            None => break,
+                            Some(HttpServer::GetAddress { tx }) => {
+                                tx.send(*addr_rx.borrow()).expect("failed to send response");
+                            }
+                            Some(HttpServer::SubscribeAddress { tx }) => {
+                                tx.send(addr_rx.clone()).expect("failed to send response");
+                            }
                         }
                     }
                     result = config_rx.changed() => {
@@ -303,7 +357,7 @@ where
 
                         if current_config != new_config {
                             current_handle =
-                                handle_config_change(&current_config, &new_config, current_handle, &deps)
+                                handle_config_change(&current_config, &new_config, current_handle, &deps, &addr_tx)
                                     .await;
                             current_config = new_config;
                         }
@@ -318,10 +372,11 @@ where
                 // Brief delay to allow clean shutdown
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
+            addr_tx.send(None).ok();
         }
     });
 
-    Ok((tx, actual_addr))
+    Ok(tx)
 }
 
 fn describe_config_changes(old: &HttpServerConfig, new: &HttpServerConfig) -> String {

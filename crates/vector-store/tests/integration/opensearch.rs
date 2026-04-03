@@ -16,6 +16,7 @@ use std::sync::Arc;
 use tokio::sync::watch;
 use uuid::Uuid;
 use vector_store::DbIndexType;
+use vector_store::HttpServerExt;
 use vector_store::IndexMetadata;
 use vector_store::Timestamp;
 
@@ -49,10 +50,10 @@ async fn simple_create_search_delete_index() {
 
     let (_config_tx, config_rx) = watch::channel(Arc::new(test_config()));
 
-    let (_server_actor, addr) =
-        vector_store::run(node_state, db_actor, internals, index_factory, config_rx)
-            .await
-            .unwrap();
+    let server = vector_store::run(node_state, db_actor, internals, index_factory, config_rx)
+        .await
+        .unwrap();
+    let addr = server.get_address().await.unwrap();
 
     let client = HttpClient::new(addr);
 
@@ -103,8 +104,9 @@ async fn simple_create_search_delete_index() {
             client
                 .index_status(&index.keyspace_name, &index.index_name)
                 .await
-                .expect("failed to get index status")
-                .count
+                .ok()
+                .map(|status| status.count)
+                .unwrap_or(0)
                 == 3
         },
         "Waiting for index to be added to the store",

@@ -21,6 +21,7 @@ use vector_store::Connectivity;
 use vector_store::DbIndexType;
 use vector_store::ExpansionAdd;
 use vector_store::ExpansionSearch;
+use vector_store::HttpServerExt;
 use vector_store::IndexMetadata;
 use vector_store::Quantization;
 use vector_store::SpaceType;
@@ -112,10 +113,10 @@ async fn memory_limit_during_index_build() {
     let index_factory = vector_store::new_index_factory_usearch(config_rx.clone()).unwrap();
 
     let node_state = node_state.clone();
-    let (_server, addr) =
-        vector_store::run(node_state, db_actor, internals, index_factory, config_rx)
-            .await
-            .unwrap();
+    let server = vector_store::run(node_state, db_actor, internals, index_factory, config_rx)
+        .await
+        .unwrap();
+    let addr = server.get_address().await.unwrap();
 
     let client = HttpClient::new(addr);
 
