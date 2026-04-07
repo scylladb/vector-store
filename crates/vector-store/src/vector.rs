@@ -9,16 +9,7 @@ use anyhow::bail;
 use scylla::value::CqlValue;
 use std::num::NonZeroUsize;
 
-#[derive(
-    Clone,
-    Debug,
-    PartialEq,
-    serde::Serialize,
-    serde::Deserialize,
-    derive_more::AsRef,
-    derive_more::From,
-    utoipa::ToSchema,
-)]
+#[derive(Clone, Debug, PartialEq, derive_more::AsRef, derive_more::From)]
 /// The vector to use for the Approximate Nearest Neighbor search. The format of data must match the data_type of the index.
 pub struct Vector(Vec<f32>);
 

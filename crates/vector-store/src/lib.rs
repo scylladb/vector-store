@@ -10,7 +10,7 @@ pub mod db_index;
 mod db_index_backend;
 mod distance;
 mod engine;
-pub mod httproutes;
+mod httproutes;
 mod httpserver;
 mod index;
 mod index_key;
@@ -44,8 +44,6 @@ pub use crate::table::PartitionId;
 pub use crate::table::PrimaryId;
 pub use crate::timestamp::Timestamp;
 use db::Db;
-pub use httproutes::DataType;
-pub use httproutes::IndexInfo;
 use index::factory;
 pub use index::factory::IndexFactory;
 use scylla::cluster::metadata::ColumnType;
@@ -55,7 +53,6 @@ use scylla::serialize::writers::CellWriter;
 use scylla::serialize::writers::WrittenCellProof;
 use scylla::value::CqlValue;
 use scylla_cdc::CqlIdentifier;
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::net::SocketAddr;
@@ -71,14 +68,7 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::watch;
 use tokio::task;
-use utoipa::PartialSchema;
-use utoipa::ToSchema;
-use utoipa::openapi::KnownFormat;
-use utoipa::openapi::ObjectBuilder;
-use utoipa::openapi::RefOr;
-use utoipa::openapi::Schema;
-use utoipa::openapi::SchemaFormat;
-use utoipa::openapi::schema::Type;
+use utoipa::openapi::OpenApi;
 use uuid::Uuid;
 pub use vector::Vector;
 
@@ -222,9 +212,7 @@ pub struct Credentials {
     derive_more::AsRef,
     derive_more::Display,
     derive_more::From,
-    serde::Deserialize,
-    serde::Serialize,
-    utoipa::ToSchema,
+    derive_more::Into,
 )]
 #[from(String, &String, &str)]
 #[as_ref(str)]
@@ -259,10 +247,8 @@ impl SerializeValue for KeyspaceName {
     Ord,
     derive_more::From,
     derive_more::AsRef,
-    serde::Serialize,
-    serde::Deserialize,
+    derive_more::Into,
     derive_more::Display,
-    utoipa::ToSchema,
 )]
 #[from(String, &String, &str)]
 #[as_ref(str)]
@@ -280,17 +266,7 @@ impl SerializeValue for IndexName {
 }
 
 #[derive(
-    Clone,
-    Debug,
-    PartialEq,
-    Eq,
-    Hash,
-    derive_more::From,
-    derive_more::AsRef,
-    serde::Serialize,
-    serde::Deserialize,
-    derive_more::Display,
-    utoipa::ToSchema,
+    Clone, Debug, PartialEq, Eq, Hash, derive_more::From, derive_more::AsRef, derive_more::Display,
 )]
 #[from(String, &String, &str)]
 #[as_ref(str)]
@@ -316,11 +292,9 @@ impl SerializeValue for TableName {
     Ord,
     PartialOrd,
     derive_more::From,
+    derive_more::Into,
     derive_more::AsRef,
-    serde::Serialize,
-    serde::Deserialize,
     derive_more::Display,
-    utoipa::ToSchema,
 )]
 #[from(String, &String, &str)]
 #[as_ref(str)]
@@ -344,8 +318,6 @@ impl SerializeValue for ColumnName {
     PartialEq,
     Eq,
     Hash,
-    serde::Serialize,
-    serde::Deserialize,
     derive_more::AsRef,
     derive_more::From,
     derive_more::Display,
@@ -361,8 +333,6 @@ pub struct Dimensions(NonZeroUsize);
     PartialEq,
     Eq,
     Hash,
-    serde::Serialize,
-    serde::Deserialize,
     derive_more::AsRef,
     derive_more::From,
     derive_more::Display,
@@ -383,12 +353,9 @@ impl Default for Connectivity {
     PartialEq,
     Eq,
     Hash,
-    serde::Serialize,
-    serde::Deserialize,
     derive_more::AsRef,
     derive_more::From,
     derive_more::Display,
-    utoipa::ToSchema,
 )]
 /// Control the recall of indexing
 pub struct ExpansionAdd(usize);
@@ -406,12 +373,9 @@ impl Default for ExpansionAdd {
     PartialEq,
     Eq,
     Hash,
-    serde::Serialize,
-    serde::Deserialize,
     derive_more::AsRef,
     derive_more::From,
     derive_more::Display,
-    utoipa::ToSchema,
 )]
 /// Control the quality of the search
 pub struct ExpansionSearch(usize);
@@ -422,19 +386,7 @@ impl Default for ExpansionSearch {
     }
 }
 
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    PartialEq,
-    Eq,
-    Hash,
-    Default,
-    serde::Serialize,
-    serde::Deserialize,
-    derive_more::From,
-    utoipa::ToSchema,
-)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default, derive_more::From)]
 pub enum SpaceType {
     Euclidean,
     #[default]
@@ -491,32 +443,9 @@ impl FromStr for Quantization {
     }
 }
 
-#[derive(
-    Clone,
-    Copy,
-    serde::Serialize,
-    serde::Deserialize,
-    derive_more::AsRef,
-    derive_more::Display,
-    derive_more::From,
-)]
+#[derive(Clone, Copy, derive_more::AsRef, derive_more::Display, derive_more::From)]
 /// Limit the number of search result
 pub struct Limit(NonZeroUsize);
-
-impl ToSchema for Limit {
-    fn name() -> Cow<'static, str> {
-        Cow::Borrowed("Limit")
-    }
-}
-
-impl PartialSchema for Limit {
-    fn schema() -> RefOr<Schema> {
-        ObjectBuilder::new()
-            .schema_type(Type::Integer)
-            .format(Some(SchemaFormat::KnownFormat(KnownFormat::Int32)))
-            .into()
-    }
-}
 
 impl Default for Limit {
     fn default() -> Self {
@@ -748,6 +677,10 @@ pub fn new_index_factory_opensearch(
     Ok(Box::new(index::opensearch::new_opensearch(
         &addr, config_rx,
     )?))
+}
+
+pub fn openapi() -> OpenApi {
+    httproutes::api()
 }
 
 pub async fn wait_for_shutdown() {

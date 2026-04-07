@@ -1,15 +1,15 @@
-# Copyright 2025-present ScyllaDB
+# Copyright 2026-present ScyllaDB
 # SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 
 [package]
-name = "httpclient"
+name = "httpapi"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-anyhow.workspace = true
-httpapi.workspace = true
-reqwest.workspace = true
-serde_json.workspace = true
+derive_more.workspace = true
+macros.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+utoipa.workspace = true

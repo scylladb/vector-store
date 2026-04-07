@@ -13,6 +13,11 @@ use e2etest_scylla_proxy_cluster::ScyllaProxyNodeConfig;
 use e2etest_tls::TlsExt;
 use e2etest_vector_store_cluster::VectorStoreClusterExt;
 use e2etest_vector_store_cluster::VectorStoreNodeConfig;
+use httpapi::IndexInfo;
+use httpapi::IndexName;
+use httpapi::IndexStatus;
+use httpapi::IndexStatusResponse;
+use httpapi::KeyspaceName;
 use httpclient::HttpClient;
 use itertools::Itertools;
 use scylla::client::session::Session;
@@ -30,11 +35,7 @@ use std::time::Duration;
 use tap::Pipe;
 use tokio::time;
 use tracing::info;
-use vector_store::IndexInfo;
-use vector_store::IndexName;
-use vector_store::KeyspaceName;
 use vector_store::TableName;
-use vector_store::httproutes::IndexStatus;
 
 pub const DEFAULT_TEST_TIMEOUT: Duration = Duration::from_secs(10 * 60); // 10 minutes
 pub const DEFAULT_OPERATION_TIMEOUT: Duration = Duration::from_secs(20);
@@ -467,10 +468,7 @@ where
 }
 
 #[framed]
-pub async fn wait_for_index(
-    client: &HttpClient,
-    index: &IndexInfo,
-) -> vector_store::httproutes::IndexStatusResponse {
+pub async fn wait_for_index(client: &HttpClient, index: &IndexInfo) -> IndexStatusResponse {
     wait_for_value(
         || async {
             match client.index_status(&index.keyspace, &index.index).await {

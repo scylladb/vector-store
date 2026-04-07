@@ -10,6 +10,9 @@ use crate::db_basic::ScanFn;
 use crate::db_basic::Table;
 use crate::wait_for;
 use crate::wait_for_value;
+use httpapi::PostIndexAnnFilter;
+use httpapi::PostIndexAnnResponse;
+use httpapi::PostIndexAnnRestriction;
 use httpclient::HttpClient;
 use reqwest::StatusCode;
 use scylla::cluster::metadata::NativeType;
@@ -34,9 +37,6 @@ use vector_store::Percentage;
 use vector_store::Quantization;
 use vector_store::SpaceType;
 use vector_store::Timestamp;
-use vector_store::httproutes::PostIndexAnnFilter;
-use vector_store::httproutes::PostIndexAnnResponse;
-use vector_store::httproutes::PostIndexAnnRestriction;
 use vector_store::node_state::NodeState;
 
 pub(crate) fn test_config() -> Config {
@@ -210,10 +210,12 @@ async fn simple_create_search_delete_index() {
     .await;
     let (client, _server, _config_tx) = run.await;
 
+    let keyspace_name = index.keyspace_name.clone().into();
+    let index_name = index.index_name.clone().into();
     wait_for(
         || async {
             client
-                .index_status(&index.keyspace_name, &index.index_name)
+                .index_status(&keyspace_name, &index_name)
                 .await
                 .expect("failed to get index status")
                 .count
@@ -225,12 +227,12 @@ async fn simple_create_search_delete_index() {
 
     let indexes = client.indexes().await;
     assert_eq!(indexes.len(), 1);
-    assert_eq!(indexes[0], vector_store::IndexInfo::new("vector", "ann"));
+    assert_eq!(indexes[0], httpapi::IndexInfo::new("vector", "ann"));
 
     let (primary_keys, distances, similarity_scores) = client
         .ann(
-            &index.keyspace_name,
-            &index.index_name,
+            &keyspace_name,
+            &index_name,
             vec![2.1, -2., 2.].into(),
             None,
             NonZeroUsize::new(1).unwrap().into(),
@@ -339,8 +341,8 @@ async fn failed_db_index_create() {
 
     let indexes = client.indexes().await;
     assert_eq!(indexes.len(), 2);
-    assert!(indexes.contains(&vector_store::IndexInfo::new("vector", "ann")));
-    assert!(indexes.contains(&vector_store::IndexInfo::new("vector", "ann2")));
+    assert!(indexes.contains(&httpapi::IndexInfo::new("vector", "ann")));
+    assert!(indexes.contains(&httpapi::IndexInfo::new("vector", "ann2")));
 
     db.add_index(
         IndexMetadata {
@@ -360,9 +362,9 @@ async fn failed_db_index_create() {
 
     let indexes = client.indexes().await;
     assert_eq!(indexes.len(), 3);
-    assert!(indexes.contains(&vector_store::IndexInfo::new("vector", "ann")));
-    assert!(indexes.contains(&vector_store::IndexInfo::new("vector", "ann2")));
-    assert!(indexes.contains(&vector_store::IndexInfo::new("vector", "ann3")));
+    assert!(indexes.contains(&httpapi::IndexInfo::new("vector", "ann")));
+    assert!(indexes.contains(&httpapi::IndexInfo::new("vector", "ann2")));
+    assert!(indexes.contains(&httpapi::IndexInfo::new("vector", "ann3")));
 
     db.del_index(&index.keyspace_name, &"ann2".into()).unwrap();
 
@@ -374,8 +376,8 @@ async fn failed_db_index_create() {
 
     let indexes = client.indexes().await;
     assert_eq!(indexes.len(), 2);
-    assert!(indexes.contains(&vector_store::IndexInfo::new("vector", "ann")));
-    assert!(indexes.contains(&vector_store::IndexInfo::new("vector", "ann3")));
+    assert!(indexes.contains(&httpapi::IndexInfo::new("vector", "ann")));
+    assert!(indexes.contains(&httpapi::IndexInfo::new("vector", "ann3")));
 }
 
 #[tokio::test]
@@ -399,8 +401,8 @@ async fn ann_returns_bad_request_when_provided_vector_size_is_not_eq_index_dimen
 
     let result = client
         .post_ann(
-            &index.keyspace_name,
-            &index.index_name,
+            &index.keyspace_name.into(),
+            &index.index_name.into(),
             vec![1.0, 2.0].into(), // Only 2 dimensions, should be 3 (index.dimensions)
             None,
             NonZeroUsize::new(1).unwrap().into(),
@@ -432,8 +434,8 @@ async fn ann_fail_while_building() {
 
     let result = client
         .post_ann(
-            &index.keyspace_name,
-            &index.index_name,
+            &index.keyspace_name.into(),
+            &index.index_name.into(),
             vec![1.0, 2.0, 3.0].into(),
             None,
             NonZeroUsize::new(1).unwrap().into(),
@@ -463,12 +465,14 @@ async fn ann_failed_when_wrong_number_of_primary_keys() {
     )
     .await;
 
+    let keyspace_name = index.keyspace_name.into();
+    let index_name = index.index_name.into();
     wait_for(
         || async {
             let response = client
                 .post_ann(
-                    &index.keyspace_name,
-                    &index.index_name,
+                    &keyspace_name,
+                    &index_name,
                     vec![1.0, 2.0, 3.0].into(),
                     None,
                     NonZeroUsize::new(1).unwrap().into(),
@@ -495,6 +499,8 @@ async fn ann_filter_partition_key_int_eq() {
 
     let pk_column: ColumnName = "pk".into();
     let ck_column: ColumnName = "ck".into();
+    let pk_column_http: httpapi::ColumnName = pk_column.clone().into();
+    let ck_column_http: httpapi::ColumnName = ck_column.clone().into();
     let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
         DbIndexType::Global,
         [pk_column.clone(), ck_column.clone()],
@@ -513,17 +519,19 @@ async fn ann_filter_partition_key_int_eq() {
     )
     .await;
 
+    let keyspace_name = index.keyspace_name.into();
+    let index_name = index.index_name.into();
     // Search for nearest neighbors with a filter on primary key "pk" = 1
     let pk_ck_values = wait_for_value(
         || async {
             let (primary_keys, _, _) = client
                 .ann(
-                    &index.keyspace_name,
-                    &index.index_name,
+                    &keyspace_name,
+                    &index_name,
                     vec![1.0, 2.0, 3.0].into(),
                     Some(PostIndexAnnFilter {
                         restrictions: vec![PostIndexAnnRestriction::Eq {
-                            lhs: pk_column.clone(),
+                            lhs: pk_column_http.clone(),
                             rhs: 1.into(),
                         }],
                         allow_filtering: false,
@@ -532,13 +540,13 @@ async fn ann_filter_partition_key_int_eq() {
                 )
                 .await;
             let pk_ck_values: HashSet<_> = primary_keys
-                .get(&pk_column)
+                .get(&pk_column_http)
                 .unwrap()
                 .iter()
                 .map(|v| v.as_i64().unwrap() as usize)
                 .zip(
                     primary_keys
-                        .get(&ck_column)
+                        .get(&ck_column_http)
                         .unwrap()
                         .iter()
                         .map(|v| v.as_i64().unwrap() as usize),
@@ -564,6 +572,8 @@ async fn ann_filter_clustering_key_int_eq() {
 
     let pk_column: ColumnName = "pk".into();
     let ck_column: ColumnName = "ck".into();
+    let pk_column_http: httpapi::ColumnName = pk_column.clone().into();
+    let ck_column_http: httpapi::ColumnName = ck_column.clone().into();
     let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
         DbIndexType::Global,
         [pk_column.clone(), ck_column.clone()],
@@ -582,17 +592,19 @@ async fn ann_filter_clustering_key_int_eq() {
     )
     .await;
 
+    let keyspace_name = index.keyspace_name.clone().into();
+    let index_name = index.index_name.clone().into();
     // Search for nearest neighbors with a filter on primary key "ck" = 1
     let pk_ck_values = wait_for_value(
         || async {
             let (primary_keys, _, _) = client
                 .ann(
-                    &index.keyspace_name,
-                    &index.index_name,
+                    &keyspace_name,
+                    &index_name,
                     vec![1.0, 2.0, 3.0].into(),
                     Some(PostIndexAnnFilter {
                         restrictions: vec![PostIndexAnnRestriction::Eq {
-                            lhs: ck_column.clone(),
+                            lhs: ck_column_http.clone(),
                             rhs: 1.into(),
                         }],
                         allow_filtering: false,
@@ -601,13 +613,13 @@ async fn ann_filter_clustering_key_int_eq() {
                 )
                 .await;
             let pk_ck_values: HashSet<_> = primary_keys
-                .get(&pk_column)
+                .get(&pk_column_http)
                 .unwrap()
                 .iter()
                 .map(|v| v.as_i64().unwrap() as usize)
                 .zip(
                     primary_keys
-                        .get(&ck_column)
+                        .get(&ck_column_http)
                         .unwrap()
                         .iter()
                         .map(|v| v.as_i64().unwrap() as usize),
@@ -633,6 +645,8 @@ async fn ann_filter_partition_key_int_in() {
 
     let pk_column: ColumnName = "pk".into();
     let ck_column: ColumnName = "ck".into();
+    let pk_column_http: httpapi::ColumnName = pk_column.clone().into();
+    let ck_column_http: httpapi::ColumnName = ck_column.clone().into();
     let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
         DbIndexType::Global,
         [pk_column.clone(), ck_column.clone()],
@@ -651,17 +665,19 @@ async fn ann_filter_partition_key_int_in() {
     )
     .await;
 
+    let keyspace_name = index.keyspace_name.clone().into();
+    let index_name = index.index_name.clone().into();
     // Search for nearest neighbors with a filter on primary key "pk" IN (1, 2)
     let pk_ck_values = wait_for_value(
         || async {
             let (primary_keys, _, _) = client
                 .ann(
-                    &index.keyspace_name,
-                    &index.index_name,
+                    &keyspace_name,
+                    &index_name,
                     vec![1.0, 2.0, 3.0].into(),
                     Some(PostIndexAnnFilter {
                         restrictions: vec![PostIndexAnnRestriction::In {
-                            lhs: pk_column.clone(),
+                            lhs: pk_column_http.clone(),
                             rhs: vec![1.into(), 2.into()],
                         }],
                         allow_filtering: false,
@@ -670,13 +686,13 @@ async fn ann_filter_partition_key_int_in() {
                 )
                 .await;
             let pk_ck_values: HashSet<_> = primary_keys
-                .get(&pk_column)
+                .get(&pk_column_http)
                 .unwrap()
                 .iter()
                 .map(|v| v.as_i64().unwrap() as usize)
                 .zip(
                     primary_keys
-                        .get(&ck_column)
+                        .get(&ck_column_http)
                         .unwrap()
                         .iter()
                         .map(|v| v.as_i64().unwrap() as usize),
@@ -706,6 +722,8 @@ async fn ann_filter_clustering_key_int_in() {
 
     let pk_column: ColumnName = "pk".into();
     let ck_column: ColumnName = "ck".into();
+    let pk_column_http: httpapi::ColumnName = pk_column.clone().into();
+    let ck_column_http: httpapi::ColumnName = ck_column.clone().into();
     let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
         DbIndexType::Global,
         [pk_column.clone(), ck_column.clone()],
@@ -724,17 +742,19 @@ async fn ann_filter_clustering_key_int_in() {
     )
     .await;
 
+    let keyspace_name = index.keyspace_name.clone().into();
+    let index_name = index.index_name.clone().into();
     // Search for nearest neighbors with a filter on primary key "ck" IN (1, 3)
     let pk_ck_values = wait_for_value(
         || async {
             let (primary_keys, _, _) = client
                 .ann(
-                    &index.keyspace_name,
-                    &index.index_name,
+                    &keyspace_name,
+                    &index_name,
                     vec![1.0, 2.0, 3.0].into(),
                     Some(PostIndexAnnFilter {
                         restrictions: vec![PostIndexAnnRestriction::In {
-                            lhs: ck_column.clone(),
+                            lhs: ck_column_http.clone(),
                             rhs: vec![1.into(), 3.into()],
                         }],
                         allow_filtering: false,
@@ -743,13 +763,13 @@ async fn ann_filter_clustering_key_int_in() {
                 )
                 .await;
             let pk_ck_values: HashSet<_> = primary_keys
-                .get(&pk_column)
+                .get(&pk_column_http)
                 .unwrap()
                 .iter()
                 .map(|v| v.as_i64().unwrap() as usize)
                 .zip(
                     primary_keys
-                        .get(&ck_column)
+                        .get(&ck_column_http)
                         .unwrap()
                         .iter()
                         .map(|v| v.as_i64().unwrap() as usize),
@@ -779,6 +799,8 @@ async fn ann_filter_primary_key_int_eq_tuple() {
 
     let pk_column: ColumnName = "pk".into();
     let ck_column: ColumnName = "ck".into();
+    let pk_column_http: httpapi::ColumnName = pk_column.clone().into();
+    let ck_column_http: httpapi::ColumnName = ck_column.clone().into();
     let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
         DbIndexType::Global,
         [pk_column.clone(), ck_column.clone()],
@@ -801,10 +823,10 @@ async fn ann_filter_primary_key_int_eq_tuple() {
     let pk_ck_values = run_ann_filter_int_int(
         &client,
         &index,
-        &pk_column,
-        &ck_column,
+        &pk_column_http,
+        &ck_column_http,
         vec![PostIndexAnnRestriction::EqTuple {
-            lhs: vec![pk_column.clone(), ck_column.clone()],
+            lhs: vec![pk_column_http.clone(), ck_column_http.clone()],
             rhs: vec![1.into(), 5.into()],
         }],
         1,
@@ -820,6 +842,8 @@ async fn ann_filter_primary_key_int_in_tuple() {
 
     let pk_column: ColumnName = "pk".into();
     let ck_column: ColumnName = "ck".into();
+    let pk_column_http: httpapi::ColumnName = pk_column.clone().into();
+    let ck_column_http: httpapi::ColumnName = ck_column.clone().into();
     let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
         DbIndexType::Global,
         [pk_column.clone(), ck_column.clone()],
@@ -842,10 +866,10 @@ async fn ann_filter_primary_key_int_in_tuple() {
     let pk_ck_values = run_ann_filter_int_int(
         &client,
         &index,
-        &pk_column,
-        &ck_column,
+        &pk_column_http,
+        &ck_column_http,
         vec![PostIndexAnnRestriction::InTuple {
-            lhs: vec![pk_column.clone(), ck_column.clone()],
+            lhs: vec![pk_column_http.clone(), ck_column_http.clone()],
             rhs: vec![vec![0.into(), 7.into()], vec![1.into(), 5.into()]],
         }],
         2,
@@ -891,8 +915,8 @@ async fn setup_int_int_store() -> (
 async fn run_ann_filter_int_int(
     client: &HttpClient,
     index: &IndexMetadata,
-    pk_column: &ColumnName,
-    ck_column: &ColumnName,
+    pk_column: &httpapi::ColumnName,
+    ck_column: &httpapi::ColumnName,
     restrictions: Vec<PostIndexAnnRestriction>,
     expected_count: usize,
 ) -> HashSet<(usize, usize)> {
@@ -900,8 +924,8 @@ async fn run_ann_filter_int_int(
         || async {
             let (primary_keys, _, _) = client
                 .ann(
-                    &index.keyspace_name,
-                    &index.index_name,
+                    &index.keyspace_name.clone().into(),
+                    &index.index_name.clone().into(),
                     vec![1.0, 2.0, 3.0].into(),
                     Some(PostIndexAnnFilter {
                         restrictions: restrictions.clone(),
@@ -953,6 +977,8 @@ async fn ann_filter_clustering_key_int_lt() {
     let (index, client, pk_column, ck_column, _db, _server, _node_state) =
         setup_int_int_store().await;
 
+    let pk_column = pk_column.into();
+    let ck_column = ck_column.into();
     // Search for nearest neighbors with a filter on clustering key "ck" < 3
     // Should return rows where ck is 0, 1, or 2 (3 values per pk, 3 pks = 9 total)
     let pk_ck_values = run_ann_filter_int_int(
@@ -991,6 +1017,8 @@ async fn ann_filter_clustering_key_int_lte() {
     let (index, client, pk_column, ck_column, _db, _server, _node_state) =
         setup_int_int_store().await;
 
+    let pk_column = pk_column.into();
+    let ck_column = ck_column.into();
     // Search for nearest neighbors with a filter on clustering key "ck" <= 2
     // Should return rows where ck is 0, 1, or 2 (3 values per pk, 3 pks = 9 total)
     let pk_ck_values = run_ann_filter_int_int(
@@ -1029,6 +1057,8 @@ async fn ann_filter_clustering_key_int_gt() {
     let (index, client, pk_column, ck_column, _db, _server, _node_state) =
         setup_int_int_store().await;
 
+    let pk_column = pk_column.into();
+    let ck_column = ck_column.into();
     // Search for nearest neighbors with a filter on clustering key "ck" > 6
     // Should return rows where ck is 7, 8, or 9 (3 values per pk, 3 pks = 9 total)
     let pk_ck_values = run_ann_filter_int_int(
@@ -1067,6 +1097,8 @@ async fn ann_filter_clustering_key_int_gte() {
     let (index, client, pk_column, ck_column, _db, _server, _node_state) =
         setup_int_int_store().await;
 
+    let pk_column = pk_column.into();
+    let ck_column = ck_column.into();
     // Search for nearest neighbors with a filter on clustering key "ck" >= 7
     // Should return rows where ck is 7, 8, or 9 (3 values per pk, 3 pks = 9 total)
     let pk_ck_values = run_ann_filter_int_int(
@@ -1105,6 +1137,8 @@ async fn ann_filter_clustering_key_int_range() {
     let (index, client, pk_column, ck_column, _db, _server, _node_state) =
         setup_int_int_store().await;
 
+    let pk_column = pk_column.into();
+    let ck_column = ck_column.into();
     // Search for nearest neighbors with a filter on clustering key 3 <= "ck" < 6
     // Should return rows where ck is 3, 4, or 5 (3 values per pk, 3 pks = 9 total)
     let pk_ck_values = run_ann_filter_int_int(
@@ -1149,6 +1183,8 @@ async fn ann_filter_primary_key_int_lt_tuple() {
     let (index, client, pk_column, ck_column, _db, _server, _node_state) =
         setup_int_int_store().await;
 
+    let pk_column = pk_column.into();
+    let ck_column = ck_column.into();
     // Search for nearest neighbors with a filter on primary key ("pk", "ck") < (1, 5)
     // Should return rows where (pk, ck) < (1, 5), i.e., pk=0 (all ck) and pk=1 with ck < 5
     // That's 10 (pk=0) + 5 (pk=1, ck=0..4) = 15 rows
@@ -1195,6 +1231,8 @@ async fn ann_filter_primary_key_int_lte_tuple() {
     let (index, client, pk_column, ck_column, _db, _server, _node_state) =
         setup_int_int_store().await;
 
+    let pk_column = pk_column.into();
+    let ck_column = ck_column.into();
     // Search for nearest neighbors with a filter on primary key ("pk", "ck") <= (1, 5)
     // Should return rows where (pk, ck) <= (1, 5), i.e., pk=0 (all ck) and pk=1 with ck <= 5
     // That's 10 (pk=0) + 6 (pk=1, ck=0..5) = 16 rows
@@ -1242,6 +1280,8 @@ async fn ann_filter_primary_key_int_gt_tuple() {
     let (index, client, pk_column, ck_column, _db, _server, _node_state) =
         setup_int_int_store().await;
 
+    let pk_column = pk_column.into();
+    let ck_column = ck_column.into();
     // Search for nearest neighbors with a filter on primary key ("pk", "ck") > (1, 5)
     // Should return rows where (pk, ck) > (1, 5), i.e., pk=1 with ck > 5 and pk=2 (all ck)
     // That's 4 (pk=1, ck=6..9) + 10 (pk=2) = 14 rows
@@ -1287,6 +1327,8 @@ async fn ann_filter_primary_key_int_gte_tuple() {
     let (index, client, pk_column, ck_column, _db, _server, _node_state) =
         setup_int_int_store().await;
 
+    let pk_column = pk_column.into();
+    let ck_column = ck_column.into();
     // Search for nearest neighbors with a filter on primary key ("pk", "ck") >= (1, 5)
     // Should return rows where (pk, ck) >= (1, 5), i.e., pk=1 with ck >= 5 and pk=2 (all ck)
     // That's 5 (pk=1, ck=5..9) + 10 (pk=2) = 15 rows
@@ -1332,6 +1374,8 @@ async fn ann_filter_partition_key_text_gt() {
 
     let pk_column: ColumnName = "pk".into();
     let ck_column: ColumnName = "ck".into();
+    let pk_column_http: httpapi::ColumnName = pk_column.clone().into();
+    let ck_column_http: httpapi::ColumnName = ck_column.clone().into();
     let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
         DbIndexType::Global,
         [pk_column.clone(), ck_column.clone()],
@@ -1352,18 +1396,20 @@ async fn ann_filter_partition_key_text_gt() {
     )
     .await;
 
+    let keyspace_name = index.keyspace_name.clone().into();
+    let index_name = index.index_name.clone().into();
     // Search for nearest neighbors with a filter on partition key "pk" > "b"
     // Should return rows where pk is "c", "d", or "e"
     let pk_ck_values = wait_for_value(
         || async {
             let (primary_keys, _, _) = client
                 .ann(
-                    &index.keyspace_name,
-                    &index.index_name,
+                    &keyspace_name,
+                    &index_name,
                     vec![1.0, 2.0, 3.0].into(),
                     Some(PostIndexAnnFilter {
                         restrictions: vec![PostIndexAnnRestriction::Gt {
-                            lhs: pk_column.clone(),
+                            lhs: pk_column_http.clone(),
                             rhs: "b".into(),
                         }],
                         allow_filtering: false,
@@ -1372,13 +1418,13 @@ async fn ann_filter_partition_key_text_gt() {
                 )
                 .await;
             let pk_ck_values: HashSet<_> = primary_keys
-                .get(&pk_column)
+                .get(&pk_column_http)
                 .unwrap()
                 .iter()
                 .map(|v| v.as_str().unwrap().to_string())
                 .zip(
                     primary_keys
-                        .get(&ck_column)
+                        .get(&ck_column_http)
                         .unwrap()
                         .iter()
                         .map(|v| v.as_i64().unwrap() as usize),
@@ -1437,14 +1483,12 @@ async fn http_server_is_responsive_when_index_add_hangs() {
     // Ensure the HTTP server stays responsive while the (simulated) embedding add is long-running.
     let status = client.status().await.unwrap();
 
-    assert_eq!(status, vector_store::httproutes::NodeStatus::Bootstrapping);
+    assert_eq!(status, httpapi::NodeStatus::Bootstrapping);
 }
 
 #[tokio::test]
 #[ntest::timeout(10_000)]
 async fn null_vector_is_not_indexed() {
-    use vector_store::httproutes::IndexStatus;
-
     crate::enable_tracing();
 
     let (run, index, _db, _node_state) = setup_store(
@@ -1469,13 +1513,15 @@ async fn null_vector_is_not_indexed() {
     .await;
     let (client, _server, _config_tx) = run.await;
 
+    let keyspace_name = index.keyspace_name.clone().into();
+    let index_name = index.index_name.clone().into();
     wait_for(
         || async {
             let status = client
-                .index_status(&index.keyspace_name, &index.index_name)
+                .index_status(&keyspace_name, &index_name)
                 .await
                 .expect("failed to get index status");
-            status.status == IndexStatus::Serving && status.count == 1
+            status.status == httpapi::IndexStatus::Serving && status.count == 1
         },
         "Waiting for exactly 1 vector to be indexed (null vector must be skipped)",
     )

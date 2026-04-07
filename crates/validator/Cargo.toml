@@ -18,6 +18,7 @@ e2etest-scylla-cluster.workspace = true
 e2etest-scylla-proxy-cluster.workspace = true
 e2etest-tls.workspace = true
 e2etest-vector-store-cluster.workspace = true
+httpapi.workspace = true
 httpclient.workspace = true
 itertools.workspace = true
 rustls.workspace = true

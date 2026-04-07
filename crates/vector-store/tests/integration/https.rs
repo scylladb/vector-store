@@ -4,6 +4,7 @@
  */
 
 use crate::db_basic;
+use httpapi::PostIndexAnnRequest;
 use rcgen::CertifiedKey;
 use reqwest::StatusCode;
 use std::io::Write;
@@ -13,7 +14,6 @@ use std::sync::Arc;
 use tempfile::NamedTempFile;
 use tokio::sync::watch;
 use vector_store::Config;
-use vector_store::httproutes::PostIndexAnnRequest;
 
 fn create_temp_file<C: AsRef<[u8]>>(content: C) -> NamedTempFile {
     let mut file = NamedTempFile::new().unwrap();

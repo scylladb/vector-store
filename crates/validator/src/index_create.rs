@@ -9,12 +9,12 @@ use crate::common::CreateIndexQuery;
 use crate::common::DEFAULT_TEST_TIMEOUT;
 use async_backtrace::framed;
 use e2etest::TestCase;
+use httpapi::IndexInfo;
+use httpapi::KeyspaceName;
 use httpclient::HttpClient;
 use scylla::client::session::Session;
 use std::sync::Arc;
 use tracing::info;
-use vector_store::IndexInfo;
-use vector_store::KeyspaceName;
 use vector_store::TableName;
 
 #[framed]

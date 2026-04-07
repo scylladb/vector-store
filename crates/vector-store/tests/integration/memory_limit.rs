@@ -6,6 +6,7 @@
 use crate::db_basic;
 use crate::db_basic::Table;
 use crate::usearch::test_config;
+use httpapi::NodeStatus;
 use httpclient::HttpClient;
 use scylla::cluster::metadata::NativeType;
 use scylla::value::CqlValue;
@@ -25,7 +26,6 @@ use vector_store::IndexMetadata;
 use vector_store::Quantization;
 use vector_store::SpaceType;
 use vector_store::Timestamp;
-use vector_store::httproutes::NodeStatus;
 
 #[tokio::test]
 /// The test case scenario:
@@ -134,7 +134,7 @@ async fn memory_limit_during_index_build() {
 
     assert!(
         client
-            .index_status(&index.keyspace_name, &index.index_name)
+            .index_status(&index.keyspace_name.into(), &index.index_name.into())
             .await
             .unwrap()
             .count
