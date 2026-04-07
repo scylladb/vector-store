@@ -7,6 +7,7 @@
 #[allow(dead_code)]
 mod db_basic;
 
+use axum::http::StatusCode;
 use criterion::BenchmarkId;
 use criterion::Criterion;
 use criterion::criterion_group;
@@ -18,9 +19,10 @@ use futures::FutureExt;
 use futures::StreamExt;
 use futures::stream;
 use httpapi::IndexStatus;
-use httpclient::HttpClient;
+use httpapi::IndexStatusResponse;
 use scylla::cluster::metadata::NativeType;
 use scylla::value::CqlValue;
+use std::cell::RefCell;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::LazyLock;
@@ -30,6 +32,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
 use tap::Pipe;
+use testclient::TestClient;
 use tokio::runtime::Runtime;
 use tokio::sync::Notify;
 use tokio::sync::Semaphore;
@@ -51,6 +54,7 @@ use vector_store::DbIndexType;
 use vector_store::ExpansionAdd;
 use vector_store::ExpansionSearch;
 use vector_store::HttpServerConfig;
+use vector_store::HttpServerExt;
 use vector_store::IndexMetadata;
 use vector_store::PrimaryKey;
 use vector_store::Quantization;
@@ -180,7 +184,7 @@ async fn run_vector_store(
     config: watch::Receiver<Arc<Config>>,
     node_state: mpsc::Sender<NodeState>,
     db: mpsc::Sender<Db>,
-) -> (impl Sized, HttpClient) {
+) -> (impl Sized, Arc<TestClient>) {
     let internals = vector_store::new_internals();
     let index_factory = vector_store::new_index_factory_usearch(config.clone()).unwrap();
 
@@ -191,48 +195,54 @@ async fn run_vector_store(
         http: http_rx,
     };
 
-    let (server, addr) = vector_store::run(node_state, db, internals, index_factory, receivers)
+    let (server, _) = vector_store::run(node_state, db, internals, index_factory, receivers)
         .await
         .unwrap();
 
-    ((http_tx, server), HttpClient::new(addr))
+    let client = Arc::new(TestClient::new(server.router().await));
+    ((http_tx, server), client)
 }
 
 async fn wait_until_index_is_created(
-    client: &HttpClient,
+    client: &TestClient,
     keyspace_name: &httpapi::KeyspaceName,
     index_name: &httpapi::IndexName,
 ) {
-    while client
-        .index_status(keyspace_name, index_name)
-        .await
-        .is_err()
-    {
+    loop {
+        let response = client.index_status(keyspace_name, index_name).await;
+        if response.status_code() == StatusCode::OK {
+            break;
+        }
         task::yield_now().await;
     }
 }
 
 async fn wait_until_index_is_ready(
-    client: &HttpClient,
+    client: &TestClient,
     keyspace_name: &httpapi::KeyspaceName,
     index_name: &httpapi::IndexName,
 ) {
-    while client
-        .index_status(keyspace_name, index_name)
-        .await
-        .map(|status| status.status != IndexStatus::Serving)
-        .unwrap_or(true)
-    {
+    loop {
+        let response = client.index_status(keyspace_name, index_name).await;
+        if response.status_code() == StatusCode::OK
+            && response.json::<IndexStatusResponse>().status == IndexStatus::Serving
+        {
+            break;
+        }
         task::yield_now().await;
     }
 }
 
 async fn wait_until_index_is_removed(
-    client: &HttpClient,
+    client: &TestClient,
     keyspace_name: &httpapi::KeyspaceName,
     index_name: &httpapi::IndexName,
 ) {
-    while client.index_status(keyspace_name, index_name).await.is_ok() {
+    loop {
+        let response = client.index_status(keyspace_name, index_name).await;
+        if response.status_code() != StatusCode::OK {
+            break;
+        }
         task::yield_now().await;
     }
 }
@@ -283,7 +293,7 @@ fn fullscan_add(c: &mut Criterion) {
     let fixture = LazyLock::new(|| {
         let runtime = default_runtime();
         let notify_stop = Arc::new(Notify::new());
-        let (tx_db_client, rx_db_client) = oneshot::channel();
+        let (tx_fixture, rx_fixture) = oneshot::channel();
         runtime.spawn({
             let index_metadata = index_metadata.clone();
             let notify_stop = notify_stop.clone();
@@ -307,12 +317,12 @@ fn fullscan_add(c: &mut Criterion) {
                 let index_name = index_metadata.index_name.clone().into();
                 wait_until_index_is_created(&client, &keyspace_name, &index_name).await;
 
-                tx_db_client.send((db, client, tx)).unwrap();
+                tx_fixture.send((db, client, tx)).unwrap();
                 notify_stop.notified().await;
             }
         });
-        let (db, client, tx) = rx_db_client.blocking_recv().unwrap();
-        (runtime, notify_stop, db, client, tx)
+        let (db, client, tx) = rx_fixture.blocking_recv().unwrap();
+        RefCell::new(Some((runtime, notify_stop, db, client, tx)))
     });
 
     let next_pk = Arc::new(AtomicI64::new(0));
@@ -320,7 +330,8 @@ fn fullscan_add(c: &mut Criterion) {
         BenchmarkId::new("fullscan-add", concurrency),
         &concurrency,
         |b, concurrency| {
-            let (runtime, _, _, _, tx) = &*fixture;
+            let fixture = fixture.borrow();
+            let (runtime, _, _, _, tx) = fixture.as_ref().unwrap();
             b.to_async(runtime).iter_custom(|iters| {
                 let tx = tx.clone();
                 let next_pk = Arc::clone(&next_pk);
@@ -349,17 +360,19 @@ fn fullscan_add(c: &mut Criterion) {
         },
     );
 
-    if let Some((runtime, notify_stop, db, client, _)) = LazyLock::get(&fixture) {
-        delete_index(db, &index_metadata);
+    if let Some(fixture) = LazyLock::get(&fixture) {
+        let (runtime, notify_stop, db, client, _) = fixture.take().unwrap();
+        delete_index(&db, &index_metadata);
         let keyspace_name = index_metadata.keyspace_name.clone().into();
         let index_name = index_metadata.index_name.clone().into();
         runtime.block_on(wait_until_index_is_removed(
-            client,
+            &client,
             &keyspace_name,
             &index_name,
         ));
         notify_stop.notify_one();
-        wait_until_all_tasks_finished(runtime);
+        drop(client);
+        wait_until_all_tasks_finished(&runtime);
     }
 }
 
@@ -377,7 +390,7 @@ fn search(c: &mut Criterion) {
     let fixture = LazyLock::new(|| {
         let runtime = default_runtime();
         let notify_stop = Arc::new(Notify::new());
-        let (tx_client, rx_client) = oneshot::channel();
+        let (tx_fixture, rx_fixture) = oneshot::channel();
         let (tx, rx) = mpsc::channel(runtime.metrics().num_workers() * 2);
         runtime.spawn({
             let notify_stop = notify_stop.clone();
@@ -416,21 +429,21 @@ fn search(c: &mut Criterion) {
                 let index_name = index_metadata.index_name.clone().into();
                 wait_until_index_is_ready(&client, &keyspace_name, &index_name).await;
 
-                tx_client.send((db, client)).unwrap();
+                tx_fixture.send((db, client)).unwrap();
                 notify_stop.notified().await;
             }
         });
-        let (db, client) = rx_client.blocking_recv().unwrap();
-        (runtime, notify_stop, db, client)
+        let (db, client) = rx_fixture.blocking_recv().unwrap();
+        RefCell::new(Some((runtime, notify_stop, db, client)))
     });
 
     group.bench_with_input(
         BenchmarkId::new("search", concurrency),
         &concurrency,
         |b, concurrency| {
-            let (runtime, _, _, client) = &*fixture;
+            let fixture = fixture.borrow();
+            let (runtime, _, _, client) = fixture.as_ref().unwrap();
             let index_metadata = index_metadata.clone();
-            let client = client.clone();
             b.to_async(runtime).iter_custom(|iters| {
                 let index_metadata = index_metadata.clone();
                 let client = client.clone();
@@ -442,10 +455,12 @@ fn search(c: &mut Criterion) {
                         async move {
                             let vector = vec![it as f32; DIMENSIONS];
                             let start = Instant::now();
-                            _ = client
+                            let response = client
                                 .ann(&keyspace_name, &index_name, vector.into(), None, limit)
                                 .await;
-                            start.elapsed()
+                            let elapsed = start.elapsed();
+                            response.assert_status_ok();
+                            elapsed
                         }
                     })
                     .await
@@ -454,17 +469,19 @@ fn search(c: &mut Criterion) {
         },
     );
 
-    if let Some((runtime, notify_stop, db, client)) = LazyLock::get(&fixture) {
-        delete_index(db, &index_metadata);
+    if let Some(fixture) = LazyLock::get(&fixture) {
+        let (runtime, notify_stop, db, client) = fixture.take().unwrap();
+        delete_index(&db, &index_metadata);
         let keyspace_name = index_metadata.keyspace_name.clone().into();
         let index_name = index_metadata.index_name.clone().into();
         runtime.block_on(wait_until_index_is_removed(
-            client,
+            &client,
             &keyspace_name,
             &index_name,
         ));
         notify_stop.notify_one();
-        wait_until_all_tasks_finished(runtime);
+        drop(client);
+        wait_until_all_tasks_finished(&runtime);
     }
 }
 

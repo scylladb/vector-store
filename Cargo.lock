@@ -4705,6 +4705,7 @@ dependencies = [
  "tap",
  "temp-env",
  "tempfile",
+ "testclient",
  "thiserror 2.0.18",
  "time",
  "tokio",
