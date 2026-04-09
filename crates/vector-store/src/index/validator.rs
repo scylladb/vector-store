@@ -1,4 +1,5 @@
 use crate::Dimensions;
+use crate::IndexKey;
 use crate::Vector;
 use anyhow::bail;
 use thiserror::Error;
@@ -7,6 +8,16 @@ use thiserror::Error;
 pub enum Error {
     #[error("Wrong embedding dimension: expected {expected}, got {actual}")]
     WrongEmbeddingDimension { expected: usize, actual: usize },
+    #[error("partition id not found for index key {index_key} during {operation}")]
+    PartitionIdNotFound {
+        index_key: IndexKey,
+        operation: &'static str,
+    },
+    #[error("state or partition not found for index key {index_key} during {operation}")]
+    StateOrPartitionNotFound {
+        index_key: IndexKey,
+        operation: &'static str,
+    },
 }
 
 pub fn embedding_dimensions(embedding: &Vector, dimensions: Dimensions) -> anyhow::Result<()> {

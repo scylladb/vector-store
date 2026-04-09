@@ -786,9 +786,10 @@ where
             let Some((partition_id, _)) = table.read().unwrap().partition_id(&index_key, None)
             else {
                 warn!("partition id not found for index key {index_key:?} during ann");
-                _ = tx.send(Err(anyhow!(
-                    "partition id not found for index key {index_key:?} during ann"
-                )));
+                _ = tx.send(Err(anyhow!(validator::Error::PartitionIdNotFound {
+                    index_key: index_key.clone(),
+                    operation: "ann",
+                })));
                 return None;
             };
             let index_id = partition_id.index_id();
@@ -799,7 +800,10 @@ where
             else {
                 warn!("state or partition not found for index key {index_key:?} during ann");
                 _ = tx.send(Err(anyhow!(
-                    "state or partition not found for index key {index_key:?} during ann"
+                    validator::Error::StateOrPartitionNotFound {
+                        index_key: index_key.clone(),
+                        operation: "ann",
+                    }
                 )));
                 return None;
             };
@@ -828,9 +832,10 @@ where
                 .partition_id(&index_key, Some(filter.restrictions))
             else {
                 warn!("partition id not found for index key {index_key:?} during filtered ann");
-                _ = tx.send(Err(anyhow!(
-                    "partition id not found for index key {index_key:?} during filtered ann"
-                )));
+                _ = tx.send(Err(anyhow!(validator::Error::PartitionIdNotFound {
+                    index_key: index_key.clone(),
+                    operation: "filtered ann",
+                })));
                 return None;
             };
             let index_id = partition_id.index_id();
@@ -844,7 +849,10 @@ where
                         during filtered ann"
                 );
                 _ = tx.send(Err(anyhow!(
-                    "state or partition not found for index key {index_key:?} during filtered ann"
+                    validator::Error::StateOrPartitionNotFound {
+                        index_key: index_key.clone(),
+                        operation: "filtered ann",
+                    }
                 )));
                 return None;
             };
@@ -1658,12 +1666,17 @@ mod tests {
             result.is_err(),
             "Expected error when partition id is not found during ann"
         );
-        let err_msg = result.unwrap_err().to_string();
+        let err = result.unwrap_err();
+        assert!(
+            err.downcast_ref::<validator::Error>().is_some(),
+            "Error should be a validator::Error, got: {err}"
+        );
+        let err_msg = err.to_string();
         assert!(
             err_msg.contains("partition id not found"),
             "Error message should mention partition id not found, got: {err_msg}"
         );
-    }
+    } 
 
     #[tokio::test]
     async fn ann_returns_error_when_state_or_partition_not_found() {
@@ -1692,7 +1705,12 @@ mod tests {
             result.is_err(),
             "Expected error when state or partition is not found during ann"
         );
-        let err_msg = result.unwrap_err().to_string();
+        let err = result.unwrap_err();
+        assert!(
+            err.downcast_ref::<validator::Error>().is_some(),
+            "Error should be a validator::Error, got: {err}"
+        );
+        let err_msg = err.to_string();
         assert!(
             err_msg.contains("state or partition not found"),
             "Error message should mention state or partition not found, got: {err_msg}"
@@ -1732,7 +1750,12 @@ mod tests {
             result.is_err(),
             "Expected error when partition id is not found during filtered ann"
         );
-        let err_msg = result.unwrap_err().to_string();
+        let err = result.unwrap_err();
+        assert!(
+            err.downcast_ref::<validator::Error>().is_some(),
+            "Error should be a validator::Error, got: {err}"
+        );
+        let err_msg = err.to_string();
         assert!(
             err_msg.contains("partition id not found"),
             "Error message should mention partition id not found, got: {err_msg}"
@@ -1775,7 +1798,12 @@ mod tests {
             result.is_err(),
             "Expected error when state or partition is not found during filtered ann"
         );
-        let err_msg = result.unwrap_err().to_string();
+        let err = result.unwrap_err();
+        assert!(
+            err.downcast_ref::<validator::Error>().is_some(),
+            "Error should be a validator::Error, got: {err}"
+        );
+        let err_msg = err.to_string();
         assert!(
             err_msg.contains("state or partition not found"),
             "Error message should mention state or partition not found, got: {err_msg}"
