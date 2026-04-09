@@ -1676,7 +1676,7 @@ mod tests {
             err_msg.contains("partition id not found"),
             "Error message should mention partition id not found, got: {err_msg}"
         );
-    } 
+    }
 
     #[tokio::test]
     async fn ann_returns_error_when_state_or_partition_not_found() {
