@@ -292,6 +292,15 @@ pub async fn load_config(env: impl Fn(&str) -> anyhow::Result<String>) -> anyhow
         .ok()
         .map(std::path::PathBuf::from);
 
+    config.mtls_addr = env("VECTOR_STORE_MTLS_URI")
+        .ok()
+        .map(|v| v.parse())
+        .transpose()?
+        .unwrap_or(config.mtls_addr);
+    config.mtls_ca_cert_path = env("VECTOR_STORE_MTLS_CA_CERT_PATH")
+        .ok()
+        .map(std::path::PathBuf::from);
+
     config.cql_connection_timeout = env("VECTOR_STORE_CQL_CONNECTION_TIMEOUT")
         .ok()
         .map(|v| v.parse::<humantime::Duration>())
@@ -533,6 +542,8 @@ mod tests {
             disable_colors: false,
             tls_cert_path: None,
             tls_key_path: None,
+            mtls_addr: "127.0.0.1:6081".parse().unwrap(),
+            mtls_ca_cert_path: None,
             cql_connection_timeout: None,
             cql_keepalive_interval: None,
             cql_keepalive_timeout: None,

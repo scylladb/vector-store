@@ -113,9 +113,10 @@ async fn memory_limit_during_index_build() {
     let index_factory = vector_store::new_index_factory_usearch(config_rx.clone()).unwrap();
 
     let node_state = node_state.clone();
-    let server = vector_store::run(node_state, db_actor, internals, index_factory, config_rx)
-        .await
-        .unwrap();
+    let (server, _mtls) =
+        vector_store::run(node_state, db_actor, internals, index_factory, config_rx)
+            .await
+            .unwrap();
     let addr = (*server.address().await.borrow()).unwrap();
 
     let client = HttpClient::new(addr);

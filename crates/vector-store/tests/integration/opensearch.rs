@@ -50,9 +50,10 @@ async fn simple_create_search_delete_index() {
 
     let (_config_tx, config_rx) = watch::channel(Arc::new(test_config()));
 
-    let server = vector_store::run(node_state, db_actor, internals, index_factory, config_rx)
-        .await
-        .unwrap();
+    let (server, _mtls) =
+        vector_store::run(node_state, db_actor, internals, index_factory, config_rx)
+            .await
+            .unwrap();
     let addr = (*server.address().await.borrow()).unwrap();
 
     let client = HttpClient::new(addr);
