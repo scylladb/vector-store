@@ -1662,20 +1662,13 @@ mod tests {
             )
             .await;
 
-        assert!(
-            result.is_err(),
-            "Expected error when partition id is not found during ann"
-        );
-        let err = result.unwrap_err();
-        assert!(
-            err.downcast_ref::<validator::Error>().is_some(),
-            "Error should be a validator::Error, got: {err}"
-        );
-        let err_msg = err.to_string();
-        assert!(
-            err_msg.contains("partition id not found"),
-            "Error message should mention partition id not found, got: {err_msg}"
-        );
+        assert!(matches!(
+            result.unwrap_err().downcast_ref::<validator::Error>(),
+            Some(validator::Error::PartitionIdNotFound {
+                operation: "ann",
+                ..
+            })
+        ));
     }
 
     #[tokio::test]
@@ -1701,20 +1694,13 @@ mod tests {
             )
             .await;
 
-        assert!(
-            result.is_err(),
-            "Expected error when state or partition is not found during ann"
-        );
-        let err = result.unwrap_err();
-        assert!(
-            err.downcast_ref::<validator::Error>().is_some(),
-            "Error should be a validator::Error, got: {err}"
-        );
-        let err_msg = err.to_string();
-        assert!(
-            err_msg.contains("state or partition not found"),
-            "Error message should mention state or partition not found, got: {err_msg}"
-        );
+        assert!(matches!(
+            result.unwrap_err().downcast_ref::<validator::Error>(),
+            Some(validator::Error::StateOrPartitionNotFound {
+                operation: "ann",
+                ..
+            })
+        ));
     }
 
     #[tokio::test]
@@ -1746,20 +1732,13 @@ mod tests {
             )
             .await;
 
-        assert!(
-            result.is_err(),
-            "Expected error when partition id is not found during filtered ann"
-        );
-        let err = result.unwrap_err();
-        assert!(
-            err.downcast_ref::<validator::Error>().is_some(),
-            "Error should be a validator::Error, got: {err}"
-        );
-        let err_msg = err.to_string();
-        assert!(
-            err_msg.contains("partition id not found"),
-            "Error message should mention partition id not found, got: {err_msg}"
-        );
+        assert!(matches!(
+            result.unwrap_err().downcast_ref::<validator::Error>(),
+            Some(validator::Error::PartitionIdNotFound {
+                operation: "filtered ann",
+                ..
+            })
+        ));
     }
 
     #[tokio::test]
@@ -1794,19 +1773,12 @@ mod tests {
             )
             .await;
 
-        assert!(
-            result.is_err(),
-            "Expected error when state or partition is not found during filtered ann"
-        );
-        let err = result.unwrap_err();
-        assert!(
-            err.downcast_ref::<validator::Error>().is_some(),
-            "Error should be a validator::Error, got: {err}"
-        );
-        let err_msg = err.to_string();
-        assert!(
-            err_msg.contains("state or partition not found"),
-            "Error message should mention state or partition not found, got: {err_msg}"
-        );
+        assert!(matches!(
+            result.unwrap_err().downcast_ref::<validator::Error>(),
+            Some(validator::Error::StateOrPartitionNotFound {
+                operation: "filtered ann",
+                ..
+            })
+        ));
     }
 }
