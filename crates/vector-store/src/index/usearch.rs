@@ -786,7 +786,9 @@ where
             let Some((partition_id, _)) = table.read().unwrap().partition_id(&index_key, None)
             else {
                 warn!("partition id not found for index key {index_key:?} during ann");
-                _ = tx.send(Ok((vec![], vec![])));
+                _ = tx.send(Err(anyhow!(
+                    "partition id not found for index key {index_key:?} during ann"
+                )));
                 return None;
             };
             let index_id = partition_id.index_id();
@@ -796,7 +798,9 @@ where
                 .map(|(state, partition)| (state, Arc::clone(partition)))
             else {
                 warn!("state or partition not found for index key {index_key:?} during ann");
-                _ = tx.send(Ok((vec![], vec![])));
+                _ = tx.send(Err(anyhow!(
+                    "state or partition not found for index key {index_key:?} during ann"
+                )));
                 return None;
             };
             Some((
@@ -824,7 +828,9 @@ where
                 .partition_id(&index_key, Some(filter.restrictions))
             else {
                 warn!("partition id not found for index key {index_key:?} during filtered ann");
-                _ = tx.send(Ok((vec![], vec![])));
+                _ = tx.send(Err(anyhow!(
+                    "partition id not found for index key {index_key:?} during filtered ann"
+                )));
                 return None;
             };
             let index_id = partition_id.index_id();
@@ -837,7 +843,9 @@ where
                     "state or partition not found for index key {index_key:?} \
                         during filtered ann"
                 );
-                _ = tx.send(Ok((vec![], vec![])));
+                _ = tx.send(Err(anyhow!(
+                    "state or partition not found for index key {index_key:?} during filtered ann"
+                )));
                 return None;
             };
             let msg = if let Some(restrictions) = restrictions {
@@ -1192,6 +1200,7 @@ mod tests {
     use super::*;
     use crate::Config;
     use crate::IndexKey;
+    use crate::Restriction;
     use crate::index::IndexExt;
     use crate::memory;
     use crate::table::IndexIdGenerator;
@@ -1600,5 +1609,225 @@ mod tests {
         let b1_vec = f32_to_b1x8(&input);
         assert_eq!(b1_vec.len(), 2);
         assert_eq!(b1x8_to_u8_vec(&b1_vec), &[0b01010101, 0b00000101]);
+    }
+
+    #[tokio::test]
+    async fn ann_returns_error_when_partition_id_not_found() {
+        let (_, config_rx) = watch::channel(Arc::new(Config::default()));
+
+        let options = IndexOptions {
+            dimensions: 3,
+            metric: MetricKind::L2sq,
+            ..Default::default()
+        };
+        let threads = Handle::current().metrics().num_workers() + rayon::current_num_threads();
+        let table = Arc::new(RwLock::new(MockTableSearch::new()));
+        let index_key = IndexKey::new(&"vector".into(), &"store".into());
+        let actor = new(
+            move || Ok(Arc::new(ThreadedUsearchIndex::new(options, threads)?)),
+            index_key.clone(),
+            NonZeroUsize::new(3).unwrap().into(),
+            Arc::clone(&table),
+            Arc::new(Semaphore::new(4)),
+            Arc::new(Semaphore::new(4)),
+            memory::new(config_rx),
+        )
+        .unwrap();
+
+        // Mock partition_id to return None — simulating a missing partition
+        table
+            .write()
+            .unwrap()
+            .expect_partition_id()
+            .returning(|_, _| None);
+
+        let result = actor
+            .ann(
+                index_key,
+                vec![1.0, 2.0, 3.0].into(),
+                NonZeroUsize::new(1).unwrap().into(),
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "Expected error when partition id is not found during ann"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("partition id not found"),
+            "Error message should mention partition id not found, got: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ann_returns_error_when_state_or_partition_not_found() {
+        let (_, config_rx) = watch::channel(Arc::new(Config::default()));
+
+        let options = IndexOptions {
+            dimensions: 3,
+            metric: MetricKind::L2sq,
+            ..Default::default()
+        };
+        let threads = Handle::current().metrics().num_workers() + rayon::current_num_threads();
+        let table = Arc::new(RwLock::new(MockTableSearch::new()));
+        let index_key = IndexKey::new(&"vector".into(), &"store".into());
+        let actor = new(
+            move || Ok(Arc::new(ThreadedUsearchIndex::new(options, threads)?)),
+            index_key.clone(),
+            NonZeroUsize::new(3).unwrap().into(),
+            Arc::clone(&table),
+            Arc::new(Semaphore::new(4)),
+            Arc::new(Semaphore::new(4)),
+            memory::new(config_rx),
+        )
+        .unwrap();
+
+        // Mock partition_id to return a valid partition_id, but don't add any vectors
+        // so that the states/partitions maps remain empty
+        let index_id = IndexIdGenerator::new().next(true).unwrap();
+        let partition_id = PartitionId::global(index_id);
+        table
+            .write()
+            .unwrap()
+            .expect_partition_id()
+            .returning(move |_, _| Some((partition_id, None)));
+
+        let result = actor
+            .ann(
+                index_key,
+                vec![1.0, 2.0, 3.0].into(),
+                NonZeroUsize::new(1).unwrap().into(),
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "Expected error when state or partition is not found during ann"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("state or partition not found"),
+            "Error message should mention state or partition not found, got: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn filtered_ann_returns_error_when_partition_id_not_found() {
+        let (_, config_rx) = watch::channel(Arc::new(Config::default()));
+
+        let options = IndexOptions {
+            dimensions: 3,
+            metric: MetricKind::L2sq,
+            ..Default::default()
+        };
+        let threads = Handle::current().metrics().num_workers() + rayon::current_num_threads();
+        let table = Arc::new(RwLock::new(MockTableSearch::new()));
+        let index_key = IndexKey::new(&"vector".into(), &"store".into());
+        let actor = new(
+            move || Ok(Arc::new(ThreadedUsearchIndex::new(options, threads)?)),
+            index_key.clone(),
+            NonZeroUsize::new(3).unwrap().into(),
+            Arc::clone(&table),
+            Arc::new(Semaphore::new(4)),
+            Arc::new(Semaphore::new(4)),
+            memory::new(config_rx),
+        )
+        .unwrap();
+
+        // Mock partition_id to return None for filtered ann
+        table
+            .write()
+            .unwrap()
+            .expect_partition_id()
+            .returning(|_, _| None);
+
+        let filter = Filter {
+            restrictions: vec![Restriction::Eq {
+                lhs: "col".into(),
+                rhs: CqlValue::Int(42),
+            }],
+            allow_filtering: false,
+        };
+
+        let result = actor
+            .filtered_ann(
+                index_key,
+                vec![1.0, 2.0, 3.0].into(),
+                filter,
+                NonZeroUsize::new(1).unwrap().into(),
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "Expected error when partition id is not found during filtered ann"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("partition id not found"),
+            "Error message should mention partition id not found, got: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn filtered_ann_returns_error_when_state_or_partition_not_found() {
+        let (_, config_rx) = watch::channel(Arc::new(Config::default()));
+
+        let options = IndexOptions {
+            dimensions: 3,
+            metric: MetricKind::L2sq,
+            ..Default::default()
+        };
+        let threads = Handle::current().metrics().num_workers() + rayon::current_num_threads();
+        let table = Arc::new(RwLock::new(MockTableSearch::new()));
+        let index_key = IndexKey::new(&"vector".into(), &"store".into());
+        let actor = new(
+            move || Ok(Arc::new(ThreadedUsearchIndex::new(options, threads)?)),
+            index_key.clone(),
+            NonZeroUsize::new(3).unwrap().into(),
+            Arc::clone(&table),
+            Arc::new(Semaphore::new(4)),
+            Arc::new(Semaphore::new(4)),
+            memory::new(config_rx),
+        )
+        .unwrap();
+
+        // Mock partition_id to return a valid partition_id, but don't add any vectors
+        // so that the states/partitions maps remain empty
+        let index_id = IndexIdGenerator::new().next(true).unwrap();
+        let partition_id = PartitionId::global(index_id);
+        table
+            .write()
+            .unwrap()
+            .expect_partition_id()
+            .returning(move |_, _| Some((partition_id, None)));
+
+        let filter = Filter {
+            restrictions: vec![Restriction::Eq {
+                lhs: "col".into(),
+                rhs: CqlValue::Int(42),
+            }],
+            allow_filtering: false,
+        };
+
+        let result = actor
+            .filtered_ann(
+                index_key,
+                vec![1.0, 2.0, 3.0].into(),
+                filter,
+                NonZeroUsize::new(1).unwrap().into(),
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "Expected error when state or partition is not found during filtered ann"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("state or partition not found"),
+            "Error message should mention state or partition not found, got: {err_msg}"
+        );
     }
 }
