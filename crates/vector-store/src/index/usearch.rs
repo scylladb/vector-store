@@ -1611,8 +1611,7 @@ mod tests {
         assert_eq!(b1x8_to_u8_vec(&b1_vec), &[0b01010101, 0b00000101]);
     }
 
-    #[tokio::test]
-    async fn ann_returns_error_when_partition_id_not_found() {
+    fn create_test_actor(table: &Arc<RwLock<MockTableSearch>>) -> (mpsc::Sender<Index>, IndexKey) {
         let (_, config_rx) = watch::channel(Arc::new(Config::default()));
 
         let options = IndexOptions {
@@ -1621,18 +1620,24 @@ mod tests {
             ..Default::default()
         };
         let threads = Handle::current().metrics().num_workers() + rayon::current_num_threads();
-        let table = Arc::new(RwLock::new(MockTableSearch::new()));
         let index_key = IndexKey::new(&"vector".into(), &"store".into());
         let actor = new(
             move || Ok(Arc::new(ThreadedUsearchIndex::new(options, threads)?)),
             index_key.clone(),
             NonZeroUsize::new(3).unwrap().into(),
-            Arc::clone(&table),
+            Arc::clone(table),
             Arc::new(Semaphore::new(4)),
             Arc::new(Semaphore::new(4)),
             memory::new(config_rx),
         )
         .unwrap();
+        (actor, index_key)
+    }
+
+    #[tokio::test]
+    async fn ann_returns_error_when_partition_id_not_found() {
+        let table = Arc::new(RwLock::new(MockTableSearch::new()));
+        let (actor, index_key) = create_test_actor(&table);
 
         // Mock partition_id to return None — simulating a missing partition
         table
@@ -1662,26 +1667,8 @@ mod tests {
 
     #[tokio::test]
     async fn ann_returns_error_when_state_or_partition_not_found() {
-        let (_, config_rx) = watch::channel(Arc::new(Config::default()));
-
-        let options = IndexOptions {
-            dimensions: 3,
-            metric: MetricKind::L2sq,
-            ..Default::default()
-        };
-        let threads = Handle::current().metrics().num_workers() + rayon::current_num_threads();
         let table = Arc::new(RwLock::new(MockTableSearch::new()));
-        let index_key = IndexKey::new(&"vector".into(), &"store".into());
-        let actor = new(
-            move || Ok(Arc::new(ThreadedUsearchIndex::new(options, threads)?)),
-            index_key.clone(),
-            NonZeroUsize::new(3).unwrap().into(),
-            Arc::clone(&table),
-            Arc::new(Semaphore::new(4)),
-            Arc::new(Semaphore::new(4)),
-            memory::new(config_rx),
-        )
-        .unwrap();
+        let (actor, index_key) = create_test_actor(&table);
 
         // Mock partition_id to return a valid partition_id, but don't add any vectors
         // so that the states/partitions maps remain empty
@@ -1714,26 +1701,8 @@ mod tests {
 
     #[tokio::test]
     async fn filtered_ann_returns_error_when_partition_id_not_found() {
-        let (_, config_rx) = watch::channel(Arc::new(Config::default()));
-
-        let options = IndexOptions {
-            dimensions: 3,
-            metric: MetricKind::L2sq,
-            ..Default::default()
-        };
-        let threads = Handle::current().metrics().num_workers() + rayon::current_num_threads();
         let table = Arc::new(RwLock::new(MockTableSearch::new()));
-        let index_key = IndexKey::new(&"vector".into(), &"store".into());
-        let actor = new(
-            move || Ok(Arc::new(ThreadedUsearchIndex::new(options, threads)?)),
-            index_key.clone(),
-            NonZeroUsize::new(3).unwrap().into(),
-            Arc::clone(&table),
-            Arc::new(Semaphore::new(4)),
-            Arc::new(Semaphore::new(4)),
-            memory::new(config_rx),
-        )
-        .unwrap();
+        let (actor, index_key) = create_test_actor(&table);
 
         // Mock partition_id to return None for filtered ann
         table
@@ -1772,26 +1741,8 @@ mod tests {
 
     #[tokio::test]
     async fn filtered_ann_returns_error_when_state_or_partition_not_found() {
-        let (_, config_rx) = watch::channel(Arc::new(Config::default()));
-
-        let options = IndexOptions {
-            dimensions: 3,
-            metric: MetricKind::L2sq,
-            ..Default::default()
-        };
-        let threads = Handle::current().metrics().num_workers() + rayon::current_num_threads();
         let table = Arc::new(RwLock::new(MockTableSearch::new()));
-        let index_key = IndexKey::new(&"vector".into(), &"store".into());
-        let actor = new(
-            move || Ok(Arc::new(ThreadedUsearchIndex::new(options, threads)?)),
-            index_key.clone(),
-            NonZeroUsize::new(3).unwrap().into(),
-            Arc::clone(&table),
-            Arc::new(Semaphore::new(4)),
-            Arc::new(Semaphore::new(4)),
-            memory::new(config_rx),
-        )
-        .unwrap();
+        let (actor, index_key) = create_test_actor(&table);
 
         // Mock partition_id to return a valid partition_id, but don't add any vectors
         // so that the states/partitions maps remain empty
