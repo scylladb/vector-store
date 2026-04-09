@@ -136,7 +136,7 @@ pub(crate) async fn setup_store_with_quantization(
                 vector_store::run(node_state, db_actor, internals, index_factory, config_rx)
                     .await
                     .unwrap();
-            let addr = server.get_address().await.unwrap();
+            let addr = (*server.address().await.borrow()).unwrap();
 
             (HttpClient::new(addr), server, config_tx)
         }
@@ -291,7 +291,7 @@ async fn failed_db_index_create() {
     let server = vector_store::run(node_state, db_actor, internals, index_factory, config_rx)
         .await
         .unwrap();
-    let addr = server.get_address().await.unwrap();
+    let addr = (*server.address().await.borrow()).unwrap();
 
     let client = HttpClient::new(addr);
 

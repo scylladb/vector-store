@@ -99,9 +99,7 @@ fn main() -> anyhow::Result<()> {
             config_rx.clone(),
         )
         .await?;
-        let addr = server
-            .get_address()
-            .await
+        let addr = (*server.address().await.borrow())
             .ok_or_else(|| anyhow!("failed to get server address"))?;
         tracing::info!("listening on {addr}");
 

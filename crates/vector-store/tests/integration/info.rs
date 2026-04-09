@@ -23,7 +23,7 @@ async fn run_vs(
     let server = vector_store::run(node_state, db_actor, internals, index_factory, config_rx)
         .await
         .unwrap();
-    let addr = server.get_address().await.unwrap();
+    let addr = (*server.address().await.borrow()).unwrap();
     (HttpClient::new(addr), server, _config_tx)
 }
 

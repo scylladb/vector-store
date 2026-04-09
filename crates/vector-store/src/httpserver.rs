@@ -37,38 +37,25 @@ pub(crate) struct HttpServerConfig {
 }
 
 pub enum HttpServer {
-    GetAddress {
-        tx: oneshot::Sender<Option<SocketAddr>>,
-    },
-    SubscribeAddress {
+    Address {
         tx: oneshot::Sender<watch::Receiver<Option<SocketAddr>>>,
     },
 }
 
 pub trait HttpServerExt {
-    fn get_address(&self) -> impl std::future::Future<Output = Option<SocketAddr>> + Send;
-    fn subscribe_address(
+    fn address(
         &self,
     ) -> impl std::future::Future<Output = watch::Receiver<Option<SocketAddr>>> + Send;
 }
 
 impl HttpServerExt for mpsc::Sender<HttpServer> {
-    async fn get_address(&self) -> Option<SocketAddr> {
+    async fn address(&self) -> watch::Receiver<Option<SocketAddr>> {
         let (tx, rx) = oneshot::channel();
-        self.send(HttpServer::GetAddress { tx })
+        self.send(HttpServer::Address { tx })
             .await
-            .expect("HttpServerExt::get_address: internal actor should receive request");
+            .expect("HttpServerExt::address: internal actor should receive request");
         rx.await
-            .expect("HttpServerExt::get_address: internal actor should send response")
-    }
-
-    async fn subscribe_address(&self) -> watch::Receiver<Option<SocketAddr>> {
-        let (tx, rx) = oneshot::channel();
-        self.send(HttpServer::SubscribeAddress { tx })
-            .await
-            .expect("HttpServerExt::subscribe_address: internal actor should receive request");
-        rx.await
-            .expect("HttpServerExt::subscribe_address: internal actor should send response")
+            .expect("HttpServerExt::address: internal actor should send response")
     }
 }
 
@@ -340,10 +327,7 @@ where
                     result = rx.recv() => {
                         match result {
                             None => break,
-                            Some(HttpServer::GetAddress { tx }) => {
-                                tx.send(*addr_rx.borrow()).expect("failed to send response");
-                            }
-                            Some(HttpServer::SubscribeAddress { tx }) => {
+                            Some(HttpServer::Address { tx }) => {
                                 tx.send(addr_rx.clone()).expect("failed to send response");
                             }
                         }
