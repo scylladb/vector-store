@@ -9,32 +9,31 @@ use crate::tls_utils::generate_client_identity;
 use crate::tls_utils::generate_server_cert;
 use crate::tls_utils::init;
 use crate::tls_utils::read_cert;
-use crate::usearch::test_config;
 use crate::wait_for;
 use std::sync::Arc;
 use tempfile::NamedTempFile;
 use tokio::sync::watch;
 use vector_store::Config;
+use vector_store::ConfigManager;
 use vector_store::HttpServerExt;
 
 struct MtlsTestServer<S> {
     _server: S,
     _addr: core::net::SocketAddr,
     mtls_addr: core::net::SocketAddr,
-    config_tx: watch::Sender<Arc<Config>>,
+    config_manager: ConfigManager,
     cert_file: NamedTempFile,
     _key_file: NamedTempFile,
     ca_cert_file: NamedTempFile,
     ca_key_file: NamedTempFile,
-    config: Config,
     mtls: S,
 }
 
 impl<S: HttpServerExt> MtlsTestServer<S> {
-    fn update_config(&self, f: impl FnOnce(Config) -> Config) {
-        self.config_tx
-            .send(Arc::new(f(self.config.clone())))
-            .unwrap();
+    fn update_mtls_ca_cert(&self, ca_cert_path: Option<&std::path::Path>) {
+        self.config_manager.update_config(|config| {
+            config.mtls_ca_cert_path = ca_cert_path.map(|p| p.to_path_buf());
+        });
     }
 }
 
@@ -50,24 +49,23 @@ async fn run_server(enable_mtls: bool) -> MtlsTestServer<impl Sized + HttpServer
     let (cert_file, key_file) = generate_server_cert(&mtls_addr);
     let (ca_cert_file, ca_key_file) = generate_ca_cert();
 
-    let mtls_ca_cert_path = if enable_mtls {
-        Some(ca_cert_file.path().to_path_buf())
-    } else {
-        None
-    };
-
     let config = Config {
+        vector_store_addr: core::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         tls_cert_path: Some(cert_file.path().to_path_buf()),
         tls_key_path: Some(key_file.path().to_path_buf()),
-        mtls_ca_cert_path,
         mtls_addr,
-        ..test_config()
+        mtls_ca_cert_path: if enable_mtls {
+            Some(ca_cert_file.path().to_path_buf())
+        } else {
+            None
+        },
+        ..Config::default()
     };
 
-    let (config_tx, config_rx) = watch::channel(Arc::new(config.clone()));
+    let (config_manager, receivers) = ConfigManager::new(config);
 
     let (server, mtls) =
-        vector_store::run(node_state, db_actor, internals, index_factory, config_rx)
+        vector_store::run(node_state, db_actor, internals, index_factory, receivers)
             .await
             .unwrap();
     let addr = (*server.address().await.borrow()).unwrap();
@@ -86,12 +84,11 @@ async fn run_server(enable_mtls: bool) -> MtlsTestServer<impl Sized + HttpServer
         _server: server,
         _addr: addr,
         mtls_addr,
-        config_tx,
+        config_manager,
         cert_file,
         _key_file: key_file,
         ca_cert_file,
         ca_key_file,
-        config,
         mtls,
     }
 }
@@ -185,10 +182,8 @@ async fn test_mtls_config_none_to_some_starts_server() {
 
     let server = run_server_without_mtls().await;
 
-    server.update_config(|c| Config {
-        mtls_ca_cert_path: Some(server.ca_cert_file.path().to_path_buf()),
-        ..c
-    });
+    let ca_cert_path = server.ca_cert_file.path().to_path_buf();
+    server.update_mtls_ca_cert(Some(&ca_cert_path));
 
     let identity = generate_client_identity(&server.ca_key_file);
     let client = reqwest::Client::builder()
@@ -214,10 +209,7 @@ async fn test_mtls_config_some_to_none_stops_server() {
 
     let server = run_server_with_mtls().await;
 
-    server.update_config(|c| Config {
-        mtls_ca_cert_path: None,
-        ..c
-    });
+    server.update_mtls_ca_cert(None);
 
     let identity = generate_client_identity(&server.ca_key_file);
     let client = reqwest::Client::builder()
@@ -247,11 +239,8 @@ async fn test_mtls_config_some_to_some_updates_ca_cert() {
 
     let (ca_cert_file, ca_key_file) = generate_ca_cert();
 
-    server.update_config(|c| Config {
-        mtls_ca_cert_path: Some(ca_cert_file.path().to_path_buf()),
-        mtls_addr: server.mtls_addr,
-        ..c
-    });
+    let ca_cert_path = ca_cert_file.path().to_path_buf();
+    server.update_mtls_ca_cert(Some(&ca_cert_path));
 
     let identity = generate_client_identity(&ca_key_file);
 

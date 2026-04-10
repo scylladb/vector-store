@@ -6,7 +6,7 @@
 use crate::db_basic;
 use crate::db_basic::Table;
 use crate::mock_opensearch;
-use crate::usearch::test_config;
+use crate::usearch::config_channels;
 use crate::wait_for;
 use httpclient::HttpClient;
 use scylla::cluster::metadata::NativeType;
@@ -15,6 +15,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tokio::sync::watch;
 use uuid::Uuid;
+use vector_store::Config;
 use vector_store::DbIndexType;
 use vector_store::HttpServerExt;
 use vector_store::IndexMetadata;
@@ -48,10 +49,10 @@ async fn simple_create_search_delete_index() {
     let index_factory =
         vector_store::new_index_factory_opensearch(server.base_url(), config_rx_factory).unwrap();
 
-    let (_config_tx, config_rx) = watch::channel(Arc::new(test_config()));
+    let (_config_tx, receivers) = config_channels(Config::default());
 
     let (server, _mtls) =
-        vector_store::run(node_state, db_actor, internals, index_factory, config_rx)
+        vector_store::run(node_state, db_actor, internals, index_factory, receivers)
             .await
             .unwrap();
     let addr = (*server.address().await.borrow()).unwrap();

@@ -5,22 +5,90 @@
 
 use crate::Config;
 use crate::Credentials;
+use crate::tls;
+use crate::tls::TlsServerConfig;
 use anyhow::anyhow;
 use anyhow::bail;
 use itertools::Itertools;
 use secrecy::ExposeSecret;
+use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
 
+#[derive(Clone, PartialEq)]
+pub struct HttpServerConfig {
+    pub addr: SocketAddr,
+    pub(crate) tls: Option<TlsServerConfig>,
+}
+
+impl HttpServerConfig {
+    pub(crate) fn protocol_label(&self) -> &'static str {
+        match &self.tls {
+            None => "HTTP",
+            Some(tls) => tls.protocol_label(),
+        }
+    }
+}
+
 pub struct ConfigManager {
     config_tx: watch::Sender<Arc<Config>>,
+    http_config_tx: watch::Sender<Arc<Option<HttpServerConfig>>>,
+    mtls_config_tx: watch::Sender<Arc<Option<HttpServerConfig>>>,
+}
+
+fn derive_http_config(config: &Config) -> Option<HttpServerConfig> {
+    let identity = load_server_identity(config);
+    let tls = identity
+        .as_ref()
+        .map(TlsServerConfig::new)
+        .transpose()
+        .inspect_err(|e| tracing::error!("Failed to build TLS config for HTTP server: {e}"))
+        .ok()
+        .flatten();
+    Some(HttpServerConfig {
+        addr: config.vector_store_addr,
+        tls,
+    })
+}
+
+fn derive_mtls_config(config: &Config) -> Option<HttpServerConfig> {
+    let identity = load_server_identity(config)?;
+    let verifier = load_mtls_verifier(config)?;
+    let tls = TlsServerConfig::new_mtls(&identity, &verifier)
+        .inspect_err(|e| tracing::error!("Failed to build mTLS config: {e}"))
+        .ok()?;
+    Some(HttpServerConfig {
+        addr: config.mtls_addr,
+        tls: Some(tls),
+    })
+}
+
+fn load_server_identity(config: &Config) -> Option<tls::ServerIdentity> {
+    let cert = config.tls_cert_path.as_ref()?;
+    let key = config.tls_key_path.as_ref()?;
+    tls::ServerIdentity::new(cert, key)
+        .inspect_err(|e| tracing::error!("Failed to load server identity: {e}"))
+        .ok()
+}
+
+fn load_mtls_verifier(config: &Config) -> Option<tls::MtlsVerifier> {
+    let path = config.mtls_ca_cert_path.as_ref()?;
+    tls::MtlsVerifier::new(path)
+        .inspect_err(|e| tracing::error!("Failed to load mTLS verifier: {e}"))
+        .ok()
+}
+
+pub struct ConfigReceivers {
+    pub config: watch::Receiver<Arc<Config>>,
+    pub http: watch::Receiver<Arc<Option<HttpServerConfig>>>,
+    pub mtls: watch::Receiver<Arc<Option<HttpServerConfig>>>,
 }
 
 impl ConfigManager {
-    /// Create a new ConfigManager and return both the manager and a receiver for configuration
-    /// change notifications. The receiver can be cloned to share with multiple consumers.
+    /// Create a new ConfigManager and return both the manager and receivers for configuration
+    /// change notifications. The receivers can be cloned to share with multiple consumers.
     ///
     /// After creating the ConfigManager, call `start()` from within a Tokio runtime context
     /// to begin listening for SIGHUP signals.
@@ -29,10 +97,25 @@ impl ConfigManager {
     /// * `config` - Initial configuration
     ///
     /// # Returns
-    /// A tuple of (ConfigManager, receiver for configuration changes)
-    pub fn new(config: Config) -> (Self, watch::Receiver<Arc<Config>>) {
+    /// A tuple of (ConfigManager, config receivers)
+    pub fn new(config: Config) -> (Self, ConfigReceivers) {
+        let http = derive_http_config(&config);
+        let mtls = derive_mtls_config(&config);
         let (config_tx, config_rx) = watch::channel(Arc::new(config));
-        (Self { config_tx }, config_rx)
+        let (http_config_tx, http_config_rx) = watch::channel(Arc::new(http));
+        let (mtls_config_tx, mtls_config_rx) = watch::channel(Arc::new(mtls));
+        (
+            Self {
+                config_tx,
+                http_config_tx,
+                mtls_config_tx,
+            },
+            ConfigReceivers {
+                config: config_rx,
+                http: http_config_rx,
+                mtls: mtls_config_rx,
+            },
+        )
     }
 
     /// Start listening for SIGHUP signals in a background task.
@@ -53,20 +136,32 @@ impl ConfigManager {
         &self,
         env: impl Fn(&str) -> anyhow::Result<String>,
     ) -> anyhow::Result<()> {
-        // Get old config before reload
         let old_config = self.config_tx.borrow().clone();
 
-        // Load new configuration
-        let new_config = Arc::new(load_config(env).await?);
+        let config = load_config(env).await?;
 
-        // Check for restart-required changes
-        self.check_restart_required_changes(&old_config, &new_config);
+        self.check_restart_required_changes(&old_config, &config);
 
-        // Update the config atomically - watch will notify all receivers
-        self.config_tx.send(new_config)?;
+        self.send_config(config);
 
         tracing::info!("Configuration reloaded successfully");
         Ok(())
+    }
+
+    /// Apply a configuration update by mutating the current config.
+    /// Derives HTTP server configs from the updated config and notifies all watchers.
+    pub fn update_config(&self, f: impl FnOnce(&mut Config)) {
+        let mut config = (**self.config_tx.borrow()).clone();
+        f(&mut config);
+        self.send_config(config);
+    }
+
+    fn send_config(&self, config: Config) {
+        let http = derive_http_config(&config);
+        let mtls = derive_mtls_config(&config);
+        self.config_tx.send(Arc::new(config)).ok();
+        self.http_config_tx.send(Arc::new(http)).ok();
+        self.mtls_config_tx.send(Arc::new(mtls)).ok();
     }
 
     /// Check for configuration changes that require a server restart and log warnings.
@@ -231,7 +326,7 @@ pub async fn load_config(env: impl Fn(&str) -> anyhow::Result<String>) -> anyhow
         config.disable_colors = disable_colors;
     }
 
-    if let Some(vector_store_addr) = env("VECTOR_STORE_URI")
+    let vector_store_addr = env("VECTOR_STORE_URI")
         .ok()
         .map(|v| {
             v.to_socket_addrs()
@@ -239,9 +334,10 @@ pub async fn load_config(env: impl Fn(&str) -> anyhow::Result<String>) -> anyhow
                 .next()
                 .ok_or(anyhow!("Unable to parse VECTOR_STORE_URI env (host:port)"))
         })
-        .transpose()?
-    {
-        config.vector_store_addr = vector_store_addr;
+        .transpose()?;
+
+    if let Some(addr) = vector_store_addr {
+        config.vector_store_addr = addr;
     }
 
     if let Ok(scylladb_uri) = env("VECTOR_STORE_SCYLLADB_URI") {
@@ -284,19 +380,21 @@ pub async fn load_config(env: impl Fn(&str) -> anyhow::Result<String>) -> anyhow
 
     config.credentials = credentials(&env).await?;
 
-    // Load TLS configuration
-    let tls_cert_path = env("VECTOR_STORE_TLS_CERT_PATH")
+    config.tls_cert_path = env("VECTOR_STORE_TLS_CERT_PATH")
         .ok()
         .map(std::path::PathBuf::from);
-    let tls_key_path = env("VECTOR_STORE_TLS_KEY_PATH")
+    config.tls_key_path = env("VECTOR_STORE_TLS_KEY_PATH")
         .ok()
         .map(std::path::PathBuf::from);
 
-    config.mtls_addr = env("VECTOR_STORE_MTLS_URI")
+    if let Some(mtls_addr) = env("VECTOR_STORE_MTLS_URI")
         .ok()
         .map(|v| v.parse())
         .transpose()?
-        .unwrap_or(config.mtls_addr);
+    {
+        config.mtls_addr = mtls_addr;
+    }
+
     config.mtls_ca_cert_path = env("VECTOR_STORE_MTLS_CA_CERT_PATH")
         .ok()
         .map(std::path::PathBuf::from);
@@ -354,17 +452,13 @@ pub async fn load_config(env: impl Fn(&str) -> anyhow::Result<String>) -> anyhow
         .map(|v| serde_json::from_str(&v))
         .transpose()?;
 
-    // Validate that both cert and key are provided together, or neither
-    match (&tls_cert_path, &tls_key_path) {
-        (Some(_), Some(_)) | (None, None) => {
-            config.tls_cert_path = tls_cert_path;
-            config.tls_key_path = tls_key_path;
-        }
-        _ => {
+    match (&config.tls_cert_path, &config.tls_key_path) {
+        (Some(_), None) | (None, Some(_)) => {
             bail!(
                 "Both VECTOR_STORE_TLS_CERT_PATH and VECTOR_STORE_TLS_KEY_PATH must be set together"
             )
         }
+        _ => {}
     }
 
     Ok(config)
@@ -530,89 +624,64 @@ mod tests {
 
     #[tokio::test]
     async fn config_manager_reload_notifies_watchers() {
-        let initial_config = Config {
-            vector_store_addr: "127.0.0.1:6080".parse().unwrap(),
-            scylladb_uri: "127.0.0.1:9042".to_string(),
-            threads: None,
-            memory_limit: None,
-            memory_usage_check_interval: None,
-            opensearch_addr: None,
-            credentials: None,
-            usearch_simulator: None,
-            disable_colors: false,
-            tls_cert_path: None,
-            tls_key_path: None,
-            mtls_addr: "127.0.0.1:6081".parse().unwrap(),
-            mtls_ca_cert_path: None,
-            cql_connection_timeout: None,
-            cql_keepalive_interval: None,
-            cql_keepalive_timeout: None,
-            cql_tcp_keepalive_interval: None,
-            cql_uri_translation_map: None,
-            cdc_safety_interval: None,
-            cdc_sleep_interval: None,
-            cdc_fine_safety_interval: None,
-            cdc_fine_sleep_interval: None,
-        };
+        let (config_manager, receivers) = ConfigManager::new(Config::default());
 
-        let (config_manager, mut config_rx) = ConfigManager::new(initial_config);
-
-        // Get initial config
+        let mut config_rx = receivers.config;
+        let mut http_rx = receivers.http;
         let initial = config_rx.borrow().clone();
-        assert_eq!(initial.vector_store_addr.to_string(), "127.0.0.1:6080");
         assert_eq!(initial.scylladb_uri, "127.0.0.1:9042");
+        assert_eq!(
+            http_rx.borrow().as_ref().as_ref().unwrap().addr.to_string(),
+            "127.0.0.1:6080"
+        );
 
-        // Reload config with different environment values
         let env = mock_env(HashMap::from([
             ("VECTOR_STORE_URI", "192.168.1.100:7070".into()),
             ("VECTOR_STORE_SCYLLADB_URI", "192.168.1.200:9043".into()),
         ]));
         config_manager.reload_config(env).await.unwrap();
 
-        // Wait for change notification
         config_rx.changed().await.unwrap();
+        http_rx.changed().await.unwrap();
 
-        // Verify new config values
         let updated = config_rx.borrow();
-        assert_eq!(updated.vector_store_addr.to_string(), "192.168.1.100:7070");
         assert_eq!(updated.scylladb_uri, "192.168.1.200:9043");
+        assert_eq!(
+            http_rx.borrow().as_ref().as_ref().unwrap().addr.to_string(),
+            "192.168.1.100:7070"
+        );
     }
 
     #[tokio::test]
     async fn config_manager_multiple_watchers() {
-        let initial_config = Config::default();
-        let (config_manager, config_rx) = ConfigManager::new(initial_config);
+        let (config_manager, receivers) = ConfigManager::new(Config::default());
+        let http_rx = receivers.http;
 
-        // Clone receivers for multiple watchers
-        let mut rx1 = config_rx.clone();
-        let mut rx2 = config_rx.clone();
-        let mut rx3 = config_rx;
+        let mut rx1 = http_rx.clone();
+        let mut rx2 = http_rx.clone();
+        let mut rx3 = http_rx;
 
-        // Spawn tasks to wait for changes
         let task1 = tokio::spawn(async move {
             rx1.changed().await.unwrap();
-            rx1.borrow().vector_store_addr.to_string()
+            rx1.borrow().as_ref().as_ref().unwrap().addr.to_string()
         });
         let task2 = tokio::spawn(async move {
             rx2.changed().await.unwrap();
-            rx2.borrow().vector_store_addr.to_string()
+            rx2.borrow().as_ref().as_ref().unwrap().addr.to_string()
         });
         let task3 = tokio::spawn(async move {
             rx3.changed().await.unwrap();
-            rx3.borrow().vector_store_addr.to_string()
+            rx3.borrow().as_ref().as_ref().unwrap().addr.to_string()
         });
 
-        // Give tasks time to start waiting
         tokio::time::sleep(Duration::from_millis(10)).await;
 
-        // Reload config
         let env = mock_env(HashMap::from([(
             "VECTOR_STORE_URI",
             "192.168.1.100:8080".into(),
         )]));
         config_manager.reload_config(env).await.unwrap();
 
-        // Verify all watchers received the update
         let addr1 = task1.await.unwrap();
         let addr2 = task2.await.unwrap();
         let addr3 = task3.await.unwrap();

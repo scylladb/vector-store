@@ -5,7 +5,7 @@
 
 use crate::db_basic;
 use crate::db_basic::Table;
-use crate::usearch::test_config;
+use crate::usearch::config_channels;
 use httpclient::HttpClient;
 use scylla::cluster::metadata::NativeType;
 use scylla::value::CqlValue;
@@ -13,7 +13,6 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 use sysinfo::System;
-use tokio::sync::watch;
 use tracing::info;
 use uuid::Uuid;
 use vector_store::Config;
@@ -106,15 +105,15 @@ async fn memory_limit_during_index_build() {
     let config = Config {
         memory_limit: Some(limit_memory),
         memory_usage_check_interval: Some(Duration::from_millis(10)),
-        ..test_config()
+        ..Config::default()
     };
 
-    let (_config_tx, config_rx) = watch::channel(Arc::new(config));
-    let index_factory = vector_store::new_index_factory_usearch(config_rx.clone()).unwrap();
+    let (_config_tx, receivers) = config_channels(config);
+    let index_factory = vector_store::new_index_factory_usearch(receivers.config.clone()).unwrap();
 
     let node_state = node_state.clone();
     let (server, _mtls) =
-        vector_store::run(node_state, db_actor, internals, index_factory, config_rx)
+        vector_store::run(node_state, db_actor, internals, index_factory, receivers)
             .await
             .unwrap();
     let addr = (*server.address().await.borrow()).unwrap();

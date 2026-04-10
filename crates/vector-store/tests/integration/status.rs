@@ -4,9 +4,9 @@
  */
 
 use crate::usearch;
-use crate::usearch::test_config;
 use crate::wait_for;
 use scylla::cluster::metadata::NativeType;
+use vector_store::Config;
 use vector_store::DbIndexType;
 use vector_store::httproutes::NodeStatus;
 
@@ -33,7 +33,7 @@ async fn status_is_serving_after_creation() {
 async fn status_is_bootstrapping_while_discovering_indexes() {
     crate::enable_tracing();
     let (run, _index, db, _node_state) = usearch::setup_store(
-        test_config(),
+        Config::default(),
         DbIndexType::Global,
         ["pk".into(), "ck".into()],
         [

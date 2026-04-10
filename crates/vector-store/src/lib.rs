@@ -29,9 +29,12 @@ mod primary_key;
 mod similarity;
 mod table;
 mod timestamp;
+mod tls;
 mod vector;
 
 pub use crate::config_manager::ConfigManager;
+pub use crate::config_manager::ConfigReceivers;
+pub use crate::config_manager::HttpServerConfig;
 pub use crate::config_manager::load_config;
 pub use crate::distance::Distance;
 pub use crate::index_key::IndexKey;
@@ -676,33 +679,12 @@ pub fn block_on<Output>(threads: Option<usize>, f: impl AsyncFnOnce() -> Output)
         .block_on(async move { f().await })
 }
 
-fn http_server_config(config: &Config) -> Option<httpserver::HttpServerConfig> {
-    Some(httpserver::HttpServerConfig {
-        addr: config.vector_store_addr,
-        tls_cert_path: config.tls_cert_path.clone(),
-        tls_key_path: config.tls_key_path.clone(),
-        mtls_ca_cert_path: None,
-    })
-}
-
-fn mtls_http_server_config(config: &Config) -> Option<httpserver::HttpServerConfig> {
-    config
-        .mtls_ca_cert_path
-        .as_ref()
-        .map(|ca_cert_path| httpserver::HttpServerConfig {
-            addr: config.mtls_addr,
-            tls_cert_path: config.tls_cert_path.clone(),
-            tls_key_path: config.tls_key_path.clone(),
-            mtls_ca_cert_path: Some(ca_cert_path.clone()),
-        })
-}
-
 pub async fn run(
     node_state: Sender<NodeState>,
     db_actor: Sender<Db>,
     internals: Sender<Internals>,
     index_factory: Box<dyn IndexFactory + Send + Sync>,
-    config_rx: watch::Receiver<Arc<Config>>,
+    receivers: ConfigReceivers,
 ) -> anyhow::Result<(
     Sender<httpserver::HttpServer>,
     Sender<httpserver::HttpServer>,
@@ -714,7 +696,7 @@ pub async fn run(
         index_factory,
         node_state.clone(),
         metrics.clone(),
-        config_rx.clone(),
+        receivers.config,
     )
     .await?;
 
@@ -724,8 +706,7 @@ pub async fn run(
         metrics.clone(),
         internals.clone(),
         index_engine_version.clone(),
-        config_rx.clone(),
-        http_server_config,
+        receivers.http,
     )
     .await?;
 
@@ -735,8 +716,7 @@ pub async fn run(
         metrics,
         internals,
         index_engine_version,
-        config_rx,
-        mtls_http_server_config,
+        receivers.mtls,
     )
     .await?;
 

@@ -181,7 +181,10 @@ async fn run_vector_store(
     let internals = vector_store::new_internals();
     let index_factory = vector_store::new_index_factory_usearch(config.clone()).unwrap();
 
-    let (server, _mtls) = vector_store::run(node_state, db, internals, index_factory, config)
+    let initial_config = config.borrow().clone();
+    let (_, receivers) = vector_store::ConfigManager::new((*initial_config).clone());
+
+    let (server, _mtls) = vector_store::run(node_state, db, internals, index_factory, receivers)
         .await
         .unwrap();
     let addr = (*server.address().await.borrow()).unwrap();

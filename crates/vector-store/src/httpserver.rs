@@ -3,23 +3,16 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
-use crate::Config;
+use crate::config_manager::HttpServerConfig;
 use crate::engine::Engine;
 use crate::httproutes;
 use crate::internals::Internals;
 use crate::metrics::Metrics;
 use crate::node_state::NodeState;
-use anyhow::bail;
 use axum_server::Handle;
 use axum_server::accept::NoDelayAcceptor;
 use axum_server::tls_rustls::RustlsConfig;
-use rustls::RootCertStore;
-use rustls::pki_types::CertificateDer;
-use rustls::pki_types::PrivateKeyDer;
-use rustls::server::WebPkiClientVerifier;
-use rustls_pki_types::pem::PemObject;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -27,14 +20,6 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio::time;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct HttpServerConfig {
-    pub addr: SocketAddr,
-    pub tls_cert_path: Option<PathBuf>,
-    pub tls_key_path: Option<PathBuf>,
-    pub mtls_ca_cert_path: Option<PathBuf>,
-}
 
 pub enum HttpServer {
     Address {
@@ -65,91 +50,6 @@ struct ServerDeps {
     metrics: Arc<Metrics>,
     internals: Sender<Internals>,
     index_engine_version: String,
-}
-
-async fn load_mtls_config(
-    cert_path: &PathBuf,
-    key_path: &PathBuf,
-    ca_cert_path: &PathBuf,
-) -> anyhow::Result<RustlsConfig> {
-    let ca_pem = tokio::fs::read(ca_cert_path)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to read mTLS CA cert at {ca_cert_path:?}: {e}"))?;
-
-    let ca_certs = CertificateDer::pem_slice_iter(&ca_pem)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| anyhow::anyhow!("Failed to parse mTLS CA certificate PEM: {e}"))?;
-
-    let mut root_store = RootCertStore::empty();
-    let (added, ignored) = root_store.add_parsable_certificates(ca_certs);
-    if added == 0 {
-        bail!("No valid CA certificates found in mTLS CA cert file {ca_cert_path:?}");
-    }
-    if ignored > 0 {
-        tracing::warn!(
-            "{ignored} CA certificate(s) in the mTLS CA bundle could not be parsed and were skipped"
-        );
-    }
-
-    let verifier = WebPkiClientVerifier::builder(Arc::new(root_store))
-        .build()
-        .map_err(|e| anyhow::anyhow!("Failed to build mTLS client verifier: {e}"))?;
-
-    let cert_pem = tokio::fs::read(cert_path)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to read server cert at {cert_path:?}: {e}"))?;
-    let key_pem = tokio::fs::read(key_path)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to read server key at {key_path:?}: {e}"))?;
-
-    let cert_chain = CertificateDer::pem_slice_iter(&cert_pem)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| anyhow::anyhow!("Failed to parse server certificate PEM: {e}"))?;
-
-    let private_key = PrivateKeyDer::from_pem_slice(&key_pem)
-        .map_err(|e| anyhow::anyhow!("Failed to parse server private key PEM: {e}"))?;
-
-    let server_config = rustls::ServerConfig::builder()
-        .with_client_cert_verifier(verifier)
-        .with_single_cert(cert_chain, private_key)
-        .map_err(|e| anyhow::anyhow!("Failed to build mTLS server config: {e}"))?;
-
-    tracing::info!("mTLS enabled with CA cert from {ca_cert_path:?}");
-
-    Ok(RustlsConfig::from_config(Arc::new(server_config)))
-}
-
-async fn load_tls_config(config: &HttpServerConfig) -> anyhow::Result<Option<RustlsConfig>> {
-    match (&config.tls_cert_path, &config.tls_key_path) {
-        (Some(cert_path), Some(key_path)) => match &config.mtls_ca_cert_path {
-            Some(ca_path) => load_mtls_config(cert_path, key_path, ca_path)
-                .await
-                .map(Some),
-            None => {
-                let tls = RustlsConfig::from_pem_file(cert_path, key_path)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to load TLS config: {e}"))?;
-                Ok(Some(tls))
-            }
-        },
-        _ => {
-            if config.mtls_ca_cert_path.is_some() {
-                bail!(
-                    "mTLS CA certificate path is configured, but TLS certificate or key path is missing"
-                );
-            } else {
-                Ok(None)
-            }
-        }
-    }
-}
-
-fn protocol(tls_config: &Option<RustlsConfig>) -> &'static str {
-    if tls_config.is_some() {
-        "HTTPS"
-    } else {
-        "HTTP"
-    }
 }
 
 /// Retry spawning a server with exponential backoff
@@ -195,14 +95,11 @@ async fn enable_server(
 ) -> anyhow::Result<Handle> {
     tracing::info!("HTTP server being enabled");
     let (handle, addr) = spawn_server_with_retry(config, deps).await?;
-    let protocol = if config.mtls_ca_cert_path.is_some() {
-        "HTTPS (mTLS)"
-    } else if config.tls_cert_path.is_some() {
-        "HTTPS"
-    } else {
-        "HTTP"
-    };
-    tracing::info!("{} server started successfully on {}", protocol, addr);
+    tracing::info!(
+        "{} server started successfully on {}",
+        config.protocol_label(),
+        addr
+    );
     addr_tx.send(Some(addr)).ok();
     Ok(handle)
 }
@@ -233,14 +130,11 @@ async fn reload_server(
 
     match spawn_server_with_retry(new_config, deps).await {
         Ok((handle, addr)) => {
-            let protocol = if new_config.mtls_ca_cert_path.is_some() {
-                "HTTPS (mTLS)"
-            } else if new_config.tls_cert_path.is_some() {
-                "HTTPS"
-            } else {
-                "HTTP"
-            };
-            tracing::info!("{} server reloaded successfully on {}", protocol, addr);
+            tracing::info!(
+                "{} server reloaded successfully on {}",
+                new_config.protocol_label(),
+                addr
+            );
             addr_tx.send(Some(addr)).ok();
             Some(handle)
         }
@@ -279,18 +173,14 @@ async fn handle_config_change(
     }
 }
 
-pub(crate) async fn new<F>(
+pub(crate) async fn new(
     state: Sender<NodeState>,
     engine: Sender<Engine>,
     metrics: Arc<Metrics>,
     internals: Sender<Internals>,
     index_engine_version: String,
-    mut config_rx: watch::Receiver<Arc<Config>>,
-    get_server_config: F,
-) -> anyhow::Result<Sender<HttpServer>>
-where
-    F: Fn(&Config) -> Option<HttpServerConfig> + Send + 'static,
-{
+    mut config_rx: watch::Receiver<Arc<Option<HttpServerConfig>>>,
+) -> anyhow::Result<Sender<HttpServer>> {
     // minimal size as channel is used as a lifetime guard
     const CHANNEL_SIZE: usize = 1;
     let (tx, mut rx) = mpsc::channel(CHANNEL_SIZE);
@@ -305,10 +195,10 @@ where
         index_engine_version: index_engine_version.clone(),
     };
 
-    let initial_config = get_server_config(&config_rx.borrow());
+    let initial_config = config_rx.borrow().clone();
 
     // Start initial server if config is provided
-    let mut current_handle = if let Some(ref config) = initial_config {
+    let mut current_handle = if let Some(ref config) = *initial_config {
         let (handle, addr) = spawn_server_with_retry(config, &deps).await?;
         addr_tx.send(Some(addr)).ok();
         Some(handle)
@@ -337,7 +227,7 @@ where
                             break;
                         }
 
-                        let new_config = get_server_config(&config_rx.borrow());
+                        let new_config = config_rx.borrow().clone();
 
                         if current_config != new_config {
                             current_handle =
@@ -368,25 +258,11 @@ fn describe_config_changes(old: &HttpServerConfig, new: &HttpServerConfig) -> St
     if old.addr != new.addr {
         changes.push(format!("address {} -> {}", old.addr, new.addr));
     }
-    if old.tls_cert_path != new.tls_cert_path || old.tls_key_path != new.tls_key_path {
-        let tls_label = |c: &HttpServerConfig| {
-            if c.tls_cert_path.is_some() && c.tls_key_path.is_some() {
-                "enabled"
-            } else {
-                "disabled"
-            }
-        };
-        changes.push(format!("TLS {} -> {}", tls_label(old), tls_label(new)));
-    }
-    if old.mtls_ca_cert_path != new.mtls_ca_cert_path {
-        let mtls_label = |c: &HttpServerConfig| {
-            if c.mtls_ca_cert_path.is_some() {
-                "enabled"
-            } else {
-                "disabled"
-            }
-        };
-        changes.push(format!("mTLS {} -> {}", mtls_label(old), mtls_label(new)));
+    match (&old.tls, &new.tls) {
+        (Some(old_tls), Some(new_tls)) => changes.extend(old_tls.describe_changes(new_tls)),
+        (None, Some(_)) => changes.push("TLS enabled".to_string()),
+        (Some(_), None) => changes.push("TLS disabled".to_string()),
+        (None, None) => {}
     }
     changes.join(", ")
 }
@@ -397,13 +273,7 @@ async fn spawn_server(
     config: &HttpServerConfig,
     deps: &ServerDeps,
 ) -> anyhow::Result<(Handle, SocketAddr)> {
-    let tls_config = load_tls_config(config).await?;
-    let is_mtls = config.mtls_ca_cert_path.is_some();
-    let protocol = if is_mtls {
-        "HTTPS (mTLS)"
-    } else {
-        protocol(&tls_config)
-    };
+    let protocol = config.protocol_label();
     let addr = config.addr;
 
     let handle = Handle::new();
@@ -415,11 +285,16 @@ async fn spawn_server(
         let metrics = deps.metrics.clone();
         let internals = deps.internals.clone();
         let index_engine_version = deps.index_engine_version.clone();
+        let tls = config.tls.as_ref().map(|t| {
+            (
+                RustlsConfig::from_config(Arc::clone(t.server_config())),
+                t.is_mtls(),
+            )
+        });
 
         async move {
-            let result = match tls_config {
-                Some(tls_config) if is_mtls => {
-                    // mTLS requires HTTPS-only (no dual protocol)
+            let result = match tls {
+                Some((tls_config, true)) => {
                     axum_server::bind_rustls(addr, tls_config)
                         .handle(handle)
                         .serve(
@@ -435,8 +310,7 @@ async fn spawn_server(
                         )
                         .await
                 }
-                Some(tls_config) => {
-                    // Regular TLS allows dual protocol (HTTP + HTTPS)
+                Some((tls_config, false)) => {
                     axum_server_dual_protocol::bind_dual_protocol(addr, tls_config)
                         .handle(handle)
                         .serve(
@@ -452,7 +326,7 @@ async fn spawn_server(
                         )
                         .await
                 }
-                _ => {
+                None => {
                     axum_server::bind(addr)
                         .handle(handle)
                         .acceptor(NoDelayAcceptor::new())

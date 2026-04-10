@@ -16,7 +16,6 @@ use scylla::cluster::metadata::NativeType;
 use scylla::value::CqlValue;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
@@ -40,11 +39,16 @@ use vector_store::httproutes::PostIndexAnnResponse;
 use vector_store::httproutes::PostIndexAnnRestriction;
 use vector_store::node_state::NodeState;
 
-pub(crate) fn test_config() -> Config {
-    Config {
-        vector_store_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
-        ..Default::default()
-    }
+#[allow(dead_code)]
+pub(crate) struct ConfigTransmitters {
+    pub config_manager: vector_store::ConfigManager,
+}
+
+pub(crate) fn config_channels(
+    config: Config,
+) -> (ConfigTransmitters, vector_store::ConfigReceivers) {
+    let (config_manager, receivers) = vector_store::ConfigManager::new(config);
+    (ConfigTransmitters { config_manager }, receivers)
 }
 
 pub(crate) async fn setup_store(
@@ -126,14 +130,14 @@ pub(crate) async fn setup_store_with_quantization(
 
     db.add_index(index.clone(), fullscan_fn, cdc_fn).unwrap();
 
-    let (config_tx, config_rx) = watch::channel(Arc::new(config));
-    let index_factory = vector_store::new_index_factory_usearch(config_rx.clone()).unwrap();
+    let (config_tx, receivers) = config_channels(config);
+    let index_factory = vector_store::new_index_factory_usearch(receivers.config.clone()).unwrap();
 
     let run = {
         let node_state = node_state.clone();
         async move {
             let (server, _mtls) =
-                vector_store::run(node_state, db_actor, internals, index_factory, config_rx)
+                vector_store::run(node_state, db_actor, internals, index_factory, receivers)
                     .await
                     .unwrap();
             let addr = (*server.address().await.borrow()).unwrap();
@@ -159,7 +163,7 @@ pub(crate) async fn setup_store_and_wait_for_index(
     Sender<NodeState>,
 ) {
     let (run, index, db, node_state) = setup_store(
-        test_config(),
+        Config::default(),
         index_type,
         primary_keys,
         columns,
@@ -183,7 +187,7 @@ async fn simple_create_search_delete_index() {
     crate::enable_tracing();
 
     let (run, index, db, _node_state) = setup_store(
-        test_config(),
+        Config::default(),
         DbIndexType::Global,
         ["pk".into(), "ck".into()],
         [
@@ -286,10 +290,10 @@ async fn failed_db_index_create() {
     let (_, rx) = watch::channel(Arc::new(Config::default()));
     let index_factory = vector_store::new_index_factory_usearch(rx).unwrap();
 
-    let (_config_tx, config_rx) = watch::channel(Arc::new(test_config()));
+    let (_config_tx, receivers) = config_channels(Config::default());
 
     let (server, _mtls) =
-        vector_store::run(node_state, db_actor, internals, index_factory, config_rx)
+        vector_store::run(node_state, db_actor, internals, index_factory, receivers)
             .await
             .unwrap();
     let addr = (*server.address().await.borrow()).unwrap();
@@ -418,7 +422,7 @@ async fn ann_returns_bad_request_when_provided_vector_size_is_not_eq_index_dimen
 async fn ann_fail_while_building() {
     crate::enable_tracing();
     let (run, index, db, _node_state) = setup_store(
-        test_config(),
+        Config::default(),
         DbIndexType::Global,
         ["pk".into(), "ck".into()],
         [
@@ -1417,7 +1421,7 @@ async fn http_server_is_responsive_when_index_add_hangs() {
             Duration::from_secs(20), // Simulate long add operation (longer than test timeout).
             Duration::from_secs(0),
         ]),
-        ..test_config()
+        ..Config::default()
     };
     let (run, _index, _db, _node_state) = setup_store(
         config,
@@ -1452,7 +1456,7 @@ async fn null_vector_is_not_indexed() {
     crate::enable_tracing();
 
     let (run, index, _db, _node_state) = setup_store(
-        test_config(),
+        Config::default(),
         DbIndexType::Global,
         ["pk".into()],
         [("pk".to_string().into(), NativeType::Int)],
