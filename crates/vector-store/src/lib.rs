@@ -31,6 +31,7 @@ mod table;
 mod timestamp;
 pub mod tls;
 mod vector;
+mod worker;
 
 pub use crate::config_manager::ConfigManager;
 pub use crate::config_manager::ConfigReceivers;
@@ -68,9 +69,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Builder;
-use tokio::runtime::Handle;
 use tokio::signal;
-use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::watch;
@@ -611,13 +610,6 @@ pub struct DbEmbedding {
 pub struct AsyncInProgress(mpsc::Sender<()>);
 
 pub fn block_on<Output>(threads: Option<usize>, f: impl AsyncFnOnce() -> Output) -> Output {
-    if let Some(threads @ 1..) = threads {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .build_global()
-            .unwrap();
-    }
-
     let mut builder = match threads {
         Some(0) | None => Builder::new_multi_thread(),
         Some(1) => Builder::new_current_thread(),
@@ -680,23 +672,7 @@ pub fn new_internals() -> Sender<Internals> {
 pub fn new_index_factory_usearch(
     config_tx: watch::Receiver<Arc<Config>>,
 ) -> anyhow::Result<Box<dyn IndexFactory + Send + Sync>> {
-    // A semaphore that limits the concurrency of search operations, which are performed on Tokio threads.
-    // This is a global concurrency limit for all indexes.
-    let search_concurrency = Handle::current().metrics().num_workers();
-    let tokio_semaphore = Arc::new(Semaphore::new(search_concurrency));
-    // A semaphore that limits the concurrency of add/remove operations, which are performed on Rayon threads.
-    // This is a global concurrency limit for all indexes.
-    // The limit is set to 3 times the number of Rayon threads to ensure high throughput.
-    const RAYON_CONCURRENCY_MULTIPLIER: usize = 3;
-    let add_remove_concurrency =
-        (rayon::current_num_threads() * RAYON_CONCURRENCY_MULTIPLIER).min(Semaphore::MAX_PERMITS);
-    let rayon_semaphore = Arc::new(Semaphore::new(add_remove_concurrency));
-
-    Ok(Box::new(index::usearch::new_usearch(
-        tokio_semaphore,
-        rayon_semaphore,
-        config_tx,
-    )?))
+    Ok(Box::new(index::usearch::new_usearch(config_tx)?))
 }
 
 pub fn new_index_factory_opensearch(
