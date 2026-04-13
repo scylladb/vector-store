@@ -547,6 +547,7 @@ If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
         )
     )
 )]
+#[hotpath::measure]
 async fn post_index_ann(
     State(state): State<RoutesInnerState>,
     extensions: Extensions,

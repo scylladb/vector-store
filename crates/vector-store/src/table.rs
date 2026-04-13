@@ -998,6 +998,7 @@ pub(crate) trait TableAdd {
 }
 
 impl TableAdd for Table {
+    #[hotpath::measure]
     fn add(
         &mut self,
         _index_key: &IndexKey,
@@ -1144,10 +1145,12 @@ pub(crate) trait TableSearch {
 }
 
 impl TableSearch for Table {
+    #[hotpath::measure]
     fn index_id(&self, index_key: &IndexKey) -> Option<IndexId> {
         self.index_ids.get(index_key).copied()
     }
 
+    #[hotpath::measure]
     fn partition_id(
         &self,
         index_key: &IndexKey,
@@ -1171,6 +1174,7 @@ impl TableSearch for Table {
         }
     }
 
+    #[hotpath::measure]
     fn primary_key(&self, partition_id: PartitionId, primary_id: PrimaryId) -> Option<PrimaryKey> {
         if !self.is_valid_primary_id(partition_id, primary_id) {
             return None;
@@ -1178,6 +1182,7 @@ impl TableSearch for Table {
         self.primary_keys.get(primary_id).cloned().flatten()
     }
 
+    #[hotpath::measure]
     fn is_valid_for(
         &self,
         partition_id: PartitionId,

@@ -24,6 +24,7 @@ bcrypt = "0.15"
 const-hex = "1.18.1"
 clap = { version = "4.5.40", features = ["derive"] }
 chrono = "0.4.43"
+console-subscriber = "0.5.0"
 criterion = { version = "0.8.2", features = ["async_tokio"] }
 dashmap = "6.1.0"
 derive_more = { version = "2.0.1", features = ["full"] }
@@ -37,6 +38,7 @@ e2etest-tls = { path = "crates/e2etest-tls" }
 e2etest-vector-store-cluster = { path = "crates/e2etest-vector-store-cluster" }
 futures = "0.3.31"
 hickory-server = "0.25.2"
+hotpath = { version = "0.15.0", features = ["tokio", "futures", "async-channel"] }
 httpclient = { path = "crates/httpclient" }
 humantime = "2.2.0"
 itertools = "0.14.0"
