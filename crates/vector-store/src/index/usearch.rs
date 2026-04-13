@@ -26,6 +26,9 @@ use crate::table::PartitionId;
 use crate::table::PrimaryId;
 use crate::table::Table;
 use crate::table::TableSearch;
+use crate::worker;
+use crate::worker::Worker;
+use crate::worker::WorkerExt;
 use anyhow::anyhow;
 use itertools::Itertools;
 use std::collections::BTreeMap;
@@ -36,9 +39,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
-use tokio::runtime::Handle;
 use tokio::sync::Notify;
-use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
@@ -55,8 +56,7 @@ use usearch::ScalarKind;
 use usearch::b1x8;
 
 pub struct UsearchIndexFactory {
-    tokio_semaphore: Arc<Semaphore>,
-    rayon_semaphore: Arc<Semaphore>,
+    worker: async_channel::Sender<Worker>,
     mode: Mode,
 }
 
@@ -78,15 +78,13 @@ impl IndexFactory for UsearchIndexFactory {
                     quantization: index.quantization.into(),
                     ..Default::default()
                 };
-                let threads =
-                    Handle::current().metrics().num_workers() + rayon::current_num_threads();
+                let threads = perf::num_workers();
                 new(
                     move || Ok(Arc::new(ThreadedUsearchIndex::new(options, threads)?)),
                     index.key,
                     index.dimensions,
                     table,
-                    Arc::clone(&self.tokio_semaphore),
-                    Arc::clone(&self.rayon_semaphore),
+                    self.worker.clone(),
                     memory,
                 )
             }
@@ -100,8 +98,7 @@ impl IndexFactory for UsearchIndexFactory {
                 index.key,
                 index.dimensions,
                 table,
-                Arc::clone(&self.tokio_semaphore),
-                Arc::clone(&self.rayon_semaphore),
+                self.worker.clone(),
                 memory,
             ),
         }
@@ -116,14 +113,11 @@ impl IndexFactory for UsearchIndexFactory {
 }
 
 pub fn new_usearch(
-    tokio_semaphore: Arc<Semaphore>,
-    rayon_semaphore: Arc<Semaphore>,
     mut config_rx: watch::Receiver<Arc<Config>>,
 ) -> anyhow::Result<UsearchIndexFactory> {
     let config = config_rx.borrow_and_update().clone();
     Ok(UsearchIndexFactory {
-        tokio_semaphore,
-        rayon_semaphore,
+        worker: worker::new(),
         mode: if config.usearch_simulator.is_none() {
             Mode::Usearch
         } else {
@@ -694,8 +688,7 @@ fn new<I: UsearchIndex + Send + Sync + 'static>(
     index_key: IndexKey,
     dimensions: Dimensions,
     table: Arc<RwLock<impl TableSearch + Send + Sync + 'static>>,
-    tokio_semaphore: Arc<Semaphore>,
-    rayon_semaphore: Arc<Semaphore>,
+    worker: async_channel::Sender<Worker>,
     memory: mpsc::Sender<Memory>,
 ) -> anyhow::Result<mpsc::Sender<Index>> {
     let (tx, mut rx) = mpsc::channel(perf::channel_size());
@@ -729,15 +722,8 @@ fn new<I: UsearchIndex + Send + Sync + 'static>(
                         continue;
                     };
 
-                    dispatch_task(
-                        state,
-                        partition,
-                        &table,
-                        &tokio_semaphore,
-                        &rayon_semaphore,
-                        msg,
-                    )
-                    .await;
+                    dispatch_task(state, partition, &table, &worker, msg).await;
+                    hotpath::val!("usearch-rx.len-end").set(&rx.len());
                 }
 
                 partitions
@@ -912,8 +898,7 @@ async fn dispatch_task<I, T>(
     state: &mut IndexState,
     partition: Arc<PartitionState<I>>,
     table: &Arc<RwLock<T>>,
-    tokio_semaphore: &Arc<Semaphore>,
-    rayon_semaphore: &Arc<Semaphore>,
+    worker: &async_channel::Sender<Worker>,
     msg: Index,
 ) where
     I: UsearchIndex + Send + Sync + 'static,
@@ -926,13 +911,13 @@ async fn dispatch_task<I, T>(
             drop(operation_permit);
             let operation_permit = state.operation.permit_for_reserve().await;
             if let Some(capacity) = needs_more_capacity(partition.idx.as_ref(), is_global) {
-                let permit = Arc::clone(rayon_semaphore).acquire_owned().await.unwrap();
                 let idx = Arc::clone(&partition.idx);
-                rayon::spawn(move || {
-                    reserve(idx.as_ref(), capacity);
-                    drop(permit);
-                    drop(operation_permit);
-                });
+                worker
+                    .spawn_long_task(move || {
+                        reserve(idx.as_ref(), capacity);
+                        drop(operation_permit);
+                    })
+                    .await;
             }
         }
     }
@@ -943,20 +928,20 @@ async fn dispatch_task<I, T>(
     let dimensions = state.dimensions;
     let size = Arc::clone(&state.size);
     if should_run_on_tokio(&msg) {
-        let permit = Arc::clone(tokio_semaphore).acquire_owned().await.unwrap();
-        tokio::spawn(async move {
-            process(partition, table, dimensions, size, msg);
-            drop(permit);
-            drop(operation_permit);
-        });
+        worker
+            .spawn_short_task(move || {
+                process(partition, table, dimensions, size, msg);
+                drop(operation_permit);
+            })
+            .await;
         return;
     }
-    let permit = Arc::clone(rayon_semaphore).acquire_owned().await.unwrap();
-    rayon::spawn(move || {
-        process(partition, table, dimensions, size, msg);
-        drop(permit);
-        drop(operation_permit);
-    });
+    worker
+        .spawn_long_task(move || {
+            process(partition, table, dimensions, size, msg);
+            drop(operation_permit);
+        })
+        .await;
 }
 
 #[hotpath::measure]
@@ -1296,7 +1281,7 @@ mod tests {
             metric: MetricKind::L2sq,
             ..Default::default()
         };
-        let threads = Handle::current().metrics().num_workers() + rayon::current_num_threads();
+        let threads = perf::num_workers();
         let table = Arc::new(RwLock::new(MockTableSearch::new()));
         let index_key = IndexKey::new(&"vector".into(), &"store".into());
         let actor = new(
@@ -1304,8 +1289,7 @@ mod tests {
             index_key.clone(),
             NonZeroUsize::new(3).unwrap().into(),
             Arc::clone(&table),
-            Arc::new(Semaphore::new(4)),
-            Arc::new(Semaphore::new(4)),
+            worker::new(),
             memory::new(config_rx),
         )
         .unwrap();
@@ -1444,7 +1428,7 @@ mod tests {
             metric: MetricKind::L2sq,
             ..Default::default()
         };
-        let threads = Handle::current().metrics().num_workers() + rayon::current_num_threads();
+        let threads = perf::num_workers();
         let table = Arc::new(RwLock::new(MockTableSearch::new()));
         let index_key = IndexKey::new(&"vector".into(), &"store".into());
         let actor = new(
@@ -1452,8 +1436,7 @@ mod tests {
             index_key.clone(),
             NonZeroUsize::new(3).unwrap().into(),
             Arc::clone(&table),
-            Arc::new(Semaphore::new(4)),
-            Arc::new(Semaphore::new(4)),
+            worker::new(),
             memory_tx,
         )
         .unwrap();
@@ -1504,7 +1487,7 @@ mod tests {
             metric: MetricKind::L2sq,
             ..Default::default()
         };
-        let threads = Handle::current().metrics().num_workers() + rayon::current_num_threads();
+        let threads = perf::num_workers();
         let table = Arc::new(RwLock::new(MockTableSearch::new()));
         let index_key = IndexKey::new(&"vector".into(), &"store".into());
         let index = new(
@@ -1512,8 +1495,7 @@ mod tests {
             index_key.clone(),
             dimensions.into(),
             Arc::clone(&table),
-            Arc::new(Semaphore::new(Semaphore::MAX_PERMITS)),
-            Arc::new(Semaphore::new(Semaphore::MAX_PERMITS)),
+            worker::new(),
             memory::new(config_rx),
         )
         .unwrap();
@@ -1529,6 +1511,12 @@ mod tests {
                 assert_eq!(key, &index_key);
                 assert!(restrictions.is_none());
                 Some((partition_id, None))
+            }
+        });
+        table.write().unwrap().expect_primary_key().returning({
+            move |check_partition_id, _| {
+                assert_eq!(partition_id, check_partition_id);
+                None
             }
         });
         let add_handles = add_concurrently(

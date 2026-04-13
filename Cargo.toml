@@ -15,6 +15,7 @@ license = "LicenseRef-ScyllaDB-Source-Available-1.0"
 anyhow = "1.0.97"
 arrow-array = "56.0.0"
 async-backtrace = "0.2.7"
+async-channel = "2.5.0"
 async-trait = "0.1.88"
 axum = { version = "0.8.8", features = ["macros"] }
 axum-server = { version = "0.8.0", features = ["tls-rustls"] }
@@ -83,7 +84,6 @@ utoipa-swagger-ui = { version = "9.0.0", features = ["axum", "vendored"] }
 uuid = "1.16.0"
 vector-store = { path = "crates/vector-store" }
 secrecy = "0.10.3"
-rayon = "1.11.0"
 
 [patch.crates-io]
 axum-server-dual-protocol = { git = "https://github.com/vinchona/axum-server-dual-protocol", rev = "ca6db055254255b74238673ce4135698e347d71c" }

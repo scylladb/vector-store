@@ -27,6 +27,7 @@ console = ["console-subscriber"]
 
 [dependencies]
 anyhow.workspace = true
+async-channel.workspace = true
 async-trait.workspace = true
 axum.workspace = true
 axum-server.workspace = true
@@ -68,7 +69,6 @@ utoipa.workspace = true
 utoipa-axum.workspace = true
 utoipa-swagger-ui.workspace = true
 uuid.workspace = true
-rayon.workspace = true
 
 [dev-dependencies]
 axum-test.workspace = true
