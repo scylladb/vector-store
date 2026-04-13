@@ -11,7 +11,6 @@ use axum::http::StatusCode;
 use criterion::BenchmarkId;
 use criterion::Criterion;
 use criterion::criterion_group;
-use criterion::criterion_main;
 use db_basic::DbBasic;
 use db_basic::ScanFn;
 use db_basic::Table;
@@ -41,9 +40,6 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio::task;
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::fmt;
-use tracing_subscriber::prelude::*;
 use uuid::Uuid;
 use vector_store::AsyncInProgress;
 use vector_store::ColumnName;
@@ -76,10 +72,20 @@ fn init() {
     INIT.call_once(|| {
         _ = dotenvy::dotenv();
 
-        tracing_subscriber::registry()
-            .with(EnvFilter::try_new("none").unwrap())
-            .with(fmt::layer().with_target(false))
-            .init();
+        #[cfg(feature = "console")]
+        console_subscriber::init();
+
+        #[cfg(not(feature = "console"))]
+        {
+            use tracing_subscriber::EnvFilter;
+            use tracing_subscriber::fmt;
+            use tracing_subscriber::prelude::*;
+
+            tracing_subscriber::registry()
+                .with(EnvFilter::try_new("none").unwrap())
+                .with(fmt::layer().with_target(false))
+                .init();
+        }
     });
 }
 
@@ -102,7 +108,7 @@ fn default_runtime() -> Runtime {
             .unwrap();
     });
 
-    tokio::runtime::Builder::new_multi_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .pipe(|mut b| {
             if let Some(threads) = threads {
                 b.worker_threads(threads);
@@ -111,7 +117,9 @@ fn default_runtime() -> Runtime {
         })
         .enable_all()
         .build()
-        .unwrap()
+        .unwrap();
+    hotpath::tokio_runtime!(runtime.handle());
+    runtime
 }
 
 fn default_index_metadata(dimensions: usize) -> IndexMetadata {
@@ -486,6 +494,7 @@ fn search(c: &mut Criterion) {
     }
 }
 
+#[hotpath::measure]
 async fn run_with_concurrency<F, Fut>(concurrency: usize, iters: u64, f: F) -> Duration
 where
     F: Fn(u64) -> Fut + Clone + Send + Sync + 'static,
@@ -517,4 +526,10 @@ where
 }
 
 criterion_group!(benches, fullscan_add, search);
-criterion_main!(benches);
+
+#[hotpath::main]
+fn main() {
+    benches();
+
+    Criterion::default().configure_from_args().final_summary();
+}

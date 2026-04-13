@@ -27,6 +27,7 @@ impl TestClient {
         }
     }
 
+    #[hotpath::measure]
     pub async fn index_status(
         &self,
         keyspace_name: &KeyspaceName,
@@ -40,6 +41,7 @@ impl TestClient {
             .await
     }
 
+    #[hotpath::measure]
     pub async fn ann(
         &self,
         keyspace_name: &KeyspaceName,

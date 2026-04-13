@@ -7,7 +7,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+hotpath = ["hotpath/hotpath"]
+
 [dependencies]
 axum.workspace = true
 axum-test.workspace = true
+hotpath.workspace = true
 httpapi.workspace = true
