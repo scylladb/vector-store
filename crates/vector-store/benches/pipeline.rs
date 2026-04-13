@@ -20,6 +20,7 @@ use futures::StreamExt;
 use futures::stream;
 use httpapi::IndexStatus;
 use httpapi::IndexStatusResponse;
+use itertools::Itertools;
 use scylla::cluster::metadata::NativeType;
 use scylla::value::CqlValue;
 use std::cell::RefCell;
@@ -28,6 +29,7 @@ use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::Once;
 use std::sync::atomic::AtomicI64;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
@@ -35,7 +37,6 @@ use tap::Pipe;
 use testclient::TestClient;
 use tokio::runtime::Runtime;
 use tokio::sync::Notify;
-use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
@@ -490,18 +491,25 @@ where
     F: Fn(u64) -> Fut + Clone + Send + Sync + 'static,
     Fut: std::future::Future<Output = Duration> + Send + 'static,
 {
-    let semaphore = Arc::new(Semaphore::new(concurrency));
-    let mut tasks = Vec::new();
-    for it in 0..iters {
-        let permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
-        let f = f.clone();
-        tasks.push(tokio::spawn(async move {
-            let duration = f(it).await;
-            drop(permit);
-            duration
-        }));
-    }
-    _ = semaphore.acquire_many(concurrency as u32).await.unwrap();
+    let counter = Arc::new(AtomicU64::new(0));
+    let tasks = (0..concurrency)
+        .map(|_| {
+            let counter = Arc::clone(&counter);
+            let f = f.clone();
+            tokio::spawn(async move {
+                let mut durations = Vec::new();
+                loop {
+                    let it = counter.fetch_add(1, Ordering::Relaxed);
+                    if it >= iters {
+                        break;
+                    }
+                    let duration = f(it).await;
+                    durations.push(duration);
+                }
+                durations.into_iter().fold(Duration::ZERO, |acc, x| acc + x)
+            })
+        })
+        .collect_vec();
     stream::iter(tasks.into_iter())
         .then(|task| async move { task.await.unwrap() })
         .fold(Duration::ZERO, |acc, x| async move { acc + x })
