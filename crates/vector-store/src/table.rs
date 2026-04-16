@@ -14,12 +14,15 @@ use crate::Vector;
 use anyhow::anyhow;
 use anyhow::bail;
 use itertools::Itertools;
+use num_bigint::BigInt;
 use scylla::cluster::metadata::NativeType;
 use scylla::value::CqlDate;
 use scylla::value::CqlTime;
 use scylla::value::CqlTimestamp;
 use scylla::value::CqlTimeuuid;
 use scylla::value::CqlValue;
+use scylla::value::CqlVarint;
+use scylla::value::CqlVarintBorrowed;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -350,6 +353,7 @@ enum Column {
     Timeuuid(ColumnVec<PrimaryId, TValue<CqlTimeuuid>>),
     TinyInt(ColumnVec<PrimaryId, TValue<i8>>),
     Uuid(ColumnVec<PrimaryId, TValue<Uuid>>),
+    Varint(ColumnVec<PrimaryId, TValue<CqlVarint>>),
     PrimaryKey(KeyOffset),
 }
 
@@ -372,6 +376,7 @@ impl Column {
             NativeType::Timeuuid => Self::Timeuuid(ColumnVec::new()),
             NativeType::TinyInt => Self::TinyInt(ColumnVec::new()),
             NativeType::Uuid => Self::Uuid(ColumnVec::new()),
+            NativeType::Varint => Self::Varint(ColumnVec::new()),
             _ => bail!("Unsupported native type: {native_type:?}"),
         })
     }
@@ -395,6 +400,7 @@ impl Column {
             Self::Timeuuid(vec) => vec.resize_with(size, || TValue::None(timestamp)),
             Self::TinyInt(vec) => vec.resize_with(size, || TValue::None(timestamp)),
             Self::Uuid(vec) => vec.resize_with(size, || TValue::None(timestamp)),
+            Self::Varint(vec) => vec.resize_with(size, || TValue::None(timestamp)),
             Self::PrimaryKey(_) => {}
         }
     }
@@ -503,6 +509,12 @@ impl Column {
                 };
                 vec.update(primary_id, TValue::Some(timestamp, value))
             }
+            Self::Varint(vec) => {
+                let CqlValue::Varint(value) = value else {
+                    bail!("Failed to convert value to Varint");
+                };
+                vec.update(primary_id, TValue::Some(timestamp, value))
+            }
             Self::PrimaryKey(_) => bail!("Cannot insert value into PrimaryKey column"),
         }
     }
@@ -593,6 +605,11 @@ impl Column {
                 .and_then(|val| val.get())
                 .cloned()
                 .map(CqlValue::Uuid),
+            Self::Varint(vec) => vec
+                .get(primary_id)
+                .and_then(|val| val.get())
+                .cloned()
+                .map(CqlValue::Varint),
             Self::PrimaryKey(key_offset) => primary_keys
                 .get(primary_id)
                 .and_then(|opt_key| opt_key.as_ref())
@@ -1325,6 +1342,16 @@ fn cql_cmp(lhs: &CqlValue, rhs: &CqlValue) -> Option<Ordering> {
         (CqlValue::Float(a), CqlValue::Float(b)) => a.partial_cmp(b),
         (CqlValue::Double(a), CqlValue::Double(b)) => a.partial_cmp(b),
         (CqlValue::Counter(a), CqlValue::Counter(b)) => Some(a.0.cmp(&b.0)),
+        // Varint: semantic comparison via num-bigint
+        (CqlValue::Varint(a), CqlValue::Varint(b)) => {
+            let a_bi = BigInt::from(CqlVarintBorrowed::from_signed_bytes_be_slice(
+                a.as_signed_bytes_be_slice(),
+            ));
+            let b_bi = BigInt::from(CqlVarintBorrowed::from_signed_bytes_be_slice(
+                b.as_signed_bytes_be_slice(),
+            ));
+            Some(a_bi.cmp(&b_bi))
+        }
         // Text types
         (CqlValue::Text(a), CqlValue::Text(b)) => Some(a.cmp(b)),
         (CqlValue::Ascii(a), CqlValue::Ascii(b)) => Some(a.cmp(b)),
@@ -1774,6 +1801,46 @@ mod tests {
             None
         );
         assert_eq!(cql_cmp(&CqlValue::Float(1.0), &CqlValue::Double(1.0)), None);
+    }
+
+    #[test]
+    fn cql_cmp_varint() {
+        use num_bigint::BigInt;
+        use scylla::value::CqlVarint;
+        let make = |s: &str| CqlValue::Varint(CqlVarint::from(s.parse::<BigInt>().unwrap()));
+
+        assert_eq!(
+            cql_cmp(&make("-1000000000000000000000"), &make("0")),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            cql_cmp(&make("99999999999999999999"), &make("99999999999999999999")),
+            Some(Ordering::Equal)
+        );
+        assert_eq!(
+            cql_cmp(
+                &make("100000000000000000001"),
+                &make("99999999999999999999")
+            ),
+            Some(Ordering::Greater)
+        );
+        // negative values
+        assert_eq!(
+            cql_cmp(
+                &make("-98765432109876543210"),
+                &make("-12345678901234567890")
+            ),
+            Some(Ordering::Less)
+        );
+        assert_eq!(cql_cmp(&make("-1"), &make("1")), Some(Ordering::Less));
+        // large positive vs large negative
+        assert_eq!(
+            cql_cmp(
+                &make("98765432109876543210987654321098765432109876543210"),
+                &make("-98765432109876543210987654321098765432109876543210")
+            ),
+            Some(Ordering::Greater)
+        );
     }
 
     #[test]

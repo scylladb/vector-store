@@ -40,6 +40,7 @@ humantime.workspace = true
 itertools.workspace = true
 macros.workspace = true
 mimalloc.workspace = true
+num-bigint.workspace = true
 rustls.workspace = true
 rustls-pki-types.workspace = true
 opensearch.workspace = true
