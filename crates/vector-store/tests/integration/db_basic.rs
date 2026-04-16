@@ -386,7 +386,12 @@ pub(crate) fn new_db_index(
                         let Some(msg) = msg else {
                             break;
                         };
-                        process_db_index(&db, &metadata, &fullscan_finished, msg).await;
+                        spawn_process_db_index(
+                            db.clone(),
+                            metadata.clone(),
+                            Arc::clone(&fullscan_finished),
+                            msg
+                        ).await;
                     }
                 }
             }
@@ -414,13 +419,24 @@ pub(crate) fn new_db_index(
                         let Some(msg) = msg else {
                             break;
                         };
-                        process_db_index(&db, &metadata, &fullscan_finished, msg).await;
+                        spawn_process_db_index(
+                            db.clone(),
+                            metadata.clone(),
+                            Arc::clone(&fullscan_finished),
+                            msg
+                        ).await;
                     }
                 }
             }
 
             while let Some(msg) = rx_index.recv().await {
-                process_db_index(&db, &metadata, &fullscan_finished, msg).await;
+                spawn_process_db_index(
+                    db.clone(),
+                    metadata.clone(),
+                    Arc::clone(&fullscan_finished),
+                    msg,
+                )
+                .await;
             }
             drop(tx_embeddings);
         }
@@ -446,64 +462,66 @@ fn cdc(db: &mut DbBasic, metadata: &IndexMetadata) -> Option<ScanFn> {
         .and_then(|index| index.cdc_fn.take())
 }
 
-async fn process_db_index(
-    db: &DbBasic,
-    metadata: &IndexMetadata,
-    fullscan_finished: &Arc<AtomicBool>,
+async fn spawn_process_db_index(
+    db: DbBasic,
+    metadata: IndexMetadata,
+    fullscan_finished: Arc<AtomicBool>,
     msg: DbIndex,
 ) {
-    match msg {
-        DbIndex::GetPrimaryKeyColumns { tx } => tx
-            .send(
-                db.0.read()
-                    .unwrap()
-                    .keyspaces
-                    .get(&metadata.keyspace_name)
-                    .and_then(|keyspace| keyspace.tables.get(&metadata.table_name))
-                    .map(|table| table.primary_keys.clone())
-                    .unwrap_or_default(),
-            )
-            .map_err(|_| anyhow!("DbIndex::GetPrimaryKeyColumns: unable to send response"))
-            .unwrap(),
+    tokio::spawn(async move {
+        match msg {
+            DbIndex::GetPrimaryKeyColumns { tx } => tx
+                .send(
+                    db.0.read()
+                        .unwrap()
+                        .keyspaces
+                        .get(&metadata.keyspace_name)
+                        .and_then(|keyspace| keyspace.tables.get(&metadata.table_name))
+                        .map(|table| table.primary_keys.clone())
+                        .unwrap_or_default(),
+                )
+                .map_err(|_| anyhow!("DbIndex::GetPrimaryKeyColumns: unable to send response"))
+                .unwrap(),
 
-        DbIndex::GetPartitionKeyCount { tx } => tx
-            .send(
-                db.0.read()
-                    .unwrap()
-                    .keyspaces
-                    .get(&metadata.keyspace_name)
-                    .and_then(|keyspace| keyspace.tables.get(&metadata.table_name))
-                    .map(|table| table.partition_key_count)
-                    .unwrap_or(1),
-            )
-            .map_err(|_| anyhow!("DbIndex::GetPartitionKeyCount: unable to send response"))
-            .unwrap(),
+            DbIndex::GetPartitionKeyCount { tx } => tx
+                .send(
+                    db.0.read()
+                        .unwrap()
+                        .keyspaces
+                        .get(&metadata.keyspace_name)
+                        .and_then(|keyspace| keyspace.tables.get(&metadata.table_name))
+                        .map(|table| table.partition_key_count)
+                        .unwrap_or(1),
+                )
+                .map_err(|_| anyhow!("DbIndex::GetPartitionKeyCount: unable to send response"))
+                .unwrap(),
 
-        DbIndex::GetTableColumns { tx } => tx
-            .send(
-                db.0.read()
-                    .unwrap()
-                    .keyspaces
-                    .get(&metadata.keyspace_name)
-                    .and_then(|keyspace| keyspace.tables.get(&metadata.table_name))
-                    .map(|table| table.columns.clone())
-                    .unwrap_or_default(),
-            )
-            .map_err(|_| anyhow!("DbIndex::GetPrimaryKeyColumns: unable to send response"))
-            .unwrap(),
+            DbIndex::GetTableColumns { tx } => tx
+                .send(
+                    db.0.read()
+                        .unwrap()
+                        .keyspaces
+                        .get(&metadata.keyspace_name)
+                        .and_then(|keyspace| keyspace.tables.get(&metadata.table_name))
+                        .map(|table| table.columns.clone())
+                        .unwrap_or_default(),
+                )
+                .map_err(|_| anyhow!("DbIndex::GetPrimaryKeyColumns: unable to send response"))
+                .unwrap(),
 
-        DbIndex::FullScanProgress { tx } => tx
-            .send({
-                let db = db.0.read().unwrap();
-                db.next_full_scan_progress.clone().unwrap_or_else(|| {
-                    if fullscan_finished.load(Ordering::Acquire) {
-                        Progress::Done
-                    } else {
-                        Progress::InProgress(Percentage::try_from(0.0).unwrap())
-                    }
+            DbIndex::FullScanProgress { tx } => tx
+                .send({
+                    let db = db.0.read().unwrap();
+                    db.next_full_scan_progress.clone().unwrap_or_else(|| {
+                        if fullscan_finished.load(Ordering::Acquire) {
+                            Progress::Done
+                        } else {
+                            Progress::InProgress(Percentage::try_from(0.0).unwrap())
+                        }
+                    })
                 })
-            })
-            .map_err(|_| anyhow!("DbIndex::GetTargetColumn: unable to send response"))
-            .unwrap(),
-    }
+                .map_err(|_| anyhow!("DbIndex::GetTargetColumn: unable to send response"))
+                .unwrap(),
+        }
+    });
 }
