@@ -372,7 +372,11 @@ pub(crate) fn new_db_index(
                         let Some(msg) = msg else {
                             break;
                         };
-                        process_db_index(&db, &metadata, msg).await;
+                        let db = db.clone();
+                        let metadata = metadata.clone();
+                        tokio::spawn(async move {
+                            process_db_index(&db, &metadata, msg).await;
+                        });
                     }
                 }
             }
@@ -400,13 +404,21 @@ pub(crate) fn new_db_index(
                         let Some(msg) = msg else {
                             break;
                         };
-                        process_db_index(&db, &metadata, msg).await;
+                        let db = db.clone();
+                        let metadata = metadata.clone();
+                        tokio::spawn(async move {
+                            process_db_index(&db, &metadata, msg).await;
+                        });
                     }
                 }
             }
 
             while let Some(msg) = rx_index.recv().await {
-                process_db_index(&db, &metadata, msg).await;
+                let db = db.clone();
+                let metadata = metadata.clone();
+                tokio::spawn(async move {
+                    process_db_index(&db, &metadata, msg).await;
+                });
             }
             drop(tx_embeddings);
         }
