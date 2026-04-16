@@ -29,6 +29,7 @@ use scylla::value::CqlTime;
 use scylla::value::CqlTimestamp;
 use scylla::value::CqlTimeuuid;
 use scylla::value::CqlValue;
+use scylla::value::CqlVarint;
 use std::fmt;
 use std::hash::Hash;
 #[cfg(test)]
@@ -62,6 +63,7 @@ const TAG_INET_V4: u8 = 15;
 const TAG_INET_V6: u8 = 16;
 const TAG_COUNTER: u8 = 17;
 const TAG_BLOB: u8 = 18;
+const TAG_VARINT: u8 = 19;
 
 /// Size of the leading count byte that stores the number of values.
 const COUNT_SIZE: usize = std::mem::size_of::<u8>();
@@ -318,6 +320,7 @@ fn encoded_size(value: &CqlValue) -> usize {
         CqlValue::Text(s) => TAG_SIZE + VAR_LEN_SIZE + s.len(),
         CqlValue::Ascii(s) => TAG_SIZE + VAR_LEN_SIZE + s.len(),
         CqlValue::Blob(b) => TAG_SIZE + VAR_LEN_SIZE + b.len(),
+        CqlValue::Varint(v) => TAG_SIZE + VAR_LEN_SIZE + v.as_signed_bytes_be_slice().len(),
         _ => unsupported(value),
     }
 }
@@ -381,6 +384,17 @@ fn encode_value(buf: &mut Vec<u8>, value: &CqlValue) {
                 .expect("Blob value too large for InvariantKey encoding");
             buf.extend_from_slice(&len.to_le_bytes());
             buf.extend_from_slice(b);
+        }
+
+        CqlValue::Varint(v) => {
+            buf.push(TAG_VARINT);
+            let bytes = v.as_signed_bytes_be_slice();
+            let len: u32 = bytes
+                .len()
+                .try_into()
+                .expect("Varint value too large for InvariantKey encoding");
+            buf.extend_from_slice(&len.to_le_bytes());
+            buf.extend_from_slice(bytes);
         }
 
         CqlValue::Uuid(v) => {
@@ -458,7 +472,7 @@ fn skip_value(data: &[u8]) -> usize {
             TAG_SIZE + std::mem::size_of::<i64>()
         }
         TAG_UUID | TAG_TIMEUUID | TAG_INET_V6 => TAG_SIZE + UUID_SIZE,
-        TAG_TEXT | TAG_ASCII | TAG_BLOB => VAR_DATA_OFFSET + read_var_len(data),
+        TAG_TEXT | TAG_ASCII | TAG_BLOB | TAG_VARINT => VAR_DATA_OFFSET + read_var_len(data),
         other => panic!("Unknown tag in InvariantKey data: {other}"),
     }
 }
@@ -516,6 +530,16 @@ fn decode_value(data: &[u8]) -> (CqlValue, usize) {
             let len = read_var_len(data);
             (
                 CqlValue::Blob(data[VAR_DATA_OFFSET..VAR_DATA_OFFSET + len].to_vec()),
+                VAR_DATA_OFFSET + len,
+            )
+        }
+
+        TAG_VARINT => {
+            let len = read_var_len(data);
+            (
+                CqlValue::Varint(CqlVarint::from_signed_bytes_be(
+                    data[VAR_DATA_OFFSET..VAR_DATA_OFFSET + len].to_vec(),
+                )),
                 VAR_DATA_OFFSET + len,
             )
         }
@@ -629,6 +653,8 @@ mod tests {
             CqlValue::Int(-100_000),
             CqlValue::BigInt(123_456_789_000),
             CqlValue::BigInt(-123_456_789_000),
+            CqlValue::Varint(CqlVarint::from_signed_bytes_be(vec![0x01, 0x00])), // 256
+            CqlValue::Varint(CqlVarint::from_signed_bytes_be(vec![0xFF, 0x00])), // -256
             CqlValue::Float(std::f32::consts::PI),
             CqlValue::Float(-std::f32::consts::PI),
             CqlValue::Double(std::f64::consts::E),
