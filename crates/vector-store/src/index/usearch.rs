@@ -20,6 +20,7 @@ use crate::index::validator;
 use crate::memory::Allocate;
 use crate::memory::Memory;
 use crate::memory::MemoryExt;
+use crate::perf;
 use crate::table::IndexId;
 use crate::table::PartitionId;
 use crate::table::PrimaryId;
@@ -701,7 +702,7 @@ fn new<I: UsearchIndex + Send + Sync + 'static>(
     const CHANNEL_SIZE: usize = 10;
     let (tx, mut rx) = mpsc::channel(CHANNEL_SIZE);
 
-    tokio::spawn(
+    tokio::spawn(perf::hotpath_async(
         {
             let index_key = index_key.clone();
             async move {
@@ -749,7 +750,7 @@ fn new<I: UsearchIndex + Send + Sync + 'static>(
             }
         }
         .instrument(error_span!("usearch", "{index_key}")),
-    );
+    ));
 
     Ok(tx)
 }
@@ -946,7 +947,6 @@ async fn dispatch_task<I, T>(
     if should_run_on_tokio(&msg) {
         let permit = Arc::clone(tokio_semaphore).acquire_owned().await.unwrap();
         tokio::spawn(async move {
-            crate::move_to_the_end_of_async_runtime_queue().await;
             process(partition, table, dimensions, size, msg);
             drop(permit);
             drop(operation_permit);

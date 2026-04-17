@@ -24,6 +24,7 @@ mod monitor_indexes;
 mod monitor_items;
 pub mod node_state;
 mod partition_key;
+mod perf;
 mod primary_key;
 mod similarity;
 mod table;
@@ -73,7 +74,6 @@ use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::watch;
-use tokio::task;
 use utoipa::PartialSchema;
 use utoipa::ToSchema;
 use utoipa::openapi::KnownFormat;
@@ -714,12 +714,6 @@ pub async fn new_node_state() -> Sender<NodeState> {
 
 pub fn new_internals() -> Sender<Internals> {
     internals::new()
-}
-
-// yield to let other tasks run before cpu-intensive processing, as it is CPU intensive and can
-// block other tasks (increase tail latency)
-async fn move_to_the_end_of_async_runtime_queue() {
-    task::yield_now().await;
 }
 
 pub fn new_index_factory_usearch(
