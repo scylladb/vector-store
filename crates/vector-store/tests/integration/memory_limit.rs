@@ -65,6 +65,7 @@ async fn memory_limit_during_index_build() {
         index.table_name.clone(),
         Table {
             primary_keys: Arc::new(vec!["pk".into()]),
+            partition_key_count: 1,
             columns: Arc::new([("pk".into(), NativeType::Int)].into_iter().collect()),
             dimensions: [(index.target_column.clone(), index.dimensions)]
                 .into_iter()

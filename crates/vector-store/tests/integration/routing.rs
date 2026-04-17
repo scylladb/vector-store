@@ -94,6 +94,7 @@ async fn setup() -> (HttpClient, DbBasic, impl Sized) {
 fn add_table(
     db: &DbBasic,
     primary_keys: impl IntoIterator<Item = ColumnName>,
+    partition_key_count: usize,
     columns: impl IntoIterator<Item = (ColumnName, NativeType)>,
     vector_columns: impl IntoIterator<Item = ColumnName>,
 ) {
@@ -102,6 +103,7 @@ fn add_table(
         "items".into(),
         Table {
             primary_keys: Arc::new(primary_keys.into_iter().collect()),
+            partition_key_count,
             columns: Arc::new(columns.into_iter().collect()),
             dimensions: vector_columns
                 .into_iter()
@@ -226,6 +228,7 @@ async fn ann_routes_to_serving_index_while_replacement_is_bootstrapping() {
     add_table(
         &db,
         ["pk".into()],
+        1,
         [("pk".into(), NativeType::Int)],
         ["embedding".into()],
     );
@@ -270,6 +273,7 @@ async fn ann_routes_to_newest_serving_index() {
     add_table(
         &db,
         ["pk".into()],
+        1,
         [("pk".into(), NativeType::Int)],
         ["embedding".into()],
     );
@@ -318,6 +322,7 @@ async fn ann_routes_to_newest_local_index_with_same_score() {
     add_table(
         &db,
         ["pk".into(), "ck".into()],
+        1,
         [
             ("pk".into(), NativeType::Int),
             ("ck".into(), NativeType::Int),
@@ -382,6 +387,7 @@ async fn ann_routes_to_local_index_with_more_matching_partition_key_columns() {
     add_table(
         &db,
         ["pk1".into(), "pk2".into(), "ck".into()],
+        2,
         [
             ("pk1".into(), NativeType::Int),
             ("pk2".into(), NativeType::Int),
@@ -461,6 +467,7 @@ async fn ann_routes_to_local_index_with_filter_columns_covering_restriction() {
     add_table(
         &db,
         ["pk".into(), "ck".into()],
+        1,
         [
             ("pk".into(), NativeType::Int),
             ("ck".into(), NativeType::Int),
@@ -535,6 +542,7 @@ async fn ann_routes_to_global_index_with_filter_columns_covering_restriction() {
     add_table(
         &db,
         ["pk".into(), "ck".into()],
+        1,
         [
             ("pk".into(), NativeType::Int),
             ("ck".into(), NativeType::Int),
@@ -609,6 +617,7 @@ async fn ann_routes_to_local_index_when_pk_restrictions_match() {
     add_table(
         &db,
         ["pk".into(), "ck".into()],
+        1,
         [
             ("pk".into(), NativeType::Int),
             ("ck".into(), NativeType::Int),
@@ -673,6 +682,7 @@ async fn ann_routes_to_global_index_without_pk_restrictions() {
     add_table(
         &db,
         ["pk".into(), "ck".into()],
+        1,
         [
             ("pk".into(), NativeType::Int),
             ("ck".into(), NativeType::Int),

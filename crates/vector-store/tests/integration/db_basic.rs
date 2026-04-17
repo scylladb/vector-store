@@ -91,6 +91,7 @@ pub(crate) fn new(node_state: Sender<NodeState>) -> (mpsc::Sender<Db>, DbBasic) 
 
 pub(crate) struct Table {
     pub(crate) primary_keys: Arc<Vec<ColumnName>>,
+    pub(crate) partition_key_count: usize,
     pub(crate) columns: Arc<HashMap<ColumnName, NativeType>>,
     pub(crate) dimensions: HashMap<ColumnName, Dimensions>,
 }
@@ -463,6 +464,19 @@ async fn process_db_index(
                     .unwrap_or_default(),
             )
             .map_err(|_| anyhow!("DbIndex::GetPrimaryKeyColumns: unable to send response"))
+            .unwrap(),
+
+        DbIndex::GetPartitionKeyCount { tx } => tx
+            .send(
+                db.0.read()
+                    .unwrap()
+                    .keyspaces
+                    .get(&metadata.keyspace_name)
+                    .and_then(|keyspace| keyspace.tables.get(&metadata.table_name))
+                    .map(|table| table.partition_key_count)
+                    .unwrap_or(1),
+            )
+            .map_err(|_| anyhow!("DbIndex::GetPartitionKeyCount: unable to send response"))
             .unwrap(),
 
         DbIndex::GetTableColumns { tx } => tx

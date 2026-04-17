@@ -90,6 +90,9 @@ pub enum DbIndex {
     GetPrimaryKeyColumns {
         tx: oneshot::Sender<GetPrimaryKeyColumnsR>,
     },
+    GetPartitionKeyCount {
+        tx: oneshot::Sender<usize>,
+    },
     GetTableColumns {
         tx: oneshot::Sender<GetTableColumnsR>,
     },
@@ -100,6 +103,7 @@ pub enum DbIndex {
 
 pub(crate) trait DbIndexExt {
     async fn get_primary_key_columns(&self) -> GetPrimaryKeyColumnsR;
+    async fn get_partition_key_count(&self) -> usize;
     async fn get_table_columns(&self) -> GetTableColumnsR;
     async fn full_scan_progress(&self) -> Progress;
 }
@@ -108,6 +112,14 @@ impl DbIndexExt for mpsc::Sender<DbIndex> {
     async fn get_primary_key_columns(&self) -> GetPrimaryKeyColumnsR {
         let (tx, rx) = oneshot::channel();
         self.send(DbIndex::GetPrimaryKeyColumns { tx })
+            .await
+            .expect("internal actor should receive request");
+        rx.await.expect("internal actor should send response")
+    }
+
+    async fn get_partition_key_count(&self) -> usize {
+        let (tx, rx) = oneshot::channel();
+        self.send(DbIndex::GetPartitionKeyCount { tx })
             .await
             .expect("internal actor should receive request");
         rx.await.expect("internal actor should send response")
@@ -258,6 +270,11 @@ async fn process(statements: Arc<Statements>, msg: DbIndex, completed_scan_lengt
             .unwrap_or_else(|_| {
                 trace!("process: Db::GetPrimaryKeyColumns: unable to send response")
             }),
+        DbIndex::GetPartitionKeyCount { tx } => {
+            tx.send(statements.partition_key_count).unwrap_or_else(|_| {
+                trace!("process: Db::GetPartitionKeyCount: unable to send response")
+            })
+        }
         DbIndex::GetTableColumns { tx } => tx
             .send(statements.get_table_columns())
             .unwrap_or_else(|_| trace!("process: Db::GetTableColumns: unable to send response")),
@@ -275,6 +292,7 @@ async fn process(statements: Arc<Statements>, msg: DbIndex, completed_scan_lengt
 struct Statements {
     session_rx: tokio::sync::watch::Receiver<Option<Arc<Session>>>,
     primary_key_columns: Arc<Vec<ColumnName>>,
+    partition_key_count: usize,
     table_columns: GetTableColumnsR,
     st_range_scan: PreparedStatement,
 }
@@ -298,6 +316,7 @@ impl Statements {
             .get(metadata.table_name.as_ref())
             .ok_or_else(|| anyhow!("table {} does not exist", metadata.table_name))?;
 
+        let partition_key_count = table.partition_key.len();
         let primary_key_columns = Arc::new(
             table
                 .partition_key
@@ -359,6 +378,7 @@ impl Statements {
 
         Ok(Self {
             primary_key_columns,
+            partition_key_count,
             table_columns,
             st_range_scan,
             session_rx,

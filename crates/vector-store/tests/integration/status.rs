@@ -16,6 +16,7 @@ async fn status_is_serving_after_creation() {
     let (_index, client, _db, _server, _node_state) = usearch::setup_store_and_wait_for_index(
         DbIndexType::Global,
         ["pk".into(), "ck".into()],
+        1,
         [
             ("pk".to_string().into(), NativeType::Int),
             ("ck".to_string().into(), NativeType::Text),
@@ -36,6 +37,7 @@ async fn status_is_bootstrapping_while_discovering_indexes() {
         test_config(),
         DbIndexType::Global,
         ["pk".into(), "ck".into()],
+        1,
         [
             ("pk".to_string().into(), NativeType::Int),
             ("ck".to_string().into(), NativeType::Text),
