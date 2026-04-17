@@ -4,6 +4,8 @@
  */
 
 use crate::invariant_key::InvariantKey;
+use bigdecimal::BigDecimal;
+use scylla::value::CqlDecimal;
 use scylla::value::CqlValue;
 
 /// This is a thin newtype around [`InvariantKey`] providing primary-key-specific
@@ -34,5 +36,25 @@ impl FromIterator<CqlValue> for PrimaryKey {
 impl<I: IntoIterator<Item = CqlValue>> From<I> for PrimaryKey {
     fn from(iter: I) -> Self {
         Self(InvariantKey::from_iter(iter))
+    }
+}
+
+/// Normalize a [`CqlValue`] so that semantically equal values produce identical bytes.
+///
+/// Currently only affects `Decimal`: strips trailing zeros via `BigDecimal::normalized()`
+/// so that e.g. `3.14` and `3.140` map to the same [`PrimaryKey`] entry.
+/// This is needed because Scylla clustering keys use value-based comparison,
+/// but the raw bytes differ for different decimal representations.
+pub(crate) fn normalize(value: CqlValue) -> CqlValue {
+    match value {
+        CqlValue::Decimal(d) => {
+            let normalized = BigDecimal::from(d).normalized();
+            // TryFrom can only fail if scale overflows i32, which shouldn't
+            // happen after normalization (it only strips trailing zeros).
+            CqlValue::Decimal(
+                CqlDecimal::try_from(normalized).expect("normalized decimal scale fits i32"),
+            )
+        }
+        other => other,
     }
 }

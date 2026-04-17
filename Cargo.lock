@@ -3247,6 +3247,7 @@ version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "87834c927e9336270725aac24fada6e86f9d14aa04a8c8f93223b002e86f3891"
 dependencies = [
+ "bigdecimal",
  "byteorder",
  "bytes",
  "chrono",
@@ -4294,6 +4295,7 @@ dependencies = [
  "axum",
  "axum-server",
  "axum-server-dual-protocol",
+ "bigdecimal",
  "chrono",
  "clap",
  "const-hex",

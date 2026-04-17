@@ -25,6 +25,7 @@
 
 use scylla::value::Counter;
 use scylla::value::CqlDate;
+use scylla::value::CqlDecimal;
 use scylla::value::CqlTime;
 use scylla::value::CqlTimestamp;
 use scylla::value::CqlTimeuuid;
@@ -64,6 +65,7 @@ const TAG_INET_V6: u8 = 16;
 const TAG_COUNTER: u8 = 17;
 const TAG_BLOB: u8 = 18;
 const TAG_VARINT: u8 = 19;
+const TAG_DECIMAL: u8 = 20;
 
 /// Size of the leading count byte that stores the number of values.
 const COUNT_SIZE: usize = std::mem::size_of::<u8>();
@@ -321,6 +323,10 @@ fn encoded_size(value: &CqlValue) -> usize {
         CqlValue::Ascii(s) => TAG_SIZE + VAR_LEN_SIZE + s.len(),
         CqlValue::Blob(b) => TAG_SIZE + VAR_LEN_SIZE + b.len(),
         CqlValue::Varint(v) => TAG_SIZE + VAR_LEN_SIZE + v.as_signed_bytes_be_slice().len(),
+        CqlValue::Decimal(d) => {
+            let (varint_bytes, _scale) = d.as_signed_be_bytes_slice_and_exponent();
+            TAG_SIZE + VAR_LEN_SIZE + std::mem::size_of::<i32>() + varint_bytes.len()
+        }
         _ => unsupported(value),
     }
 }
@@ -395,6 +401,17 @@ fn encode_value(buf: &mut Vec<u8>, value: &CqlValue) {
                 .expect("Varint value too large for InvariantKey encoding");
             buf.extend_from_slice(&len.to_le_bytes());
             buf.extend_from_slice(bytes);
+        }
+
+        CqlValue::Decimal(d) => {
+            buf.push(TAG_DECIMAL);
+            let (varint_bytes, scale) = d.as_signed_be_bytes_slice_and_exponent();
+            let payload_len: u32 = (std::mem::size_of::<i32>() + varint_bytes.len())
+                .try_into()
+                .expect("Decimal value too large for InvariantKey encoding");
+            buf.extend_from_slice(&payload_len.to_le_bytes());
+            buf.extend_from_slice(&scale.to_be_bytes());
+            buf.extend_from_slice(varint_bytes);
         }
 
         CqlValue::Uuid(v) => {
@@ -472,7 +489,9 @@ fn skip_value(data: &[u8]) -> usize {
             TAG_SIZE + std::mem::size_of::<i64>()
         }
         TAG_UUID | TAG_TIMEUUID | TAG_INET_V6 => TAG_SIZE + UUID_SIZE,
-        TAG_TEXT | TAG_ASCII | TAG_BLOB | TAG_VARINT => VAR_DATA_OFFSET + read_var_len(data),
+        TAG_TEXT | TAG_ASCII | TAG_BLOB | TAG_VARINT | TAG_DECIMAL => {
+            VAR_DATA_OFFSET + read_var_len(data)
+        }
         other => panic!("Unknown tag in InvariantKey data: {other}"),
     }
 }
@@ -539,6 +558,21 @@ fn decode_value(data: &[u8]) -> (CqlValue, usize) {
             (
                 CqlValue::Varint(CqlVarint::from_signed_bytes_be(
                     data[VAR_DATA_OFFSET..VAR_DATA_OFFSET + len].to_vec(),
+                )),
+                VAR_DATA_OFFSET + len,
+            )
+        }
+
+        TAG_DECIMAL => {
+            let len = read_var_len(data);
+            let payload = &data[VAR_DATA_OFFSET..VAR_DATA_OFFSET + len];
+            let scale =
+                i32::from_be_bytes(payload[..std::mem::size_of::<i32>()].try_into().unwrap());
+            let varint_bytes = payload[std::mem::size_of::<i32>()..].to_vec();
+            (
+                CqlValue::Decimal(CqlDecimal::from_signed_be_bytes_and_exponent(
+                    varint_bytes,
+                    scale,
                 )),
                 VAR_DATA_OFFSET + len,
             )
@@ -659,6 +693,16 @@ mod tests {
             CqlValue::Float(-std::f32::consts::PI),
             CqlValue::Double(std::f64::consts::E),
             CqlValue::Double(-std::f64::consts::E),
+            CqlValue::Decimal(CqlDecimal::from_signed_be_bytes_and_exponent(vec![0x0F], 1)), // 1.5
+            CqlValue::Decimal(CqlDecimal::from_signed_be_bytes_and_exponent(
+                vec![0x01],
+                -3,
+            )), // 1000
+            CqlValue::Decimal(CqlDecimal::from_signed_be_bytes_and_exponent(vec![0xFE], 0)), // -2
+            CqlValue::Decimal(CqlDecimal::from_signed_be_bytes_and_exponent(
+                vec![0x03, 0xE8],
+                2,
+            )), // 10.00
             CqlValue::Text("hello world".to_string()),
             CqlValue::Ascii("ascii".to_string()),
             CqlValue::Blob(vec![0xDE, 0xAD, 0xBE, 0xEF]),

@@ -22,6 +22,7 @@ use crate::invariant_key::InvariantKey;
 use crate::node_state::Event;
 use crate::node_state::NodeState;
 use crate::node_state::NodeStateExt;
+use crate::primary_key::normalize;
 use anyhow::Context;
 use anyhow::anyhow;
 use anyhow::bail;
@@ -264,6 +265,7 @@ async fn process(statements: Arc<Statements>, msg: DbIndex, completed_scan_lengt
 struct Statements {
     session_rx: tokio::sync::watch::Receiver<Option<Arc<Session>>>,
     primary_key_columns: Arc<Vec<ColumnName>>,
+    partition_key_count: usize,
     table_columns: GetTableColumnsR,
     st_range_scan: PreparedStatement,
 }
@@ -287,6 +289,7 @@ impl Statements {
             .get(metadata.table_name.as_ref())
             .ok_or_else(|| anyhow!("table {} does not exist", metadata.table_name))?;
 
+        let partition_key_count = table.partition_key.len();
         let primary_key_columns = Arc::new(
             table
                 .partition_key
@@ -348,6 +351,7 @@ impl Statements {
 
         Ok(Self {
             primary_key_columns,
+            partition_key_count,
             table_columns,
             st_range_scan,
             session_rx,
@@ -525,6 +529,7 @@ impl Statements {
     ) -> anyhow::Result<BoxStream<'static, DbEmbedding>> {
         // last two columns are embedding and writetime
         let columns_len_expected = self.primary_key_columns.len() + 2;
+        let partition_key_count = self.partition_key_count;
 
         // wait for an active session
         let session = {
@@ -575,11 +580,18 @@ impl Statements {
                 let Ok(primary_key) = row
                     .columns
                     .into_iter()
-                    .map(|value| {
+                    .enumerate()
+                    .map(|(idx, value)| {
                         let Some(value) = value else {
                             bail!("range_scan_stream: missing a primary key column");
                         };
-                        Ok(value)
+                        // Normalize clustering key columns so semantically equal
+                        // decimal representations map to the same PrimaryKey.
+                        if idx >= partition_key_count {
+                            Ok(normalize(value))
+                        } else {
+                            Ok(value)
+                        }
                     })
                     .collect::<anyhow::Result<_>>()
                     .inspect_err(|err| debug!("range_scan_stream: {err}"))

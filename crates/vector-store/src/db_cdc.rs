@@ -11,6 +11,7 @@ use crate::IndexMetadata;
 use crate::db_index_backend::DbIndexBackend;
 use crate::internals::Internals;
 use crate::internals::InternalsExt;
+use crate::primary_key::normalize;
 use ::time::Date;
 use ::time::Month;
 use ::time::OffsetDateTime;
@@ -484,6 +485,7 @@ fn spawn_handler_task(
 
 struct CdcConsumerData {
     primary_key_columns: Vec<ColumnName>,
+    partition_key_count: usize,
     backend: DbIndexBackend,
     tx: mpsc::Sender<(DbEmbedding, Option<AsyncInProgress>)>,
     gregorian_epoch: PrimitiveDateTime,
@@ -510,20 +512,29 @@ impl Consumer for CdcConsumer {
             .transpose()?
             .flatten();
 
+        let partition_key_count = self.0.partition_key_count;
         let primary_key = self
             .0
             .primary_key_columns
             .iter()
-            .map(|column| {
+            .enumerate()
+            .map(|(idx, column)| {
                 if !row.column_exists(column.as_ref()) {
                     bail!("CDC error: primary key column {column} should exist");
                 }
                 if row.column_deletable(column.as_ref()) {
                     bail!("CDC error: primary key column {column} should not be deletable");
                 }
-                row.take_value(column.as_ref()).ok_or(anyhow!(
+                let value = row.take_value(column.as_ref()).ok_or(anyhow!(
                     "CDC error: primary key column {column} value should exist"
-                ))
+                ))?;
+                // Normalize clustering key columns so semantically equal decimal
+                // representations (e.g. 3.14 vs 3.140) map to the same PrimaryKey.
+                if idx >= partition_key_count {
+                    Ok(normalize(value))
+                } else {
+                    Ok(value)
+                }
             })
             .collect::<anyhow::Result<_>>()?;
 
@@ -578,6 +589,7 @@ impl CdcConsumerFactory {
             .get(metadata.table_name.as_ref())
             .ok_or_else(|| anyhow!("table {} does not exist", metadata.table_name))?;
 
+        let partition_key_count = table.partition_key.len();
         let primary_key_columns = table
             .partition_key
             .iter()
@@ -595,6 +607,7 @@ impl CdcConsumerFactory {
 
         Ok(Self(Arc::new(CdcConsumerData {
             primary_key_columns,
+            partition_key_count,
             backend,
             tx,
             gregorian_epoch,

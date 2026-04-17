@@ -13,10 +13,13 @@ use crate::Timestamp;
 use crate::Vector;
 use anyhow::anyhow;
 use anyhow::bail;
+use bigdecimal::BigDecimal;
 use itertools::Itertools;
 use num_bigint::BigInt;
 use scylla::cluster::metadata::NativeType;
 use scylla::value::CqlDate;
+use scylla::value::CqlDecimal;
+use scylla::value::CqlDecimalBorrowed;
 use scylla::value::CqlTime;
 use scylla::value::CqlTimestamp;
 use scylla::value::CqlTimeuuid;
@@ -342,6 +345,7 @@ enum Column {
     Blob(ColumnVec<PrimaryId, TValue<Vec<u8>>>),
     Boolean(ColumnVec<PrimaryId, TValue<bool>>),
     Date(ColumnVec<PrimaryId, TValue<CqlDate>>),
+    Decimal(ColumnVec<PrimaryId, TValue<CqlDecimal>>),
     Double(ColumnVec<PrimaryId, TValue<f64>>),
     Float(ColumnVec<PrimaryId, TValue<f32>>),
     Inet(ColumnVec<PrimaryId, TValue<IpAddr>>),
@@ -365,6 +369,7 @@ impl Column {
             NativeType::Blob => Self::Blob(ColumnVec::new()),
             NativeType::Boolean => Self::Boolean(ColumnVec::new()),
             NativeType::Date => Self::Date(ColumnVec::new()),
+            NativeType::Decimal => Self::Decimal(ColumnVec::new()),
             NativeType::Double => Self::Double(ColumnVec::new()),
             NativeType::Float => Self::Float(ColumnVec::new()),
             NativeType::Inet => Self::Inet(ColumnVec::new()),
@@ -389,6 +394,7 @@ impl Column {
             Self::Blob(vec) => vec.resize_with(size, || TValue::None(timestamp)),
             Self::Boolean(vec) => vec.resize_with(size, || TValue::None(timestamp)),
             Self::Date(vec) => vec.resize_with(size, || TValue::None(timestamp)),
+            Self::Decimal(vec) => vec.resize_with(size, || TValue::None(timestamp)),
             Self::Double(vec) => vec.resize_with(size, || TValue::None(timestamp)),
             Self::Float(vec) => vec.resize_with(size, || TValue::None(timestamp)),
             Self::Inet(vec) => vec.resize_with(size, || TValue::None(timestamp)),
@@ -440,6 +446,12 @@ impl Column {
             Self::Date(vec) => {
                 let CqlValue::Date(value) = value else {
                     bail!("Failed to convert value to Date");
+                };
+                vec.update(primary_id, TValue::Some(timestamp, value))
+            }
+            Self::Decimal(vec) => {
+                let CqlValue::Decimal(value) = value else {
+                    bail!("Failed to convert value to Decimal");
                 };
                 vec.update(primary_id, TValue::Some(timestamp, value))
             }
@@ -550,6 +562,11 @@ impl Column {
                 .and_then(|val| val.get())
                 .cloned()
                 .map(CqlValue::Date),
+            Self::Decimal(vec) => vec
+                .get(primary_id)
+                .and_then(|val| val.get())
+                .cloned()
+                .map(CqlValue::Decimal),
             Self::Double(vec) => vec
                 .get(primary_id)
                 .and_then(|val| val.get())
@@ -1352,6 +1369,17 @@ fn cql_cmp(lhs: &CqlValue, rhs: &CqlValue) -> Option<Ordering> {
             ));
             Some(a_bi.cmp(&b_bi))
         }
+        (CqlValue::Decimal(a), CqlValue::Decimal(b)) => {
+            let (a_bytes, a_scale) = a.as_signed_be_bytes_slice_and_exponent();
+            let (b_bytes, b_scale) = b.as_signed_be_bytes_slice_and_exponent();
+            let a_bd = BigDecimal::from(
+                CqlDecimalBorrowed::from_signed_be_bytes_slice_and_exponent(a_bytes, a_scale),
+            );
+            let b_bd = BigDecimal::from(
+                CqlDecimalBorrowed::from_signed_be_bytes_slice_and_exponent(b_bytes, b_scale),
+            );
+            Some(a_bd.cmp(&b_bd))
+        }
         // Text types
         (CqlValue::Text(a), CqlValue::Text(b)) => Some(a.cmp(b)),
         (CqlValue::Ascii(a), CqlValue::Ascii(b)) => Some(a.cmp(b)),
@@ -1840,6 +1868,43 @@ mod tests {
                 &make("-98765432109876543210987654321098765432109876543210")
             ),
             Some(Ordering::Greater)
+        );
+    }
+
+    #[test]
+    fn cql_cmp_decimal() {
+        let make = |s: &str| {
+            CqlValue::Decimal(CqlDecimal::try_from(s.parse::<BigDecimal>().unwrap()).unwrap())
+        };
+
+        assert_eq!(
+            cql_cmp(&make("-98765432109876543210.123456789"), &make("0")),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            cql_cmp(
+                &make("3.14159265358979323846"),
+                &make("3.14159265358979323846")
+            ),
+            Some(Ordering::Equal)
+        );
+        assert_eq!(
+            cql_cmp(
+                &make("1000000000000000000.000000001"),
+                &make("999999999999999999.999999999")
+            ),
+            Some(Ordering::Greater)
+        );
+        // different scales for semantically equal value: 1.50 == 1.5
+        assert_eq!(cql_cmp(&make("1.50"), &make("1.5")), Some(Ordering::Equal));
+        // negative comparisons
+        assert_eq!(
+            cql_cmp(&make("-0.000000001"), &make("0.000000001")),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            cql_cmp(&make("-1.25"), &make("-1.125")),
+            Some(Ordering::Less)
         );
     }
 
