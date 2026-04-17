@@ -5,6 +5,7 @@
 
 use crate::IndexKey;
 use crate::IndexMetadata;
+use crate::perf;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::hash_map::Entry::Vacant;
@@ -96,8 +97,7 @@ fn update_indexes(idxs: &mut HashMap<IndexKey, IndexStatus>, keys: HashSet<Index
 }
 
 pub(crate) async fn new() -> mpsc::Sender<NodeState> {
-    const CHANNEL_SIZE: usize = 10;
-    let (tx, mut rx) = mpsc::channel(CHANNEL_SIZE);
+    let (tx, mut rx) = mpsc::channel(perf::channel_size().into());
 
     tokio::spawn(
         async move {

@@ -4,6 +4,7 @@
  */
 
 use crate::Config;
+use crate::perf;
 use std::sync::Arc;
 use std::time::Duration;
 use sysinfo::System;
@@ -49,9 +50,7 @@ impl MemoryExt for mpsc::Sender<Memory> {
 }
 
 pub(crate) fn new(mut config_rx: watch::Receiver<Arc<Config>>) -> mpsc::Sender<Memory> {
-    // TODO: The value of channel size was taken from initial benchmarks. Needs more testing
-    const CHANNEL_SIZE: usize = 10;
-    let (tx, mut rx) = mpsc::channel(CHANNEL_SIZE);
+    let (tx, mut rx) = mpsc::channel(perf::channel_size().into());
 
     tokio::spawn(async move {
         debug!("starting");

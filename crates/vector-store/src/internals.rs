@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+use crate::perf;
 use scylla::client::session::Session;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -101,9 +102,7 @@ impl InternalsExt for mpsc::Sender<Internals> {
 type Counters = RwLock<BTreeMap<String, AtomicU64>>;
 
 pub(crate) fn new() -> mpsc::Sender<Internals> {
-    // TODO: The value of channel size was taken from initial benchmarks. Needs more testing
-    const CHANNEL_SIZE: usize = 10;
-    let (tx, mut rx) = mpsc::channel(CHANNEL_SIZE);
+    let (tx, mut rx) = mpsc::channel(perf::channel_size().into());
 
     tokio::spawn(
         async move {

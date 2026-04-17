@@ -17,6 +17,7 @@ use crate::engine::EngineExt;
 use crate::node_state::Event;
 use crate::node_state::NodeState;
 use crate::node_state::NodeStateExt;
+use crate::perf;
 use anyhow::bail;
 use futures::StreamExt;
 use futures::stream;
@@ -45,7 +46,7 @@ pub(crate) async fn new(
     node_state: Sender<NodeState>,
     mut config_rx: watch::Receiver<Arc<Config>>,
 ) -> anyhow::Result<Sender<MonitorIndexes>> {
-    let (tx, mut rx) = mpsc::channel(10);
+    let (tx, mut rx) = mpsc::channel(perf::channel_size().into());
     tokio::spawn(
         async move {
             const INTERVAL: Duration = Duration::from_secs(1);

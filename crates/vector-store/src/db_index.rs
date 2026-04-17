@@ -22,6 +22,7 @@ use crate::invariant_key::InvariantKey;
 use crate::node_state::Event;
 use crate::node_state::NodeState;
 use crate::node_state::NodeStateExt;
+use crate::perf;
 use anyhow::Context;
 use anyhow::anyhow;
 use anyhow::bail;
@@ -155,10 +156,8 @@ pub(crate) async fn new(
 )> {
     let key = metadata.key();
 
-    // TODO: The value of channel size was taken from initial benchmarks. Needs more testing
-    const CHANNEL_SIZE: usize = 10;
-    let (tx_index, mut rx_index) = mpsc::channel(CHANNEL_SIZE);
-    let (tx_embeddings, rx_embeddings) = mpsc::channel(CHANNEL_SIZE);
+    let (tx_index, mut rx_index) = mpsc::channel(perf::channel_size().into());
+    let (tx_embeddings, rx_embeddings) = mpsc::channel(perf::channel_size().into());
 
     // Wait for initial session to create statements.
     let mut statements_session_rx = session_rx.clone();

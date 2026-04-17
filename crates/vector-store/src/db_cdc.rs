@@ -11,6 +11,7 @@ use crate::IndexMetadata;
 use crate::db_index_backend::DbIndexBackend;
 use crate::internals::Internals;
 use crate::internals::InternalsExt;
+use crate::perf;
 use ::time::Date;
 use ::time::Month;
 use ::time::OffsetDateTime;
@@ -125,8 +126,7 @@ pub(crate) fn new(
     tx_embeddings: mpsc::Sender<(DbEmbedding, Option<AsyncInProgress>)>,
     config: CdcReaderConfig,
 ) -> mpsc::Sender<DbCdc> {
-    // TODO: The value of channel size was taken from initial benchmarks. Needs more testing
-    let (tx, mut rx) = mpsc::channel::<DbCdc>(10);
+    let (tx, mut rx) = mpsc::channel::<DbCdc>(perf::channel_size().into());
 
     // Mark the receiver to ensure first session update is visible
     session_rx.mark_changed();

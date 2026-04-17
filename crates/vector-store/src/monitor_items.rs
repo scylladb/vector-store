@@ -31,9 +31,7 @@ pub(crate) async fn new(
     index: Sender<Index>,
     metrics: Arc<Metrics>,
 ) -> anyhow::Result<Sender<MonitorItems>> {
-    // The value was taken from initial benchmarks
-    const CHANNEL_SIZE: usize = 10;
-    let (tx, mut rx) = mpsc::channel(CHANNEL_SIZE);
+    let (tx, mut rx) = mpsc::channel(perf::channel_size().into());
     let key_for_span = key.clone();
 
     tokio::spawn(perf::hotpath_async(

@@ -698,9 +698,7 @@ fn new<I: UsearchIndex + Send + Sync + 'static>(
     rayon_semaphore: Arc<Semaphore>,
     memory: mpsc::Sender<Memory>,
 ) -> anyhow::Result<mpsc::Sender<Index>> {
-    // TODO: The value of channel size was taken from initial benchmarks. Needs more testing
-    const CHANNEL_SIZE: usize = 10;
-    let (tx, mut rx) = mpsc::channel(CHANNEL_SIZE);
+    let (tx, mut rx) = mpsc::channel(perf::channel_size().into());
 
     tokio::spawn(perf::hotpath_async(
         {
