@@ -15,6 +15,8 @@ use tracing::Instrument;
 use tracing::debug;
 use tracing::debug_span;
 
+use crate::perf;
+
 pub type CountersR = BTreeMap<String, u64>;
 
 pub enum Internals {
@@ -101,9 +103,7 @@ impl InternalsExt for mpsc::Sender<Internals> {
 type Counters = RwLock<BTreeMap<String, AtomicU64>>;
 
 pub(crate) fn new() -> mpsc::Sender<Internals> {
-    // TODO: The value of channel size was taken from initial benchmarks. Needs more testing
-    const CHANNEL_SIZE: usize = 10;
-    let (tx, mut rx) = mpsc::channel(CHANNEL_SIZE);
+    let (tx, mut rx) = mpsc::channel(perf::channel_size());
 
     tokio::spawn(
         async move {

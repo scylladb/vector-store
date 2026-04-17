@@ -24,6 +24,7 @@ use crate::monitor_indexes;
 use crate::monitor_items;
 use crate::node_state::NodeState;
 use crate::node_state::NodeStateExt;
+use crate::perf;
 use crate::table::Table;
 use itertools::Itertools;
 use std::sync::Arc;
@@ -124,7 +125,7 @@ pub(crate) async fn new(
     metrics: Arc<Metrics>,
     config_rx: watch::Receiver<Arc<Config>>,
 ) -> anyhow::Result<mpsc::Sender<Engine>> {
-    let (tx, mut rx) = mpsc::channel(10);
+    let (tx, mut rx) = mpsc::channel(perf::channel_size());
 
     let monitor_actor =
         monitor_indexes::new(db.clone(), tx.downgrade(), node_state.clone()).await?;
