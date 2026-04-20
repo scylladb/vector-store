@@ -14,6 +14,7 @@ pub mod httproutes;
 mod httpserver;
 mod index;
 mod index_key;
+mod indexes;
 mod info;
 mod internals;
 mod invariant_key;
@@ -770,7 +771,7 @@ pub async fn wait_for_shutdown() {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct Percentage {
     value: f64,
 }
@@ -795,7 +796,7 @@ impl TryFrom<f64> for Percentage {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy, PartialEq)]
 pub enum Progress {
     Done,
     InProgress(Percentage),

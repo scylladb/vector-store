@@ -473,12 +473,7 @@ async fn process_db_index(db: &DbBasic, metadata: &IndexMetadata, msg: DbIndex) 
             .unwrap(),
 
         DbIndex::FullScanProgress { tx } => tx
-            .send({
-                let mut db = db.0.write().unwrap();
-                let val = db.next_full_scan_progress.clone();
-                db.next_full_scan_progress = Progress::Done;
-                val
-            })
+            .send(db.0.read().unwrap().next_full_scan_progress)
             .map_err(|_| anyhow!("DbIndex::GetTargetColumn: unable to send response"))
             .unwrap(),
     }
