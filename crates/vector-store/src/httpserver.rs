@@ -256,22 +256,28 @@ async fn spawn_server(
     let handle = Handle::new();
 
     let router = match tls_config {
-        Some(_) => httproutes::new(
-            engine,
-            metrics,
-            state,
-            internals,
-            index_engine_version,
-            true,
-        ),
-        _ => httproutes::new(
-            engine,
-            metrics,
-            state,
-            internals,
-            index_engine_version,
-            false,
-        ),
+        Some(_) => {
+            httproutes::new(
+                engine,
+                metrics,
+                state,
+                internals,
+                index_engine_version,
+                true,
+            )
+            .await
+        }
+        _ => {
+            httproutes::new(
+                engine,
+                metrics,
+                state,
+                internals,
+                index_engine_version,
+                false,
+            )
+            .await
+        }
     };
     tokio::spawn({
         let handle = handle.clone();

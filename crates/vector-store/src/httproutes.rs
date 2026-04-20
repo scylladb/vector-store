@@ -14,12 +14,12 @@ use crate::Quantization;
 use crate::Restriction;
 use crate::SimilarityScore;
 use crate::Vector;
-use crate::db_index::DbIndexExt;
 use crate::distance;
 use crate::engine::Engine;
 use crate::engine::EngineExt;
 use crate::index::IndexExt;
 use crate::index::validator;
+use crate::indexes::Indexes;
 use crate::info::Info;
 use crate::internals::Internals;
 use crate::internals::InternalsExt;
@@ -58,6 +58,7 @@ use std::collections::HashMap;
 use std::num::NonZero;
 use std::sync::Arc;
 use std::sync::LazyLock;
+use std::sync::RwLock;
 use time::Date;
 use time::OffsetDateTime;
 use time::Time;
@@ -108,6 +109,7 @@ struct ApiDoc;
 #[derive(Clone)]
 struct RoutesInnerState {
     engine: Sender<Engine>,
+    indexes: Arc<RwLock<Indexes>>,
     metrics: Arc<Metrics>,
     node_state: Sender<NodeState>,
     internals: Sender<Internals>,
@@ -115,7 +117,7 @@ struct RoutesInnerState {
     use_tls: bool,
 }
 
-pub(crate) fn new(
+pub(crate) async fn new(
     engine: Sender<Engine>,
     metrics: Arc<Metrics>,
     node_state: Sender<NodeState>,
@@ -123,8 +125,10 @@ pub(crate) fn new(
     index_engine_version: String,
     use_tls: bool,
 ) -> Router {
+    let indexes = engine.get_indexes().await;
     let state = RoutesInnerState {
         engine,
+        indexes,
         metrics: metrics.clone(),
         node_state,
         internals,
@@ -573,14 +577,21 @@ async fn post_index_ann(
         .start_timer();
 
     let index_key = IndexKey::new(&keyspace, &index_name);
-    let Some((index, db_index)) = state.engine.get_index(index_key.clone()).await else {
+    let Some((index, scan_progress, primary_key_columns, table_columns)) =
+        state.indexes.read().unwrap().get(&index_key).map(|index| {
+            (
+                index.index(),
+                index.progress(),
+                index.primary_key_columns(),
+                index.table_columns(),
+            )
+        })
+    else {
         timer.observe_duration();
         let msg = format!("missing index: {keyspace}.{index_name}");
         debug!("post_index_ann: {msg}");
         return (StatusCode::NOT_FOUND, msg).into_response();
     };
-
-    let scan_progress = db_index.full_scan_progress().await;
 
     if let Progress::InProgress(percentage) = scan_progress {
         let msg = format!(
@@ -591,19 +602,15 @@ async fn post_index_ann(
         return (StatusCode::SERVICE_UNAVAILABLE, msg).into_response();
     }
 
-    let primary_key_columns = db_index.get_primary_key_columns().await;
     let search_result = if let Some(filter) = request.filter {
-        let filter = match try_from_post_index_ann_filter(
-            filter,
-            &primary_key_columns,
-            db_index.get_table_columns().await.as_ref(),
-        ) {
-            Ok(filter) => filter,
-            Err(err) => {
-                debug!("post_index_ann: {err}");
-                return (StatusCode::BAD_REQUEST, err.to_string()).into_response();
-            }
-        };
+        let filter =
+            match try_from_post_index_ann_filter(filter, &primary_key_columns, &table_columns) {
+                Ok(filter) => filter,
+                Err(err) => {
+                    debug!("post_index_ann: {err}");
+                    return (StatusCode::BAD_REQUEST, err.to_string()).into_response();
+                }
+            };
         index
             .filtered_ann(index_key, request.vector, filter, request.limit)
             .await
