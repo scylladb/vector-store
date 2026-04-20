@@ -710,9 +710,11 @@ fn new<I: UsearchIndex + Send + Sync + 'static>(
                 let mut partitions = BTreeMap::new();
 
                 let mut allocate_prev = Allocate::Can;
+                let allocate_rx = memory.subscribe_allocate().await;
 
                 while let Some(msg) = rx.recv().await {
-                    if !check_memory_allocation(&msg, &memory, &mut allocate_prev, &index_key).await
+                    if !check_memory_allocation(&msg, &allocate_rx, &mut allocate_prev, &index_key)
+                        .await
                     {
                         continue;
                     }
@@ -1171,7 +1173,7 @@ fn filtered_ann<I>(
 #[hotpath::measure]
 async fn check_memory_allocation(
     msg: &Index,
-    memory: &mpsc::Sender<Memory>,
+    rx_allocate: &watch::Receiver<Allocate>,
     allocate_prev: &mut Allocate,
     key: &IndexKey,
 ) -> bool {
@@ -1179,7 +1181,7 @@ async fn check_memory_allocation(
         return true;
     }
 
-    let allocate = memory.can_allocate().await;
+    let allocate = *rx_allocate.borrow();
     if allocate == Allocate::Cannot {
         if *allocate_prev == Allocate::Can {
             error!("Unable to add vector for index {key}: not enough memory to reserve more space");
@@ -1437,6 +1439,12 @@ mod tests {
     #[tokio::test]
     async fn allocate_parameter_works() {
         let (memory_tx, mut memory_rx) = mpsc::channel(1);
+        let (allocate_tx, allocate_rx) = watch::channel(Allocate::Can);
+        let memory_respond = tokio::spawn(async move {
+            let Memory::SubscribeAllocate { tx } = memory_rx.recv().await.unwrap();
+            _ = tx.send(allocate_rx);
+            memory_rx
+        });
 
         let options = IndexOptions {
             dimensions: 3,
@@ -1456,18 +1464,14 @@ mod tests {
             memory_tx,
         )
         .unwrap();
+        memory_respond.await.unwrap();
 
-        let memory_respond = tokio::spawn(async move {
-            let Memory::CanAllocate { tx } = memory_rx.recv().await.unwrap();
-            _ = tx.send(Allocate::Cannot);
-            memory_rx
-        });
+        allocate_tx.send(Allocate::Cannot).unwrap();
         let index_id = IndexIdGenerator::new().next(true).unwrap();
         let partition_id = PartitionId::global(index_id);
         actor
             .add_vector(partition_id, 1.into(), vec![1., 1., 1.].into(), None)
             .await;
-        let mut memory_rx = memory_respond.await.unwrap();
 
         table
             .write()
@@ -1478,14 +1482,10 @@ mod tests {
 
         assert_eq!(actor.count(index_key.clone()).await.unwrap(), 0);
 
-        let memory_respond = tokio::spawn(async move {
-            let Memory::CanAllocate { tx } = memory_rx.recv().await.unwrap();
-            _ = tx.send(Allocate::Can);
-        });
+        allocate_tx.send(Allocate::Can).unwrap();
         actor
             .add_vector(partition_id, 1.into(), vec![1., 1., 1.].into(), None)
             .await;
-        memory_respond.await.unwrap();
 
         // Wait for the add operation to complete, as it runs in a separate task.
         time::timeout(Duration::from_secs(10), async {
