@@ -11,6 +11,7 @@ use aws_sdk_dynamodb::operation::query::QueryError;
 use aws_sdk_dynamodb::operation::query::QueryOutput;
 use aws_sdk_dynamodb::operation::query::builders::QueryFluentBuilder;
 use aws_sdk_dynamodb::types::AttributeValue;
+use aws_sdk_dynamodb::types::ScalarAttributeType;
 use aws_sdk_dynamodb::types::Select;
 use e2etest::TestCase;
 use httpapi::ColumnName;
@@ -18,6 +19,7 @@ use httpapi::IndexName;
 use httpapi::Limit;
 use httpapi::Vector;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use tracing::info;
 
@@ -25,12 +27,47 @@ use super::Item;
 use super::JsonBodyInjectInterceptor;
 use super::TableContext;
 use super::alternator_keyspace;
+use super::create_alternator_table;
+use super::delete_alternator_table;
 use super::dynamo_float_list;
+use super::issue_update_table;
 use super::make_clients;
 use super::unique_alternator_index_name;
 use super::unique_alternator_table_name;
 use super::wait_for_index_count;
 
+/// Extracts a string attribute value from an item map, panicking with a clear
+/// message if the key is absent or the value is not `AttributeValue::S`.
+fn extract_s(item: &HashMap<String, AttributeValue>, attr: &str) -> String {
+    match item.get(attr) {
+        Some(AttributeValue::S(value)) => value.clone(),
+        other => panic!("expected string attribute '{attr}', got {other:?}"),
+    }
+}
+
+async fn put_item_with_optimized_vector(
+    client: &aws_sdk_dynamodb::Client,
+    table_name: &str,
+    pk_attr: &str,
+    pk_value: &str,
+    vec_attr: &str,
+    vector: [f32; 3],
+) {
+    let item_json = serde_json::json!({
+        pk_attr: { "S": pk_value },
+        vec_attr: { "V": vector },
+    });
+
+    client
+        .put_item()
+        .table_name(table_name)
+        .item(pk_attr, AttributeValue::S(pk_value.to_string()))
+        .customize()
+        .interceptor(JsonBodyInjectInterceptor::new([("Item", item_json)]))
+        .send()
+        .await
+        .expect("PutItem with optimized vector should succeed");
+}
 /// Extension trait that adds Alternator `VectorSearch` to any [`QueryFluentBuilder`].
 ///
 /// Call `.vector_search(vector)` as the **last** builder step before `.send()`:
@@ -290,6 +327,220 @@ async fn query_uses_selected_vector_index(actors: TestActors) {
     );
 
     super::delete_alternator_table(&client, &table_name).await;
+
+    info!("finished");
+}
+
+// ---------------------------------------------------------------------------
+// Test: Query sees both optimized `V` and standard `L` vector encodings
+// ---------------------------------------------------------------------------
+
+/// Mirrors upstream Alternator coverage for mixed vector encodings.
+///
+/// One item is written with the optimized Alternator vector type (`{"V": [...]}`),
+/// while another is written through the standard DynamoDB list-of-numbers
+/// representation (`{"L": [{"N": ...}, ...]}`). After the vector index is
+/// created and fully prefills, a query must return both items.
+#[framed]
+async fn query_with_vector_v_type_and_l_type(actors: TestActors) {
+    info!("started");
+
+    let (client, vs_clients) = make_clients(&actors).await;
+    let vs_client = &vs_clients[0];
+
+    let table_name = unique_alternator_table_name();
+    let index_name = unique_alternator_index_name();
+    let pk_name = "p";
+    let vec_name = "v";
+    let index = vector_store::IndexInfo::new(
+        alternator_keyspace(&table_name).as_ref(),
+        index_name.as_ref(),
+    );
+
+    create_alternator_table(
+        &client,
+        &table_name,
+        pk_name,
+        ScalarAttributeType::S,
+        None,
+        &[],
+    )
+    .await
+    .expect("CreateTable should succeed");
+
+    let pk_v = "pk-v";
+    let pk_l = "pk-l";
+
+    put_item_with_optimized_vector(
+        &client,
+        &table_name,
+        pk_name,
+        pk_v,
+        vec_name,
+        [1.0, 0.0, 0.0],
+    )
+    .await;
+    client
+        .put_item()
+        .table_name(&table_name)
+        .item(pk_name, AttributeValue::S(pk_l.to_string()))
+        .item(vec_name, dynamo_float_list([1.0_f32, 0.0, 0.0]))
+        .send()
+        .await
+        .expect("PutItem with list-of-numbers vector should succeed");
+
+    issue_update_table(
+        &client,
+        &table_name,
+        serde_json::json!([{
+            "Create": {
+                "IndexName": index.index.as_ref(),
+                "VectorAttribute": {
+                    "AttributeName": vec_name,
+                    "Dimensions": 3
+                }
+            }
+        }]),
+    )
+    .await;
+
+    common::wait_for_index(vs_client, &index).await;
+    wait_for_index_count(vs_client, &index, 2).await;
+
+    let items = client
+        .query()
+        .table_name(&table_name)
+        .index_name(index.index.as_ref())
+        .limit(2)
+        .vector_search([1.0_f32, 0.0, 0.0])
+        .send()
+        .await
+        .expect("Query with mixed vector encodings should succeed")
+        .items()
+        .to_vec();
+
+    let expected = HashSet::from([pk_v.to_string(), pk_l.to_string()]);
+    let got = items
+        .iter()
+        .map(|item| extract_s(item, pk_name))
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        got, expected,
+        "query should return both V and L encoded vectors"
+    );
+
+    delete_alternator_table(&client, &table_name).await;
+
+    info!("finished");
+}
+
+// ---------------------------------------------------------------------------
+// Test: Query works end-to-end with optimized `V` vector encoding
+// ---------------------------------------------------------------------------
+
+/// Writes vectors using Alternator's optimized `V` type and verifies that a
+/// vector-search query returns all indexed items and ranks the nearest one
+/// first.
+#[framed]
+async fn query_with_vector_v_type(actors: TestActors) {
+    info!("started");
+
+    let (client, vs_clients) = make_clients(&actors).await;
+    let vs_client = &vs_clients[0];
+
+    let table_name = unique_alternator_table_name();
+    let index_name = unique_alternator_index_name();
+    let pk_name = "p";
+    let vec_name = "v";
+    let index = vector_store::IndexInfo::new(
+        alternator_keyspace(&table_name).as_ref(),
+        index_name.as_ref(),
+    );
+
+    create_alternator_table(
+        &client,
+        &table_name,
+        pk_name,
+        ScalarAttributeType::S,
+        None,
+        &[],
+    )
+    .await
+    .expect("CreateTable should succeed");
+
+    let pk_nearest = "pk-nearest";
+    let pk_farther = "pk-farther";
+
+    put_item_with_optimized_vector(
+        &client,
+        &table_name,
+        pk_name,
+        pk_nearest,
+        vec_name,
+        [1.0, 0.0, 0.0],
+    )
+    .await;
+    put_item_with_optimized_vector(
+        &client,
+        &table_name,
+        pk_name,
+        pk_farther,
+        vec_name,
+        [0.0, 1.0, 0.0],
+    )
+    .await;
+
+    issue_update_table(
+        &client,
+        &table_name,
+        serde_json::json!([{
+            "Create": {
+                "IndexName": index.index.as_ref(),
+                "VectorAttribute": {
+                    "AttributeName": vec_name,
+                    "Dimensions": 3
+                }
+            }
+        }]),
+    )
+    .await;
+
+    common::wait_for_index(vs_client, &index).await;
+    wait_for_index_count(vs_client, &index, 2).await;
+
+    let items = client
+        .query()
+        .table_name(&table_name)
+        .index_name(index.index.as_ref())
+        .limit(2)
+        .vector_search([1.0_f32, 0.0, 0.0])
+        .send()
+        .await
+        .expect("Query with optimized vector encoding should succeed")
+        .items()
+        .to_vec();
+
+    assert_eq!(
+        items.len(),
+        2,
+        "query should return both optimized-vector items"
+    );
+    assert_eq!(
+        extract_s(&items[0], pk_name),
+        pk_nearest,
+        "nearest optimized-vector item should rank first"
+    );
+    let got = items
+        .iter()
+        .map(|item| extract_s(item, pk_name))
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        got,
+        HashSet::from([pk_nearest.to_string(), pk_farther.to_string()]),
+        "query should return all optimized-vector items"
+    );
+
+    delete_alternator_table(&client, &table_name).await;
 
     info!("finished");
 }
@@ -951,6 +1202,16 @@ pub(super) fn register(test_case: TestCase<TestActors>) -> TestCase<TestActors> 
             "query_uses_selected_vector_index",
             common::DEFAULT_TEST_TIMEOUT,
             query_uses_selected_vector_index,
+        )
+        .with_test(
+            "query_with_vector_v_type_and_l_type",
+            common::DEFAULT_TEST_TIMEOUT,
+            query_with_vector_v_type_and_l_type,
+        )
+        .with_test(
+            "query_with_vector_v_type",
+            common::DEFAULT_TEST_TIMEOUT,
+            query_with_vector_v_type,
         )
         .with_test(
             "query_with_vector_search_multiple_results_ordering",
