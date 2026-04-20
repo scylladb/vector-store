@@ -9,13 +9,13 @@ use crate::Progress;
 use crate::Quantization;
 use crate::Restriction;
 use crate::SimilarityScore;
-use crate::db_index::DbIndexExt;
 use crate::distance;
 use crate::engine::Engine;
 use crate::engine::EngineExt;
 use crate::index::IndexExt;
 use crate::index::validator;
 use crate::indexes;
+use crate::indexes::Indexes;
 use crate::info::Info;
 use crate::internals::Internals;
 use crate::internals::InternalsExt;
@@ -61,6 +61,7 @@ use std::num::NonZero;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::LazyLock;
+use std::sync::RwLock;
 use time::Date;
 use time::OffsetDateTime;
 use time::Time;
@@ -111,6 +112,7 @@ struct ApiDoc;
 #[derive(Clone)]
 struct RoutesInnerState {
     engine: Sender<Engine>,
+    indexes: Arc<RwLock<Indexes>>,
     metrics: Arc<Metrics>,
     node_state: Sender<NodeState>,
     internals: Sender<Internals>,
@@ -118,7 +120,7 @@ struct RoutesInnerState {
     use_tls: bool,
 }
 
-pub(crate) fn new(
+pub(crate) async fn new(
     engine: Sender<Engine>,
     metrics: Arc<Metrics>,
     node_state: Sender<NodeState>,
@@ -126,8 +128,10 @@ pub(crate) fn new(
     index_engine_version: String,
     use_tls: bool,
 ) -> Router {
+    let indexes = engine.get_indexes().await;
     let state = RoutesInnerState {
         engine,
+        indexes,
         metrics: metrics.clone(),
         node_state,
         internals,
@@ -523,16 +527,18 @@ async fn post_index_ann(
     let index_key = IndexKey::new(&keyspace, &index_name);
     let (equality_cols, range_cols) = restriction_columns(&request.filter);
     let allow_filtering = request.filter.as_ref().is_some_and(|f| f.allow_filtering);
-    let (routed_key, index, db_index) = match state
-        .engine
-        .get_best_index(index_key.clone(), equality_cols, range_cols)
-        .await
+    let (routed_key, index, primary_key_columns, table_columns) = match state
+        .indexes
+        .read()
+        .unwrap()
+        .best_index(&index_key, &equality_cols, &range_cols)
     {
         indexes::BestIndexState::Serving {
             key: routed_key,
             index,
-            db_index,
             needs_filtering,
+            primary_key_columns,
+            table_columns,
         } => {
             if matches!(needs_filtering, indexes::NeedsFiltering::Yes(_)) && !allow_filtering {
                 timer.observe_duration();
@@ -543,13 +549,12 @@ async fn post_index_ann(
                 debug!("post_index_ann: {msg}");
                 return (StatusCode::BAD_REQUEST, msg).into_response();
             }
-            (routed_key, index, db_index)
+            (routed_key, index, primary_key_columns, table_columns)
         }
-        indexes::BestIndexState::NotServing(db_index) => {
+        indexes::BestIndexState::NotServing(progress) => {
             timer.observe_duration();
 
-            let scan_progress = db_index.full_scan_progress().await;
-            match scan_progress {
+            match progress {
                 Progress::InProgress(percentage) => {
                     let msg = format!(
                         "Index {keyspace}.{index_name} is not available yet as it is still being constructed, progress: {:.3}%",
@@ -586,19 +591,15 @@ async fn post_index_ann(
         ))
         .await;
 
-    let primary_key_columns = db_index.get_primary_key_columns().await;
     let search_result = if let Some(filter) = request.filter {
-        let filter = match try_from_post_index_ann_filter(
-            filter,
-            &primary_key_columns,
-            db_index.get_table_columns().await.as_ref(),
-        ) {
-            Ok(filter) => filter,
-            Err(err) => {
-                debug!("post_index_ann: {err}");
-                return (StatusCode::BAD_REQUEST, err.to_string()).into_response();
-            }
-        };
+        let filter =
+            match try_from_post_index_ann_filter(filter, &primary_key_columns, &table_columns) {
+                Ok(filter) => filter,
+                Err(err) => {
+                    debug!("post_index_ann: {err}");
+                    return (StatusCode::BAD_REQUEST, err.to_string()).into_response();
+                }
+            };
         index
             .filtered_ann(
                 routed_key,

@@ -205,12 +205,13 @@ pub(crate) enum BestIndexState {
     /// The requested index does not exist at all.
     NotFound,
     /// The requested index exists but no serving candidate was found.
-    NotServing(mpsc::Sender<DbIndex>),
+    NotServing(Progress),
     /// A serving candidate was found.
     Serving {
         key: IndexKey,
         index: mpsc::Sender<Index>,
-        db_index: mpsc::Sender<DbIndex>,
+        primary_key_columns: Arc<Vec<ColumnName>>,
+        table_columns: Arc<HashMap<ColumnName, NativeType>>,
         needs_filtering: NeedsFiltering,
     },
 }
@@ -316,11 +317,12 @@ impl Indexes {
                 BestIndexState::Serving {
                     key: routed_key.clone(),
                     index: routed_entry.index.clone(),
-                    db_index: routed_entry.db_index.clone(),
+                    primary_key_columns: Arc::clone(&routed_entry.primary_key_columns),
+                    table_columns: Arc::clone(&routed_entry.table_columns),
                     needs_filtering: needs_filtering.clone(),
                 }
             }
-            None => BestIndexState::NotServing(requested_entry.db_index.clone()),
+            None => BestIndexState::NotServing(requested_entry.progress),
         }
     }
 }
