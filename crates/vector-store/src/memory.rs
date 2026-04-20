@@ -27,20 +27,20 @@ pub enum Allocate {
     Cannot,
 }
 
-pub(crate) type AllocateR = Allocate;
+pub(crate) type AllocateR = watch::Receiver<Allocate>;
 
 pub enum Memory {
-    CanAllocate { tx: oneshot::Sender<AllocateR> },
+    SubscribeAllocate { tx: oneshot::Sender<AllocateR> },
 }
 
 pub(crate) trait MemoryExt {
-    async fn can_allocate(&self) -> AllocateR;
+    async fn subscribe_allocate(&self) -> AllocateR;
 }
 
 impl MemoryExt for mpsc::Sender<Memory> {
-    async fn can_allocate(&self) -> AllocateR {
+    async fn subscribe_allocate(&self) -> AllocateR {
         let (tx, rx) = oneshot::channel();
-        self.send(Memory::CanAllocate { tx })
+        self.send(Memory::SubscribeAllocate { tx })
             .await
             .expect("MemoryExt::can_allocate: internal actor should receive request");
         rx.await
@@ -70,14 +70,16 @@ pub(crate) fn new(mut config_rx: watch::Receiver<Arc<Config>>) -> mpsc::Sender<M
         );
         info!("Memory usage check interval set to {:?}", interval.period());
 
-        let mut allocate = can_allocate(used_memory(&system_info), memory_limit, Allocate::Can);
+        let (allocate_tx, allocate_rx) = watch::channel(
+            can_allocate(used_memory(&system_info), memory_limit, Allocate::Can));
 
         loop {
             select! {
                 _ = config_rx.changed() => {
                     let config_new = config_rx.borrow_and_update().clone();
                     if config.memory_limit != config_new.memory_limit {
-                        memory_limit = calculate_memory_limit(available_memory(&system_info), &config_new);
+                        memory_limit = calculate_memory_limit(
+                            available_memory(&system_info), &config_new);
                         info!("Memory limit updated to {memory_limit} bytes");
                     }
                     if config.memory_usage_check_interval != config_new.memory_usage_check_interval {
@@ -93,7 +95,9 @@ pub(crate) fn new(mut config_rx: watch::Receiver<Arc<Config>>) -> mpsc::Sender<M
 
                 _ = interval.tick() => {
                     system_info.refresh_memory();
-                    allocate = can_allocate(used_memory(&system_info), memory_limit, allocate);
+                    let allocate = *allocate_tx.borrow();
+                    _ = allocate_tx.send(
+                        can_allocate(used_memory(&system_info), memory_limit, allocate));
                 }
 
                 msg = rx.recv() => {
@@ -101,8 +105,11 @@ pub(crate) fn new(mut config_rx: watch::Receiver<Arc<Config>>) -> mpsc::Sender<M
                         break;
                     };
                     match msg {
-                        Memory::CanAllocate { tx } => {
-                            tx.send(allocate).unwrap_or_else(|_| trace!("can_allocate: unable to send response"));
+                        Memory::SubscribeAllocate { tx } => {
+                            tx
+                                .send(allocate_rx.clone())
+                                .unwrap_or_else(|_|
+                                    trace!("can_allocate: unable to send response"));
                         }
                     }
                 }
@@ -227,9 +234,10 @@ mod tests {
             ..Config::default()
         }));
         let memory_actor = new(config_rx);
+        let allocator_rx = memory_actor.subscribe_allocate().await;
 
         // be sure the actor has started
-        assert_eq!(memory_actor.can_allocate().await, Allocate::Can);
+        assert_eq!(*allocator_rx.borrow(), Allocate::Can);
 
         let available_mem = available_memory(&System::new_all());
         let default_limit = calculate_memory_limit(available_mem, &Config::default());
@@ -250,7 +258,8 @@ mod tests {
             .unwrap();
 
         // be sure the configuration reload has taken place
-        assert_eq!(memory_actor.can_allocate().await, Allocate::Can);
+        let allocator_rx = memory_actor.subscribe_allocate().await;
+        assert_eq!(*allocator_rx.borrow(), Allocate::Can);
         assert!(logs_contain(&format!(
             "Memory limit updated to {} bytes",
             { default_limit - 1 }
