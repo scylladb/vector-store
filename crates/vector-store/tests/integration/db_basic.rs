@@ -512,7 +512,7 @@ async fn spawn_process_db_index(
             DbIndex::FullScanProgress { tx } => tx
                 .send({
                     let db = db.0.read().unwrap();
-                    db.next_full_scan_progress.clone().unwrap_or_else(|| {
+                    db.next_full_scan_progress.unwrap_or_else(|| {
                         if fullscan_finished.load(Ordering::Acquire) {
                             Progress::Done
                         } else {

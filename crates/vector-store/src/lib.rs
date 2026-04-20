@@ -736,7 +736,7 @@ pub async fn wait_for_shutdown() {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Percentage {
     value: f64,
 }
@@ -761,7 +761,7 @@ impl TryFrom<f64> for Percentage {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Progress {
     Done,
     InProgress(Percentage),
