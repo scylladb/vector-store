@@ -11,6 +11,7 @@ mod mock_opensearch;
 mod openapi;
 mod opensearch;
 mod quantization;
+mod routing;
 mod status;
 mod usearch;
 
