@@ -571,6 +571,16 @@ async fn post_index_ann(
         }
     };
 
+    #[cfg(feature = "slow-test-hooks")]
+    state
+        .internals
+        .increment_counter(format!(
+            "ann-served-request--{}--{}",
+            routed_key.keyspace(),
+            routed_key.index(),
+        ))
+        .await;
+
     let primary_key_columns = db_index.get_primary_key_columns().await;
     let search_result = if let Some(filter) = request.filter {
         let filter = match try_from_post_index_ann_filter(
