@@ -11,6 +11,7 @@ use crate::db_index::DbIndex;
 use crate::db_index::DbIndexExt;
 use crate::index::Index;
 use crate::monitor_items::MonitorItems;
+use crate::node_state::IndexStatus;
 use scylla::cluster::metadata::NativeType;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -23,6 +24,7 @@ pub(crate) struct IndexCache {
     quantization: Quantization,
     primary_key_columns: Arc<Vec<ColumnName>>,
     table_columns: Arc<HashMap<ColumnName, NativeType>>,
+    status: IndexStatus,
     progress: Progress,
 }
 
@@ -44,6 +46,7 @@ impl IndexCache {
             primary_key_columns,
             table_columns,
             progress,
+            status: IndexStatus::Initializing,
         }
     }
 
@@ -65,6 +68,14 @@ impl IndexCache {
 
     pub(crate) fn table_columns(&self) -> Arc<HashMap<ColumnName, NativeType>> {
         Arc::clone(&self.table_columns)
+    }
+
+    pub(crate) fn status(&self) -> IndexStatus {
+        self.status
+    }
+
+    pub(crate) fn set_status(&mut self, status: IndexStatus) {
+        self.status = status;
     }
 
     pub(crate) fn progress(&self) -> Progress {

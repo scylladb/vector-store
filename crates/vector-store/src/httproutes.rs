@@ -312,35 +312,31 @@ async fn get_index_status(
     Path((keyspace_name, index_name)): Path<(KeyspaceName, IndexName)>,
 ) -> Response {
     let index_key = IndexKey::new(&keyspace_name, &index_name);
-    let Some((index, _)) = state.engine.get_index(index_key.clone()).await else {
+    let Some((index, status)) = state
+        .indexes
+        .read()
+        .unwrap()
+        .get(&index_key)
+        .map(|index| (index.index(), index.status()))
+    else {
         let msg = format!("missing index: {keyspace_name}.{index_name}");
         debug!("get_index_status: {msg}");
         return (StatusCode::NOT_FOUND, msg).into_response();
     };
-    if let Some(index_status) = state
-        .node_state
-        .get_index_status(keyspace_name.as_ref(), index_name.as_ref())
-        .await
-    {
-        match index.count(index_key).await {
-            Err(err) => {
-                let msg = format!("index.count request error: {err}");
-                debug!("get_index_status: {msg}");
-                (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
-            }
-            Ok(count) => (
-                StatusCode::OK,
-                response::Json(IndexStatusResponse {
-                    status: IndexStatus::from(index_status),
-                    count,
-                }),
-            )
-                .into_response(),
+    match index.count(index_key).await {
+        Err(err) => {
+            let msg = format!("index.count request error: {err}");
+            debug!("get_index_status: {msg}");
+            (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
         }
-    } else {
-        let msg = format!("missing index status: {keyspace_name}.{index_name}");
-        debug!("get_index_status: {msg}");
-        (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
+        Ok(count) => (
+            StatusCode::OK,
+            response::Json(IndexStatusResponse {
+                status: IndexStatus::from(status),
+                count,
+            }),
+        )
+            .into_response(),
     }
 }
 

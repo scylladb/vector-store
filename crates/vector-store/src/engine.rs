@@ -23,6 +23,7 @@ use crate::memory::Memory;
 use crate::monitor_indexes;
 use crate::monitor_items;
 use crate::node_state::NodeState;
+use crate::node_state::NodeStateExt;
 use crate::table::Table;
 use itertools::Itertools;
 use std::sync::Arc;
@@ -125,7 +126,8 @@ pub(crate) async fn new(
 ) -> anyhow::Result<mpsc::Sender<Engine>> {
     let (tx, mut rx) = mpsc::channel(10);
 
-    let monitor_actor = monitor_indexes::new(db.clone(), tx.downgrade(), node_state).await?;
+    let monitor_actor =
+        monitor_indexes::new(db.clone(), tx.downgrade(), node_state.clone()).await?;
     let memory_actor = memory::new(config_rx);
 
     tokio::spawn(
@@ -165,7 +167,7 @@ pub(crate) async fn new(
                         }
                     }
 
-                    _ = interval.tick() => update_indexes(&indexes).await,
+                    _ = interval.tick() => update_indexes(&node_state, &indexes).await,
                 }
 
             }
@@ -305,19 +307,34 @@ async fn get_index(key: IndexKey, tx: oneshot::Sender<GetIndexR>, indexes: &RwLo
     .unwrap_or_else(|_| trace!("get_index: unable to send response"));
 }
 
-async fn update_indexes(indexes: &RwLock<Indexes>) {
+async fn update_indexes(node_state: &Sender<NodeState>, indexes: &RwLock<Indexes>) {
     let actual_indexes = indexes
         .read()
         .unwrap()
         .iter()
-        .map(|(key, cache)| (key.clone(), cache.db_index(), cache.progress()))
+        .map(|(key, cache)| {
+            (
+                key.clone(),
+                cache.db_index(),
+                cache.progress(),
+                cache.status(),
+            )
+        })
         .collect_vec();
-    for (key, db_index, progress) in actual_indexes.into_iter() {
+    for (key, db_index, progress, status) in actual_indexes.into_iter() {
         let new_progress = db_index.full_scan_progress().await;
         if new_progress != progress
             && let Some(cache) = indexes.write().unwrap().get_mut(&key)
         {
             cache.set_progress(new_progress);
+        }
+        if let Some(new_status) = node_state
+            .get_index_status(key.keyspace().as_ref(), key.index().as_ref())
+            .await
+            && new_status != status
+            && let Some(cache) = indexes.write().unwrap().get_mut(&key)
+        {
+            cache.set_status(new_status);
         }
     }
 }
