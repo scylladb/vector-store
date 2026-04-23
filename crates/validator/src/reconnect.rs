@@ -272,11 +272,19 @@ async fn restarting_one_node_doesnt_break_fullscan(actors: TestActors) {
     .await;
 
     info!("Checking that full scan isn't completed");
-    let index_status = client
-        .index_status(&index.keyspace, &index.index)
-        .await
-        .expect("failed to get index status");
-    assert_eq!(index_status.status, IndexStatus::Bootstrapping);
+    wait_for(
+        || async {
+            client
+                .index_status(&index.keyspace, &index.index)
+                .await
+                .expect("failed to get index status")
+                .status
+                == IndexStatus::Bootstrapping
+        },
+        format!("index {index:?} must be bootstrapping"),
+        Duration::from_secs(10),
+    )
+    .await;
 
     let proxy_addr = get_default_scylla_proxy_node_configs(&actors)
         .await
@@ -391,11 +399,19 @@ async fn restarting_all_nodes_doesnt_break_fullscan(actors: TestActors) {
     ))
     .await;
 
-    let index_status = client
-        .index_status(&index.keyspace, &index.index)
-        .await
-        .expect("failed to get index status");
-    assert_eq!(index_status.status, IndexStatus::Bootstrapping);
+    wait_for(
+        || async {
+            client
+                .index_status(&index.keyspace, &index.index)
+                .await
+                .expect("failed to get index status")
+                .status
+                == IndexStatus::Bootstrapping
+        },
+        format!("index {index:?} must be bootstrapping"),
+        Duration::from_secs(10),
+    )
+    .await;
 
     info!("Restart each node one by one");
     for proxy_addr in get_default_scylla_proxy_node_configs(&actors)
