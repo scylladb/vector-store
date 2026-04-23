@@ -651,6 +651,11 @@ impl<'a> CreateIndexQuery<'a> {
         }
     }
 
+    pub fn index_name(mut self, index_name: impl Into<String>) -> Self {
+        self.index = index_name.into().into();
+        self
+    }
+
     pub fn partition_columns(
         mut self,
         partition_columns: impl IntoIterator<Item = impl AsRef<str>>,
