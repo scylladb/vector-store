@@ -234,9 +234,7 @@ async fn simple_create_search_delete_index() {
             client
                 .index_status(&keyspace_name, &index_name)
                 .await
-                .expect("failed to get index status")
-                .count
-                == 3
+                .is_ok_and(|status| status.status == IndexStatus::Serving && status.count == 3)
         },
         "Waiting for 3 vectors to be indexed",
     )

@@ -9,6 +9,7 @@ use crate::db_basic::Table;
 use crate::mock_opensearch;
 use crate::usearch::test_config;
 use crate::wait_for;
+use httpapi::IndexStatus;
 use httpclient::HttpClient;
 use scylla::cluster::metadata::NativeType;
 use scylla::value::CqlValue;
@@ -103,10 +104,10 @@ async fn simple_create_search_delete_index() {
     let index_name = index.index_name.clone().into();
     wait_for(
         || async {
-            let Ok(status) = client.index_status(&keyspace_name, &index_name).await else {
-                return false;
-            };
-            status.count == 3
+            client
+                .index_status(&keyspace_name, &index_name)
+                .await
+                .is_ok_and(|status| status.status == IndexStatus::Serving && status.count == 3)
         },
         "Waiting for index to be added to the store",
     )
