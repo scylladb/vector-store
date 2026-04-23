@@ -330,6 +330,7 @@ async fn update_indexes(node_state: &Sender<NodeState>, indexes: &RwLock<Indexes
             )
         })
         .collect_vec();
+
     for (key, db_index, progress, status) in actual_indexes.into_iter() {
         let Some(new_status) = node_state
             .get_index_status(key.keyspace().as_ref(), key.index().as_ref())
