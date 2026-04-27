@@ -15,6 +15,7 @@ use crate::engine::Engine;
 use crate::engine::EngineExt;
 use crate::index::IndexExt;
 use crate::index::validator;
+use crate::indexes;
 use crate::info::Info;
 use crate::internals::Internals;
 use crate::internals::InternalsExt;
@@ -390,6 +391,39 @@ async fn get_metrics(
     (StatusCode::OK, response_headers, buffer)
 }
 
+fn restriction_columns(
+    filter: &Option<httpapi::PostIndexAnnFilter>,
+) -> (Vec<crate::ColumnName>, Vec<crate::ColumnName>) {
+    let Some(filter) = filter else {
+        return (Vec::new(), Vec::new());
+    };
+    let mut equality = Vec::new();
+    let mut range = Vec::new();
+    for r in &filter.restrictions {
+        match r {
+            httpapi::PostIndexAnnRestriction::Eq { lhs, .. }
+            | httpapi::PostIndexAnnRestriction::In { lhs, .. } => {
+                equality.push(lhs.as_ref().into())
+            }
+            httpapi::PostIndexAnnRestriction::Lt { lhs, .. }
+            | httpapi::PostIndexAnnRestriction::Lte { lhs, .. }
+            | httpapi::PostIndexAnnRestriction::Gt { lhs, .. }
+            | httpapi::PostIndexAnnRestriction::Gte { lhs, .. } => range.push(lhs.as_ref().into()),
+            httpapi::PostIndexAnnRestriction::EqTuple { lhs, .. }
+            | httpapi::PostIndexAnnRestriction::InTuple { lhs, .. } => {
+                equality.extend(lhs.iter().map(|name| name.as_ref().into()))
+            }
+            httpapi::PostIndexAnnRestriction::LtTuple { lhs, .. }
+            | httpapi::PostIndexAnnRestriction::LteTuple { lhs, .. }
+            | httpapi::PostIndexAnnRestriction::GtTuple { lhs, .. }
+            | httpapi::PostIndexAnnRestriction::GteTuple { lhs, .. } => {
+                range.extend(lhs.iter().map(|name| name.as_ref().into()))
+            }
+        }
+    }
+    (equality, range)
+}
+
 impl From<distance::DistanceValue> for httpapi::Distance {
     fn from(v: distance::DistanceValue) -> Self {
         Self::from(<distance::DistanceValue as Into<f32>>::into(v))
@@ -482,23 +516,45 @@ async fn post_index_ann(
         .start_timer();
 
     let index_key = IndexKey::new(&keyspace, &index_name);
-    let Some((index, db_index)) = state.engine.get_index(index_key.clone()).await else {
-        timer.observe_duration();
-        let msg = format!("missing index: {keyspace}.{index_name}");
-        debug!("post_index_ann: {msg}");
-        return (StatusCode::NOT_FOUND, msg).into_response();
+    let (equality_cols, range_cols) = restriction_columns(&request.filter);
+    let (routed_key, index, db_index) = match state
+        .engine
+        .get_best_index(index_key.clone(), equality_cols, range_cols)
+        .await
+    {
+        indexes::BestIndexState::Serving(routed_key, index, db_index) => {
+            (routed_key, index, db_index)
+        }
+        indexes::BestIndexState::NotServing(db_index) => {
+            timer.observe_duration();
+
+            let scan_progress = db_index.full_scan_progress().await;
+            match scan_progress {
+                Progress::InProgress(percentage) => {
+                    let msg = format!(
+                        "Index {keyspace}.{index_name} is not available yet as it is still being constructed, progress: {:.3}%",
+                        percentage.get()
+                    );
+                    debug!("post_index_ann: {msg}");
+                    return (StatusCode::SERVICE_UNAVAILABLE, msg).into_response();
+                }
+                Progress::Done => {
+                    let msg = format!(
+                        "Index {keyspace}.{index_name} is not serving, but full scan did finish."
+                    );
+                    debug!("post_index_ann: {msg}");
+                    return (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response();
+                }
+            }
+        }
+        indexes::BestIndexState::NotFound => {
+            timer.observe_duration();
+
+            let msg = format!("missing index: {keyspace}.{index_name}");
+            debug!("post_index_ann: {msg}");
+            return (StatusCode::NOT_FOUND, msg).into_response();
+        }
     };
-
-    let scan_progress = db_index.full_scan_progress().await;
-
-    if let Progress::InProgress(percentage) = scan_progress {
-        let msg = format!(
-            "Index {keyspace}.{index_name} is not available yet as it is still being constructed, progress: {:.3}%",
-            percentage.get()
-        );
-        debug!("post_index_ann: {msg}");
-        return (StatusCode::SERVICE_UNAVAILABLE, msg).into_response();
-    }
 
     let primary_key_columns = db_index.get_primary_key_columns().await;
     let search_result = if let Some(filter) = request.filter {
@@ -515,7 +571,7 @@ async fn post_index_ann(
         };
         index
             .filtered_ann(
-                index_key,
+                routed_key,
                 request.vector.into(),
                 filter,
                 request.limit.into(),
@@ -523,7 +579,7 @@ async fn post_index_ann(
             .await
     } else {
         index
-            .ann(index_key, request.vector.into(), request.limit.into())
+            .ann(routed_key, request.vector.into(), request.limit.into())
             .await
     };
 
