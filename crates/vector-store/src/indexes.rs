@@ -227,7 +227,12 @@ pub(crate) enum BestIndexState {
     /// The requested index exists but no serving candidate was found.
     NotServing(mpsc::Sender<DbIndex>),
     /// A serving candidate was found.
-    Serving(IndexKey, mpsc::Sender<Index>, mpsc::Sender<DbIndex>),
+    Serving {
+        key: IndexKey,
+        index: mpsc::Sender<Index>,
+        db_index: mpsc::Sender<DbIndex>,
+        needs_filtering: NeedsFiltering,
+    },
 }
 
 /// Determines the index to route a query to, given a requested `IndexKey`.
@@ -280,19 +285,20 @@ pub(crate) async fn route_index(
     .max_by(|(_, score_a, version_a), (_, score_b, version_b)| {
         score_a.cmp(score_b).then_with(|| version_a.cmp(version_b))
     })
-    .map(|(k, _, _)| k);
+    .map(|(k, score, _)| (k, score));
 
     match routed_key {
-        Some(routed_key) => {
+        Some((routed_key, needs_filtering)) => {
             let routed_entry = indexes.get(routed_key).expect("routed key must exist");
             if routed_key != key {
                 debug!("routing index request from {key} to {routed_key}");
             }
-            BestIndexState::Serving(
-                routed_key.clone(),
-                routed_entry.index.clone(),
-                routed_entry.db_index.clone(),
-            )
+            BestIndexState::Serving {
+                key: routed_key.clone(),
+                index: routed_entry.index.clone(),
+                db_index: routed_entry.db_index.clone(),
+                needs_filtering: needs_filtering.clone(),
+            }
         }
         None => BestIndexState::NotServing(requested_entry.db_index.clone()),
     }
