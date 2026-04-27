@@ -51,6 +51,7 @@ static DEFAULT_SCYLLA_ARGS: LazyLock<RwLock<Vec<String>>> = LazyLock::new(|| {
             "--logger-log-level=migration_manager=warn",
             "--shutdown-announce-in-ms=0",
             "--tablets-mode-for-new-keyspaces=enabled",
+            "--alternator-ttl-period-in-seconds=0.5",
         ]
         .into_iter()
         .map(String::from)
