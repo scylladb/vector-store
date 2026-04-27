@@ -19,6 +19,7 @@ mod quantization_and_rescoring;
 mod reconnect;
 mod serde;
 mod similarity_functions;
+mod ttl;
 
 use async_backtrace::framed;
 use e2etest::TestCase;
@@ -239,6 +240,7 @@ pub async fn test_cases() -> impl Iterator<Item = (String, TestCase<TestActors>)
             "quantization_and_rescoring",
             quantization_and_rescoring::new().await,
         ),
+        ("ttl", ttl::new().await),
     ]
     .into_iter()
     .map(|(name, test_case)| (name.to_string(), test_case))
