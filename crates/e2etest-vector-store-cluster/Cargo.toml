@@ -8,10 +8,11 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+anyhow.workspace = true
 async-backtrace.workspace = true
 e2etest.workspace = true
-httpclient.workspace = true
+reqwest.workspace = true
+serde.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-vector-store.workspace = true

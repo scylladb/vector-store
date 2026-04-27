@@ -5,7 +5,7 @@
 
 use async_backtrace::frame;
 use async_backtrace::framed;
-use httpclient::HttpClient;
+use reqwest::Client;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::net::SocketAddr;
@@ -26,10 +26,42 @@ use tracing::Instrument;
 use tracing::debug;
 use tracing::debug_span;
 use tracing::info;
-use vector_store::httproutes::NodeStatus;
 
 pub const VS_PORT: u16 = 6080;
 pub const DB_PORT: u16 = 9042;
+
+#[derive(serde::Deserialize, PartialEq, Debug)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum NodeStatus {
+    Initializing,
+    ConnectingToDb,
+    Bootstrapping,
+    Serving,
+}
+
+struct HttpClient {
+    client: Client,
+    url_api: String,
+}
+
+impl HttpClient {
+    fn new(addr: SocketAddr) -> Self {
+        Self {
+            url_api: format!("http://{addr}/api/v1"),
+            client: Client::new(),
+        }
+    }
+
+    async fn status(&self) -> anyhow::Result<NodeStatus> {
+        Ok(self
+            .client
+            .get(format!("{}/status", self.url_api))
+            .send()
+            .await?
+            .json()
+            .await?)
+    }
+}
 
 /// Configuration for a single Vector Store node in the test cluster.
 #[derive(Clone)]

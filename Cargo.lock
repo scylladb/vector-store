@@ -1221,13 +1221,14 @@ dependencies = [
 name = "e2etest-vector-store-cluster"
 version = "0.0.0-dev"
 dependencies = [
+ "anyhow",
  "async-backtrace",
  "e2etest",
- "httpclient",
+ "reqwest",
+ "serde",
  "tempfile",
  "tokio",
  "tracing",
- "vector-store",
 ]
 
 [[package]]
