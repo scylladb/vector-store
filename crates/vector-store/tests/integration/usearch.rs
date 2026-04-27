@@ -10,6 +10,7 @@ use crate::db_basic::ScanFn;
 use crate::db_basic::Table;
 use crate::wait_for;
 use crate::wait_for_value;
+use httpapi::IndexStatus;
 use httpapi::PostIndexAnnFilter;
 use httpapi::PostIndexAnnResponse;
 use httpapi::PostIndexAnnRestriction;
@@ -167,9 +168,17 @@ pub(crate) async fn setup_store_and_wait_for_index(
     .await;
     let (client, server, _config_tx) = run.await;
 
+    let keyspace_name = index.keyspace_name.clone().into();
+    let index_name = index.index_name.clone().into();
+
     wait_for(
-        || async { !client.indexes().await.is_empty() },
-        "Waiting for index to be added to the store",
+        || async {
+            client
+                .index_status(&keyspace_name, &index_name)
+                .await
+                .is_ok_and(|status| status.status == IndexStatus::Serving)
+        },
+        "Waiting for index to be serving",
     )
     .await;
 
@@ -423,7 +432,9 @@ async fn ann_fail_while_building() {
             ("pk".to_string().into(), NativeType::Int),
             ("ck".to_string().into(), NativeType::Text),
         ],
-        None,
+        Some(Box::new(|_tx| {
+            futures::FutureExt::boxed(std::future::pending::<()>())
+        })),
         None,
     )
     .await;
@@ -432,10 +443,24 @@ async fn ann_fail_while_building() {
     ));
     let (client, _server, _config_tx) = run.await;
 
+    let keyspace_name = index.keyspace_name.into();
+    let index_name = index.index_name.into();
+
+    wait_for(
+        || async {
+            client
+                .index_status(&keyspace_name, &index_name)
+                .await
+                .is_ok_and(|status| status.status == IndexStatus::Bootstrapping)
+        },
+        "Waiting for index to be bootstrapping",
+    )
+    .await;
+
     let result = client
         .post_ann(
-            &index.keyspace_name.into(),
-            &index.index_name.into(),
+            &keyspace_name,
+            &index_name,
             vec![1.0, 2.0, 3.0].into(),
             None,
             NonZeroUsize::new(1).unwrap().into(),

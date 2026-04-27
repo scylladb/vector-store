@@ -9,6 +9,7 @@ use crate::usearch::test_config;
 use crate::wait_for;
 use crate::wait_for_value;
 use httpapi::DataType;
+use httpapi::IndexStatus;
 use httpapi::PostIndexAnnFilter;
 use httpapi::PostIndexAnnRestriction;
 use scylla::value::CqlValue;
@@ -193,6 +194,18 @@ async fn search_with_quantization(quantization: Quantization, filter: Option<Pos
 
     let keyspace_name = index.keyspace_name.clone().into();
     let index_name = index.index_name.clone().into();
+
+    wait_for(
+        || async {
+            client
+                .index_status(&keyspace_name, &index_name)
+                .await
+                .is_ok_and(|status| status.status == IndexStatus::Serving)
+        },
+        &format!("Waiting for index to be serving ({:?})", quantization),
+    )
+    .await;
+
     // expect to find the inserted vector as the nearest neighbor
     // with distance 0.0 as we are searching for the same vector
     wait_for(
@@ -299,6 +312,18 @@ async fn binary_quantization_with_non_divisible_by_8_dimensions() {
 
     let keyspace_name = index.keyspace_name.clone().into();
     let index_name = index.index_name.clone().into();
+
+    wait_for(
+        || async {
+            client
+                .index_status(&keyspace_name, &index_name)
+                .await
+                .is_ok_and(|status| status.status == IndexStatus::Serving)
+        },
+        "Waiting for index to be serving",
+    )
+    .await;
+
     // expect to find the inserted vector as the nearest neighbor
     // with distance 0.0 as we are searching for the same vector
     wait_for(
