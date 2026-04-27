@@ -7,6 +7,7 @@ use crate::TestActors;
 use crate::common;
 use crate::common::CreateIndexQuery;
 use crate::common::DEFAULT_TEST_TIMEOUT;
+use crate::common::TableName;
 use async_backtrace::framed;
 use e2etest::TestCase;
 use httpapi::IndexInfo;
@@ -15,7 +16,6 @@ use httpclient::HttpClient;
 use scylla::client::session::Session;
 use std::sync::Arc;
 use tracing::info;
-use vector_store::TableName;
 
 #[framed]
 pub(crate) async fn new() -> TestCase<TestActors> {

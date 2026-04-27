@@ -5,6 +5,7 @@
 
 use crate::TestActors;
 use crate::common;
+use crate::common::TableName;
 use crate::common::*;
 use async_backtrace::framed;
 use e2etest::TestCase;
@@ -13,7 +14,6 @@ use httpclient::HttpClient;
 use scylla::client::session::Session;
 use std::collections::HashMap;
 use tracing::info;
-use vector_store::TableName;
 
 /// Generate test vectors for quantization precision testing
 /// Creates a query vector and embeddings with small directional differences

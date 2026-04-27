@@ -35,7 +35,6 @@ use std::time::Duration;
 use tap::Pipe;
 use tokio::time;
 use tracing::info;
-use vector_store::TableName;
 
 pub const DEFAULT_TEST_TIMEOUT: Duration = Duration::from_secs(10 * 60); // 10 minutes
 pub const DEFAULT_OPERATION_TIMEOUT: Duration = Duration::from_secs(20);
@@ -54,6 +53,13 @@ pub const DB_PROXY_OCTET_3: u8 = 13;
 pub const VS_OCTET_1: u8 = 21;
 pub const VS_OCTET_2: u8 = 22;
 pub const VS_OCTET_3: u8 = 23;
+
+#[derive(
+    Clone, Debug, PartialEq, Eq, Hash, derive_more::From, derive_more::AsRef, derive_more::Display,
+)]
+#[from(String, &String, &str)]
+#[as_ref(str)]
+pub(crate) struct TableName(String);
 
 /// Returns the default DB IPs for a given subnet. This variant can be used
 /// before `TestActors` is constructed (e.g. during TLS cert generation).

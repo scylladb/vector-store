@@ -4317,6 +4317,7 @@ dependencies = [
  "async-backtrace",
  "bcrypt",
  "clap",
+ "derive_more",
  "e2etest",
  "e2etest-dns",
  "e2etest-firewall",
@@ -4336,7 +4337,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
- "vector-store",
 ]
 
 [[package]]
