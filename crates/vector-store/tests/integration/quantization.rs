@@ -272,7 +272,7 @@ async fn can_search_with_filter_when_quantization_is_enabled() {
                     lhs: pk_column.clone(),
                     rhs: vec![pk_value.into()],
                 }],
-                allow_filtering: false,
+                allow_filtering: true,
             }),
         )
         .await;

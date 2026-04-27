@@ -422,6 +422,48 @@ async fn ann_returns_bad_request_when_provided_vector_size_is_not_eq_index_dimen
 }
 
 #[tokio::test]
+#[ntest::timeout(10_000)]
+async fn ann_returns_bad_request_when_filtering_required_but_not_allowed() {
+    crate::enable_tracing();
+
+    let pk_column: ColumnName = "pk".into();
+    let ck_column: ColumnName = "ck".into();
+    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+        DbIndexType::Global,
+        [pk_column.clone(), ck_column.clone()],
+        [
+            (pk_column.clone(), NativeType::Int),
+            (ck_column.clone(), NativeType::Int),
+        ],
+        Some(db_basic::scan_fn([(
+            [CqlValue::Int(1), CqlValue::Int(1)].into(),
+            Some(vec![1., 1., 1.].into()),
+            Timestamp::from_unix_timestamp(10),
+        )])),
+        None,
+    )
+    .await;
+
+    let result = client
+        .post_ann(
+            &index.keyspace_name.into(),
+            &index.index_name.into(),
+            vec![1.0, 2.0, 3.0].into(),
+            Some(PostIndexAnnFilter {
+                restrictions: vec![PostIndexAnnRestriction::Eq {
+                    lhs: pk_column.into(),
+                    rhs: 1.into(),
+                }],
+                allow_filtering: false,
+            }),
+            NonZeroUsize::new(1).unwrap().into(),
+        )
+        .await;
+
+    assert_eq!(result.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn ann_fail_while_building() {
     crate::enable_tracing();
     let (run, index, db, _node_state) = setup_store(
@@ -559,7 +601,7 @@ async fn ann_filter_partition_key_int_eq() {
                             lhs: pk_column_http.clone(),
                             rhs: 1.into(),
                         }],
-                        allow_filtering: false,
+                        allow_filtering: true,
                     }),
                     NonZeroUsize::new(100).unwrap().into(),
                 )
@@ -632,7 +674,7 @@ async fn ann_filter_clustering_key_int_eq() {
                             lhs: ck_column_http.clone(),
                             rhs: 1.into(),
                         }],
-                        allow_filtering: false,
+                        allow_filtering: true,
                     }),
                     NonZeroUsize::new(100).unwrap().into(),
                 )
@@ -705,7 +747,7 @@ async fn ann_filter_partition_key_int_in() {
                             lhs: pk_column_http.clone(),
                             rhs: vec![1.into(), 2.into()],
                         }],
-                        allow_filtering: false,
+                        allow_filtering: true,
                     }),
                     NonZeroUsize::new(100).unwrap().into(),
                 )
@@ -782,7 +824,7 @@ async fn ann_filter_clustering_key_int_in() {
                             lhs: ck_column_http.clone(),
                             rhs: vec![1.into(), 3.into()],
                         }],
-                        allow_filtering: false,
+                        allow_filtering: true,
                     }),
                     NonZeroUsize::new(100).unwrap().into(),
                 )
@@ -954,7 +996,7 @@ async fn run_ann_filter_int_int(
                     vec![1.0, 2.0, 3.0].into(),
                     Some(PostIndexAnnFilter {
                         restrictions: restrictions.clone(),
-                        allow_filtering: false,
+                        allow_filtering: true,
                     }),
                     NonZeroUsize::new(100).unwrap().into(),
                 )
@@ -1437,7 +1479,7 @@ async fn ann_filter_partition_key_text_gt() {
                             lhs: pk_column_http.clone(),
                             rhs: "b".into(),
                         }],
-                        allow_filtering: false,
+                        allow_filtering: true,
                     }),
                     NonZeroUsize::new(100).unwrap().into(),
                 )

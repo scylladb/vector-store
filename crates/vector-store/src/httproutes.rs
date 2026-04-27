@@ -517,12 +517,27 @@ async fn post_index_ann(
 
     let index_key = IndexKey::new(&keyspace, &index_name);
     let (equality_cols, range_cols) = restriction_columns(&request.filter);
+    let allow_filtering = request.filter.as_ref().is_some_and(|f| f.allow_filtering);
     let (routed_key, index, db_index) = match state
         .engine
         .get_best_index(index_key.clone(), equality_cols, range_cols)
         .await
     {
-        indexes::BestIndexState::Serving(routed_key, index, db_index) => {
+        indexes::BestIndexState::Serving {
+            key: routed_key,
+            index,
+            db_index,
+            needs_filtering,
+        } => {
+            if matches!(needs_filtering, indexes::NeedsFiltering::Yes(_)) && !allow_filtering {
+                timer.observe_duration();
+
+                let msg = format!(
+                    "Index {keyspace}.{index_name} requires ALLOW FILTERING for this query"
+                );
+                debug!("post_index_ann: {msg}");
+                return (StatusCode::BAD_REQUEST, msg).into_response();
+            }
             (routed_key, index, db_index)
         }
         indexes::BestIndexState::NotServing(db_index) => {
