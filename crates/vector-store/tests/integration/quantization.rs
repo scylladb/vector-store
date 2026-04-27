@@ -5,12 +5,12 @@
 
 use crate::db_basic;
 use crate::usearch::setup_store_with_quantization;
-use crate::usearch::test_config;
 use crate::wait_for;
 use crate::wait_for_value;
 use scylla::value::CqlValue;
 use std::num::NonZeroUsize;
 use vector_store::ColumnName;
+use vector_store::Config;
 use vector_store::DataType;
 use vector_store::DbIndexType;
 use vector_store::Distance;
@@ -51,7 +51,7 @@ async fn quantization_is_effectively_applied() {
         )];
         let values_len = values.len();
         let (run, index, _db, _node_state) = setup_store_with_quantization(
-            test_config(),
+            Config::default(),
             DbIndexType::Global,
             ["pk".into()],
             [(
@@ -132,7 +132,7 @@ async fn quantization_is_returned_as_index_data_type() {
         (Quantization::B1, DataType::B1),
     ] {
         let (run, index, _db, _node_state) = setup_store_with_quantization(
-            test_config(),
+            Config::default(),
             DbIndexType::Global,
             [],
             [],
@@ -172,7 +172,7 @@ async fn search_with_quantization(quantization: Quantization, filter: Option<Pos
     )];
 
     let (run, index, _db, _node_state) = setup_store_with_quantization(
-        test_config(),
+        Config::default(),
         DbIndexType::Global,
         [pk_column.clone()],
         [(
@@ -276,7 +276,7 @@ async fn binary_quantization_with_non_divisible_by_8_dimensions() {
     )];
 
     let (run, index, _db, _node_state) = setup_store_with_quantization(
-        test_config(),
+        Config::default(),
         DbIndexType::Global,
         [pk_column.clone()],
         [(

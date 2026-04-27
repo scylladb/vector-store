@@ -4,27 +4,22 @@
  */
 
 use crate::db_basic;
-use rcgen::CertifiedKey;
+use crate::tls_utils::generate_server_cert;
+use crate::tls_utils::init;
+use crate::tls_utils::read_cert;
 use reqwest::StatusCode;
-use std::io::Write;
 use std::num::NonZeroUsize;
-use std::path::PathBuf;
 use std::sync::Arc;
-use tempfile::NamedTempFile;
 use tokio::sync::watch;
 use vector_store::Config;
+use vector_store::ConfigManager;
+use vector_store::HttpServerExt;
 use vector_store::httproutes::PostIndexAnnRequest;
-
-fn create_temp_file<C: AsRef<[u8]>>(content: C) -> NamedTempFile {
-    let mut file = NamedTempFile::new().unwrap();
-    file.write_all(content.as_ref()).unwrap();
-    file
-}
 
 async fn run_server(
     addr: core::net::SocketAddr,
-    tls_cert_path: Option<PathBuf>,
-    tls_key_path: Option<PathBuf>,
+    tls_cert_path: Option<std::path::PathBuf>,
+    tls_key_path: Option<std::path::PathBuf>,
 ) -> (impl Sized, core::net::SocketAddr, impl Sized) {
     let node_state = vector_store::new_node_state().await;
     let internals = vector_store::new_internals();
@@ -32,39 +27,32 @@ async fn run_server(
     let (_, rx) = watch::channel(Arc::new(Config::default()));
     let index_factory = vector_store::new_index_factory_usearch(rx).unwrap();
 
-    let config = vector_store::Config {
+    let config = Config {
         vector_store_addr: addr,
         tls_cert_path,
         tls_key_path,
-        ..Default::default()
+        ..Config::default()
     };
 
-    let (_config_tx, config_rx) = watch::channel(Arc::new(config));
+    let (config_manager, receivers) = ConfigManager::new(config);
 
-    let (server, addr) =
-        vector_store::run(node_state, db_actor, internals, index_factory, config_rx)
+    let (server, _mtls) =
+        vector_store::run(node_state, db_actor, internals, index_factory, receivers)
             .await
             .unwrap();
+    let addr = (*server.address().await.borrow()).unwrap();
 
-    (server, addr, _config_tx)
+    (server, addr, config_manager)
 }
 
 #[tokio::test]
 async fn test_https_server_responds() {
-    rustls::crypto::aws_lc_rs::default_provider()
-        .install_default()
-        .expect("install ring crypto provider");
-
-    crate::enable_tracing();
+    init();
 
     let addr = core::net::SocketAddr::from(([127, 0, 0, 1], 0));
-    let CertifiedKey { cert, signing_key } =
-        rcgen::generate_simple_self_signed(vec![addr.ip().to_string()]).unwrap();
+    let (cert_file, key_file) = generate_server_cert(&addr);
 
-    let cert_file = create_temp_file(cert.pem().as_bytes());
-    let key_file = create_temp_file(signing_key.serialize_pem().as_bytes());
-
-    let (_server, addr, _config_tx) = run_server(
+    let (_server, addr, _config_manager) = run_server(
         addr,
         Some(cert_file.path().to_path_buf()),
         Some(key_file.path().to_path_buf()),
@@ -72,7 +60,7 @@ async fn test_https_server_responds() {
     .await;
 
     let client = reqwest::Client::builder()
-        .add_root_certificate(reqwest::Certificate::from_pem(cert.pem().as_bytes()).unwrap())
+        .add_root_certificate(read_cert(&cert_file))
         .build()
         .unwrap();
 

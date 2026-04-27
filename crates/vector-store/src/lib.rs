@@ -12,6 +12,8 @@ mod distance;
 mod engine;
 pub mod httproutes;
 mod httpserver;
+pub use httpserver::HttpServer;
+pub use httpserver::HttpServerExt;
 mod index;
 mod index_key;
 mod info;
@@ -27,9 +29,12 @@ mod primary_key;
 mod similarity;
 mod table;
 mod timestamp;
+mod tls;
 mod vector;
 
 pub use crate::config_manager::ConfigManager;
+pub use crate::config_manager::ConfigReceivers;
+pub use crate::config_manager::HttpServerConfig;
 pub use crate::config_manager::load_config;
 pub use crate::distance::Distance;
 pub use crate::index_key::IndexKey;
@@ -177,6 +182,8 @@ pub struct Config {
     pub disable_colors: bool,
     pub tls_cert_path: Option<std::path::PathBuf>,
     pub tls_key_path: Option<std::path::PathBuf>,
+    pub mtls_addr: SocketAddr,
+    pub mtls_ca_cert_path: Option<std::path::PathBuf>,
 }
 
 impl Default for Config {
@@ -193,6 +200,8 @@ impl Default for Config {
             disable_colors: false,
             tls_cert_path: None,
             tls_key_path: None,
+            mtls_addr: "127.0.0.1:6081".parse().unwrap(),
+            mtls_ca_cert_path: None,
             cql_connection_timeout: None,
             cql_keepalive_interval: None,
             cql_keepalive_timeout: None,
@@ -675,26 +684,43 @@ pub async fn run(
     db_actor: Sender<Db>,
     internals: Sender<Internals>,
     index_factory: Box<dyn IndexFactory + Send + Sync>,
-    config_rx: watch::Receiver<Arc<Config>>,
-) -> anyhow::Result<(impl Sized, SocketAddr)> {
+    receivers: ConfigReceivers,
+) -> anyhow::Result<(
+    Sender<httpserver::HttpServer>,
+    Sender<httpserver::HttpServer>,
+)> {
     let metrics: Arc<Metrics> = Arc::new(metrics::Metrics::new());
     let index_engine_version = index_factory.index_engine_version();
-    httpserver::new(
+    let engine = engine::new(
+        db_actor,
+        index_factory,
         node_state.clone(),
-        engine::new(
-            db_actor,
-            index_factory,
-            node_state,
-            metrics.clone(),
-            config_rx.clone(),
-        )
-        .await?,
+        metrics.clone(),
+        receivers.config,
+    )
+    .await?;
+
+    let main = httpserver::new(
+        node_state.clone(),
+        engine.clone(),
+        metrics.clone(),
+        internals.clone(),
+        index_engine_version.clone(),
+        receivers.http,
+    )
+    .await?;
+
+    let mtls = httpserver::new(
+        node_state,
+        engine,
         metrics,
         internals,
         index_engine_version,
-        config_rx,
+        receivers.mtls,
     )
-    .await
+    .await?;
+
+    Ok((main, mtls))
 }
 
 pub async fn new_db(

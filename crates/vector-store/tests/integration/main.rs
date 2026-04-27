@@ -8,10 +8,12 @@ mod https;
 mod info;
 mod memory_limit;
 mod mock_opensearch;
+mod mtls;
 mod openapi;
 mod opensearch;
 mod quantization;
 mod status;
+mod tls_utils;
 mod usearch;
 
 use std::sync::Once;

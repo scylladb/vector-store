@@ -48,6 +48,7 @@ use vector_store::DbEmbedding;
 use vector_store::DbIndexType;
 use vector_store::ExpansionAdd;
 use vector_store::ExpansionSearch;
+use vector_store::HttpServerExt;
 use vector_store::IndexMetadata;
 use vector_store::PrimaryKey;
 use vector_store::Quantization;
@@ -180,9 +181,13 @@ async fn run_vector_store(
     let internals = vector_store::new_internals();
     let index_factory = vector_store::new_index_factory_usearch(config.clone()).unwrap();
 
-    let (server, addr) = vector_store::run(node_state, db, internals, index_factory, config)
+    let initial_config = config.borrow().clone();
+    let (_, receivers) = vector_store::ConfigManager::new((*initial_config).clone());
+
+    let (server, _mtls) = vector_store::run(node_state, db, internals, index_factory, receivers)
         .await
         .unwrap();
+    let addr = (*server.address().await.borrow()).unwrap();
 
     (server, HttpClient::new(addr))
 }
