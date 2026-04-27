@@ -134,9 +134,13 @@ pub(crate) fn new(
     let mut reader: CdcReaderState = config.into();
     let name = reader.name;
     let actor_key = metadata.key();
+    let span_key = actor_key.clone();
     tokio::spawn(
         async move {
             debug!("starting");
+            internals
+                .increment_counter(format!("{actor_key}-{name}-cdc-actor-started"))
+                .await;
 
             loop {
                 tokio::select! {
@@ -174,9 +178,12 @@ pub(crate) fn new(
             // Cleanup
             reader.stop().await;
 
+            internals
+                .increment_counter(format!("{actor_key}-{name}-cdc-actor-stopped"))
+                .await;
             debug!("finished");
         }
-        .instrument(error_span!("db_cdc", "{}-{}", actor_key, name)),
+        .instrument(error_span!("db_cdc", "{}-{}", span_key, name)),
     );
 
     tx

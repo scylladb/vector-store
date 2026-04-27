@@ -180,13 +180,23 @@ pub(crate) async fn new(
         CdcReaderConfig::Fine,
     );
 
-    // Monitor CDC actor channels for closure to notify about errors
-    tokio::spawn(async move {
-        tokio::select! {
-            _ = cdc_wide.closed() => {},
-            _ = cdc_fine.closed() => {},
+    // Signal from the main db_index task to the CDC monitor task that
+    // this db_index is shutting down. Without it, the monitor would keep
+    // the CDC senders alive across a db_index replacement, leaving
+    // orphaned CDC actors running (VECTOR-653).
+    let db_index_stopped = Arc::new(Notify::new());
+
+    // Monitor CDC actor channels for closure to notify about errors, or
+    // exit when the main db_index task signals shutdown.
+    tokio::spawn({
+        let db_index_stopped = Arc::clone(&db_index_stopped);
+        async move {
+            tokio::select! {
+                _ = cdc_wide.closed() => cdc_error_notify.notify_one(),
+                _ = cdc_fine.closed() => cdc_error_notify.notify_one(),
+                _ = db_index_stopped.notified() => {}
+            }
         }
-        cdc_error_notify.notify_one();
     });
 
     // Spawn main task for full scan and message processing
@@ -232,6 +242,7 @@ pub(crate) async fn new(
                 tokio::spawn(process(Arc::clone(&statements), msg, completed_scan_length.clone()));
             }
 
+            db_index_stopped.notify_one();
             debug!("finished");
         }
         .instrument(error_span!("db_index", "{}", key)),
