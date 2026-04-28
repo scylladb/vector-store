@@ -541,6 +541,12 @@ impl IndexMetadata {
     pub fn key(&self) -> IndexKey {
         IndexKey::new(&self.keyspace_name, &self.index_name)
     }
+
+    fn discard_version(&self) -> Self {
+        let mut copy = self.clone();
+        copy.version = IndexVersion(Uuid::nil());
+        copy
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

@@ -118,7 +118,8 @@ pub(crate) async fn new(
 ) -> anyhow::Result<mpsc::Sender<Engine>> {
     let (tx, mut rx) = mpsc::channel(10);
 
-    let monitor_actor = monitor_indexes::new(db.clone(), tx.downgrade(), node_state).await?;
+    let monitor_actor =
+        monitor_indexes::new(db.clone(), tx.downgrade(), node_state, config_rx.clone()).await?;
     let memory_actor = memory::new(config_rx);
 
     tokio::spawn(
