@@ -282,6 +282,14 @@ pub async fn load_config(env: impl Fn(&str) -> anyhow::Result<String>) -> anyhow
             anyhow!("Unable to parse VECTOR_STORE_USEARCH_SIMULATOR env (search_us:add_us:delete_us:...): {err}")
         })).transpose()?;
 
+    config.alter_index_simulator = env("VECTOR_STORE_ALTER_INDEX_SIMULATOR")
+        .unwrap_or("false".into())
+        .trim()
+        .parse()
+        .or(Err(anyhow!(
+            "Unable to parse VECTOR_STORE_ALTER_INDEX_SIMULATOR env (true/false)"
+        )))?;
+
     config.credentials = credentials(&env).await?;
 
     // Load TLS configuration
@@ -530,6 +538,7 @@ mod tests {
             opensearch_addr: None,
             credentials: None,
             usearch_simulator: None,
+            alter_index_simulator: false,
             disable_colors: false,
             tls_cert_path: None,
             tls_key_path: None,
