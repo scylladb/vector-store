@@ -705,4 +705,155 @@ mod tests {
         set_valid_indexes(vec![true, false, true]);
         assert!(get_indexes(&db).await.is_err());
     }
+
+    #[test]
+    fn validate_should_delete() {
+        let idx = IndexMetadata {
+            keyspace_name: "ks".into(),
+            index_name: "idx".into(),
+            table_name: "tbl".into(),
+            target_column: "embedding".into(),
+            index_type: DbIndexType::Global,
+            filtering_columns: Arc::new(Vec::new()),
+            dimensions: NonZeroUsize::new(3).unwrap().into(),
+            connectivity: Default::default(),
+            expansion_add: Default::default(),
+            expansion_search: Default::default(),
+            space_type: Default::default(),
+            version: Uuid::new_v4().into(),
+            quantization: Default::default(),
+        };
+        assert!(should_delete(
+            &IndexMetadata { ..idx.clone() },
+            &HashSet::new()
+        ));
+        assert!(!should_delete(
+            &IndexMetadata { ..idx.clone() },
+            &[idx.clone()].into_iter().collect()
+        ));
+        assert!(should_delete(
+            &IndexMetadata {
+                version: Uuid::new_v4().into(),
+                ..idx.clone()
+            },
+            &[idx.clone()].into_iter().collect()
+        ));
+        assert!(should_delete(
+            &IndexMetadata {
+                expansion_add: 1.into(),
+                ..idx.clone()
+            },
+            &[idx.clone()].into_iter().collect()
+        ));
+    }
+
+    #[test]
+    fn validate_should_delete_simulator() {
+        let idx = IndexMetadata {
+            keyspace_name: "ks".into(),
+            index_name: "idx".into(),
+            table_name: "tbl".into(),
+            target_column: "embedding".into(),
+            index_type: DbIndexType::Global,
+            filtering_columns: Arc::new(Vec::new()),
+            dimensions: NonZeroUsize::new(3).unwrap().into(),
+            connectivity: Default::default(),
+            expansion_add: Default::default(),
+            expansion_search: Default::default(),
+            space_type: Default::default(),
+            version: Uuid::new_v4().into(),
+            quantization: Default::default(),
+        };
+        assert!(!should_delete_simulator(
+            &IndexMetadata { ..idx.clone() },
+            &HashSet::new()
+        ));
+        assert!(!should_delete_simulator(
+            &IndexMetadata { ..idx.clone() },
+            &[idx.clone()].into_iter().collect()
+        ));
+        assert!(!should_delete_simulator(
+            &IndexMetadata {
+                version: Uuid::new_v4().into(),
+                ..idx.clone()
+            },
+            &[idx.clone()].into_iter().collect()
+        ));
+        assert!(should_delete_simulator(
+            &IndexMetadata {
+                expansion_add: 1.into(),
+                ..idx.clone()
+            },
+            &[idx.clone()].into_iter().collect()
+        ));
+        assert!(should_delete_simulator(
+            &IndexMetadata {
+                expansion_add: 1.into(),
+                version: Uuid::new_v4().into(),
+                ..idx.clone()
+            },
+            &[idx.clone()].into_iter().collect()
+        ));
+    }
+
+    #[test]
+    fn validate_should_add() {
+        let idx = IndexMetadata {
+            keyspace_name: "ks".into(),
+            index_name: "idx".into(),
+            table_name: "tbl".into(),
+            target_column: "embedding".into(),
+            index_type: DbIndexType::Global,
+            filtering_columns: Arc::new(Vec::new()),
+            dimensions: NonZeroUsize::new(3).unwrap().into(),
+            connectivity: Default::default(),
+            expansion_add: Default::default(),
+            expansion_search: Default::default(),
+            space_type: Default::default(),
+            version: Uuid::new_v4().into(),
+            quantization: Default::default(),
+        };
+        assert!(should_add(
+            &IndexMetadata { ..idx.clone() },
+            &HashSet::new()
+        ));
+        assert!(!should_add(
+            &IndexMetadata { ..idx.clone() },
+            &[idx.clone()].into_iter().collect()
+        ));
+    }
+    #[test]
+
+    fn validate_should_add_simulator() {
+        let idx = IndexMetadata {
+            keyspace_name: "ks".into(),
+            index_name: "idx".into(),
+            table_name: "tbl".into(),
+            target_column: "embedding".into(),
+            index_type: DbIndexType::Global,
+            filtering_columns: Arc::new(Vec::new()),
+            dimensions: NonZeroUsize::new(3).unwrap().into(),
+            connectivity: Default::default(),
+            expansion_add: Default::default(),
+            expansion_search: Default::default(),
+            space_type: Default::default(),
+            version: Uuid::new_v4().into(),
+            quantization: Default::default(),
+        };
+        assert!(should_add_simulator(
+            &IndexMetadata { ..idx.clone() },
+            &HashSet::new()
+        ));
+        assert!(!should_add_simulator(
+            &IndexMetadata { ..idx.clone() },
+            &[idx.clone()].into_iter().collect()
+        ));
+        assert!(!should_add_simulator(
+            &IndexMetadata {
+                version: Uuid::new_v4().into(),
+                ..idx.clone()
+            },
+            &[idx.clone()].into_iter().collect()
+        ));
+    }
 }
