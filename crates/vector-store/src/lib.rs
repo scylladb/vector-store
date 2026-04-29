@@ -28,6 +28,7 @@ mod primary_key;
 mod similarity;
 mod table;
 mod timestamp;
+pub mod tls;
 mod vector;
 
 pub use crate::config_manager::ConfigManager;
