@@ -32,6 +32,8 @@ pub mod tls;
 mod vector;
 
 pub use crate::config_manager::ConfigManager;
+pub use crate::config_manager::ConfigReceivers;
+pub use crate::config_manager::HttpServerConfig;
 pub use crate::config_manager::load_config;
 pub use crate::distance::Distance;
 pub use crate::index_key::IndexKey;
@@ -635,7 +637,7 @@ pub async fn run(
     db_actor: Sender<Db>,
     internals: Sender<Internals>,
     index_factory: Box<dyn IndexFactory + Send + Sync>,
-    config_rx: watch::Receiver<Arc<Config>>,
+    receivers: ConfigReceivers,
 ) -> anyhow::Result<(impl Sized, SocketAddr)> {
     let metrics: Arc<Metrics> = Arc::new(metrics::Metrics::new());
     let index_engine_version = index_factory.index_engine_version();
@@ -646,13 +648,13 @@ pub async fn run(
             index_factory,
             node_state,
             metrics.clone(),
-            config_rx.clone(),
+            receivers.config,
         )
         .await?,
         metrics,
         internals,
         index_engine_version,
-        config_rx,
+        receivers.http,
     )
     .await
 }

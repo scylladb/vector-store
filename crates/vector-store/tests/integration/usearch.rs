@@ -4,6 +4,7 @@
  */
 
 use crate::Duration;
+use crate::create_config_channels;
 use crate::db_basic;
 use crate::db_basic::DbBasic;
 use crate::db_basic::ScanFn;
@@ -130,18 +131,18 @@ pub(crate) async fn setup_store_with_quantization(
 
     db.add_index(index.clone(), fullscan_fn, cdc_fn).unwrap();
 
-    let (config_tx, config_rx) = watch::channel(Arc::new(config));
-    let index_factory = vector_store::new_index_factory_usearch(config_rx.clone()).unwrap();
+    let (receivers, senders) = create_config_channels(config).await;
+    let index_factory = vector_store::new_index_factory_usearch(receivers.config.clone()).unwrap();
 
     let run = {
         let node_state = node_state.clone();
         async move {
             let (server, addr) =
-                vector_store::run(node_state, db_actor, internals, index_factory, config_rx)
+                vector_store::run(node_state, db_actor, internals, index_factory, receivers)
                     .await
                     .unwrap();
 
-            (HttpClient::new(addr), server, config_tx)
+            (HttpClient::new(addr), server, senders)
         }
     };
 
@@ -301,10 +302,9 @@ async fn failed_db_index_create() {
     let (_, rx) = watch::channel(Arc::new(Config::default()));
     let index_factory = vector_store::new_index_factory_usearch(rx).unwrap();
 
-    let (_config_tx, config_rx) = watch::channel(Arc::new(test_config()));
-
+    let (receivers, _senders) = create_config_channels(test_config()).await;
     let (_server_actor, addr) =
-        vector_store::run(node_state, db_actor, internals, index_factory, config_rx)
+        vector_store::run(node_state, db_actor, internals, index_factory, receivers)
             .await
             .unwrap();
 

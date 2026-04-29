@@ -3,7 +3,9 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+use crate::create_config_channels;
 use crate::db_basic;
+use crate::usearch::test_config;
 use httpapi::PostIndexAnnRequest;
 use rcgen::CertifiedKey;
 use reqwest::StatusCode;
@@ -36,17 +38,17 @@ async fn run_server(
         vector_store_addr: addr,
         tls_cert_path,
         tls_key_path,
-        ..Default::default()
+        ..test_config()
     };
 
-    let (_config_tx, config_rx) = watch::channel(Arc::new(config));
+    let (receivers, senders) = create_config_channels(config).await;
 
     let (server, addr) =
-        vector_store::run(node_state, db_actor, internals, index_factory, config_rx)
+        vector_store::run(node_state, db_actor, internals, index_factory, receivers)
             .await
             .unwrap();
 
-    (server, addr, _config_tx)
+    (server, addr, senders)
 }
 
 #[tokio::test]
@@ -64,7 +66,7 @@ async fn test_https_server_responds() {
     let cert_file = create_temp_file(cert.pem().as_bytes());
     let key_file = create_temp_file(signing_key.serialize_pem().as_bytes());
 
-    let (_server, addr, _config_tx) = run_server(
+    let (_server, addr, _config_senders) = run_server(
         addr,
         Some(cert_file.path().to_path_buf()),
         Some(key_file.path().to_path_buf()),
