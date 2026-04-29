@@ -17,6 +17,7 @@ use db_basic::Table;
 use futures::FutureExt;
 use futures::StreamExt;
 use futures::stream;
+use httpapi::IndexStatus;
 use httpclient::HttpClient;
 use scylla::cluster::metadata::NativeType;
 use scylla::value::CqlValue;
@@ -55,7 +56,6 @@ use vector_store::SpaceType;
 use vector_store::Timestamp;
 use vector_store::Vector;
 use vector_store::db::Db;
-use vector_store::httproutes::IndexStatus;
 use vector_store::node_state::NodeState;
 
 const ENV_CONCURRENCY: &str = "BENCHES_CONCURRENCY";
@@ -187,9 +187,13 @@ async fn run_vector_store(
     (server, HttpClient::new(addr))
 }
 
-async fn wait_until_index_is_created(client: &HttpClient, index_metadata: &IndexMetadata) {
+async fn wait_until_index_is_created(
+    client: &HttpClient,
+    keyspace_name: &httpapi::KeyspaceName,
+    index_name: &httpapi::IndexName,
+) {
     while client
-        .index_status(&index_metadata.keyspace_name, &index_metadata.index_name)
+        .index_status(keyspace_name, index_name)
         .await
         .is_err()
     {
@@ -197,9 +201,13 @@ async fn wait_until_index_is_created(client: &HttpClient, index_metadata: &Index
     }
 }
 
-async fn wait_until_index_is_ready(client: &HttpClient, index_metadata: &IndexMetadata) {
+async fn wait_until_index_is_ready(
+    client: &HttpClient,
+    keyspace_name: &httpapi::KeyspaceName,
+    index_name: &httpapi::IndexName,
+) {
     while client
-        .index_status(&index_metadata.keyspace_name, &index_metadata.index_name)
+        .index_status(keyspace_name, index_name)
         .await
         .map(|status| status.status != IndexStatus::Serving)
         .unwrap_or(true)
@@ -208,12 +216,12 @@ async fn wait_until_index_is_ready(client: &HttpClient, index_metadata: &IndexMe
     }
 }
 
-async fn wait_until_index_is_removed(client: &HttpClient, index_metadata: &IndexMetadata) {
-    while client
-        .index_status(&index_metadata.keyspace_name, &index_metadata.index_name)
-        .await
-        .is_ok()
-    {
+async fn wait_until_index_is_removed(
+    client: &HttpClient,
+    keyspace_name: &httpapi::KeyspaceName,
+    index_name: &httpapi::IndexName,
+) {
+    while client.index_status(keyspace_name, index_name).await.is_ok() {
         task::yield_now().await;
     }
 }
@@ -283,7 +291,9 @@ fn fullscan_add(c: &mut Criterion) {
                 let (tx, rx) = mpsc::channel(concurrency);
 
                 setup_index(&db, index_metadata.clone(), Some(scan_fn_mpsc(rx)), None);
-                wait_until_index_is_created(&client, &index_metadata).await;
+                let keyspace_name = index_metadata.keyspace_name.clone().into();
+                let index_name = index_metadata.index_name.clone().into();
+                wait_until_index_is_created(&client, &keyspace_name, &index_name).await;
 
                 tx_db_client.send((db, client, tx)).unwrap();
                 notify_stop.notified().await;
@@ -329,7 +339,13 @@ fn fullscan_add(c: &mut Criterion) {
 
     if let Some((runtime, notify_stop, db, client, _)) = LazyLock::get(&fixture) {
         delete_index(db, &index_metadata);
-        runtime.block_on(wait_until_index_is_removed(client, &index_metadata));
+        let keyspace_name = index_metadata.keyspace_name.clone().into();
+        let index_name = index_metadata.index_name.clone().into();
+        runtime.block_on(wait_until_index_is_removed(
+            client,
+            &keyspace_name,
+            &index_name,
+        ));
         notify_stop.notify_one();
         wait_until_all_tasks_finished(runtime);
     }
@@ -383,7 +399,9 @@ fn search(c: &mut Criterion) {
                 while rx_in_progress.recv().await.is_some() {}
 
                 drop(tx);
-                wait_until_index_is_ready(&client, &index_metadata).await;
+                let keyspace_name = index_metadata.keyspace_name.clone().into();
+                let index_name = index_metadata.index_name.clone().into();
+                wait_until_index_is_ready(&client, &keyspace_name, &index_name).await;
 
                 tx_client.send((db, client)).unwrap();
                 notify_stop.notified().await;
@@ -405,19 +423,14 @@ fn search(c: &mut Criterion) {
                 let client = client.clone();
                 async move {
                     run_with_concurrency(*concurrency, iters, move |it| {
-                        let index_metadata = index_metadata.clone();
+                        let keyspace_name = index_metadata.keyspace_name.clone().into();
+                        let index_name = index_metadata.index_name.clone().into();
                         let client = client.clone();
                         async move {
                             let vector = vec![it as f32; DIMENSIONS];
                             let start = Instant::now();
                             _ = client
-                                .ann(
-                                    &index_metadata.keyspace_name,
-                                    &index_metadata.index_name,
-                                    vector.into(),
-                                    None,
-                                    limit,
-                                )
+                                .ann(&keyspace_name, &index_name, vector.into(), None, limit)
                                 .await;
                             start.elapsed()
                         }
@@ -430,7 +443,13 @@ fn search(c: &mut Criterion) {
 
     if let Some((runtime, notify_stop, db, client)) = LazyLock::get(&fixture) {
         delete_index(db, &index_metadata);
-        runtime.block_on(wait_until_index_is_removed(client, &index_metadata));
+        let keyspace_name = index_metadata.keyspace_name.clone().into();
+        let index_name = index_metadata.index_name.clone().into();
+        runtime.block_on(wait_until_index_is_removed(
+            client,
+            &keyspace_name,
+            &index_name,
+        ));
         notify_stop.notify_one();
         wait_until_all_tasks_finished(runtime);
     }

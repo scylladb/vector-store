@@ -7,10 +7,10 @@ use crate::TestActors;
 use crate::common::*;
 use async_backtrace::framed;
 use e2etest::TestCase;
+use httpapi::IndexName;
+use httpapi::IndexStatus;
+use httpapi::KeyspaceName;
 use tracing::info;
-use vector_store::IndexName;
-use vector_store::KeyspaceName;
-use vector_store::httproutes::IndexStatus;
 
 #[framed]
 pub(crate) async fn new() -> TestCase<TestActors> {

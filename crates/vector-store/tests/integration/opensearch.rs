@@ -98,10 +98,12 @@ async fn simple_create_search_delete_index() {
     )
     .unwrap();
 
+    let keyspace_name = index.keyspace_name.clone().into();
+    let index_name = index.index_name.clone().into();
     wait_for(
         || async {
             client
-                .index_status(&index.keyspace_name, &index.index_name)
+                .index_status(&keyspace_name, &index_name)
                 .await
                 .expect("failed to get index status")
                 .count
@@ -113,12 +115,12 @@ async fn simple_create_search_delete_index() {
 
     let indexes = client.indexes().await;
     assert_eq!(indexes.len(), 1);
-    assert_eq!(indexes[0], vector_store::IndexInfo::new("vector", "ann"));
+    assert_eq!(indexes[0], httpapi::IndexInfo::new("vector", "ann"));
 
     let (primary_keys, distances, similarity_scores) = client
         .ann(
-            &index.keyspace_name,
-            &index.index_name,
+            &keyspace_name,
+            &index_name,
             vec![2.1, -2., 2.].into(),
             None,
             NonZeroUsize::new(1).unwrap().into(),

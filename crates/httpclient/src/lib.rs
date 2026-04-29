@@ -3,27 +3,26 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+use httpapi::ColumnName;
+use httpapi::Distance;
+use httpapi::IndexInfo;
+use httpapi::IndexName;
+use httpapi::IndexStatusResponse;
+use httpapi::InfoResponse;
+use httpapi::KeyspaceName;
+use httpapi::Limit;
+use httpapi::NodeStatus;
+use httpapi::PostIndexAnnFilter;
+use httpapi::PostIndexAnnRequest;
+use httpapi::PostIndexAnnResponse;
+use httpapi::SimilarityScore;
+use httpapi::Vector;
 use reqwest::Client;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use vector_store::ColumnName;
-use vector_store::IndexInfo;
-use vector_store::IndexName;
-use vector_store::KeyspaceName;
-use vector_store::Limit;
-use vector_store::SimilarityScore;
-use vector_store::Vector;
-use vector_store::httproutes::Distance;
-pub use vector_store::httproutes::IndexStatus;
-use vector_store::httproutes::IndexStatusResponse;
-use vector_store::httproutes::InfoResponse;
-use vector_store::httproutes::NodeStatus;
-use vector_store::httproutes::PostIndexAnnFilter;
-use vector_store::httproutes::PostIndexAnnRequest;
-use vector_store::httproutes::PostIndexAnnResponse;
 
 #[derive(Debug, Clone)]
 pub struct HttpClient {

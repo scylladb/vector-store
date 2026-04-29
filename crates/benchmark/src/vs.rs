@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+use httpapi::IndexStatus;
 use httpclient::HttpClient;
-use httpclient::IndexStatus;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::time;

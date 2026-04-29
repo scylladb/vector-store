@@ -7,7 +7,7 @@ fn main() -> anyhow::Result<()> {
     let default_path = String::from("openapi.json");
     let pathname = args.get(1).unwrap_or(&default_path);
 
-    let json = serde_json::to_string_pretty(&vector_store::httproutes::api())?;
+    let json = serde_json::to_string_pretty(&vector_store::openapi())?;
 
     let mut file = fs::File::create(pathname)?;
     writeln!(file, "{}", json)?;

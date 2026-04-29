@@ -1669,6 +1669,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9171a2ea8a68358193d15dd5d70c1c10a2afc3e7e4c5bc92bc9f025cebd7359c"
 
 [[package]]
+name = "httpapi"
+version = "0.0.0-dev"
+dependencies = [
+ "derive_more",
+ "macros",
+ "serde",
+ "serde_json",
+ "utoipa",
+]
+
+[[package]]
 name = "httparse"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1679,10 +1690,10 @@ name = "httpclient"
 version = "0.0.0-dev"
 dependencies = [
  "anyhow",
+ "httpapi",
  "reqwest",
  "serde",
  "serde_json",
- "vector-store",
 ]
 
 [[package]]
@@ -4283,6 +4294,7 @@ dependencies = [
  "arrow-array",
  "clap",
  "futures",
+ "httpapi",
  "httpclient",
  "humantime",
  "itertools 0.14.0",
@@ -4305,6 +4317,7 @@ dependencies = [
  "async-backtrace",
  "bcrypt",
  "clap",
+ "derive_more",
  "e2etest",
  "e2etest-dns",
  "e2etest-firewall",
@@ -4312,6 +4325,7 @@ dependencies = [
  "e2etest-scylla-proxy-cluster",
  "e2etest-tls",
  "e2etest-vector-store-cluster",
+ "httpapi",
  "httpclient",
  "itertools 0.14.0",
  "rustls",
@@ -4323,7 +4337,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
- "vector-store",
 ]
 
 [[package]]
@@ -4343,10 +4356,10 @@ dependencies = [
  "derive_more",
  "dotenvy",
  "futures",
+ "httpapi",
  "httpclient",
  "humantime",
  "itertools 0.14.0",
- "macros",
  "mimalloc",
  "mockall",
  "ntest",

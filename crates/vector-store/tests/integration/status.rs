@@ -6,9 +6,9 @@
 use crate::usearch;
 use crate::usearch::test_config;
 use crate::wait_for;
+use httpapi::NodeStatus;
 use scylla::cluster::metadata::NativeType;
 use vector_store::DbIndexType;
-use vector_store::httproutes::NodeStatus;
 
 #[tokio::test]
 async fn status_is_serving_after_creation() {

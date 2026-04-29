@@ -8,17 +8,16 @@ use crate::usearch::setup_store_with_quantization;
 use crate::usearch::test_config;
 use crate::wait_for;
 use crate::wait_for_value;
+use httpapi::DataType;
+use httpapi::PostIndexAnnFilter;
+use httpapi::PostIndexAnnRestriction;
 use scylla::value::CqlValue;
 use std::num::NonZeroUsize;
 use vector_store::ColumnName;
-use vector_store::DataType;
 use vector_store::DbIndexType;
 use vector_store::Distance;
 use vector_store::Quantization;
 use vector_store::Timestamp;
-use vector_store::httproutes;
-use vector_store::httproutes::PostIndexAnnFilter;
-use vector_store::httproutes::PostIndexAnnRestriction;
 
 #[tokio::test]
 // This test verifies that quantization is applied correctly by observing its effect on search results.
@@ -43,7 +42,7 @@ async fn quantization_is_effectively_applied() {
         quantization: Quantization,
         add_vector: Vec<f32>,
         search_vector: Vec<f32>,
-    ) -> httproutes::Distance {
+    ) -> httpapi::Distance {
         let values = [(
             [CqlValue::Int(1)].into(),
             Some(add_vector.into()),
@@ -65,10 +64,12 @@ async fn quantization_is_effectively_applied() {
         )
         .await;
         let (client, _server, _config_tx) = run.await;
+        let keyspace_name = index.keyspace_name.clone().into();
+        let index_name = index.index_name.clone().into();
         wait_for(
             || async {
                 client
-                    .index_status(&index.keyspace_name, &index.index_name)
+                    .index_status(&keyspace_name, &index_name)
                     .await
                     .is_ok_and(|s| s.count == values_len)
             },
@@ -78,8 +79,8 @@ async fn quantization_is_effectively_applied() {
 
         let (_, distances, _) = client
             .ann(
-                &index.keyspace_name,
-                &index.index_name,
+                &keyspace_name,
+                &index_name,
                 search_vector.into(),
                 None,
                 NonZeroUsize::new(1).unwrap().into(),
@@ -145,12 +146,14 @@ async fn quantization_is_returned_as_index_data_type() {
 
         let (client, _server, _config) = run.await;
 
+        let keyspace_name = index.keyspace_name.clone().into();
+        let index_name = index.index_name.clone().into();
         let index_info = wait_for_value(
             || async {
                 let indexes = client.indexes().await;
-                indexes.into_iter().find(|idx| {
-                    idx.keyspace == index.keyspace_name && idx.index == index.index_name
-                })
+                indexes
+                    .into_iter()
+                    .find(|idx| idx.keyspace == keyspace_name && idx.index == index_name)
             },
             "Waiting for index to be added to the store",
         )
@@ -188,14 +191,16 @@ async fn search_with_quantization(quantization: Quantization, filter: Option<Pos
 
     let (client, _server, _config_tx) = run.await;
 
+    let keyspace_name = index.keyspace_name.clone().into();
+    let index_name = index.index_name.clone().into();
     // expect to find the inserted vector as the nearest neighbor
     // with distance 0.0 as we are searching for the same vector
     wait_for(
         || async {
             client
                 .ann(
-                    &index.keyspace_name,
-                    &index.index_name,
+                    &keyspace_name,
+                    &index_name,
                     vector.clone().into(),
                     filter.clone(),
                     NonZeroUsize::new(1).unwrap().into(),
@@ -244,7 +249,7 @@ async fn can_search_with_filter_when_quantization_is_enabled() {
     ];
 
     let pk_value = 1;
-    let pk_column: ColumnName = "pk".into();
+    let pk_column: httpapi::ColumnName = "pk".into();
 
     for quantization in quantizations {
         search_with_quantization(
@@ -292,14 +297,16 @@ async fn binary_quantization_with_non_divisible_by_8_dimensions() {
 
     let (client, _server, _config_tx) = run.await;
 
+    let keyspace_name = index.keyspace_name.clone().into();
+    let index_name = index.index_name.clone().into();
     // expect to find the inserted vector as the nearest neighbor
     // with distance 0.0 as we are searching for the same vector
     wait_for(
         || async {
             client
                 .ann(
-                    &index.keyspace_name,
-                    &index.index_name,
+                    &keyspace_name,
+                    &index_name,
                     vector.clone().into(),
                     None,
                     NonZeroUsize::new(1).unwrap().into(),

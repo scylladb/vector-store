@@ -11,6 +11,7 @@ use e2etest_firewall::FirewallExt;
 use e2etest_scylla_cluster::ScyllaClusterExt;
 use e2etest_scylla_proxy_cluster::ScyllaProxyClusterExt;
 use e2etest_vector_store_cluster::VectorStoreClusterExt;
+use httpapi::IndexStatus;
 use scylla_proxy::Condition;
 use scylla_proxy::Reaction;
 use scylla_proxy::RequestReaction;
@@ -18,7 +19,6 @@ use scylla_proxy::RequestRule;
 use std::time::Duration;
 use tap::Pipe;
 use tracing::info;
-use vector_store::httproutes::IndexStatus;
 
 const FRAME_DELAY: Duration = Duration::from_millis(100);
 const DATASET_SIZE: i32 = 100;

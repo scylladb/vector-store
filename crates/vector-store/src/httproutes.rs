@@ -3,17 +3,12 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
-use crate::ColumnName;
 use crate::Filter;
 use crate::IndexKey;
-use crate::IndexName;
-use crate::KeyspaceName;
-use crate::Limit;
 use crate::Progress;
 use crate::Quantization;
 use crate::Restriction;
 use crate::SimilarityScore;
-use crate::Vector;
 use crate::db_index::DbIndexExt;
 use crate::distance;
 use crate::engine::Engine;
@@ -26,6 +21,7 @@ use crate::internals::InternalsExt;
 use crate::metrics::Metrics;
 use crate::node_state::NodeState;
 use crate::node_state::NodeStateExt;
+use crate::vector;
 use anyhow::anyhow;
 use anyhow::bail;
 use axum::Router;
@@ -43,8 +39,9 @@ use axum::response::Response;
 use axum::routing::get;
 use axum::routing::put;
 use axum_server_dual_protocol::Protocol;
+use httpapi::DataType;
+use httpapi::IndexInfo;
 use itertools::Itertools;
-use macros::ToEnumSchema;
 use prometheus::Encoder;
 use prometheus::ProtobufEncoder;
 use prometheus::TextEncoder;
@@ -56,6 +53,7 @@ use serde_json::Number;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::num::NonZero;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use time::Date;
@@ -97,8 +95,8 @@ use utoipa_swagger_ui::SwaggerUi;
     ),
     components(
         schemas(
-            KeyspaceName,
-            IndexName
+            httpapi::KeyspaceName,
+            httpapi::IndexName
         )
     ),
 )]
@@ -158,19 +156,40 @@ fn new_open_api_router() -> (Router<RoutesInnerState>, utoipa::openapi::OpenApi)
         .split_for_parts()
 }
 
-#[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema, PartialEq, Debug)]
-/// Data type and precision used for storing and processing vectors in the index.
-pub enum DataType {
-    /// 32-bit single-precision IEEE 754 floating-point.
-    F32,
-    /// 16-bit standard half-precision floating-point (IEEE 754).
-    F16,
-    /// 16-bit "Brain" floating-point.
-    BF16,
-    /// 8-bit signed integer.
-    I8,
-    /// 1-bit binary value (packed 8 per byte).
-    B1,
+impl From<crate::ColumnName> for httpapi::ColumnName {
+    fn from(value: crate::ColumnName) -> Self {
+        Self::from(<crate::ColumnName as Into<String>>::into(value))
+    }
+}
+
+impl From<httpapi::ColumnName> for crate::ColumnName {
+    fn from(value: httpapi::ColumnName) -> Self {
+        Self::from(<httpapi::ColumnName as Into<String>>::into(value))
+    }
+}
+
+impl From<crate::KeyspaceName> for httpapi::KeyspaceName {
+    fn from(value: crate::KeyspaceName) -> Self {
+        Self::from(<crate::KeyspaceName as Into<String>>::into(value))
+    }
+}
+
+impl From<httpapi::KeyspaceName> for crate::KeyspaceName {
+    fn from(value: httpapi::KeyspaceName) -> Self {
+        Self::from(<httpapi::KeyspaceName as Into<String>>::into(value))
+    }
+}
+
+impl From<crate::IndexName> for httpapi::IndexName {
+    fn from(value: crate::IndexName) -> Self {
+        Self::from(<crate::IndexName as Into<String>>::into(value))
+    }
+}
+
+impl From<httpapi::IndexName> for crate::IndexName {
+    fn from(value: httpapi::IndexName) -> Self {
+        Self::from(<httpapi::IndexName as Into<String>>::into(value))
+    }
 }
 
 impl From<Quantization> for DataType {
@@ -185,21 +204,21 @@ impl From<Quantization> for DataType {
     }
 }
 
-#[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema, PartialEq, Debug)]
-/// Information about a vector index, such as keyspace, name and data type.
-pub struct IndexInfo {
-    pub keyspace: KeyspaceName,
-    pub index: IndexName,
-    pub data_type: DataType,
+impl From<httpapi::Limit> for crate::Limit {
+    fn from(limit: httpapi::Limit) -> Self {
+        Self::from(<httpapi::Limit as Into<NonZeroUsize>>::into(limit))
+    }
 }
 
-impl IndexInfo {
-    pub fn new(keyspace: &str, index: &str) -> Self {
-        IndexInfo {
-            keyspace: String::from(keyspace).into(),
-            index: String::from(index).into(),
-            data_type: DataType::F32,
-        }
+impl From<httpapi::Vector> for vector::Vector {
+    fn from(vector: httpapi::Vector) -> Self {
+        Self::from(<httpapi::Vector as Into<Vec<f32>>>::into(vector))
+    }
+}
+
+impl From<crate::SimilarityScore> for httpapi::SimilarityScore {
+    fn from(value: crate::SimilarityScore) -> Self {
+        Self::from(<crate::SimilarityScore as Into<f32>>::into(value))
     }
 }
 
@@ -226,8 +245,8 @@ async fn get_indexes(State(state): State<RoutesInnerState>) -> Response {
         .await
         .iter()
         .map(|(key, quantization)| IndexInfo {
-            keyspace: key.keyspace(),
-            index: key.index(),
+            keyspace: key.keyspace().into(),
+            index: key.index().into(),
             data_type: (*quantization).into(),
         })
         .collect();
@@ -238,32 +257,14 @@ async fn get_indexes(State(state): State<RoutesInnerState>) -> Response {
 #[derive(utoipa::ToSchema)]
 struct ErrorMessage(#[allow(dead_code)] String);
 
-#[derive(ToEnumSchema, serde::Deserialize, serde::Serialize, PartialEq, Debug)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-/// Operational status of the vector index.
-pub enum IndexStatus {
-    /// The index has been discovered and is being initialized.
-    Initializing,
-    /// The index is performing the initial full scan of the underlying table to populate the index.
-    Bootstrapping,
-    /// The index has completed the initial table scan. It is now monitoring the database for changes.
-    Serving,
-}
-
-impl From<crate::node_state::IndexStatus> for IndexStatus {
+impl From<crate::node_state::IndexStatus> for httpapi::IndexStatus {
     fn from(status: crate::node_state::IndexStatus) -> Self {
         match status {
-            crate::node_state::IndexStatus::Initializing => IndexStatus::Initializing,
-            crate::node_state::IndexStatus::FullScanning => IndexStatus::Bootstrapping,
-            crate::node_state::IndexStatus::Serving => IndexStatus::Serving,
+            crate::node_state::IndexStatus::Initializing => httpapi::IndexStatus::Initializing,
+            crate::node_state::IndexStatus::FullScanning => httpapi::IndexStatus::Bootstrapping,
+            crate::node_state::IndexStatus::Serving => httpapi::IndexStatus::Serving,
         }
     }
-}
-
-#[derive(Debug, serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
-pub struct IndexStatusResponse {
-    pub status: IndexStatus,
-    pub count: usize,
 }
 
 #[utoipa::path(
@@ -274,15 +275,15 @@ pub struct IndexStatusResponse {
     The response includes the index's state and the total number of vectors currently indexed (excluding tombstoned or deleted entries). \
     This endpoint enables clients to monitor index readiness and data availability for search operations.",
     params(
-        ("keyspace" = KeyspaceName, Path, description = "The name of the ScyllaDB keyspace containing the vector index."),
-        ("index" = IndexName, Path, description = "The name of the ScyllaDB vector index within the specified keyspace to check status of.")
+        ("keyspace" = httpapi::KeyspaceName, Path, description = "The name of the ScyllaDB keyspace containing the vector index."),
+        ("index" = httpapi::IndexName, Path, description = "The name of the ScyllaDB vector index within the specified keyspace to check status of.")
     ),
     responses(
         (
             status = 200,
             description = "Successful operation. Returns the current operational status of the specified vector index, including its state \
             and the total number of vectors currently indexed.",
-            body = IndexStatusResponse,
+            body = httpapi::IndexStatusResponse,
             content_type = "application/json",
             example = json!({
                 "status": "SERVING",
@@ -305,8 +306,10 @@ pub struct IndexStatusResponse {
 )]
 async fn get_index_status(
     State(state): State<RoutesInnerState>,
-    Path((keyspace_name, index_name)): Path<(KeyspaceName, IndexName)>,
+    Path((keyspace_name, index_name)): Path<(httpapi::KeyspaceName, httpapi::IndexName)>,
 ) -> Response {
+    let keyspace_name: crate::KeyspaceName = keyspace_name.into();
+    let index_name: crate::IndexName = index_name.into();
     let index_key = IndexKey::new(&keyspace_name, &index_name);
     let Some((index, _)) = state.engine.get_index(index_key.clone()).await else {
         let msg = format!("missing index: {keyspace_name}.{index_name}");
@@ -326,8 +329,8 @@ async fn get_index_status(
             }
             Ok(count) => (
                 StatusCode::OK,
-                response::Json(IndexStatusResponse {
-                    status: IndexStatus::from(index_status),
+                response::Json(httpapi::IndexStatusResponse {
+                    status: index_status.into(),
                     count,
                 }),
             )
@@ -345,8 +348,8 @@ async fn get_metrics(
     headers: HeaderMap,
 ) -> impl IntoResponse {
     for (keyspace_str, index_name_str) in state.metrics.take_dirty_indexes() {
-        let keyspace = KeyspaceName::from(keyspace_str);
-        let index_name = IndexName::from(index_name_str);
+        let keyspace = crate::KeyspaceName::from(keyspace_str);
+        let index_name = crate::IndexName::from(index_name_str);
         let key = IndexKey::new(&keyspace, &index_name);
         if let Some((index, _)) = state.engine.get_index(key.clone()).await
             && let Ok(count) = index.count(key).await
@@ -387,112 +390,17 @@ async fn get_metrics(
     (StatusCode::OK, response_headers, buffer)
 }
 
-/// A filter restriction used in ANN search requests.
-#[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema, Clone)]
-#[serde(tag = "type")]
-pub enum PostIndexAnnRestriction {
-    #[serde(rename = "==")]
-    Eq { lhs: ColumnName, rhs: Value },
-    #[serde(rename = "IN")]
-    In { lhs: ColumnName, rhs: Vec<Value> },
-    #[serde(rename = "<")]
-    Lt { lhs: ColumnName, rhs: Value },
-    #[serde(rename = "<=")]
-    Lte { lhs: ColumnName, rhs: Value },
-    #[serde(rename = ">")]
-    Gt { lhs: ColumnName, rhs: Value },
-    #[serde(rename = ">=")]
-    Gte { lhs: ColumnName, rhs: Value },
-    #[serde(rename = "()==()")]
-    EqTuple {
-        lhs: Vec<ColumnName>,
-        rhs: Vec<Value>,
-    },
-    #[serde(rename = "()IN()")]
-    InTuple {
-        lhs: Vec<ColumnName>,
-        rhs: Vec<Vec<Value>>,
-    },
-    #[serde(rename = "()<()")]
-    LtTuple {
-        lhs: Vec<ColumnName>,
-        rhs: Vec<Value>,
-    },
-    #[serde(rename = "()<=()")]
-    LteTuple {
-        lhs: Vec<ColumnName>,
-        rhs: Vec<Value>,
-    },
-    #[serde(rename = "()>()")]
-    GtTuple {
-        lhs: Vec<ColumnName>,
-        rhs: Vec<Value>,
-    },
-    #[serde(rename = "()>=()")]
-    GteTuple {
-        lhs: Vec<ColumnName>,
-        rhs: Vec<Value>,
-    },
-}
-
-/// A filter used in ANN search requests.
-#[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema, Clone)]
-pub struct PostIndexAnnFilter {
-    /// A list of filter restrictions.
-    pub restrictions: Vec<PostIndexAnnRestriction>,
-
-    /// Indicates whether 'ALLOW FILTERING' was specified in the Cql query.
-    #[serde(default)]
-    pub allow_filtering: bool,
-}
-
-#[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
-pub struct PostIndexAnnRequest {
-    pub vector: Vector,
-    pub filter: Option<PostIndexAnnFilter>,
-    #[serde(default)]
-    pub limit: Limit,
-}
-
-#[derive(
-    Copy,
-    Debug,
-    Clone,
-    PartialEq,
-    serde::Deserialize,
-    derive_more::Deref,
-    derive_more::AsRef,
-    utoipa::ToSchema,
-    serde::Serialize,
-    PartialOrd,
-)]
-/// Distance between vectors measured using the distance function defined while creating the index.
-pub struct Distance(f32);
-
-impl From<distance::DistanceValue> for Distance {
+impl From<distance::DistanceValue> for httpapi::Distance {
     fn from(v: distance::DistanceValue) -> Self {
-        Self(v.into())
+        Self::from(<distance::DistanceValue as Into<f32>>::into(v))
     }
 }
 
-impl From<distance::Distance> for Distance {
+impl From<distance::Distance> for httpapi::Distance {
     fn from(d: distance::Distance) -> Self {
         let val: distance::DistanceValue = d.into();
         val.into()
     }
-}
-
-impl From<Distance> for f32 {
-    fn from(val: Distance) -> Self {
-        val.0
-    }
-}
-
-#[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
-pub struct PostIndexAnnResponse {
-    pub primary_keys: HashMap<ColumnName, Vec<Value>>,
-    pub distances: Vec<Distance>,
-    pub similarity_scores: Vec<SimilarityScore>,
 }
 
 #[utoipa::path(
@@ -505,15 +413,15 @@ The maximum number of results is controlled by the optional 'limit' parameter in
 The similarity metric is determined at index creation and cannot be changed per query. \
 If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
     params(
-        ("keyspace" = KeyspaceName, Path, description = "The name of the ScyllaDB keyspace containing the vector index."),
-        ("index" = IndexName, Path, description = "The name of the ScyllaDB vector index within the specified keyspace to perform the search on.")
+        ("keyspace" = httpapi::KeyspaceName, Path, description = "The name of the ScyllaDB keyspace containing the vector index."),
+        ("index" = httpapi::IndexName, Path, description = "The name of the ScyllaDB vector index within the specified keyspace to perform the search on.")
     ),
-    request_body = PostIndexAnnRequest,
+    request_body = httpapi::PostIndexAnnRequest,
     responses(
         (
             status = 200,
             description = "Successful ANN search. Returns a list of primary keys and their corresponding distances and similarity scores for the most similar vectors found.",
-            body = PostIndexAnnResponse
+            body = httpapi::PostIndexAnnResponse
         ),
         (
             status = 400,
@@ -550,9 +458,11 @@ If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
 async fn post_index_ann(
     State(state): State<RoutesInnerState>,
     extensions: Extensions,
-    Path((keyspace, index_name)): Path<(KeyspaceName, IndexName)>,
-    extract::Json(request): extract::Json<PostIndexAnnRequest>,
+    Path((keyspace, index_name)): Path<(httpapi::KeyspaceName, httpapi::IndexName)>,
+    extract::Json(request): extract::Json<httpapi::PostIndexAnnRequest>,
 ) -> Response {
+    let keyspace: crate::KeyspaceName = keyspace.into();
+    let index_name: crate::IndexName = index_name.into();
     if state.use_tls
         && extensions
             .get::<Protocol>()
@@ -604,10 +514,17 @@ async fn post_index_ann(
             }
         };
         index
-            .filtered_ann(index_key, request.vector, filter, request.limit)
+            .filtered_ann(
+                index_key,
+                request.vector.into(),
+                filter,
+                request.limit.into(),
+            )
             .await
     } else {
-        index.ann(index_key, request.vector, request.limit).await
+        index
+            .ann(index_key, request.vector.into(), request.limit.into())
+            .await
     };
 
     // Record duration in Prometheus
@@ -632,9 +549,11 @@ async fn post_index_ann(
                 debug!("post_index_ann: {msg}");
                 (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
             } else {
-                let similarity_scores: Vec<SimilarityScore> = distances
+                let similarity_scores: Vec<httpapi::SimilarityScore> = distances
                     .iter()
-                    .map(|distance| SimilarityScore::from(*distance))
+                    .map(|distance| (*distance).into())
+                    .map(|distance: f32| SimilarityScore::from(distance))
+                    .map(httpapi::SimilarityScore::from)
                     .collect();
 
                 let primary_keys: anyhow::Result<_> = primary_key_columns
@@ -662,7 +581,7 @@ async fn post_index_ann(
                             .map_ok(try_to_json)
                             .map(|primary_key| primary_key.flatten())
                             .collect();
-                        primary_keys.map(|primary_keys| (column, primary_keys))
+                        primary_keys.map(|primary_keys| (column.into(), primary_keys))
                     })
                     .collect();
 
@@ -674,7 +593,7 @@ async fn post_index_ann(
 
                     Ok(primary_keys) => (
                         StatusCode::OK,
-                        response::Json(PostIndexAnnResponse {
+                        response::Json(httpapi::PostIndexAnnResponse {
                             primary_keys,
                             distances: distances.into_iter().map(|d| d.into()).collect(),
                             similarity_scores,
@@ -688,11 +607,11 @@ async fn post_index_ann(
 }
 
 fn try_from_post_index_ann_filter(
-    json_filter: PostIndexAnnFilter,
-    primary_key_columns: &[ColumnName],
-    table_columns: &HashMap<ColumnName, NativeType>,
+    json_filter: httpapi::PostIndexAnnFilter,
+    primary_key_columns: &[crate::ColumnName],
+    table_columns: &HashMap<crate::ColumnName, NativeType>,
 ) -> anyhow::Result<Filter> {
-    let is_same_len = |columns: &[ColumnName], values: &[Value]| -> anyhow::Result<()> {
+    let is_same_len = |columns: &[crate::ColumnName], values: &[Value]| -> anyhow::Result<()> {
         if columns.len() != values.len() {
             bail!(
                 "Length of column tuple {columns:?} ({columns_len}) does not match length of values tuple ({values_len})",
@@ -702,7 +621,7 @@ fn try_from_post_index_ann_filter(
         }
         Ok(())
     };
-    let from_json = |column: &ColumnName, value: Value| -> anyhow::Result<CqlValue> {
+    let from_json = |column: &crate::ColumnName, value: Value| -> anyhow::Result<CqlValue> {
         if !primary_key_columns.contains(column) {
             bail!("Filtering on non primary key columns is not supported");
         };
@@ -719,34 +638,53 @@ fn try_from_post_index_ann_filter(
             .into_iter()
             .map(|restriction| -> anyhow::Result<Restriction> {
                 Ok(match restriction {
-                    PostIndexAnnRestriction::Eq { lhs, rhs } => Restriction::Eq {
-                        rhs: from_json(&lhs, rhs)?,
-                        lhs,
-                    },
-                    PostIndexAnnRestriction::In { lhs, rhs } => Restriction::In {
-                        rhs: rhs
-                            .into_iter()
-                            .map(|rhs| from_json(&lhs, rhs))
-                            .collect::<anyhow::Result<_>>()?,
-                        lhs,
-                    },
-                    PostIndexAnnRestriction::Lt { lhs, rhs } => Restriction::Lt {
-                        rhs: from_json(&lhs, rhs)?,
-                        lhs,
-                    },
-                    PostIndexAnnRestriction::Lte { lhs, rhs } => Restriction::Lte {
-                        rhs: from_json(&lhs, rhs)?,
-                        lhs,
-                    },
-                    PostIndexAnnRestriction::Gt { lhs, rhs } => Restriction::Gt {
-                        rhs: from_json(&lhs, rhs)?,
-                        lhs,
-                    },
-                    PostIndexAnnRestriction::Gte { lhs, rhs } => Restriction::Gte {
-                        rhs: from_json(&lhs, rhs)?,
-                        lhs,
-                    },
-                    PostIndexAnnRestriction::EqTuple { lhs, rhs } => {
+                    httpapi::PostIndexAnnRestriction::Eq { lhs, rhs } => {
+                        let lhs = lhs.into();
+                        Restriction::Eq {
+                            rhs: from_json(&lhs, rhs)?,
+                            lhs,
+                        }
+                    }
+                    httpapi::PostIndexAnnRestriction::In { lhs, rhs } => {
+                        let lhs = lhs.into();
+                        Restriction::In {
+                            rhs: rhs
+                                .into_iter()
+                                .map(|rhs| from_json(&lhs, rhs))
+                                .collect::<anyhow::Result<_>>()?,
+                            lhs,
+                        }
+                    }
+                    httpapi::PostIndexAnnRestriction::Lt { lhs, rhs } => {
+                        let lhs = lhs.into();
+                        Restriction::Lt {
+                            rhs: from_json(&lhs, rhs)?,
+                            lhs,
+                        }
+                    }
+                    httpapi::PostIndexAnnRestriction::Lte { lhs, rhs } => {
+                        let lhs = lhs.into();
+                        Restriction::Lte {
+                            rhs: from_json(&lhs, rhs)?,
+                            lhs,
+                        }
+                    }
+                    httpapi::PostIndexAnnRestriction::Gt { lhs, rhs } => {
+                        let lhs = lhs.into();
+                        Restriction::Gt {
+                            rhs: from_json(&lhs, rhs)?,
+                            lhs,
+                        }
+                    }
+                    httpapi::PostIndexAnnRestriction::Gte { lhs, rhs } => {
+                        let lhs = lhs.into();
+                        Restriction::Gte {
+                            rhs: from_json(&lhs, rhs)?,
+                            lhs,
+                        }
+                    }
+                    httpapi::PostIndexAnnRestriction::EqTuple { lhs, rhs } => {
+                        let lhs = lhs.into_iter().map(crate::ColumnName::from).collect_vec();
                         is_same_len(&lhs, &rhs)?;
                         Restriction::EqTuple {
                             rhs: rhs
@@ -757,20 +695,24 @@ fn try_from_post_index_ann_filter(
                             lhs,
                         }
                     }
-                    PostIndexAnnRestriction::InTuple { lhs, rhs } => Restriction::InTuple {
-                        rhs: rhs
-                            .into_iter()
-                            .map(|rhs| {
-                                is_same_len(&lhs, &rhs)?;
-                                rhs.into_iter()
-                                    .enumerate()
-                                    .map(|(idx, rhs)| from_json(&lhs[idx], rhs))
-                                    .collect::<anyhow::Result<_>>()
-                            })
-                            .collect::<anyhow::Result<_>>()?,
-                        lhs,
-                    },
-                    PostIndexAnnRestriction::LtTuple { lhs, rhs } => {
+                    httpapi::PostIndexAnnRestriction::InTuple { lhs, rhs } => {
+                        let lhs = lhs.into_iter().map(crate::ColumnName::from).collect_vec();
+                        Restriction::InTuple {
+                            rhs: rhs
+                                .into_iter()
+                                .map(|rhs| {
+                                    is_same_len(&lhs, &rhs)?;
+                                    rhs.into_iter()
+                                        .enumerate()
+                                        .map(|(idx, rhs)| from_json(&lhs[idx], rhs))
+                                        .collect::<anyhow::Result<_>>()
+                                })
+                                .collect::<anyhow::Result<_>>()?,
+                            lhs,
+                        }
+                    }
+                    httpapi::PostIndexAnnRestriction::LtTuple { lhs, rhs } => {
+                        let lhs = lhs.into_iter().map(crate::ColumnName::from).collect_vec();
                         is_same_len(&lhs, &rhs)?;
                         Restriction::LtTuple {
                             rhs: rhs
@@ -781,7 +723,8 @@ fn try_from_post_index_ann_filter(
                             lhs,
                         }
                     }
-                    PostIndexAnnRestriction::LteTuple { lhs, rhs } => {
+                    httpapi::PostIndexAnnRestriction::LteTuple { lhs, rhs } => {
+                        let lhs = lhs.into_iter().map(crate::ColumnName::from).collect_vec();
                         is_same_len(&lhs, &rhs)?;
                         Restriction::LteTuple {
                             rhs: rhs
@@ -792,7 +735,8 @@ fn try_from_post_index_ann_filter(
                             lhs,
                         }
                     }
-                    PostIndexAnnRestriction::GtTuple { lhs, rhs } => {
+                    httpapi::PostIndexAnnRestriction::GtTuple { lhs, rhs } => {
+                        let lhs = lhs.into_iter().map(crate::ColumnName::from).collect_vec();
                         is_same_len(&lhs, &rhs)?;
                         Restriction::GtTuple {
                             rhs: rhs
@@ -803,7 +747,8 @@ fn try_from_post_index_ann_filter(
                             lhs,
                         }
                     }
-                    PostIndexAnnRestriction::GteTuple { lhs, rhs } => {
+                    httpapi::PostIndexAnnRestriction::GteTuple { lhs, rhs } => {
+                        let lhs = lhs.into_iter().map(crate::ColumnName::from).collect_vec();
                         is_same_len(&lhs, &rhs)?;
                         Restriction::GteTuple {
                             rhs: rhs
@@ -994,55 +939,31 @@ fn try_from_json(value: Value, cql_type: &NativeType) -> anyhow::Result<CqlValue
     }
 }
 
-#[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
-pub struct InfoResponse {
-    /// Information about the underlying search engine.
-    pub engine: String,
-    /// The name of the Vector Store indexing service.
-    pub service: String,
-    /// The version of the Vector Store indexing service.
-    pub version: String,
-}
-
 #[utoipa::path(
     get,
     path = "/api/v1/info",
     tag = "scylla-vector-store-info",
     description = "Returns information about the Vector Store indexing service serving this API.",
     responses(
-        (status = 200, description = "Vector Store indexing service information.", body = InfoResponse)
+        (status = 200, description = "Vector Store indexing service information.", body = httpapi::InfoResponse)
     )
 )]
-async fn get_info(State(state): State<RoutesInnerState>) -> response::Json<InfoResponse> {
-    response::Json(InfoResponse {
+async fn get_info(State(state): State<RoutesInnerState>) -> response::Json<httpapi::InfoResponse> {
+    response::Json(httpapi::InfoResponse {
         version: Info::version().to_string(),
         service: Info::name().to_string(),
         engine: state.index_engine_version.clone(),
     })
 }
 
-#[derive(ToEnumSchema, serde::Deserialize, serde::Serialize, PartialEq, Debug)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-/// Operational status of the Vector Store indexing service.
-pub enum NodeStatus {
-    /// The node is starting up.
-    Initializing,
-    /// The node is establishing a connection to ScyllaDB.
-    ConnectingToDb,
-    /// The node is discovering available vector indexes in ScyllaDB.
-    Bootstrapping,
-    /// The node has completed the initial database scan and built the indexes defined at that time. It is now monitoring the database for changes.
-    Serving,
-}
-
-impl From<crate::node_state::NodeStatus> for NodeStatus {
+impl From<crate::node_state::NodeStatus> for httpapi::NodeStatus {
     fn from(status: crate::node_state::NodeStatus) -> Self {
         match status {
-            crate::node_state::NodeStatus::Initializing => NodeStatus::Initializing,
-            crate::node_state::NodeStatus::ConnectingToDb => NodeStatus::ConnectingToDb,
-            crate::node_state::NodeStatus::IndexingEmbeddings => NodeStatus::Bootstrapping,
-            crate::node_state::NodeStatus::DiscoveringIndexes => NodeStatus::Bootstrapping,
-            crate::node_state::NodeStatus::Serving => NodeStatus::Serving,
+            crate::node_state::NodeStatus::Initializing => httpapi::NodeStatus::Initializing,
+            crate::node_state::NodeStatus::ConnectingToDb => httpapi::NodeStatus::ConnectingToDb,
+            crate::node_state::NodeStatus::IndexingEmbeddings => httpapi::NodeStatus::Bootstrapping,
+            crate::node_state::NodeStatus::DiscoveringIndexes => httpapi::NodeStatus::Bootstrapping,
+            crate::node_state::NodeStatus::Serving => httpapi::NodeStatus::Serving,
         }
     }
 }
@@ -1053,13 +974,15 @@ impl From<crate::node_state::NodeStatus> for NodeStatus {
     tag = "scylla-vector-store-info",
     description = "Returns the current operational status of the Vector Store indexing service.",
     responses(
-        (status = 200, description = "Successful operation. Returns the current operational status of the Vector Store indexing service.", body = NodeStatus),
+        (status = 200, description = "Successful operation. Returns the current operational status of the Vector Store indexing service.", body = httpapi::NodeStatus),
     )
 )]
 async fn get_status(State(state): State<RoutesInnerState>) -> Response {
     (
         StatusCode::OK,
-        response::Json(NodeStatus::from(state.node_state.get_status().await)),
+        response::Json(httpapi::NodeStatus::from(
+            state.node_state.get_status().await,
+        )),
     )
         .into_response()
 }
@@ -1687,40 +1610,40 @@ mod tests {
     #[test]
     fn node_status_conversion() {
         assert_eq!(
-            NodeStatus::from(crate::node_state::NodeStatus::Initializing),
-            NodeStatus::Initializing
+            httpapi::NodeStatus::from(crate::node_state::NodeStatus::Initializing),
+            httpapi::NodeStatus::Initializing
         );
         assert_eq!(
-            NodeStatus::from(crate::node_state::NodeStatus::ConnectingToDb),
-            NodeStatus::ConnectingToDb
+            httpapi::NodeStatus::from(crate::node_state::NodeStatus::ConnectingToDb),
+            httpapi::NodeStatus::ConnectingToDb
         );
         assert_eq!(
-            NodeStatus::from(crate::node_state::NodeStatus::IndexingEmbeddings),
-            NodeStatus::Bootstrapping
+            httpapi::NodeStatus::from(crate::node_state::NodeStatus::IndexingEmbeddings),
+            httpapi::NodeStatus::Bootstrapping
         );
         assert_eq!(
-            NodeStatus::from(crate::node_state::NodeStatus::DiscoveringIndexes),
-            NodeStatus::Bootstrapping
+            httpapi::NodeStatus::from(crate::node_state::NodeStatus::DiscoveringIndexes),
+            httpapi::NodeStatus::Bootstrapping
         );
         assert_eq!(
-            NodeStatus::from(crate::node_state::NodeStatus::Serving),
-            NodeStatus::Serving
+            httpapi::NodeStatus::from(crate::node_state::NodeStatus::Serving),
+            httpapi::NodeStatus::Serving
         );
     }
 
     #[test]
     fn index_status_conversion() {
         assert_eq!(
-            IndexStatus::from(crate::node_state::IndexStatus::Initializing),
-            IndexStatus::Initializing
+            httpapi::IndexStatus::from(crate::node_state::IndexStatus::Initializing),
+            httpapi::IndexStatus::Initializing
         );
         assert_eq!(
-            IndexStatus::from(crate::node_state::IndexStatus::FullScanning),
-            IndexStatus::Bootstrapping
+            httpapi::IndexStatus::from(crate::node_state::IndexStatus::FullScanning),
+            httpapi::IndexStatus::Bootstrapping
         );
         assert_eq!(
-            IndexStatus::from(crate::node_state::IndexStatus::Serving),
-            IndexStatus::Serving
+            httpapi::IndexStatus::from(crate::node_state::IndexStatus::Serving),
+            httpapi::IndexStatus::Serving
         );
     }
 }

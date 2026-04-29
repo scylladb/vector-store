@@ -11,19 +11,12 @@ use crate::SpaceType;
     Debug,
     Clone,
     PartialEq,
-    serde::Deserialize,
     derive_more::Deref,
     derive_more::AsRef,
-    serde::Serialize,
+    derive_more::Into,
     PartialOrd,
 )]
 pub struct DistanceValue(f32);
-
-impl From<DistanceValue> for f32 {
-    fn from(v: DistanceValue) -> Self {
-        v.0
-    }
-}
 
 impl From<Distance> for DistanceValue {
     fn from(distance: Distance) -> Self {
@@ -36,7 +29,7 @@ impl From<Distance> for DistanceValue {
     }
 }
 
-#[derive(Copy, Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize, PartialOrd)]
+#[derive(Copy, Debug, Clone, PartialEq, PartialOrd)]
 pub enum Distance {
     Euclidean(DistanceValue),
     Cosine(DistanceValue),

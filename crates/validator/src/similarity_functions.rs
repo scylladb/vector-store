@@ -8,6 +8,7 @@ use crate::common;
 use crate::common::*;
 use async_backtrace::framed;
 use e2etest::TestCase;
+use httpapi::IndexInfo;
 use tracing::info;
 
 #[framed]
@@ -76,7 +77,7 @@ async fn run_similarity_function_test(
                 )
                 .await
                 .expect("failed to create an index");
-            vector_store::IndexInfo::new(keyspace.as_ref(), index_name.as_ref())
+            IndexInfo::new(keyspace.as_ref(), index_name.as_ref())
         }
         None => create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await,
     };

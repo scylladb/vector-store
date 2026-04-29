@@ -11,6 +11,7 @@ license.workspace = true
 arrow-array.workspace = true
 clap.workspace = true
 futures.workspace = true
+httpapi.workspace = true
 httpclient.workspace = true
 humantime.workspace = true
 itertools.workspace = true
