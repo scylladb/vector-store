@@ -9,6 +9,8 @@ use crate::httproutes;
 use crate::internals::Internals;
 use crate::metrics::Metrics;
 use crate::node_state::NodeState;
+use crate::tls;
+use crate::tls::TlsServerConfig;
 use axum_server::Handle;
 use axum_server::accept::NoDelayAcceptor;
 use axum_server::tls_rustls::RustlsConfig;
@@ -31,15 +33,14 @@ struct ServerDeps {
 }
 
 async fn load_tls_config(config: &Config) -> anyhow::Result<Option<RustlsConfig>> {
-    match (&config.tls_cert_path, &config.tls_key_path) {
-        (Some(cert_path), Some(key_path)) => {
-            let config = RustlsConfig::from_pem_file(cert_path, key_path)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to load TLS config: {e}"))?;
-            Ok(Some(config))
-        }
-        _ => Ok(None),
-    }
+    let (Some(cert_path), Some(key_path)) = (&config.tls_cert_path, &config.tls_key_path) else {
+        return Ok(None);
+    };
+    let identity = tls::ServerIdentity::new(cert_path, key_path)?;
+    let tls_config = TlsServerConfig::new(&identity)?;
+    Ok(Some(RustlsConfig::from_config(Arc::clone(
+        tls_config.server_config(),
+    ))))
 }
 
 fn protocol(tls_config: &Option<RustlsConfig>) -> &'static str {
