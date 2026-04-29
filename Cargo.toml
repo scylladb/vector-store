@@ -13,6 +13,11 @@ license = "LicenseRef-ScyllaDB-Source-Available-1.0"
 
 [workspace.dependencies]
 anyhow = "1.0.97"
+aws-config = "1"
+aws-credential-types = "1"
+aws-sdk-dynamodb = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-smithy-runtime-api = "1"
+aws-smithy-types = "1"
 arrow-array = "56.0.0"
 async-backtrace = "0.2.7"
 async-trait = "0.1.88"
@@ -36,6 +41,7 @@ e2etest-tls = { path = "crates/e2etest-tls" }
 e2etest-vector-store-cluster = { path = "crates/e2etest-vector-store-cluster" }
 futures = "0.3.31"
 hickory-server = "0.25.2"
+http = "1"
 httpapi = { path = "crates/httpapi" }
 httpclient = { path = "crates/httpclient" }
 humantime = "2.2.0"

@@ -522,7 +522,7 @@ static KEYSPACE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static TABLE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static INDEX_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-fn unique_name(prefix: &str, counter: &AtomicUsize) -> String {
+pub fn unique_name(prefix: &str, counter: &AtomicUsize) -> String {
     format!(
         "{prefix}_{counter}",
         counter = counter.fetch_add(1, Ordering::Relaxed)
