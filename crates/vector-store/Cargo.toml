@@ -22,9 +22,12 @@ harness = false
 [features]
 default = []
 dev-tools = []
+hotpath = ["hotpath/hotpath"]
+console = ["console-subscriber"]
 
 [dependencies]
 anyhow.workspace = true
+async-channel.workspace = true
 async-trait.workspace = true
 axum.workspace = true
 axum-server.workspace = true
@@ -32,10 +35,12 @@ axum-server-dual-protocol.workspace = true
 clap.workspace = true
 chrono.workspace = true
 const-hex.workspace = true
+console-subscriber = {workspace = true, optional = true}
 dashmap.workspace = true
 derive_more.workspace = true
 dotenvy.workspace = true
 futures.workspace = true
+hotpath.workspace = true
 humantime.workspace = true
 itertools.workspace = true
 macros.workspace = true
@@ -64,9 +69,9 @@ utoipa.workspace = true
 utoipa-axum.workspace = true
 utoipa-swagger-ui.workspace = true
 uuid.workspace = true
-rayon.workspace = true
 
 [dev-dependencies]
+axum-test.workspace = true
 criterion.workspace = true
 mockall.workspace = true
 ntest.workspace = true
@@ -74,5 +79,6 @@ reqwest.workspace = true
 httpclient.workspace = true
 tempfile.workspace = true
 temp-env = "0.3.6"
+testclient.workspace = true
 tracing-test.workspace = true
 rcgen.workspace = true

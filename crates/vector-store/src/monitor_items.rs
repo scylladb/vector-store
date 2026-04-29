@@ -9,6 +9,7 @@ use crate::IndexKey;
 use crate::Metrics;
 use crate::index::Index;
 use crate::index::IndexExt;
+use crate::perf;
 use crate::table::Operation;
 use crate::table::TableAdd;
 use std::sync::Arc;
@@ -30,12 +31,10 @@ pub(crate) async fn new(
     index: Sender<Index>,
     metrics: Arc<Metrics>,
 ) -> anyhow::Result<Sender<MonitorItems>> {
-    // The value was taken from initial benchmarks
-    const CHANNEL_SIZE: usize = 10;
-    let (tx, mut rx) = mpsc::channel(CHANNEL_SIZE);
+    let (tx, mut rx) = mpsc::channel(perf::channel_size());
     let key_for_span = key.clone();
 
-    tokio::spawn(
+    tokio::spawn(perf::hotpath_async(
         async move {
             debug!("starting");
 
@@ -54,7 +53,7 @@ pub(crate) async fn new(
             debug!("finished");
         }
         .instrument(error_span!("monitor items", "{key_for_span}")),
-    );
+    ));
     Ok(tx)
 }
 

@@ -100,12 +100,13 @@ async fn simple_create_search_delete_index() {
 
     wait_for(
         || async {
-            client
+            let Ok(status) = client
                 .index_status(&index.keyspace_name, &index.index_name)
                 .await
-                .expect("failed to get index status")
-                .count
-                == 3
+            else {
+                return false;
+            };
+            status.count == 3
         },
         "Waiting for index to be added to the store",
     )

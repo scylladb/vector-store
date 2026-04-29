@@ -15,14 +15,17 @@ license = "LicenseRef-ScyllaDB-Source-Available-1.0"
 anyhow = "1.0.97"
 arrow-array = "56.0.0"
 async-backtrace = "0.2.7"
+async-channel = "2.5.0"
 async-trait = "0.1.88"
-axum = { version = "0.8.1", features = ["macros"] }
-axum-server = { version = "0.7.2", features = ["tls-rustls"] }
-axum-server-dual-protocol = "0.7.0"
+axum = { version = "0.8.8", features = ["macros"] }
+axum-server = { version = "0.8.0", features = ["tls-rustls"] }
+axum-server-dual-protocol = "0.8.0"
+axum-test = "20.0.0"
 bcrypt = "0.15"
 const-hex = "1.18.1"
 clap = { version = "4.5.40", features = ["derive"] }
 chrono = "0.4.43"
+console-subscriber = "0.5.0"
 criterion = { version = "0.8.2", features = ["async_tokio"] }
 dashmap = "6.1.0"
 derive_more = { version = "2.0.1", features = ["full"] }
@@ -36,6 +39,7 @@ e2etest-tls = { path = "crates/e2etest-tls" }
 e2etest-vector-store-cluster = { path = "crates/e2etest-vector-store-cluster" }
 futures = "0.3.31"
 hickory-server = "0.25.2"
+hotpath = { version = "0.15.0", features = ["tokio", "futures", "async-channel"] }
 httpclient = { path = "crates/httpclient" }
 humantime = "2.2.0"
 itertools = "0.14.0"
@@ -50,7 +54,7 @@ opensearch = { version = "2.3.0", default-features = false, features = ["rustls-
 parquet = { version = "56.0.0", features = ["async"] }
 prometheus = "0.14"
 quote = "1.0"
-rand = "0.9.2"
+rand = "0.10.1"
 rcgen = "0.14.5"
 regex = "1.11.1"
 reqwest = { version = "0.12.15", default-features = false, features = ["json", "rustls-tls"] }
@@ -63,6 +67,7 @@ syn = { version = "2.0", features = ["full"] }
 sysinfo = "0.37.2"
 tap = "1.0.1"
 tempfile = "3.20.0"
+testclient = { path = "crates/testclient" }
 thiserror = "2.0.12"
 time = { version = "0.3.41", features = ["formatting", "parsing"] }
 tokio = { version = "1.44.2", features = ["full"] }
@@ -79,4 +84,6 @@ utoipa-swagger-ui = { version = "9.0.0", features = ["axum", "vendored"] }
 uuid = "1.16.0"
 vector-store = { path = "crates/vector-store" }
 secrecy = "0.10.3"
-rayon = "1.11.0"
+
+[patch.crates-io]
+axum-server-dual-protocol = { git = "https://github.com/vinchona/axum-server-dual-protocol", rev = "ca6db055254255b74238673ce4135698e347d71c" }

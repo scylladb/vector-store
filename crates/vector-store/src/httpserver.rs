@@ -9,6 +9,7 @@ use crate::httproutes;
 use crate::internals::Internals;
 use crate::metrics::Metrics;
 use crate::node_state::NodeState;
+use axum::Router;
 use axum_server::Handle;
 use axum_server::accept::NoDelayAcceptor;
 use axum_server::tls_rustls::RustlsConfig;
@@ -17,10 +18,28 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
+use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio::time;
 
-pub(crate) enum HttpServer {}
+pub enum HttpServer {
+    Router { tx: oneshot::Sender<Router> },
+}
+
+pub trait HttpServerExt {
+    fn router(&self) -> impl Future<Output = Router>;
+}
+
+impl HttpServerExt for Sender<HttpServer> {
+    async fn router(&self) -> Router {
+        let (tx, rx) = oneshot::channel();
+        self.send(HttpServer::Router { tx })
+            .await
+            .expect("HttpServerExt::router: internal actor should receive request");
+        rx.await
+            .expect("HttpServerExt::router: internal actor should send response")
+    }
+}
 
 async fn load_tls_config(config: &Config) -> anyhow::Result<Option<RustlsConfig>> {
     match (&config.tls_cert_path, &config.tls_key_path) {
@@ -50,7 +69,7 @@ async fn spawn_server_with_retry(
     metrics: Arc<Metrics>,
     internals: Sender<Internals>,
     index_engine_version: String,
-) -> anyhow::Result<(Handle, SocketAddr)> {
+) -> anyhow::Result<(Handle<SocketAddr>, SocketAddr, Router)> {
     let mut retry_delay = Duration::from_millis(50);
     let max_retries = 10;
 
@@ -106,7 +125,7 @@ pub(crate) async fn new(
     let initial_config = config_rx.borrow().clone();
 
     // Start initial server and get actual bound address
-    let (initial_handle, actual_addr) = spawn_server_with_retry(
+    let (initial_handle, actual_addr, mut router) = spawn_server_with_retry(
         &initial_config,
         state.clone(),
         engine.clone(),
@@ -131,9 +150,14 @@ pub(crate) async fn new(
 
             loop {
                 tokio::select! {
-                    result = rx.recv() => {
-                        if result.is_none() {
+                    msg = rx.recv() => {
+                        let Some(msg) = msg else {
                             break;
+                        };
+                        match msg {
+                            HttpServer::Router { tx } => {
+                                _ = tx.send(router.clone());
+                            }
                         }
                     }
                     result = config_rx.changed() => {
@@ -184,11 +208,12 @@ pub(crate) async fn new(
                             )
                             .await
                             {
-                                Ok((handle, new_actual_addr)) => {
+                                Ok((handle, new_actual_addr, new_router)) => {
                                     current_handle = handle;
                                     current_addr = new_config.vector_store_addr;
                                     current_tls_cert = new_config.tls_cert_path.clone();
                                     current_tls_key = new_config.tls_key_path.clone();
+                                    router = new_router;
 
                                     let protocol = if new_config.tls_cert_path.is_some() { "HTTPS" } else { "HTTP" };
                                     tracing::info!("{} server reloaded successfully on {}", protocol, new_actual_addr);
@@ -223,48 +248,53 @@ async fn spawn_server(
     metrics: Arc<Metrics>,
     internals: Sender<Internals>,
     index_engine_version: String,
-) -> anyhow::Result<(Handle, SocketAddr)> {
+) -> anyhow::Result<(Handle<SocketAddr>, SocketAddr, Router)> {
     let tls_config = load_tls_config(config).await?;
     let protocol = protocol(&tls_config);
     let addr = config.vector_store_addr;
 
     let handle = Handle::new();
 
+    let router = match tls_config {
+        Some(_) => {
+            httproutes::new(
+                engine,
+                metrics,
+                state,
+                internals,
+                index_engine_version,
+                true,
+            )
+            .await
+        }
+        _ => {
+            httproutes::new(
+                engine,
+                metrics,
+                state,
+                internals,
+                index_engine_version,
+                false,
+            )
+            .await
+        }
+    };
     tokio::spawn({
         let handle = handle.clone();
+        let router = router.clone();
         async move {
             let result = match tls_config {
                 Some(tls_config) => {
                     axum_server_dual_protocol::bind_dual_protocol(addr, tls_config)
                         .handle(handle)
-                        .serve(
-                            httproutes::new(
-                                engine,
-                                metrics,
-                                state,
-                                internals,
-                                index_engine_version,
-                                true,
-                            )
-                            .into_make_service(),
-                        )
+                        .serve(router.into_make_service())
                         .await
                 }
                 _ => {
                     axum_server::bind(addr)
                         .handle(handle)
                         .acceptor(NoDelayAcceptor::new())
-                        .serve(
-                            httproutes::new(
-                                engine,
-                                metrics,
-                                state,
-                                internals,
-                                index_engine_version,
-                                false,
-                            )
-                            .into_make_service(),
-                        )
+                        .serve(router.into_make_service())
                         .await
                 }
             };
@@ -281,5 +311,5 @@ async fn spawn_server(
             "server failed to start - listening notification not received"
         ))?;
 
-    Ok((handle, actual_addr))
+    Ok((handle, actual_addr, router))
 }

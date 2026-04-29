@@ -18,6 +18,7 @@ use crate::index::actor::Index;
 use crate::index::factory::IndexConfiguration;
 use crate::index::validator;
 use crate::memory::Memory;
+use crate::perf;
 use crate::table::IndexIdGenerator;
 use crate::table::PrimaryId;
 use crate::table::Table;
@@ -219,9 +220,7 @@ pub fn new(
     client: Arc<OpenSearch>,
 ) -> anyhow::Result<mpsc::Sender<Index>> {
     info!("Creating new index with key: {key}");
-    // TODO: The value of channel size was taken from initial benchmarks. Needs more testing
-    const CHANNEL_SIZE: usize = 10;
-    let (tx, mut rx) = mpsc::channel(CHANNEL_SIZE);
+    let (tx, mut rx) = mpsc::channel(perf::channel_size());
 
     tokio::spawn({
         let cloned_key = key.clone();
