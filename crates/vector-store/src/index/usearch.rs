@@ -136,7 +136,6 @@ enum Mode {
 
 trait UsearchIndex {
     fn reserve(&self, size: usize) -> anyhow::Result<()>;
-    fn size(&self) -> usize;
     fn capacity(&self) -> usize;
     fn add(&self, primary_id: PrimaryId, vector: &Vector) -> anyhow::Result<()>;
     fn remove(&self, primary_id: PrimaryId) -> anyhow::Result<()>;
@@ -182,10 +181,6 @@ impl UsearchIndex for ThreadedUsearchIndex {
 
     fn capacity(&self) -> usize {
         self.inner.capacity()
-    }
-
-    fn size(&self) -> usize {
-        self.inner.size()
     }
 
     fn add(&self, primary_id: PrimaryId, vector: &Vector) -> anyhow::Result<()> {
@@ -371,11 +366,6 @@ impl UsearchIndex for RwLock<Simulator> {
     }
 
     #[hotpath::measure]
-    fn size(&self) -> usize {
-        self.read().unwrap().keys.read().unwrap().len()
-    }
-
-    #[hotpath::measure]
     fn add(&self, row_id: PrimaryId, _: &Vector) -> anyhow::Result<()> {
         let start = Instant::now();
 
@@ -446,11 +436,6 @@ impl UsearchIndex for RwLock<Simulator> {
 // The value was taken for initial benchmarks (size similar to benchmark size)
 const RESERVE_INCREMENT_GLOBAL: usize = 1000000;
 const RESERVE_INCREMENT_LOCAL: usize = 1000;
-
-// When free space for index vectors drops below this, will reserve more space
-// The ratio was taken for initial benchmarks
-const RESERVE_THRESHOLD_GLOBAL: usize = RESERVE_INCREMENT_GLOBAL / 3;
-const RESERVE_THRESHOLD_LOCAL: usize = RESERVE_INCREMENT_LOCAL / 3;
 
 struct MetricConfig {
     quantization: Quantization,
@@ -627,30 +612,15 @@ mod operation {
         pub(super) async fn permit_for_reserve(&mut self) -> Permit {
             self.permit(Mode::Reserve).await
         }
-
-        /// Capacity and size permit cannot be concurrent only with reserve mode.
-        #[hotpath::measure]
-        pub(super) async fn permit_for_capacity_and_size(&mut self) -> Permit {
-            while self.mode == Mode::Reserve {
-                if self.counter.load(Ordering::Relaxed) == 0 {
-                    // checking for capacity is during add, so insert mode is fine
-                    self.mode = Mode::Insert;
-                    break;
-                }
-                self.notify.notified().await;
-            }
-
-            self.counter.fetch_add(1, Ordering::Relaxed);
-            Permit {
-                notify: Arc::clone(&self.notify),
-                counter: Arc::clone(&self.counter),
-            }
-        }
     }
 }
 
 struct PartitionState<I: UsearchIndex + Send + Sync + 'static> {
     partition_id: PartitionId,
+    size: Arc<AtomicUsize>,
+    capacity: Arc<AtomicUsize>,
+    capacity_increment: usize,
+    free_threshold: usize,
     idx: Arc<I>,
 }
 
@@ -659,7 +629,31 @@ where
     I: UsearchIndex + Send + Sync + 'static,
 {
     fn new(partition_id: PartitionId, idx: Arc<I>) -> Self {
-        Self { partition_id, idx }
+        let capacity_increment = if partition_id.index_id().is_global() {
+            RESERVE_INCREMENT_GLOBAL
+        } else {
+            RESERVE_INCREMENT_LOCAL
+        };
+        Self {
+            partition_id,
+            size: Arc::new(AtomicUsize::new(0)),
+            capacity: Arc::new(AtomicUsize::new(0)),
+            capacity_increment,
+            free_threshold: perf::channel_size().into(),
+            idx,
+        }
+    }
+
+    fn needs_more_capacity(&self) -> Option<usize> {
+        let capacity = self.capacity.load(Ordering::Relaxed);
+        let size = self.size.load(Ordering::Relaxed);
+        let free_space = capacity - size;
+
+        if free_space < self.free_threshold {
+            Some(capacity + self.capacity_increment)
+        } else {
+            None
+        }
     }
 
     fn stop(&self) {
@@ -904,21 +898,18 @@ async fn dispatch_task<I, T>(
     I: UsearchIndex + Send + Sync + 'static,
     T: TableSearch + Send + Sync + 'static,
 {
-    if let Index::AddVector { .. } = &msg {
-        let operation_permit = state.operation.permit_for_capacity_and_size().await;
-        let is_global = partition.partition_id.index_id().is_global();
-        if needs_more_capacity(partition.idx.as_ref(), is_global).is_some() {
-            drop(operation_permit);
-            let operation_permit = state.operation.permit_for_reserve().await;
-            if let Some(capacity) = needs_more_capacity(partition.idx.as_ref(), is_global) {
-                let idx = Arc::clone(&partition.idx);
-                worker
-                    .spawn_blocking(move || {
-                        reserve(idx.as_ref(), capacity);
-                        drop(operation_permit);
-                    })
-                    .await;
-            }
+    if let Index::AddVector { .. } = &msg
+        && partition.needs_more_capacity().is_some()
+    {
+        let operation_permit = state.operation.permit_for_reserve().await;
+        if let Some(capacity) = partition.needs_more_capacity() {
+            let partiton = Arc::clone(&partition);
+            worker
+                .spawn_blocking(move || {
+                    reserve(&partiton, capacity);
+                    drop(operation_permit);
+                })
+                .await;
         }
     }
 
@@ -930,7 +921,7 @@ async fn dispatch_task<I, T>(
     if is_non_blocking(&msg) {
         worker
             .spawn_non_blocking(move || {
-                process(partition, table, dimensions, size, msg);
+                process(&partition, table, dimensions, size, msg);
                 drop(operation_permit);
             })
             .await;
@@ -938,7 +929,7 @@ async fn dispatch_task<I, T>(
     }
     worker
         .spawn_blocking(move || {
-            process(partition, table, dimensions, size, msg);
+            process(&partition, table, dimensions, size, msg);
             drop(operation_permit);
         })
         .await;
@@ -951,7 +942,7 @@ fn is_non_blocking(msg: &Index) -> bool {
 
 #[hotpath::measure]
 fn process<I, T>(
-    partition: Arc<PartitionState<I>>,
+    partition: &PartitionState<I>,
     table: Arc<RwLock<T>>,
     dimensions: Dimensions,
     size: Arc<AtomicUsize>,
@@ -966,7 +957,7 @@ fn process<I, T>(
             embedding,
             in_progress: _in_progress,
             ..
-        } => add(partition.idx.as_ref(), primary_id, &embedding, &size),
+        } => add(partition, primary_id, &embedding, &size),
 
         Index::Ann {
             embedding,
@@ -997,53 +988,53 @@ fn process<I, T>(
             primary_id,
             in_progress: _in_progress,
             ..
-        } => remove(partition.idx.as_ref(), primary_id, &size),
+        } => remove(partition, primary_id, &size),
 
         Index::RemovePartition { .. } => unreachable!(),
     }
 }
 
 #[hotpath::measure]
-fn reserve(idx: &impl UsearchIndex, capacity: usize) {
-    let result = idx.reserve(capacity);
+fn reserve<I>(partition: &PartitionState<I>, capacity: usize)
+where
+    I: UsearchIndex + Send + Sync + 'static,
+{
+    let result = partition.idx.reserve(capacity);
     if let Err(err) = &result {
         error!("unable to reserve index capacity for {capacity} in usearch: {err}");
     } else {
-        debug!("reserve: reserved index capacity for {capacity}");
+        let actual_capacity = partition.idx.capacity();
+        debug!("reserve: reserved index capacity for {actual_capacity}");
+        partition.capacity.store(actual_capacity, Ordering::Relaxed);
     }
 }
 
 #[hotpath::measure]
-fn needs_more_capacity(idx: &impl UsearchIndex, is_global: bool) -> Option<usize> {
-    let capacity = idx.capacity();
-    let free_space = capacity - idx.size();
-    let (increment, threshold) = if is_global {
-        (RESERVE_INCREMENT_GLOBAL, RESERVE_THRESHOLD_GLOBAL)
-    } else {
-        (RESERVE_INCREMENT_LOCAL, RESERVE_THRESHOLD_LOCAL)
-    };
-
-    if free_space < threshold {
-        Some(capacity + increment)
-    } else {
-        None
-    }
-}
-
-#[hotpath::measure]
-fn add(idx: &impl UsearchIndex, primary_id: PrimaryId, embedding: &Vector, size: &AtomicUsize) {
-    if let Err(err) = idx.add(primary_id, embedding) {
+fn add<I>(
+    partition: &PartitionState<I>,
+    primary_id: PrimaryId,
+    embedding: &Vector,
+    size: &AtomicUsize,
+) where
+    I: UsearchIndex + Send + Sync + 'static,
+{
+    if let Err(err) = partition.idx.add(primary_id, embedding) {
         warn!("add: unable to add embedding: {err}");
     } else {
+        partition.size.fetch_add(1, Ordering::Relaxed);
         size.fetch_add(1, Ordering::Relaxed);
     }
 }
 
 #[hotpath::measure]
-fn remove(idx: &impl UsearchIndex, row_id: PrimaryId, size: &AtomicUsize) {
-    if let Err(err) = idx.remove(row_id) {
+fn remove<I>(partition: &PartitionState<I>, row_id: PrimaryId, size: &AtomicUsize)
+where
+    I: UsearchIndex + Send + Sync + 'static,
+{
+    if let Err(err) = partition.idx.remove(row_id) {
         warn!("remove: unable to remove embeddings: {err}");
     } else {
+        partition.size.fetch_sub(1, Ordering::Relaxed);
         size.fetch_sub(1, Ordering::Relaxed);
     }
 }
@@ -1066,7 +1057,7 @@ fn validate_dimensions(
 
 #[hotpath::measure]
 fn ann<I>(
-    partition: Arc<PartitionState<I>>,
+    partition: &PartitionState<I>,
     tx_ann: oneshot::Sender<AnnR>,
     table: &Arc<RwLock<impl TableSearch>>,
     embedding: Vector,
@@ -1106,7 +1097,7 @@ fn ann<I>(
 
 #[hotpath::measure]
 fn filtered_ann<I>(
-    partition: Arc<PartitionState<I>>,
+    partition: &PartitionState<I>,
     tx_ann: oneshot::Sender<AnnR>,
     table: &Arc<RwLock<impl TableSearch>>,
     embedding: Vector,
