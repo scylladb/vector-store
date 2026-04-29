@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+use crate::create_config_channels;
 use crate::usearch::test_config;
 use crate::{db_basic, mock_opensearch};
 use httpclient::HttpClient;
@@ -17,13 +18,12 @@ async fn run_vs(
     let internals = vector_store::new_internals();
     let (db_actor, _) = db_basic::new(node_state.clone());
 
-    let (_config_tx, config_rx) = watch::channel(Arc::new(test_config()));
-
+    let (receivers, _transmitters) = create_config_channels(test_config());
     let (server, addr) =
-        vector_store::run(node_state, db_actor, internals, index_factory, config_rx)
+        vector_store::run(node_state, db_actor, internals, index_factory, receivers)
             .await
             .unwrap();
-    (HttpClient::new(addr), server, _config_tx)
+    (HttpClient::new(addr), server, _transmitters)
 }
 
 #[tokio::test]

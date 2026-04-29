@@ -13,6 +13,7 @@ use std::sync::Arc;
 use tempfile::NamedTempFile;
 use tokio::sync::watch;
 use vector_store::Config;
+use vector_store::ConfigManager;
 use vector_store::httproutes::PostIndexAnnRequest;
 
 fn create_temp_file<C: AsRef<[u8]>>(content: C) -> NamedTempFile {
@@ -39,14 +40,14 @@ async fn run_server(
         ..Default::default()
     };
 
-    let (_config_tx, config_rx) = watch::channel(Arc::new(config));
+    let (config_manager, receivers) = ConfigManager::new(config).unwrap();
 
     let (server, addr) =
-        vector_store::run(node_state, db_actor, internals, index_factory, config_rx)
+        vector_store::run(node_state, db_actor, internals, index_factory, receivers)
             .await
             .unwrap();
 
-    (server, addr, _config_tx)
+    (server, addr, config_manager)
 }
 
 #[tokio::test]

@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+use crate::create_config_channels;
 use crate::db_basic;
 use crate::db_basic::Table;
 use crate::usearch::test_config;
@@ -13,7 +14,6 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 use sysinfo::System;
-use tokio::sync::watch;
 use tracing::info;
 use uuid::Uuid;
 use vector_store::Config;
@@ -108,12 +108,12 @@ async fn memory_limit_during_index_build() {
         ..test_config()
     };
 
-    let (_config_tx, config_rx) = watch::channel(Arc::new(config));
-    let index_factory = vector_store::new_index_factory_usearch(config_rx.clone()).unwrap();
+    let (receivers, _transmitters) = create_config_channels(config);
+    let index_factory = vector_store::new_index_factory_usearch(receivers.config.clone()).unwrap();
 
     let node_state = node_state.clone();
     let (_server, addr) =
-        vector_store::run(node_state, db_actor, internals, index_factory, config_rx)
+        vector_store::run(node_state, db_actor, internals, index_factory, receivers)
             .await
             .unwrap();
 

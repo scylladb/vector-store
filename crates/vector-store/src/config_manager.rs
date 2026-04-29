@@ -5,22 +5,65 @@
 
 use crate::Config;
 use crate::Credentials;
+use crate::tls;
+use crate::tls::TlsServerConfig;
 use anyhow::anyhow;
 use anyhow::bail;
 use itertools::Itertools;
 use secrecy::ExposeSecret;
+use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
 
+#[derive(Clone, PartialEq)]
+pub struct HttpServerConfig {
+    pub addr: SocketAddr,
+    pub tls: Option<TlsServerConfig>,
+}
+
+impl HttpServerConfig {
+    pub(crate) fn protocol_label(&self) -> &'static str {
+        match &self.tls {
+            None => "HTTP",
+            Some(_) => "HTTPS",
+        }
+    }
+}
+
+pub struct ConfigReceivers {
+    pub config: watch::Receiver<Arc<Config>>,
+    pub http: watch::Receiver<Arc<HttpServerConfig>>,
+}
+
+fn derive_http_config(config: &Config) -> anyhow::Result<HttpServerConfig> {
+    let tls = match load_server_identity(config) {
+        Some(identity) => Some(TlsServerConfig::new(&identity)?),
+        None => None,
+    };
+    Ok(HttpServerConfig {
+        addr: config.vector_store_addr,
+        tls,
+    })
+}
+
+fn load_server_identity(config: &Config) -> Option<tls::ServerIdentity> {
+    let cert = config.tls_cert_path.as_ref()?;
+    let key = config.tls_key_path.as_ref()?;
+    tls::ServerIdentity::new(cert, key)
+        .inspect_err(|e| tracing::error!("Failed to load server identity: {e}"))
+        .ok()
+}
+
 pub struct ConfigManager {
     config_tx: watch::Sender<Arc<Config>>,
+    http_config_tx: watch::Sender<Arc<HttpServerConfig>>,
 }
 
 impl ConfigManager {
-    /// Create a new ConfigManager and return both the manager and a receiver for configuration
-    /// change notifications. The receiver can be cloned to share with multiple consumers.
+    /// Create a new ConfigManager and return both the manager and receivers for configuration
+    /// change notifications. The receivers can be cloned to share with multiple consumers.
     ///
     /// After creating the ConfigManager, call `start()` from within a Tokio runtime context
     /// to begin listening for SIGHUP signals.
@@ -29,10 +72,21 @@ impl ConfigManager {
     /// * `config` - Initial configuration
     ///
     /// # Returns
-    /// A tuple of (ConfigManager, receiver for configuration changes)
-    pub fn new(config: Config) -> (Self, watch::Receiver<Arc<Config>>) {
+    /// A tuple of (ConfigManager, config receivers)
+    pub fn new(config: Config) -> anyhow::Result<(Self, ConfigReceivers)> {
+        let http = derive_http_config(&config)?;
         let (config_tx, config_rx) = watch::channel(Arc::new(config));
-        (Self { config_tx }, config_rx)
+        let (http_config_tx, http_config_rx) = watch::channel(Arc::new(http));
+        Ok((
+            Self {
+                config_tx,
+                http_config_tx,
+            },
+            ConfigReceivers {
+                config: config_rx,
+                http: http_config_rx,
+            },
+        ))
     }
 
     /// Start listening for SIGHUP signals in a background task.
@@ -57,16 +111,30 @@ impl ConfigManager {
         let old_config = self.config_tx.borrow().clone();
 
         // Load new configuration
-        let new_config = Arc::new(load_config(env).await?);
+        let new_config = load_config(env).await?;
 
         // Check for restart-required changes
         self.check_restart_required_changes(&old_config, &new_config);
 
         // Update the config atomically - watch will notify all receivers
-        self.config_tx.send(new_config)?;
+        self.send_config(new_config);
 
         tracing::info!("Configuration reloaded successfully");
         Ok(())
+    }
+
+    fn send_config(&self, config: Config) {
+        match derive_http_config(&config) {
+            Ok(http) => {
+                self.http_config_tx.send(Arc::new(http)).ok();
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Failed to derive HTTP server config from new config: {e};                      keeping previous HTTP server config to avoid TLS downgrade"
+                );
+            }
+        }
+        self.config_tx.send(Arc::new(config)).ok();
     }
 
     /// Check for configuration changes that require a server restart and log warnings.
@@ -521,61 +589,39 @@ mod tests {
 
     #[tokio::test]
     async fn config_manager_reload_notifies_watchers() {
-        let initial_config = Config {
-            vector_store_addr: "127.0.0.1:6080".parse().unwrap(),
-            scylladb_uri: "127.0.0.1:9042".to_string(),
-            threads: None,
-            memory_limit: None,
-            memory_usage_check_interval: None,
-            opensearch_addr: None,
-            credentials: None,
-            usearch_simulator: None,
-            disable_colors: false,
-            tls_cert_path: None,
-            tls_key_path: None,
-            cql_connection_timeout: None,
-            cql_keepalive_interval: None,
-            cql_keepalive_timeout: None,
-            cql_tcp_keepalive_interval: None,
-            cql_uri_translation_map: None,
-            cdc_safety_interval: None,
-            cdc_sleep_interval: None,
-            cdc_fine_safety_interval: None,
-            cdc_fine_sleep_interval: None,
-        };
+        let (config_manager, receivers) = ConfigManager::new(Config::default()).unwrap();
 
-        let (config_manager, mut config_rx) = ConfigManager::new(initial_config);
-
-        // Get initial config
+        let mut config_rx = receivers.config;
+        let mut http_rx = receivers.http;
         let initial = config_rx.borrow().clone();
         assert_eq!(initial.vector_store_addr.to_string(), "127.0.0.1:6080");
         assert_eq!(initial.scylladb_uri, "127.0.0.1:9042");
+        assert_eq!(http_rx.borrow().addr.to_string(), "127.0.0.1:6080");
 
-        // Reload config with different environment values
         let env = mock_env(HashMap::from([
             ("VECTOR_STORE_URI", "192.168.1.100:7070".into()),
             ("VECTOR_STORE_SCYLLADB_URI", "192.168.1.200:9043".into()),
         ]));
         config_manager.reload_config(env).await.unwrap();
 
-        // Wait for change notification
         config_rx.changed().await.unwrap();
+        http_rx.changed().await.unwrap();
 
-        // Verify new config values
         let updated = config_rx.borrow();
         assert_eq!(updated.vector_store_addr.to_string(), "192.168.1.100:7070");
         assert_eq!(updated.scylladb_uri, "192.168.1.200:9043");
+        assert_eq!(http_rx.borrow().addr.to_string(), "192.168.1.100:7070");
     }
 
     #[tokio::test]
     async fn config_manager_multiple_watchers() {
         let initial_config = Config::default();
-        let (config_manager, config_rx) = ConfigManager::new(initial_config);
+        let (config_manager, receivers) = ConfigManager::new(initial_config).unwrap();
 
         // Clone receivers for multiple watchers
-        let mut rx1 = config_rx.clone();
-        let mut rx2 = config_rx.clone();
-        let mut rx3 = config_rx;
+        let mut rx1 = receivers.config.clone();
+        let mut rx2 = receivers.config.clone();
+        let mut rx3 = receivers.config;
 
         // Spawn tasks to wait for changes
         let task1 = tokio::spawn(async move {
