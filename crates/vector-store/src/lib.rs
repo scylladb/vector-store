@@ -14,6 +14,7 @@ mod httproutes;
 mod httpserver;
 mod index;
 mod index_key;
+mod indexes;
 mod info;
 mod internals;
 mod invariant_key;
@@ -516,6 +517,27 @@ pub struct Filter {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, derive_more::From)]
 pub struct IndexVersion(Uuid);
+
+impl IndexVersion {
+    fn gregorian_ticks(&self) -> u64 {
+        self.0
+            .get_timestamp()
+            .map(|ts| ts.to_gregorian().0)
+            .unwrap_or(0)
+    }
+}
+
+impl PartialOrd for IndexVersion {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for IndexVersion {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.gregorian_ticks().cmp(&other.gregorian_ticks())
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 /// Information about an index
