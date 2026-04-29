@@ -39,6 +39,9 @@ jobs:
     - name: Run cargo-clippy checks
       run: cargo clippy --all-targets --workspace -- -Dwarnings
 
+    - name: Run cargo-clippy checks for test-hooks feature flag
+      run: cargo clippy --features slow-test-hooks --all-targets --workspace -- -Dwarnings
+
   cargo-fmt:
     runs-on: ubuntu-latest
     steps:
@@ -70,7 +73,7 @@ jobs:
       run: rustc --version
 
     - name: Run cargo-test checks
-      run: cargo test --features dev-tools --verbose --all-targets --workspace
+      run: cargo test --features dev-tools,slow-test-hooks --verbose --all-targets --workspace
 
   cargo-deny:
     runs-on: ubuntu-latest
