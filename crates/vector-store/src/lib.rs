@@ -155,6 +155,7 @@ pub struct Config {
     pub opensearch_addr: Option<String>,
     pub credentials: Option<Credentials>,
     pub usearch_simulator: Option<Vec<Duration>>,
+    pub alter_index_simulator: bool,
     pub cql_connection_timeout: Option<Duration>,
     pub cql_keepalive_interval: Option<Duration>,
     pub cql_keepalive_timeout: Option<Duration>,
@@ -180,6 +181,7 @@ impl Default for Config {
             opensearch_addr: None,
             credentials: None,
             usearch_simulator: None,
+            alter_index_simulator: false,
             disable_colors: false,
             tls_cert_path: None,
             tls_key_path: None,
@@ -538,6 +540,12 @@ pub struct IndexMetadata {
 impl IndexMetadata {
     pub fn key(&self) -> IndexKey {
         IndexKey::new(&self.keyspace_name, &self.index_name)
+    }
+
+    fn discard_version(&self) -> Self {
+        let mut copy = self.clone();
+        copy.version = IndexVersion(Uuid::nil());
+        copy
     }
 }
 

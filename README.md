@@ -29,7 +29,8 @@ service supports also `.env` files.
 | `VECTOR_STORE_CDC_SLEEP_INTERVAL`          | Wide-framed CDC reader's sleep interval. The value is in human readable value (ie. `10s`)                                | `10s`                      |
 | `VECTOR_STORE_CDC_FINE_SAFETY_INTERVAL`    | Fine-grained CDC reader's safety interval for low-latency updates (ie. `100ms`)                                          | `100ms`                    |
 | `VECTOR_STORE_CDC_FINE_SLEEP_INTERVAL`     | Fine-grained CDC reader's sleep interval for low-latency updates (ie. `500ms`)                                           | `500ms`                    |
-| `VECTOR_STORE_USEARCH_SIMULATOR`           | Enable simulator for USearch. Provides human readable delays for simulated operations (`search:add-remove:reserve`).     |                            | 
+| `VECTOR_STORE_USEARCH_SIMULATOR`           | Enable simulator for USearch. Provides human readable delays for simulated operations (`search:add-remove:reserve`).     |                            |
+| `VECTOR_STORE_ALTER_INDEX_SIMULATOR`       | Enable simulator for missing `ALTER INDEX`. When enable indexes aren't deleted and their version is not checked.         | `false`                    |
 
 ## Development builds
 

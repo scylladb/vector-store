@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+use crate::Config;
 use crate::Connectivity;
 use crate::ExpansionAdd;
 use crate::ExpansionSearch;
@@ -21,12 +22,14 @@ use futures::StreamExt;
 use futures::stream;
 use scylla::value::CqlTimeuuid;
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::mpsc::WeakSender;
+use tokio::sync::watch;
 use tokio::time;
 use tracing::Instrument;
 use tracing::debug;
@@ -40,6 +43,7 @@ pub(crate) async fn new(
     db: Sender<Db>,
     engine: WeakSender<Engine>,
     node_state: Sender<NodeState>,
+    mut config_rx: watch::Receiver<Arc<Config>>,
 ) -> anyhow::Result<Sender<MonitorIndexes>> {
     let (tx, mut rx) = mpsc::channel(10);
     tokio::spawn(
@@ -49,6 +53,10 @@ pub(crate) async fn new(
 
             let mut schema_version = SchemaVersion::new();
             let mut indexes = HashSet::new();
+            let mut alter_index_simulator = config_rx.borrow_and_update().alter_index_simulator;
+            if alter_index_simulator {
+                info!("monitor_indexes: alter index simulator is enabled");
+            }
             while !rx.is_closed() {
                 tokio::select! {
                     _ = interval.tick() => {
@@ -74,10 +82,22 @@ pub(crate) async fn new(
                         node_state.send_event(
                             Event::IndexesDiscovered(new_indexes.clone()),
                         ).await;
-                        del_indexes(&engine, indexes.extract_if(|idx| !new_indexes.contains(idx))).await;
+
+                        let for_delete: Box<dyn Fn(&IndexMetadata) -> bool + Send> = if alter_index_simulator {
+                            Box::new(|curr_idx| should_delete_simulator(curr_idx, &new_indexes))
+                        } else {
+                            Box::new(|curr_idx| should_delete(curr_idx, &new_indexes))
+                        };
+                        del_indexes(&engine, indexes.extract_if(for_delete)).await;
+
+                        let for_add: Box<dyn Fn(&IndexMetadata) -> bool + Send> = if alter_index_simulator {
+                            Box::new(|new_idx| should_add_simulator(new_idx, &indexes))
+                        } else {
+                            Box::new(|new_idx| should_add(new_idx, &indexes))
+                        };
                         let AddIndexesR {added, has_failures} = add_indexes(
                             &engine,
-                            new_indexes.into_iter().filter(|idx| !indexes.contains(idx))
+                            new_indexes.into_iter().filter(for_add)
                         ).await;
                         indexes.extend(added);
                         if has_failures {
@@ -86,6 +106,19 @@ pub(crate) async fn new(
                             schema_version.reset();
                         }
                     }
+
+                    cfg = config_rx.changed() => {
+                        let Ok(()) = cfg else {
+                            break;
+                        };
+                        let previous = alter_index_simulator;
+                        alter_index_simulator = config_rx.borrow_and_update().alter_index_simulator;
+                        if previous != alter_index_simulator {
+                            info!("monitor_indexes: alter index simulator is {}",
+                                if alter_index_simulator { "enabled" } else { "disabled" });
+                        }
+                    }
+
                     _ = rx.recv() => { }
                 }
             }
@@ -224,6 +257,32 @@ async fn del_indexes(engine: &Sender<Engine>, idxs: impl Iterator<Item = IndexMe
     for idx in idxs {
         engine.del_index(idx.key()).await;
     }
+}
+
+/// delete the index if it doesn't appear in the new_indexes
+fn should_delete(curr_idx: &IndexMetadata, new_indexes: &HashSet<IndexMetadata>) -> bool {
+    !new_indexes.contains(curr_idx)
+}
+
+/// add the index if it doesn't appear in the current indexes
+fn should_add(new_idx: &IndexMetadata, curr_indexes: &HashSet<IndexMetadata>) -> bool {
+    !curr_indexes.contains(new_idx)
+}
+
+/// delete the index if it appears in the new_indexes and is different from the current one
+fn should_delete_simulator(curr_idx: &IndexMetadata, new_indexes: &HashSet<IndexMetadata>) -> bool {
+    let curr_idx = curr_idx.discard_version();
+    new_indexes
+        .iter()
+        .map(|new_idx| new_idx.discard_version())
+        .any(|new_idx| curr_idx.key() == new_idx.key() && curr_idx != new_idx)
+}
+
+/// add the index if it appears only in the new_indexes
+fn should_add_simulator(new_idx: &IndexMetadata, curr_indexes: &HashSet<IndexMetadata>) -> bool {
+    curr_indexes
+        .iter()
+        .all(|curr_idx| curr_idx.key() != new_idx.key())
 }
 
 #[cfg(test)]
@@ -509,8 +568,10 @@ mod tests {
         let tx_eng = engine::tests::new(mock_engine);
         let (tx_ns, _rx_ns) = mpsc::channel(10);
 
+        let (_config_tx, config_rx) = watch::channel(Arc::new(Config::default()));
+
         // Start the monitor
-        let _monitor = new(tx_db.clone(), tx_eng.downgrade(), tx_ns.clone())
+        let _monitor = new(tx_db.clone(), tx_eng.downgrade(), tx_ns.clone(), config_rx)
             .await
             .unwrap();
 
@@ -643,5 +704,156 @@ mod tests {
         // second index is invalid
         set_valid_indexes(vec![true, false, true]);
         assert!(get_indexes(&db).await.is_err());
+    }
+
+    #[test]
+    fn validate_should_delete() {
+        let idx = IndexMetadata {
+            keyspace_name: "ks".into(),
+            index_name: "idx".into(),
+            table_name: "tbl".into(),
+            target_column: "embedding".into(),
+            index_type: DbIndexType::Global,
+            filtering_columns: Arc::new(Vec::new()),
+            dimensions: NonZeroUsize::new(3).unwrap().into(),
+            connectivity: Default::default(),
+            expansion_add: Default::default(),
+            expansion_search: Default::default(),
+            space_type: Default::default(),
+            version: Uuid::new_v4().into(),
+            quantization: Default::default(),
+        };
+        assert!(should_delete(
+            &IndexMetadata { ..idx.clone() },
+            &HashSet::new()
+        ));
+        assert!(!should_delete(
+            &IndexMetadata { ..idx.clone() },
+            &[idx.clone()].into_iter().collect()
+        ));
+        assert!(should_delete(
+            &IndexMetadata {
+                version: Uuid::new_v4().into(),
+                ..idx.clone()
+            },
+            &[idx.clone()].into_iter().collect()
+        ));
+        assert!(should_delete(
+            &IndexMetadata {
+                expansion_add: 1.into(),
+                ..idx.clone()
+            },
+            &[idx.clone()].into_iter().collect()
+        ));
+    }
+
+    #[test]
+    fn validate_should_delete_simulator() {
+        let idx = IndexMetadata {
+            keyspace_name: "ks".into(),
+            index_name: "idx".into(),
+            table_name: "tbl".into(),
+            target_column: "embedding".into(),
+            index_type: DbIndexType::Global,
+            filtering_columns: Arc::new(Vec::new()),
+            dimensions: NonZeroUsize::new(3).unwrap().into(),
+            connectivity: Default::default(),
+            expansion_add: Default::default(),
+            expansion_search: Default::default(),
+            space_type: Default::default(),
+            version: Uuid::new_v4().into(),
+            quantization: Default::default(),
+        };
+        assert!(!should_delete_simulator(
+            &IndexMetadata { ..idx.clone() },
+            &HashSet::new()
+        ));
+        assert!(!should_delete_simulator(
+            &IndexMetadata { ..idx.clone() },
+            &[idx.clone()].into_iter().collect()
+        ));
+        assert!(!should_delete_simulator(
+            &IndexMetadata {
+                version: Uuid::new_v4().into(),
+                ..idx.clone()
+            },
+            &[idx.clone()].into_iter().collect()
+        ));
+        assert!(should_delete_simulator(
+            &IndexMetadata {
+                expansion_add: 1.into(),
+                ..idx.clone()
+            },
+            &[idx.clone()].into_iter().collect()
+        ));
+        assert!(should_delete_simulator(
+            &IndexMetadata {
+                expansion_add: 1.into(),
+                version: Uuid::new_v4().into(),
+                ..idx.clone()
+            },
+            &[idx.clone()].into_iter().collect()
+        ));
+    }
+
+    #[test]
+    fn validate_should_add() {
+        let idx = IndexMetadata {
+            keyspace_name: "ks".into(),
+            index_name: "idx".into(),
+            table_name: "tbl".into(),
+            target_column: "embedding".into(),
+            index_type: DbIndexType::Global,
+            filtering_columns: Arc::new(Vec::new()),
+            dimensions: NonZeroUsize::new(3).unwrap().into(),
+            connectivity: Default::default(),
+            expansion_add: Default::default(),
+            expansion_search: Default::default(),
+            space_type: Default::default(),
+            version: Uuid::new_v4().into(),
+            quantization: Default::default(),
+        };
+        assert!(should_add(
+            &IndexMetadata { ..idx.clone() },
+            &HashSet::new()
+        ));
+        assert!(!should_add(
+            &IndexMetadata { ..idx.clone() },
+            &[idx.clone()].into_iter().collect()
+        ));
+    }
+    #[test]
+
+    fn validate_should_add_simulator() {
+        let idx = IndexMetadata {
+            keyspace_name: "ks".into(),
+            index_name: "idx".into(),
+            table_name: "tbl".into(),
+            target_column: "embedding".into(),
+            index_type: DbIndexType::Global,
+            filtering_columns: Arc::new(Vec::new()),
+            dimensions: NonZeroUsize::new(3).unwrap().into(),
+            connectivity: Default::default(),
+            expansion_add: Default::default(),
+            expansion_search: Default::default(),
+            space_type: Default::default(),
+            version: Uuid::new_v4().into(),
+            quantization: Default::default(),
+        };
+        assert!(should_add_simulator(
+            &IndexMetadata { ..idx.clone() },
+            &HashSet::new()
+        ));
+        assert!(!should_add_simulator(
+            &IndexMetadata { ..idx.clone() },
+            &[idx.clone()].into_iter().collect()
+        ));
+        assert!(!should_add_simulator(
+            &IndexMetadata {
+                version: Uuid::new_v4().into(),
+                ..idx.clone()
+            },
+            &[idx.clone()].into_iter().collect()
+        ));
     }
 }
