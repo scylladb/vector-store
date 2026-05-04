@@ -142,6 +142,7 @@ fn setup_table(
     db: &DbBasic,
     index: &IndexMetadata,
     primary_keys: impl IntoIterator<Item = ColumnName>,
+    partition_key_count: usize,
     columns: impl IntoIterator<Item = (ColumnName, NativeType)>,
 ) {
     db.add_table(
@@ -149,6 +150,7 @@ fn setup_table(
         index.table_name.clone(),
         Table {
             primary_keys: Arc::new(primary_keys.into_iter().collect()),
+            partition_key_count,
             columns: Arc::new(columns.into_iter().collect()),
             dimensions: [(index.target_column.clone(), index.dimensions)]
                 .into_iter()
@@ -283,6 +285,7 @@ fn fullscan_add(c: &mut Criterion) {
                     &db,
                     &index_metadata,
                     ["id".into()],
+                    1,
                     [("id".into(), NativeType::BigInt)],
                 );
                 let (_config_tx, config_rx) = watch::channel(default_config().await);
@@ -377,6 +380,7 @@ fn search(c: &mut Criterion) {
                     &db,
                     &index_metadata,
                     ["id".into()],
+                    1,
                     [("id".into(), NativeType::BigInt)],
                 );
                 setup_index(&db, index_metadata.clone(), Some(scan_fn_mpsc(rx)), None);

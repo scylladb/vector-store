@@ -54,6 +54,7 @@ async fn quantization_is_effectively_applied() {
             test_config(),
             DbIndexType::Global,
             ["pk".into()],
+            1,
             [(
                 "pk".to_string().into(),
                 scylla::cluster::metadata::NativeType::Int,
@@ -137,6 +138,7 @@ async fn quantization_is_returned_as_index_data_type() {
             test_config(),
             DbIndexType::Global,
             [],
+            0,
             [],
             None,
             None,
@@ -179,6 +181,7 @@ async fn search_with_quantization(quantization: Quantization, filter: Option<Pos
         test_config(),
         DbIndexType::Global,
         [pk_column.clone()],
+        1,
         [(
             pk_column.clone(),
             scylla::cluster::metadata::NativeType::Int,
@@ -297,6 +300,7 @@ async fn binary_quantization_with_non_divisible_by_8_dimensions() {
         test_config(),
         DbIndexType::Global,
         [pk_column.clone()],
+        1,
         [(
             pk_column.clone(),
             scylla::cluster::metadata::NativeType::Int,

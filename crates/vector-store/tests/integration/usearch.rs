@@ -51,6 +51,7 @@ pub(crate) async fn setup_store(
     config: Config,
     index_type: DbIndexType,
     primary_keys: impl IntoIterator<Item = ColumnName>,
+    partition_key_count: usize,
     columns: impl IntoIterator<Item = (ColumnName, NativeType)>,
     fullscan_fn: Option<ScanFn>,
     cdc_fn: Option<ScanFn>,
@@ -64,6 +65,7 @@ pub(crate) async fn setup_store(
         config,
         index_type,
         primary_keys,
+        partition_key_count,
         columns,
         fullscan_fn,
         cdc_fn,
@@ -78,6 +80,7 @@ pub(crate) async fn setup_store_with_quantization(
     config: Config,
     index_type: DbIndexType,
     primary_keys: impl IntoIterator<Item = ColumnName>,
+    partition_key_count: usize,
     columns: impl IntoIterator<Item = (ColumnName, NativeType)>,
     fullscan_fn: Option<ScanFn>,
     cdc_fn: Option<ScanFn>,
@@ -116,6 +119,7 @@ pub(crate) async fn setup_store_with_quantization(
         index.table_name.clone(),
         Table {
             primary_keys: Arc::new(primary_keys.into_iter().collect()),
+            partition_key_count,
             columns,
             dimensions: [(index.target_column.clone(), index.dimensions)]
                 .into_iter()
@@ -147,6 +151,7 @@ pub(crate) async fn setup_store_with_quantization(
 pub(crate) async fn setup_store_and_wait_for_index(
     index_type: DbIndexType,
     primary_keys: impl IntoIterator<Item = ColumnName>,
+    partition_key_count: usize,
     columns: impl IntoIterator<Item = (ColumnName, NativeType)>,
     fullscan_fn: Option<ScanFn>,
     cdc_fn: Option<ScanFn>,
@@ -161,6 +166,7 @@ pub(crate) async fn setup_store_and_wait_for_index(
         test_config(),
         index_type,
         primary_keys,
+        partition_key_count,
         columns,
         fullscan_fn,
         cdc_fn,
@@ -193,6 +199,7 @@ async fn simple_create_search_delete_index() {
         test_config(),
         DbIndexType::Global,
         ["pk".into(), "ck".into()],
+        1,
         [
             ("pk".to_string().into(), NativeType::Int),
             ("ck".to_string().into(), NativeType::Text),
@@ -310,6 +317,7 @@ async fn failed_db_index_create() {
         index.table_name.clone(),
         Table {
             primary_keys: Arc::new(vec!["pk".into(), "ck".into()]),
+            partition_key_count: 1,
             columns: Arc::new(
                 [
                     ("pk".into(), NativeType::Int),
@@ -395,6 +403,7 @@ async fn ann_returns_bad_request_when_provided_vector_size_is_not_eq_index_dimen
     let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
         DbIndexType::Global,
         ["pk".into(), "ck".into()],
+        1,
         [
             ("pk".to_string().into(), NativeType::Int),
             ("ck".to_string().into(), NativeType::Text),
@@ -431,6 +440,7 @@ async fn ann_returns_bad_request_when_filtering_required_but_not_allowed() {
     let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
         DbIndexType::Global,
         [pk_column.clone(), ck_column.clone()],
+        1,
         [
             (pk_column.clone(), NativeType::Int),
             (ck_column.clone(), NativeType::Int),
@@ -470,6 +480,7 @@ async fn ann_fail_while_building() {
         test_config(),
         DbIndexType::Global,
         ["pk".into(), "ck".into()],
+        1,
         [
             ("pk".to_string().into(), NativeType::Int),
             ("ck".to_string().into(), NativeType::Text),
@@ -522,6 +533,7 @@ async fn ann_failed_when_wrong_number_of_primary_keys() {
     let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
         DbIndexType::Global,
         vec!["pk".into()],
+        1,
         [("pk".into(), NativeType::Int)],
         Some(db_basic::scan_fn([(
             [CqlValue::Int(1), CqlValue::Text("one".to_string())].into(),
@@ -571,6 +583,7 @@ async fn ann_filter_partition_key_int_eq() {
     let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
         DbIndexType::Global,
         [pk_column.clone(), ck_column.clone()],
+        1,
         [
             (pk_column.clone(), NativeType::Int),
             (ck_column.clone(), NativeType::Int),
@@ -644,6 +657,7 @@ async fn ann_filter_clustering_key_int_eq() {
     let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
         DbIndexType::Global,
         [pk_column.clone(), ck_column.clone()],
+        1,
         [
             (pk_column.clone(), NativeType::Int),
             (ck_column.clone(), NativeType::Int),
@@ -717,6 +731,7 @@ async fn ann_filter_partition_key_int_in() {
     let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
         DbIndexType::Global,
         [pk_column.clone(), ck_column.clone()],
+        1,
         [
             (pk_column.clone(), NativeType::Int),
             (ck_column.clone(), NativeType::Int),
@@ -794,6 +809,7 @@ async fn ann_filter_clustering_key_int_in() {
     let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
         DbIndexType::Global,
         [pk_column.clone(), ck_column.clone()],
+        1,
         [
             (pk_column.clone(), NativeType::Int),
             (ck_column.clone(), NativeType::Int),
@@ -871,6 +887,7 @@ async fn ann_filter_primary_key_int_eq_tuple() {
     let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
         DbIndexType::Global,
         [pk_column.clone(), ck_column.clone()],
+        1,
         [
             (pk_column.clone(), NativeType::Int),
             (ck_column.clone(), NativeType::Int),
@@ -914,6 +931,7 @@ async fn ann_filter_primary_key_int_in_tuple() {
     let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
         DbIndexType::Global,
         [pk_column.clone(), ck_column.clone()],
+        1,
         [
             (pk_column.clone(), NativeType::Int),
             (ck_column.clone(), NativeType::Int),
@@ -961,6 +979,7 @@ async fn setup_int_int_store() -> (
     let (index, client, db, server, node_state) = setup_store_and_wait_for_index(
         DbIndexType::Global,
         [pk_column.clone(), ck_column.clone()],
+        1,
         [
             (pk_column.clone(), NativeType::Int),
             (ck_column.clone(), NativeType::Int),
@@ -1446,6 +1465,7 @@ async fn ann_filter_partition_key_text_gt() {
     let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
         DbIndexType::Global,
         [pk_column.clone(), ck_column.clone()],
+        1,
         [
             (pk_column.clone(), NativeType::Text),
             (ck_column.clone(), NativeType::Int),
@@ -1532,6 +1552,7 @@ async fn http_server_is_responsive_when_index_add_hangs() {
         config,
         DbIndexType::Global,
         ["pk".into(), "ck".into()],
+        1,
         [
             ("pk".to_string().into(), NativeType::Int),
             ("ck".to_string().into(), NativeType::Text),
@@ -1562,6 +1583,7 @@ async fn null_vector_is_not_indexed() {
         test_config(),
         DbIndexType::Global,
         ["pk".into()],
+        1,
         [("pk".to_string().into(), NativeType::Int)],
         Some(db_basic::scan_fn([
             (

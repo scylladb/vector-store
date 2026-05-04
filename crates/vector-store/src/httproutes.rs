@@ -40,16 +40,20 @@ use axum::response::Response;
 use axum::routing::get;
 use axum::routing::put;
 use axum_server_dual_protocol::Protocol;
+use bigdecimal::BigDecimal;
 use httpapi::DataType;
 use httpapi::IndexInfo;
 use itertools::Itertools;
+use num_bigint::BigInt;
 use prometheus::Encoder;
 use prometheus::ProtobufEncoder;
 use prometheus::TextEncoder;
 use regex::Regex;
 use scylla::cluster::metadata::NativeType;
+use scylla::value::CqlDecimal;
 use scylla::value::CqlTimeuuid;
 use scylla::value::CqlValue;
+use scylla::value::CqlVarint;
 use serde_json::Number;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -895,6 +899,10 @@ fn try_to_json(value: CqlValue) -> anyhow::Result<Value> {
 
         CqlValue::Blob(value) => Ok(Value::String(const_hex::encode_prefixed(&value))),
 
+        CqlValue::Varint(value) => Ok(Value::String(BigInt::from(value).to_string())),
+
+        CqlValue::Decimal(value) => Ok(Value::String(BigDecimal::from(value).to_string())),
+
         _ => unimplemented!(),
     }
 }
@@ -956,6 +964,20 @@ fn try_from_json(value: Value, cql_type: &NativeType) -> anyhow::Result<CqlValue
                     .map_err(|err| anyhow!("Invalid hex in blob value: {err}"))?;
                 Ok(CqlValue::Blob(bytes))
             }
+            NativeType::Varint => {
+                let bi: BigInt = value.parse().map_err(|err| {
+                    anyhow!("Failed to parse Varint from string '{value}': {err}")
+                })?;
+                Ok(CqlValue::Varint(CqlVarint::from(bi)))
+            }
+            NativeType::Decimal => {
+                let bd: BigDecimal = value.parse().map_err(|err| {
+                    anyhow!("Failed to parse Decimal from string '{value}': {err}")
+                })?;
+                Ok(CqlValue::Decimal(CqlDecimal::try_from(bd).map_err(
+                    |err| anyhow!("Decimal value out of range: {err}"),
+                )?))
+            }
             _ => bail!("Cannot convert string to CqlValue::{cql_type:?}, unsupported type"),
         },
 
@@ -1011,6 +1033,23 @@ fn try_from_json(value: Value, cql_type: &NativeType) -> anyhow::Result<CqlValue
                     .try_into()
                     .map_err(|err| anyhow!("Expected i8 for CqlValue::TinyInt: {err}"))?,
             )),
+            NativeType::Varint => {
+                // Varint is always an integer; reject fractional JSON numbers.
+                let s = value.to_string();
+                let bi: BigInt = s
+                    .parse()
+                    .map_err(|err| anyhow!("Failed to parse Varint from number '{s}': {err}"))?;
+                Ok(CqlValue::Varint(CqlVarint::from(bi)))
+            }
+            NativeType::Decimal => {
+                let s = value.to_string();
+                let bd: BigDecimal = s
+                    .parse()
+                    .map_err(|err| anyhow!("Failed to parse Decimal from number '{s}': {err}"))?;
+                Ok(CqlValue::Decimal(CqlDecimal::try_from(bd).map_err(
+                    |err| anyhow!("Decimal value out of range: {err}"),
+                )?))
+            }
             _ => bail!("Cannot convert number to CqlValue::{cql_type:?}, unsupported type"),
         },
 
@@ -1581,6 +1620,67 @@ mod tests {
         assert!(try_from_json(Value::String("0xgg".to_string()), &NativeType::Blob).is_err());
         // odd-length hex digits (after stripping prefix)
         assert!(try_from_json(Value::String("0xabc".to_string()), &NativeType::Blob).is_err());
+
+        // Varint from string
+        assert_eq!(
+            try_from_json(
+                Value::String("-98765432109876543210987654321098765432109876543210".to_string()),
+                &NativeType::Varint
+            )
+            .unwrap(),
+            CqlValue::Varint(CqlVarint::from(
+                "-98765432109876543210987654321098765432109876543210"
+                    .parse::<BigInt>()
+                    .unwrap()
+            ))
+        );
+        assert!(
+            try_from_json(
+                Value::String("not_a_number".to_string()),
+                &NativeType::Varint
+            )
+            .is_err()
+        );
+        // Varint from JSON number
+        assert_eq!(
+            try_from_json(Value::Number((-9876543210i64).into()), &NativeType::Varint).unwrap(),
+            CqlValue::Varint(CqlVarint::from(BigInt::from(-9876543210i64)))
+        );
+
+        // Decimal from string
+        assert_eq!(
+            try_from_json(
+                Value::String("-98765432109876543210.123456789".to_string()),
+                &NativeType::Decimal
+            )
+            .unwrap(),
+            CqlValue::Decimal(
+                CqlDecimal::try_from(
+                    "-98765432109876543210.123456789"
+                        .parse::<BigDecimal>()
+                        .unwrap()
+                )
+                .unwrap()
+            )
+        );
+        assert!(
+            try_from_json(
+                Value::String("not_a_decimal".to_string()),
+                &NativeType::Decimal
+            )
+            .is_err()
+        );
+        // Decimal from JSON number
+        assert_eq!(
+            try_from_json(
+                Value::Number(Number::from_f64(-1.25).unwrap()),
+                &NativeType::Decimal
+            )
+            .unwrap(),
+            CqlValue::Decimal(
+                CqlDecimal::try_from("-1.25".parse::<BigDecimal>().unwrap()).unwrap()
+            )
+        );
     }
 
     #[test]
@@ -1685,6 +1785,29 @@ mod tests {
         assert_eq!(
             try_to_json(CqlValue::Blob(vec![0x00])).unwrap(),
             Value::String("0x00".to_string())
+        );
+
+        assert_eq!(
+            try_to_json(CqlValue::Varint(CqlVarint::from(
+                "-98765432109876543210987654321098765432109876543210"
+                    .parse::<BigInt>()
+                    .unwrap()
+            )))
+            .unwrap(),
+            Value::String("-98765432109876543210987654321098765432109876543210".to_string())
+        );
+
+        assert_eq!(
+            try_to_json(CqlValue::Decimal(
+                CqlDecimal::try_from(
+                    "-98765432109876543210.123456789"
+                        .parse::<BigDecimal>()
+                        .unwrap()
+                )
+                .unwrap()
+            ))
+            .unwrap(),
+            Value::String("-98765432109876543210.123456789".to_string())
         );
     }
 

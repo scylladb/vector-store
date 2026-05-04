@@ -61,6 +61,7 @@ async fn simple_create_search_delete_index() {
         index.table_name.clone(),
         Table {
             primary_keys: Arc::new(vec!["pk".into(), "ck".into()]),
+            partition_key_count: 1,
             columns: Arc::new(
                 [
                     ("pk".into(), NativeType::Int),
