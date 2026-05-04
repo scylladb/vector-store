@@ -5,19 +5,20 @@
 
 use async_backtrace::frame;
 use async_backtrace::framed;
-use hickory_server::authority::Catalog;
-use hickory_server::authority::ZoneType;
 use hickory_server::proto::rr::DNSClass;
 use hickory_server::proto::rr::LowerName;
 use hickory_server::proto::rr::Name;
+use hickory_server::proto::rr::RData;
+use hickory_server::proto::rr::Record;
+use hickory_server::proto::rr::RecordType;
 use hickory_server::proto::rr::RrKey;
 use hickory_server::proto::rr::rdata::a::A;
 use hickory_server::proto::rr::rdata::soa::SOA;
-use hickory_server::proto::rr::record_data::RData;
-use hickory_server::proto::rr::record_type::RecordType;
-use hickory_server::proto::rr::resource::Record;
-use hickory_server::server::ServerFuture;
-use hickory_server::store::in_memory::InMemoryAuthority;
+use hickory_server::server::Server;
+use hickory_server::store::in_memory::InMemoryZoneHandler;
+use hickory_server::zone_handler::AxfrPolicy;
+use hickory_server::zone_handler::Catalog;
+use hickory_server::zone_handler::ZoneType;
 use std::net::Ipv4Addr;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -102,7 +103,7 @@ pub async fn new(ip: Ipv4Addr) -> mpsc::Sender<Dns> {
         LowerName::from_str(ZONE).unwrap(),
         vec![state.authority.clone()],
     );
-    let mut server = ServerFuture::new(catalog);
+    let mut server = Server::new(catalog);
     server.register_socket(socket);
 
     tokio::spawn(
@@ -128,7 +129,7 @@ pub async fn new(ip: Ipv4Addr) -> mpsc::Sender<Dns> {
 
 struct State {
     version: String,
-    authority: Arc<InMemoryAuthority>,
+    authority: Arc<InMemoryZoneHandler>,
     serial: u32,
 }
 
@@ -138,12 +139,12 @@ const TTL: u32 = 60;
 impl State {
     #[framed]
     async fn new() -> Self {
-        let version = format!("hicory-server-{}", hickory_server::version());
+        let version = format!("hickory-server-{}", hickory_server::version());
 
-        let authority = Arc::new(InMemoryAuthority::empty(
+        let authority = Arc::new(InMemoryZoneHandler::empty(
             Name::from_str(ZONE).unwrap(),
             ZoneType::Primary,
-            false,
+            AxfrPolicy::Deny,
         ));
         let mut soa = Record::from_rdata(
             Name::from_str(ZONE).unwrap(),
@@ -158,7 +159,7 @@ impl State {
                 0,
             )),
         );
-        soa.set_dns_class(DNSClass::IN);
+        soa.dns_class = DNSClass::IN;
         authority.upsert(soa, 0).await;
 
         Self {
@@ -213,7 +214,7 @@ async fn upsert(name: String, ip: Ipv4Addr, state: &mut State) {
         TTL,
         RData::A(A::new(octets[0], octets[1], octets[2], octets[3])),
     );
-    record.set_dns_class(DNSClass::IN);
+    record.dns_class = DNSClass::IN;
 
     state.authority.upsert(record, serial).await;
 }
