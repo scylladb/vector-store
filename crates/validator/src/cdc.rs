@@ -8,11 +8,14 @@ use crate::common::*;
 use async_backtrace::framed;
 use e2etest::TestCase;
 use std::time::Duration;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 use tracing::info;
 
 const FINE_GRAINED_CDC_MAX_LATENCY: Duration = Duration::from_secs(2);
 const CDC_MAX_LATENCY: Duration = Duration::from_secs(60);
 const CDC_ACTOR_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+const TTL_EXPIRATION_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[framed]
 pub(crate) async fn new() -> TestCase<TestActors> {
@@ -42,6 +45,11 @@ pub(crate) async fn new() -> TestCase<TestActors> {
             "recreating_index_terminates_old_cdc_actors",
             timeout,
             recreating_index_terminates_old_cdc_actors,
+        )
+        .with_test(
+            "cql_per_row_ttl_expires_from_index",
+            timeout,
+            cql_per_row_ttl_expires_from_index,
         )
 }
 
@@ -182,7 +190,12 @@ async fn cdc_update_visible_immediately(actors: TestActors) {
 
     info!("finished");
 }
-
+fn now_epoch_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time before UNIX epoch")
+        .as_secs() as i64
+}
 #[framed]
 async fn cdc_delete_visible_immediately(actors: TestActors) {
     info!("started");
@@ -520,6 +533,124 @@ async fn recreating_index_terminates_old_cdc_actors(actors: TestActors) {
         counters.get(&fine_started).copied().unwrap_or(0),
         counters.get(&fine_stopped).copied().unwrap_or(0),
     );
+}
+/// Test that rows inserted with CQL per-row TTL are not returned by ANN
+/// queries after they expire, and that the index count decrements accordingly.
+///
+/// 1. Create a table with a TTL column and insert rows — some already expired,
+///    some that will never expire.
+/// 2. Create an index and verify all rows are queryable via ANN.
+/// 3. Wait for the expiration service to delete expired rows (via CDC).
+/// 4. Verify the index count drops and ANN queries return only non-TTL rows.
+#[framed]
+async fn cql_per_row_ttl_expires_from_index(actors: TestActors) {
+    info!("started");
+
+    let (session, clients) = prepare_connection(&actors).await;
+
+    let keyspace = create_keyspace(&session).await;
+    let table = create_table(
+        &session,
+        "pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>, expiration BIGINT TTL",
+        None,
+    )
+    .await;
+
+    // Expire 5 seconds from now — enough time to build the index and
+    // observe all 5 rows before the expiration service deletes them.
+    let expire_at = now_epoch_secs() + 5;
+
+    info!("Insert 3 rows with near-future expiration and 2 rows without expiration");
+    for pk in 0..3 {
+        session
+            .query_unpaged(
+                format!(
+                    "INSERT INTO {table} (pk, v, expiration) VALUES ({pk}, [{v}, 0.0, 0.0], {expire_at})",
+                    v = pk as f32,
+                ),
+                (),
+            )
+            .await
+            .expect("failed to insert data with TTL");
+    }
+    for pk in 10..12 {
+        session
+            .query_unpaged(
+                format!(
+                    "INSERT INTO {table} (pk, v) VALUES ({pk}, [{v}, 1.0, 1.0])",
+                    v = pk as f32,
+                ),
+                (),
+            )
+            .await
+            .expect("failed to insert data without TTL");
+    }
+
+    let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
+
+    for client in &clients {
+        let index_status = wait_for_index(client, &index).await;
+        assert_eq!(
+            index_status.count, 5,
+            "Expected 5 vectors to be indexed before TTL expiry"
+        );
+    }
+
+    info!("Verify all 5 rows are returned before expiration");
+    let result = wait_for_value(
+        || async {
+            let result = get_opt_query_results(
+                format!("SELECT pk FROM {table} ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10"),
+                &session,
+            )
+            .await;
+            result.filter(|r| r.rows_num() == 5)
+        },
+        "Waiting for ANN query to return all 5 rows",
+        DEFAULT_OPERATION_TIMEOUT,
+    )
+    .await;
+    assert_eq!(result.rows_num(), 5, "Expected 5 rows before expiration");
+
+    info!("Wait for index count to drop after expiration service runs");
+    for client in &clients {
+        wait_for(
+            || async {
+                let status = client.index_status(&index.keyspace, &index.index).await;
+                matches!(status, Ok(s) if s.count == 2)
+            },
+            "Waiting for expired rows to be removed from index",
+            TTL_EXPIRATION_TIMEOUT,
+        )
+        .await;
+    }
+
+    info!("Verify ANN query returns only the non-TTL rows after expiration");
+    let result = wait_for_value(
+        || async {
+            let result = get_opt_query_results(
+                format!("SELECT pk FROM {table} ORDER BY v ANN OF [10.0, 1.0, 1.0] LIMIT 10"),
+                &session,
+            )
+            .await;
+            result.filter(|r| r.rows_num() == 2)
+        },
+        "Waiting for ANN query to return only non-TTL rows",
+        DEFAULT_OPERATION_TIMEOUT,
+    )
+    .await;
+    let rows: Vec<i32> = result
+        .rows::<(i32,)>()
+        .expect("failed to get rows")
+        .map(|row| row.expect("failed to get row").0)
+        .collect();
+    assert_eq!(rows.len(), 2, "Expected 2 rows after expiration");
+    for pk in &rows {
+        assert!(
+            *pk >= 10 && *pk < 12,
+            "Expected only non-TTL rows (pk=10,11), got pk={pk}"
+        );
+    }
 
     session
         .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
