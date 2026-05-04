@@ -17,6 +17,7 @@ mod index_create;
 mod index_status;
 mod quantization_and_rescoring;
 mod reconnect;
+mod routing;
 mod serde;
 mod similarity_functions;
 
@@ -233,6 +234,7 @@ pub async fn test_cases() -> impl Iterator<Item = (String, TestCase<TestActors>)
         ("index_status", index_status::new().await),
         ("index_create", index_create::new().await),
         ("reconnect", reconnect::new().await),
+        ("routing", routing::new().await),
         ("serde", serde::new().await),
         ("similarity_function", similarity_functions::new().await),
         (

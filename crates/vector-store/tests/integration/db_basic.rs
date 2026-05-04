@@ -13,6 +13,8 @@ use scylla::value::CqlTimeuuid;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use uuid::Uuid;
@@ -20,11 +22,12 @@ use vector_store::AsyncInProgress;
 use vector_store::ColumnName;
 use vector_store::DbCustomIndex;
 use vector_store::DbEmbedding;
-use vector_store::DbIndexType;
 use vector_store::Dimensions;
 use vector_store::IndexMetadata;
 use vector_store::IndexName;
+use vector_store::IndexVersion;
 use vector_store::KeyspaceName;
+use vector_store::Percentage;
 use vector_store::PrimaryKey;
 use vector_store::Progress;
 use vector_store::TableName;
@@ -94,7 +97,7 @@ pub(crate) struct Table {
 
 struct Index {
     metadata: IndexMetadata,
-    version: Uuid,
+    version: IndexVersion,
     fullscan_fn: Option<ScanFn>,
     cdc_fn: Option<ScanFn>,
 }
@@ -117,7 +120,7 @@ struct DbMock {
     schema_version: CqlTimeuuid,
     keyspaces: HashMap<KeyspaceName, Keyspace>,
     next_get_db_index_failed: bool,
-    next_full_scan_progress: Progress,
+    next_full_scan_progress: Option<Progress>,
     simulate_endless_get_indexes_processing: bool,
 }
 
@@ -133,7 +136,7 @@ impl DbBasic {
             schema_version: CqlTimeuuid::from(Uuid::new_v4()),
             keyspaces: HashMap::new(),
             next_get_db_index_failed: false,
-            next_full_scan_progress: Progress::Done,
+            next_full_scan_progress: None,
             simulate_endless_get_indexes_processing: false,
         })))
     }
@@ -185,8 +188,8 @@ impl DbBasic {
         keyspace.indexes.insert(
             metadata.index_name.clone(),
             Index {
+                version: metadata.version.clone(),
                 metadata,
-                version: Uuid::new_v4(),
                 fullscan_fn,
                 cdc_fn,
             },
@@ -219,7 +222,7 @@ impl DbBasic {
     }
 
     pub(crate) fn set_next_full_scan_progress(&self, progress: Progress) {
-        self.0.write().unwrap().next_full_scan_progress = progress;
+        self.0.write().unwrap().next_full_scan_progress = Some(progress);
     }
 
     pub(crate) fn simulate_endless_get_indexes_processing(&self) {
@@ -264,8 +267,8 @@ fn process_db(db: &DbBasic, msg: Db, node_state: Sender<NodeState>) {
                                 index: index_name.clone(),
                                 table: index.metadata.table_name.clone(),
                                 target_column: index.metadata.target_column.clone(),
-                                index_type: DbIndexType::Global,
-                                filtering_columns: Arc::new(Vec::new()),
+                                index_type: index.metadata.index_type.clone(),
+                                filtering_columns: index.metadata.filtering_columns.clone(),
                             })
                     })
                     .collect()))
@@ -286,7 +289,7 @@ fn process_db(db: &DbBasic, msg: Db, node_state: Sender<NodeState>) {
                 .keyspaces
                 .get(&keyspace)
                 .and_then(|keyspace| keyspace.indexes.get(&index))
-                .map(|index| index.version.into())))
+                .map(|index| index.version.clone())))
             .map_err(|_| anyhow!("Db::GetIndexVersion: unable to send response"))
             .unwrap(),
 
@@ -353,15 +356,25 @@ pub(crate) fn new_db_index(
 
     let (tx_index, mut rx_index) = mpsc::channel(10);
     let (tx_embeddings, rx_embeddings) = mpsc::channel(10);
+    let fullscan_finished = Arc::new(AtomicBool::new(false));
     tokio::spawn({
+        let fullscan_finished = fullscan_finished.clone();
         async move {
             let fullscan_fn = fullscan(&mut db, &metadata);
+            node_state
+                .send(NodeState::SendEvent(Event::FullScanStarted(
+                    metadata.clone(),
+                )))
+                .await
+                .unwrap();
             let fullscan = {
                 let tx_embeddings = tx_embeddings.clone();
+                let fullscan_finished = fullscan_finished.clone();
                 async move {
                     if let Some(fullscan_fn) = fullscan_fn {
                         fullscan_fn(tx_embeddings).await;
                     }
+                    fullscan_finished.store(true, Ordering::Release);
                 }
                 .shared()
             };
@@ -372,7 +385,7 @@ pub(crate) fn new_db_index(
                         let Some(msg) = msg else {
                             break;
                         };
-                        process_db_index(&db, &metadata, msg).await;
+                        process_db_index(&db, &metadata, &fullscan_finished, msg).await;
                     }
                 }
             }
@@ -400,13 +413,13 @@ pub(crate) fn new_db_index(
                         let Some(msg) = msg else {
                             break;
                         };
-                        process_db_index(&db, &metadata, msg).await;
+                        process_db_index(&db, &metadata, &fullscan_finished, msg).await;
                     }
                 }
             }
 
             while let Some(msg) = rx_index.recv().await {
-                process_db_index(&db, &metadata, msg).await;
+                process_db_index(&db, &metadata, &fullscan_finished, msg).await;
             }
             drop(tx_embeddings);
         }
@@ -432,7 +445,12 @@ fn cdc(db: &mut DbBasic, metadata: &IndexMetadata) -> Option<ScanFn> {
         .and_then(|index| index.cdc_fn.take())
 }
 
-async fn process_db_index(db: &DbBasic, metadata: &IndexMetadata, msg: DbIndex) {
+async fn process_db_index(
+    db: &DbBasic,
+    metadata: &IndexMetadata,
+    fullscan_finished: &Arc<AtomicBool>,
+    msg: DbIndex,
+) {
     match msg {
         DbIndex::GetPrimaryKeyColumns { tx } => tx
             .send(
@@ -462,10 +480,14 @@ async fn process_db_index(db: &DbBasic, metadata: &IndexMetadata, msg: DbIndex) 
 
         DbIndex::FullScanProgress { tx } => tx
             .send({
-                let mut db = db.0.write().unwrap();
-                let val = db.next_full_scan_progress.clone();
-                db.next_full_scan_progress = Progress::Done;
-                val
+                let db = db.0.read().unwrap();
+                db.next_full_scan_progress.clone().unwrap_or_else(|| {
+                    if fullscan_finished.load(Ordering::Acquire) {
+                        Progress::Done
+                    } else {
+                        Progress::InProgress(Percentage::try_from(0.0).unwrap())
+                    }
+                })
             })
             .map_err(|_| anyhow!("DbIndex::GetTargetColumn: unable to send response"))
             .unwrap(),

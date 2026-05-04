@@ -126,7 +126,7 @@ async fn ann_filter_by_partition_key_eq(actors: TestActors) {
         || async {
             let result = get_opt_query_results(
                 format!(
-                    "SELECT pk, ck FROM {table} WHERE pk = 1 ORDER BY v ANN OF [1.0, 0.0, 0.0] LIMIT 20"
+                    "SELECT pk, ck FROM {table} WHERE pk = 1 ORDER BY v ANN OF [1.0, 0.0, 0.0] LIMIT 20 ALLOW FILTERING"
                 ),
                 &session,
             )
@@ -197,7 +197,7 @@ async fn ann_filter_by_partition_key_in(actors: TestActors) {
         || async {
             let result = get_opt_query_results(
                 format!(
-                    "SELECT pk, ck FROM {table} WHERE pk IN (0, 2) ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 20"
+                    "SELECT pk, ck FROM {table} WHERE pk IN (0, 2) ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 20 ALLOW FILTERING"
                 ),
                 &session,
             )
@@ -264,7 +264,7 @@ async fn ann_filter_by_clustering_key_lt(actors: TestActors) {
         || async {
             let result = get_opt_query_results(
                 format!(
-                    "SELECT ck FROM {table} WHERE pk = 0 AND ck < 3 ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10"
+                    "SELECT ck FROM {table} WHERE pk = 0 AND ck < 3 ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10 ALLOW FILTERING"
                 ),
                 &session,
             )
@@ -331,7 +331,7 @@ async fn ann_filter_by_clustering_key_gt(actors: TestActors) {
         || async {
             let result = get_opt_query_results(
                 format!(
-                    "SELECT ck FROM {table} WHERE pk = 0 AND ck > 7 ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10"
+                    "SELECT ck FROM {table} WHERE pk = 0 AND ck > 7 ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10 ALLOW FILTERING"
                 ),
                 &session,
             )
@@ -398,7 +398,7 @@ async fn ann_filter_by_clustering_key_range(actors: TestActors) {
         || async {
             let result = get_opt_query_results(
                 format!(
-                    "SELECT ck FROM {table} WHERE pk = 0 AND ck >= 3 AND ck <= 5 ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10"
+                    "SELECT ck FROM {table} WHERE pk = 0 AND ck >= 3 AND ck <= 5 ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10 ALLOW FILTERING"
                 ),
                 &session,
             )
@@ -471,7 +471,7 @@ async fn ann_filter_by_pk_and_ck(actors: TestActors) {
         || async {
             let result = get_opt_query_results(
                 format!(
-                    "SELECT pk, ck1, ck2 FROM {table} WHERE pk = 1 AND ck1 = 0 ORDER BY v ANN OF [1.0, 0.0, 0.0] LIMIT 20"
+                    "SELECT pk, ck1, ck2 FROM {table} WHERE pk = 1 AND ck1 = 0 ORDER BY v ANN OF [1.0, 0.0, 0.0] LIMIT 20 ALLOW FILTERING"
                 ),
                 &session,
             )
@@ -541,7 +541,7 @@ async fn ann_filter_returns_no_results_when_nothing_matches(actors: TestActors) 
         || async {
             get_opt_query_results(
                 format!(
-                    "SELECT ck FROM {table} WHERE pk = 0 ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10"
+                    "SELECT ck FROM {table} WHERE pk = 0 ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10 ALLOW FILTERING"
                 ),
                 &session,
             )
@@ -555,7 +555,7 @@ async fn ann_filter_returns_no_results_when_nothing_matches(actors: TestActors) 
 
     // Query for a partition key that does not exist
     let results = get_query_results(
-        format!("SELECT ck FROM {table} WHERE pk = 999 ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10"),
+        format!("SELECT ck FROM {table} WHERE pk = 999 ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10 ALLOW FILTERING"),
         &session,
     )
     .await;
@@ -608,7 +608,7 @@ async fn ann_filter_by_vector_column_fails(actors: TestActors) {
     session
         .query_unpaged(
             format!(
-                "SELECT pk FROM {table} WHERE v = [1.0, 0.0, 0.0] ORDER BY v ANN OF [1.0, 0.0, 0.0] LIMIT 5"
+                "SELECT pk FROM {table} WHERE v = [1.0, 0.0, 0.0] ORDER BY v ANN OF [1.0, 0.0, 0.0] LIMIT 5 ALLOW FILTERING"
             ),
             (),
         )
@@ -659,7 +659,7 @@ async fn ann_filter_by_non_indexed_column_fails(actors: TestActors) {
 
     session
         .query_unpaged(
-            format!("SELECT pk FROM {table} WHERE f = 1 ORDER BY v ANN OF [1.0, 0.0, 0.0] LIMIT 5"),
+            format!("SELECT pk FROM {table} WHERE f = 1 ORDER BY v ANN OF [1.0, 0.0, 0.0] LIMIT 5 ALLOW FILTERING"),
             (),
         )
         .await
@@ -792,7 +792,7 @@ async fn local_index_filter_by_clustering_key_range(actors: TestActors) {
         || async {
             let result = get_opt_query_results(
                 format!(
-                    "SELECT ck FROM {table} WHERE pk = 0 AND ck >= 3 AND ck <= 5 ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10"
+                    "SELECT ck FROM {table} WHERE pk = 0 AND ck >= 3 AND ck <= 5 ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10 ALLOW FILTERING"
                 ),
                 &session,
             )
@@ -1005,7 +1005,8 @@ async fn local_ann_with_timestamp_gte_filter(actors: TestActors) {
             "SELECT pk FROM {table} \
              WHERE pk = 'alice' AND board_id = 42 \
              AND created_at >= '2024-01-01' \
-             ORDER BY v ANN OF [0.1, 0.2, 0.3] LIMIT 5"
+             ORDER BY v ANN OF [0.1, 0.2, 0.3] LIMIT 5
+             ALLOW FILTERING"
         ),
         &session,
     )
