@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+use crate::create_config_channels;
 use crate::db_basic;
 use crate::db_basic::Table;
 use crate::mock_opensearch;
@@ -47,10 +48,9 @@ async fn simple_create_search_delete_index() {
     let index_factory =
         vector_store::new_index_factory_opensearch(server.base_url(), config_rx_factory).unwrap();
 
-    let (_config_tx, config_rx) = watch::channel(Arc::new(test_config()));
-
+    let (receivers, _senders) = create_config_channels(test_config()).await;
     let (_server_actor, addr) =
-        vector_store::run(node_state, db_actor, internals, index_factory, config_rx)
+        vector_store::run(node_state, db_actor, internals, index_factory, receivers)
             .await
             .unwrap();
 

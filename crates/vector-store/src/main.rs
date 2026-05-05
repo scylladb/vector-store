@@ -65,18 +65,17 @@ fn main() -> anyhow::Result<()> {
     tracing::info!("Starting {} version {}", Info::name(), Info::version());
 
     // Create ConfigManager with initial configuration
-    let (config_manager, config_rx) = ConfigManager::new(loaded_config);
-    let config = config_rx.borrow().clone();
-
-    let threads = config.threads;
+    let threads = loaded_config.threads;
 
     vector_store::block_on(threads, async move || {
+        let (config_manager, config_receivers) = ConfigManager::new(loaded_config).await?;
         // Start SIGHUP handler now that we're in the Tokio runtime
         config_manager.start(dotenvy_to_std_var);
 
         let node_state = vector_store::new_node_state().await;
 
-        let opensearch_addr = config.opensearch_addr.clone();
+        let config_rx = config_receivers.config.clone();
+        let opensearch_addr = config_rx.borrow().opensearch_addr.clone();
 
         let index_factory = if let Some(addr) = opensearch_addr {
             tracing::info!("Using OpenSearch index factory at {addr}");
@@ -88,14 +87,14 @@ fn main() -> anyhow::Result<()> {
 
         let internals = vector_store::new_internals();
         let db_actor =
-            vector_store::new_db(node_state.clone(), internals.clone(), config_rx.clone()).await?;
+            vector_store::new_db(node_state.clone(), internals.clone(), config_rx).await?;
 
         let (_server_actor, addr) = vector_store::run(
             node_state,
             db_actor,
             internals,
             index_factory,
-            config_rx.clone(),
+            config_receivers,
         )
         .await?;
         tracing::info!("listening on {addr}");
