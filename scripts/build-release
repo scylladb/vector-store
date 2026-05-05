@@ -3,52 +3,93 @@
 set -e
 
 repo=$(dirname "${BASH_SOURCE[0]}")
-repo=$(realpath $repo/..)
+repo=$(realpath "$repo/..")
 
-cd $repo
+cd "$repo"
 
-vector_store_version=$(./scripts/run-with-release-toolchain cargo info vector-store | grep ^version: | cut -d ' ' -f 2)
+# Colors (disabled if not a terminal).
+if [[ -t 1 ]]; then
+    bold=$'\033[1m'
+    red=$'\033[0;31m'
+    green=$'\033[0;32m'
+    cyan=$'\033[0;36m'
+    reset=$'\033[0m'
+else
+    bold="" red="" green="" cyan="" reset=""
+fi
 
-# ensure the git repository is clean
+step=0
+total_steps=5
+
+step_header() {
+    step=$((step + 1))
+    echo ""
+    echo "  ${bold}${cyan}--> [build $step/$total_steps] $1${reset}"
+    echo ""
+}
+
+step_header "Resolving version and verifying repository state"
+
+if [[ -n $1 ]]; then
+    vector_store_version=$1
+    echo "  Version (override): $vector_store_version"
+else
+    vector_store_version=$(./scripts/run-with-release-toolchain cargo info vector-store | grep ^version: | cut -d ' ' -f 2)
+    echo "  Version: $vector_store_version"
+fi
+
 if git status --porcelain | grep -q . ; then
-    echo "error: git repository is not clean. Dirty files:"
+    echo "${red}error: git repository is not clean. Dirty files:${reset}"
     git status --porcelain
     echo ""
     echo "Please commit or discard uncommitted changes before building a release."
     echo "To discard all changes: git checkout -- ."
     exit 1
 fi
+echo "  ${green}Repository is clean.${reset}"
+
+# Restore Cargo.toml and Cargo.lock from git if any build step fails.
+restore_cargo_files() {
+    git checkout -- Cargo.toml Cargo.lock 2>/dev/null && echo "  Restored Cargo.toml and Cargo.lock from git."
+}
+trap restore_cargo_files EXIT
+trap 'echo ""; echo "  Interrupted."; exit 130' INT TERM
 
 archs="amd64 arm64"
 
-for arch in $archs ; do
-    echo rebuild the release version $vector_store_version for $arch
-    TARGETARCH=$arch ./scripts/run-with-release-toolchain cargo clean --release
-    TARGETARCH=$arch ./scripts/run-with-release-toolchain cargo build --release
-done
+step_header "Building release binaries"
 
 for arch in $archs ; do
-    echo build the tar archive for $arch
+    echo "  Building vector-store $vector_store_version for $arch..."
+    RELEASE_VERSION=$vector_store_version TARGETARCH=$arch ./scripts/run-with-release-toolchain cargo clean --release
+    RELEASE_VERSION=$vector_store_version TARGETARCH=$arch ./scripts/run-with-release-toolchain cargo build --release
+    echo "  ${green}Built: target/$arch/release/vector-store${reset}"
+done
+
+step_header "Creating release archives"
+
+for arch in $archs ; do
     vector_store_dir=vector-store-$vector_store_version-$arch
     vector_store_tarball=$vector_store_dir.tar.gz
     (cd target/$arch/release && tar -czf $vector_store_tarball --transform "s,^,$vector_store_dir/," vector-store)
-    ls -lh target/$arch/release/$vector_store_tarball
+    echo "  ${green}Created: target/$arch/release/$vector_store_tarball ($(du -h target/$arch/release/$vector_store_tarball | cut -f1))${reset}"
 done
 
-echo generate Cargo SBOM for version $vector_store_version
-cp Cargo.toml Cargo.toml.bak
-trap 'mv Cargo.toml.bak Cargo.toml' EXIT
+step_header "Generating Cargo SBOM"
+
+mkdir -p SBOM
 sed -i "s/version = \"0.0.0-dev\"/version = \"$vector_store_version\"/" Cargo.toml
 cargo cyclonedx --manifest-path crates/vector-store/Cargo.toml --format json
-mv Cargo.toml.bak Cargo.toml
-trap - EXIT
+restore_cargo_files
 cargo_sbom=crates/vector-store/vector-store.cdx.json
-[[ -f $cargo_sbom ]] || { echo "error: SBOM was not generated at $cargo_sbom"; exit 1; }
-mv $cargo_sbom vector-store-$vector_store_version.cdx.json
-echo "Cargo SBOM: vector-store-$vector_store_version.cdx.json"
+[[ -f $cargo_sbom ]] || { echo "${red}error: SBOM was not generated at $cargo_sbom${reset}"; exit 1; }
+mv $cargo_sbom SBOM/vector-store-$vector_store_version.cdx.json
+echo "  ${green}Created: SBOM/vector-store-$vector_store_version.cdx.json${reset}"
+
+step_header "Building Docker images and generating Docker SBOMs"
 
 for arch in $archs ; do
-    echo build the docker image for linux/$arch
+    echo "  Building docker image for linux/$arch..."
     docker_tag=scylladb/vector-store:$vector_store_version-$arch
     docker build --platform linux/$arch --tag $docker_tag -f- . <<EOF
 FROM redhat/ubi9-minimal
@@ -57,19 +98,33 @@ RUN mkdir /opt/vector-store
 COPY target/\$TARGETARCH/release/vector-store /opt/vector-store
 CMD ["/opt/vector-store/vector-store"]
 EOF
+    echo "  ${green}Built: $docker_tag${reset}"
 
-    echo generate Docker image SBOM for $arch using syft
-    docker_sbom=vector-store-docker-$vector_store_version-$arch.cdx.json
+    echo "  Generating Docker SBOM for $arch..."
+    docker_sbom=SBOM/vector-store-docker-$vector_store_version-$arch.cdx.json
     syft $docker_tag -o cyclonedx-json > $docker_sbom
-    [[ -s $docker_sbom ]] || { echo "error: Docker SBOM is empty at $docker_sbom"; exit 1; }
-    echo "Docker SBOM: $docker_sbom"
+    [[ -s $docker_sbom ]] || { echo "${red}error: Docker SBOM is empty at $docker_sbom${reset}"; exit 1; }
+    echo "  ${green}Created: $docker_sbom${reset}"
 done
 
-echo create multi-platform docker manifest
-docker_manifest=scylladb/vector-store:$vector_store_version
-docker_arch_tags=()
+echo ""
+echo "${bold}${green}========================================"
+echo " BUILD COMPLETE: vector-store $vector_store_version"
+echo "========================================${reset}"
+echo ""
+echo "Artifacts:"
 for arch in $archs ; do
-    docker_arch_tags+=("scylladb/vector-store:$vector_store_version-$arch")
+    echo "  - target/$arch/release/vector-store-$vector_store_version-$arch.tar.gz"
 done
-docker manifest create $docker_manifest "${docker_arch_tags[@]}"
-echo "Docker manifest: $docker_manifest"
+echo "  - SBOM/vector-store-$vector_store_version.cdx.json"
+for arch in $archs ; do
+    echo "  - SBOM/vector-store-docker-$vector_store_version-$arch.cdx.json"
+    echo "  - scylladb/vector-store:$vector_store_version-$arch (local docker image)"
+done
+echo ""
+echo "Next step: run ./scripts/upload-release $vector_store_version to publish."
+
+# Success — disarm the trap.
+trap - EXIT
+
+

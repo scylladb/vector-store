@@ -3,46 +3,125 @@
 set -e
 
 repo_dir=$(dirname "${BASH_SOURCE[0]}")
-repo_dir=$(realpath $repo_dir/..)
+repo_dir=$(realpath "$repo_dir/..")
 
-cd $repo_dir
+cd "$repo_dir"
 
-vector_store_version=$(./scripts/run-with-release-toolchain cargo info vector-store | grep ^version: | cut -d ' ' -f 2)
+# Colors (disabled if not a terminal).
+if [[ -t 1 ]]; then
+    bold=$'\033[1m'
+    red=$'\033[0;31m'
+    green=$'\033[0;32m'
+    cyan=$'\033[0;36m'
+    reset=$'\033[0m'
+else
+    bold="" red="" green="" cyan="" reset=""
+fi
 
+step=0
+total_steps=3
+
+step_header() {
+    step=$((step + 1))
+    echo ""
+    echo "  ${bold}${cyan}--> [upload $step/$total_steps] $1${reset}"
+    echo ""
+}
+
+step_header "Verifying prerequisites"
+
+if [[ -n $1 ]]; then
+    vector_store_version=$1
+    echo "  Version (override): $vector_store_version"
+else
+    vector_store_version=$(./scripts/run-with-release-toolchain cargo info vector-store | grep ^version: | cut -d ' ' -f 2)
+    echo "  Version: $vector_store_version"
+fi
 tag=$vector_store_version
 
-# verify the tag exists
-git rev-parse "$tag" > /dev/null 2>&1 || { echo "error: tag $tag does not exist"; exit 1; }
+git rev-parse "$tag" > /dev/null 2>&1 || { echo "${red}error: tag $tag does not exist${reset}"; exit 1; }
+echo "  ${green}Tag $tag exists.${reset}"
 
-# verify gh cli is available
-command -v gh > /dev/null 2>&1 || { echo "error: gh cli is not installed (https://cli.github.com/)"; exit 1; }
+command -v gh > /dev/null 2>&1 || { echo "${red}error: gh cli is not installed (https://cli.github.com/)${reset}"; exit 1; }
+echo "  ${green}gh CLI available.${reset}"
+
+command -v docker > /dev/null 2>&1 || { echo "${red}error: docker is not installed${reset}"; exit 1; }
+docker buildx version > /dev/null 2>&1 || { echo "${red}error: docker buildx is not available${reset}"; exit 1; }
+echo "  ${green}Docker and buildx available.${reset}"
 
 archs="amd64 arm64"
 
-# collect all release assets
+step_header "Collecting and uploading GitHub release assets"
+
 assets=()
 
 for arch in $archs ; do
     tarball=target/$arch/release/vector-store-$vector_store_version-$arch.tar.gz
-    [[ -f $tarball ]] || { echo "error: $tarball not found, run scripts/build-release first"; exit 1; }
+    [[ -f $tarball ]] || { echo "${red}error: $tarball not found, run scripts/build-release first${reset}"; exit 1; }
     assets+=("$tarball")
 done
 
-cargo_sbom=vector-store-$vector_store_version.cdx.json
-[[ -f $cargo_sbom ]] || { echo "error: $cargo_sbom not found, run scripts/build-release first"; exit 1; }
+cargo_sbom=SBOM/vector-store-$vector_store_version.cdx.json
+[[ -f $cargo_sbom ]] || { echo "${red}error: $cargo_sbom not found, run scripts/build-release first${reset}"; exit 1; }
 assets+=("$cargo_sbom")
 
 for arch in $archs ; do
-    docker_sbom=vector-store-docker-$vector_store_version-$arch.cdx.json
-    [[ -f $docker_sbom ]] || { echo "error: $docker_sbom not found, run scripts/build-release first"; exit 1; }
+    docker_sbom=SBOM/vector-store-docker-$vector_store_version-$arch.cdx.json
+    [[ -f $docker_sbom ]] || { echo "${red}error: $docker_sbom not found, run scripts/build-release first${reset}"; exit 1; }
     assets+=("$docker_sbom")
 done
 
-echo "uploading ${#assets[@]} assets to release $tag:"
+echo "  Uploading ${#assets[@]} assets to release $tag:"
 for asset in "${assets[@]}" ; do
-    echo "  $asset"
+    echo "    - $asset"
 done
 
-gh release upload "$tag" "${assets[@]}" --clobber
+if gh release view "$tag" > /dev/null 2>&1; then
+    echo "  Release $tag already exists, uploading assets."
+    gh release upload "$tag" "${assets[@]}" --clobber
+else
+    echo "  Creating release $tag with auto-generated notes."
+    gh release create "$tag" --generate-notes "${assets[@]}"
+fi
+echo "  ${green}Upload complete.${reset}"
 
-echo "done"
+step_header "Pushing Docker images and manifest"
+
+github_repo=$(git remote get-url origin | sed 's|.*github.com[:/]||;s|\.git$||')
+if [[ $github_repo != "scylladb/vector-store" ]]; then
+    echo "  Skipping Docker push (running from fork: $github_repo)."
+    echo "  Local images are available for verification:"
+    for arch in $archs ; do
+        echo "    - scylladb/vector-store:$vector_store_version-$arch"
+    done
+else
+    for arch in $archs ; do
+        echo "  Pushing scylladb/vector-store:$vector_store_version-$arch..."
+        docker push scylladb/vector-store:$vector_store_version-$arch
+        echo "  ${green}Pushed: scylladb/vector-store:$vector_store_version-$arch${reset}"
+    done
+
+    echo ""
+    echo "  Creating multi-platform Docker manifest..."
+    docker_manifest=scylladb/vector-store:$vector_store_version
+    docker buildx imagetools create -t $docker_manifest \
+        scylladb/vector-store:$vector_store_version-amd64 \
+        scylladb/vector-store:$vector_store_version-arm64
+    echo "  ${green}Pushed manifest: $docker_manifest${reset}"
+fi
+
+echo ""
+echo "${bold}${green}========================================"
+echo " UPLOAD COMPLETE: vector-store $vector_store_version"
+echo "========================================${reset}"
+echo ""
+echo "Published:"
+echo "  - GitHub release: $tag (${#assets[@]} assets)"
+if [[ $github_repo == "scylladb/vector-store" ]]; then
+    for arch in $archs ; do
+        echo "  - Docker Hub: scylladb/vector-store:$vector_store_version-$arch"
+    done
+    echo "  - Docker Hub: $docker_manifest (multi-platform manifest)"
+else
+    echo "  - Docker push skipped (fork: $github_repo)"
+fi

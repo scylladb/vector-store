@@ -3,38 +3,51 @@
 set -e
 
 repo=$(dirname "${BASH_SOURCE[0]}")
-repo=$(realpath $repo/..)
+repo=$(realpath "$repo/..")
 
 TARGETARCH="${TARGETARCH:-amd64}"
 
-rust_version=$(grep channel $repo/rust-toolchain.toml | cut -d '"' -f 2)
-image=rust:$rust_version-bookworm
+rust_version=$(grep channel "$repo/rust-toolchain.toml" | cut -d '"' -f 2)
+image="rust:$rust_version-bookworm"
 
 user_cargo_home=$CARGO_HOME
 [[ -z $user_cargo_home ]] && [[ -d "$HOME/.cargo" ]] && user_cargo_home="$HOME/.cargo"
 
-docker_cargo_home=$(docker run --rm $image sh -c 'echo $CARGO_HOME')
+docker_cargo_home=$(docker run --rm "$image" sh -c 'echo $CARGO_HOME')
 
-[[ -n $user_cargo_home ]] && mount_cargo="-v $user_cargo_home/git:$docker_cargo_home/git -v $user_cargo_home/registry:$docker_cargo_home/registry "
+if [[ -n $RELEASE_VERSION ]]; then
+    version=$RELEASE_VERSION
+else
+    version=$(git describe --dirty) || { echo "error: no annotated tag found"; exit 1; }
+fi
 
-version=$(git describe --dirty) || { echo "error: no annotated tag found"; exit 1; }
 tmp_cargo=$(mktemp /tmp/Cargo.XXXXXX)
-cat $repo/Cargo.toml | sed -e "s/version = \"0.0.0-dev\"/version = \"$version\"/" > $tmp_cargo
-
 tmp_rust_toolchain=$(mktemp /tmp/rust-toolchain.XXXXXX)
-grep -v components $repo/rust-toolchain.toml > $tmp_rust_toolchain
 
-docker run --rm \
-    --platform linux/$TARGETARCH \
-    --user "$(id -u)":"$(id -g)" \
-    -e CARGO_TARGET_DIR="./target/$TARGETARCH" \
-    -v "$repo":"$repo" \
-    -v $tmp_cargo:"$repo/Cargo.toml" \
-    -v $tmp_rust_toolchain:"$repo/rust-toolchain.toml" \
-    $mount_cargo \
-    -w "$repo" \
-    $image \
-    "$@"
+cleanup() { rm -f "$tmp_cargo" "$tmp_rust_toolchain"; }
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT TERM
 
-rm $tmp_cargo
-rm $tmp_rust_toolchain
+sed -e "s/version = \"0.0.0-dev\"/version = \"$version\"/" "$repo/Cargo.toml" > "$tmp_cargo"
+grep -v components "$repo/rust-toolchain.toml" > "$tmp_rust_toolchain"
+
+docker_args=(
+    run --rm --init
+    --platform "linux/$TARGETARCH"
+    --user "$(id -u):$(id -g)"
+    -e "CARGO_TARGET_DIR=./target/$TARGETARCH"
+    -v "$repo:$repo"
+    -v "$tmp_cargo:$repo/Cargo.toml"
+    -v "$tmp_rust_toolchain:$repo/rust-toolchain.toml"
+)
+
+if [[ -n $user_cargo_home ]]; then
+    docker_args+=(-v "$user_cargo_home/git:$docker_cargo_home/git")
+    docker_args+=(-v "$user_cargo_home/registry:$docker_cargo_home/registry")
+fi
+
+[[ -t 1 ]] && docker_args+=(-t)
+
+docker_args+=(-w "$repo" "$image" "$@")
+
+docker "${docker_args[@]}"
