@@ -81,7 +81,7 @@ if [[ ${#missing[@]} -gt 0 ]]; then
 fi
 echo "  ${green}All dependencies available.${reset}"
 
-step_header "Preparing Docker QEMU for multi-platform builds"
+step_header "Preparing Docker QEMU for multi-platform images"
 
 ./scripts/prepare-docker-qemu
 echo "  ${green}QEMU handlers registered.${reset}"

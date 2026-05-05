@@ -21,6 +21,35 @@ else
     version=$(git describe --dirty) || { echo "error: no annotated tag found"; exit 1; }
 fi
 
+# Map TARGETARCH to Rust target triple and cross-toolchain.
+case "$TARGETARCH" in
+    amd64)
+        rust_target="x86_64-unknown-linux-gnu"
+        cross_pkg=""
+        cross_prefix=""
+        ;;
+    arm64)
+        rust_target="aarch64-unknown-linux-gnu"
+        cross_pkg="gcc-aarch64-linux-gnu g++-aarch64-linux-gnu"
+        cross_prefix="aarch64-linux-gnu-"
+        ;;
+    *)
+        echo "error: unsupported TARGETARCH=$TARGETARCH (expected amd64 or arm64)"
+        exit 1
+        ;;
+esac
+
+# Determine host architecture.
+host_arch=$(uname -m)
+case "$host_arch" in
+    x86_64)  host_rust_target="x86_64-unknown-linux-gnu" ;;
+    aarch64) host_rust_target="aarch64-unknown-linux-gnu" ;;
+    *)       host_rust_target="$host_arch-unknown-linux-gnu" ;;
+esac
+
+is_cross=false
+[[ "$rust_target" != "$host_rust_target" ]] && is_cross=true
+
 tmp_cargo=$(mktemp /tmp/Cargo.XXXXXX)
 tmp_rust_toolchain=$(mktemp /tmp/rust-toolchain.XXXXXX)
 
@@ -33,8 +62,6 @@ grep -v components "$repo/rust-toolchain.toml" > "$tmp_rust_toolchain"
 
 docker_args=(
     run --rm --init
-    --platform "linux/$TARGETARCH"
-    --user "$(id -u):$(id -g)"
     -e "CARGO_TARGET_DIR=./target/$TARGETARCH"
     -v "$repo:$repo"
     -v "$tmp_cargo:$repo/Cargo.toml"
@@ -48,6 +75,31 @@ fi
 
 [[ -t 1 ]] && docker_args+=(-t)
 
-docker_args+=(-w "$repo" "$image" "$@")
+# Cross-compilation: install cross-toolchain, add Rust target, set CC/CXX/linker.
+# Runs as root so apt-get can install packages.
+if [[ "$is_cross" == "true" ]]; then
+    rust_target_upper=$(echo "$rust_target" | tr '[:lower:]-' '[:upper:]_')
+    rust_target_underscored=$(echo "$rust_target" | tr '-' '_')
+    docker_args+=(
+        -e "CARGO_TARGET_${rust_target_upper}_LINKER=${cross_prefix}gcc"
+        -e "CC_${rust_target_underscored}=${cross_prefix}gcc"
+        -e "CXX_${rust_target_underscored}=${cross_prefix}g++"
+        -e "AR_${rust_target_underscored}=${cross_prefix}ar"
+        -e "CARGO_BUILD_TARGET=$rust_target"
+        -e "CROSS_PACKAGES=$cross_pkg"
+        -e "RUST_CROSS_TARGET=$rust_target"
+        -e "FIX_UID=$(id -u)"
+        -e "FIX_GID=$(id -g)"
+        -e "TARGET_DIR=./target/$TARGETARCH"
+    )
+    docker_args+=(-w "$repo" "$image" sh -c "
+        apt-get update -qq && apt-get install -y -qq \$CROSS_PACKAGES > /dev/null 2>&1 &&
+        rustup target add \$RUST_CROSS_TARGET &&
+        \"\$@\" && chown -R \$FIX_UID:\$FIX_GID \$TARGET_DIR
+    " -- "$@")
+else
+    docker_args+=(--user "$(id -u):$(id -g)")
+    docker_args+=(-w "$repo" "$image" "$@")
+fi
 
 docker "${docker_args[@]}"

@@ -56,8 +56,18 @@ step_header "Collecting and uploading GitHub release assets"
 assets=()
 
 for arch in $archs ; do
-    tarball=target/$arch/release/vector-store-$vector_store_version-$arch.tar.gz
-    [[ -f $tarball ]] || { echo "${red}error: $tarball not found, run scripts/build-release first${reset}"; exit 1; }
+    # Cross-compilation may place artifacts in a target-triple subdir.
+    tarball=""
+    for candidate in \
+        "target/$arch/release/vector-store-$vector_store_version-$arch.tar.gz" \
+        "target/$arch/x86_64-unknown-linux-gnu/release/vector-store-$vector_store_version-$arch.tar.gz" \
+        "target/$arch/aarch64-unknown-linux-gnu/release/vector-store-$vector_store_version-$arch.tar.gz"; do
+        if [[ -f $candidate ]]; then
+            tarball=$candidate
+            break
+        fi
+    done
+    [[ -n $tarball ]] || { echo "${red}error: tarball for $arch not found, run scripts/build-release first${reset}"; exit 1; }
     assets+=("$tarball")
 done
 
