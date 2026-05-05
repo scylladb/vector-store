@@ -40,17 +40,17 @@ assets=()
 
 for arch in $archs ; do
     tarball=target/$arch/release/vector-store-$vector_store_version-$arch.tar.gz
-    [[ -f $tarball ]] || { error "$tarball not found, run scripts/build-release first"; exit 1; }
+    [[ -f $tarball ]] || { error "$tarball not found, run scripts/_build-release first"; exit 1; }
     assets+=("$tarball")
 done
 
 cargo_sbom=SBOM/vector-store-$vector_store_version.cdx.json
-[[ -f $cargo_sbom ]] || { error "$cargo_sbom not found, run scripts/build-release first"; exit 1; }
+[[ -f $cargo_sbom ]] || { error "$cargo_sbom not found, run scripts/_build-release first"; exit 1; }
 assets+=("$cargo_sbom")
 
 for arch in $archs ; do
     docker_sbom=SBOM/vector-store-docker-$vector_store_version-$arch.cdx.json
-    [[ -f $docker_sbom ]] || { error "$docker_sbom not found, run scripts/build-release first"; exit 1; }
+    [[ -f $docker_sbom ]] || { error "$docker_sbom not found, run scripts/_build-release first"; exit 1; }
     assets+=("$docker_sbom")
 done
 
