@@ -57,22 +57,45 @@ trap 'echo ""; echo "  Interrupted."; exit 130' INT TERM
 
 archs="amd64 arm64"
 
+# Map arch to Rust target triple.
+rust_target_for() {
+    case "$1" in
+        amd64) echo "x86_64-unknown-linux-gnu" ;;
+        arm64) echo "aarch64-unknown-linux-gnu" ;;
+    esac
+}
+
+# Resolve the release binary path (cross builds add a target-triple subdir).
+release_dir_for() {
+    local arch=$1
+    local target
+    target=$(rust_target_for "$arch")
+    if [[ -f "target/$arch/$target/release/vector-store" ]]; then
+        echo "target/$arch/$target/release"
+    else
+        echo "target/$arch/release"
+    fi
+}
+
 step_header "Building release binaries"
 
 for arch in $archs ; do
     echo "  Building vector-store $vector_store_version for $arch..."
     RELEASE_VERSION=$vector_store_version TARGETARCH=$arch ./scripts/run-with-release-toolchain cargo clean --release
     RELEASE_VERSION=$vector_store_version TARGETARCH=$arch ./scripts/run-with-release-toolchain cargo build --release
-    echo "  ${green}Built: target/$arch/release/vector-store${reset}"
+    release_dir=$(release_dir_for "$arch")
+    [[ -f "$release_dir/vector-store" ]] || { echo "${red}error: binary not found at $release_dir/vector-store${reset}"; exit 1; }
+    echo "  ${green}Built: $release_dir/vector-store${reset}"
 done
 
 step_header "Creating release archives"
 
 for arch in $archs ; do
+    release_dir=$(release_dir_for "$arch")
     vector_store_dir=vector-store-$vector_store_version-$arch
     vector_store_tarball=$vector_store_dir.tar.gz
-    (cd target/$arch/release && tar -czf $vector_store_tarball --transform "s,^,$vector_store_dir/," vector-store)
-    echo "  ${green}Created: target/$arch/release/$vector_store_tarball ($(du -h target/$arch/release/$vector_store_tarball | cut -f1))${reset}"
+    (cd "$release_dir" && tar -czf $vector_store_tarball --transform "s,^,$vector_store_dir/," vector-store)
+    echo "  ${green}Created: $release_dir/$vector_store_tarball ($(du -h "$release_dir/$vector_store_tarball" | cut -f1))${reset}"
 done
 
 step_header "Generating Cargo SBOM"
@@ -89,13 +112,13 @@ echo "  ${green}Created: SBOM/vector-store-$vector_store_version.cdx.json${reset
 step_header "Building Docker images and generating Docker SBOMs"
 
 for arch in $archs ; do
+    release_dir=$(release_dir_for "$arch")
     echo "  Building docker image for linux/$arch..."
     docker_tag=scylladb/vector-store:$vector_store_version-$arch
     docker build --platform linux/$arch --tag $docker_tag -f- . <<EOF
 FROM redhat/ubi9-minimal
-ARG TARGETARCH
 RUN mkdir /opt/vector-store
-COPY target/\$TARGETARCH/release/vector-store /opt/vector-store
+COPY $release_dir/vector-store /opt/vector-store
 CMD ["/opt/vector-store/vector-store"]
 EOF
     echo "  ${green}Built: $docker_tag${reset}"
@@ -114,7 +137,8 @@ echo "========================================${reset}"
 echo ""
 echo "Artifacts:"
 for arch in $archs ; do
-    echo "  - target/$arch/release/vector-store-$vector_store_version-$arch.tar.gz"
+    release_dir=$(release_dir_for "$arch")
+    echo "  - $release_dir/vector-store-$vector_store_version-$arch.tar.gz"
 done
 echo "  - SBOM/vector-store-$vector_store_version.cdx.json"
 for arch in $archs ; do
