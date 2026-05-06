@@ -79,9 +79,27 @@ pub(crate) async fn new(
                             schema_version.reset();
                             continue;
                         };
-                        node_state.send_event(
-                            Event::IndexesDiscovered(new_indexes.clone()),
-                        ).await;
+
+                        if alter_index_simulator {
+                            node_state.send_event(
+                                Event::IndexesDiscovered(
+                                    indexes
+                                        .iter()
+                                        .filter(|idx| !should_delete_simulator(idx, &new_indexes))
+                                        .chain(
+                                            new_indexes
+                                                .iter()
+                                                .filter(|idx| should_add_simulator(idx, &indexes))
+                                        )
+                                        .cloned()
+                                        .collect()
+                                )
+                            ).await;
+                        } else {
+                            node_state.send_event(
+                                Event::IndexesDiscovered(new_indexes.clone()),
+                            ).await;
+                        }
 
                         let for_delete: Box<dyn Fn(&IndexMetadata) -> bool + Send> = if alter_index_simulator {
                             Box::new(|curr_idx| should_delete_simulator(curr_idx, &new_indexes))
@@ -100,6 +118,7 @@ pub(crate) async fn new(
                             new_indexes.into_iter().filter(for_add)
                         ).await;
                         indexes.extend(added);
+
                         if has_failures {
                             // if a process has failures we will need to repeat the operation
                             // so let's reset schema version here
