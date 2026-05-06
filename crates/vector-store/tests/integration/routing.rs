@@ -85,9 +85,10 @@ async fn setup() -> (HttpClient, DbBasic, impl Sized) {
     let (db_actor, db) = db_basic::new(node_state.clone());
     let (receivers, senders) = create_config_channels(test_config()).await;
     let index_factory = vector_store::new_index_factory_usearch(receivers.config.clone()).unwrap();
-    let server = vector_store::run(node_state, db_actor, internals, index_factory, receivers)
-        .await
-        .unwrap();
+    let (server, _mtls) =
+        vector_store::run(node_state, db_actor, internals, index_factory, receivers)
+            .await
+            .unwrap();
     let addr = (*server.address().await.borrow()).unwrap();
     (HttpClient::new(addr), db, (server, senders))
 }

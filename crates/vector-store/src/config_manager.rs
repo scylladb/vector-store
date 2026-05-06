@@ -35,6 +35,7 @@ impl HttpServerConfig {
 pub struct ConfigReceivers {
     pub config: watch::Receiver<Arc<Config>>,
     pub http: watch::Receiver<Option<Arc<HttpServerConfig>>>,
+    pub mtls_http: watch::Receiver<Option<Arc<HttpServerConfig>>>,
 }
 
 async fn derive_http_config(config: &Config) -> anyhow::Result<HttpServerConfig> {
@@ -59,9 +60,37 @@ async fn load_server_identity(config: &Config) -> anyhow::Result<Option<tls::Ser
     }
 }
 
+async fn load_ca_bundle(config: &Config) -> anyhow::Result<Option<tls::CaBundle>> {
+    match config.mtls_ca_cert_path.as_ref() {
+        Some(path) => Ok(Some(tls::CaBundle::new(path).await?)),
+        None => Ok(None),
+    }
+}
+
+async fn derive_mtls_http_config(config: &Config) -> anyhow::Result<Option<HttpServerConfig>> {
+    let ca_bundle = match load_ca_bundle(config).await? {
+        Some(bundle) => bundle,
+        None => return Ok(None),
+    };
+    let identity = match load_server_identity(config).await? {
+        Some(id) => id,
+        None => {
+            bail!(
+                "mTLS CA certificate path is configured, but TLS certificate or key path is missing"
+            );
+        }
+    };
+    let tls = Some(TlsServerConfig::new_mtls(&identity, &ca_bundle)?);
+    Ok(Some(HttpServerConfig {
+        addr: config.mtls_addr,
+        tls,
+    }))
+}
+
 pub struct ConfigManager {
     config_tx: watch::Sender<Arc<Config>>,
     http_config_tx: watch::Sender<Option<Arc<HttpServerConfig>>>,
+    mtls_http_config_tx: watch::Sender<Option<Arc<HttpServerConfig>>>,
 }
 
 impl ConfigManager {
@@ -78,16 +107,20 @@ impl ConfigManager {
     /// A tuple of (ConfigManager, config receivers)
     pub async fn new(config: Config) -> anyhow::Result<(Self, ConfigReceivers)> {
         let http = derive_http_config(&config).await?;
+        let mtls_http = derive_mtls_http_config(&config).await?;
         let (config_tx, config_rx) = watch::channel(Arc::new(config));
         let (http_config_tx, http_config_rx) = watch::channel(Some(Arc::new(http)));
+        let (mtls_http_config_tx, mtls_http_config_rx) = watch::channel(mtls_http.map(Arc::new));
         Ok((
             Self {
                 config_tx,
                 http_config_tx,
+                mtls_http_config_tx,
             },
             ConfigReceivers {
                 config: config_rx,
                 http: http_config_rx,
+                mtls_http: mtls_http_config_rx,
             },
         ))
     }
@@ -137,6 +170,17 @@ impl ConfigManager {
                 );
             }
         }
+        match derive_mtls_http_config(&config).await {
+            Ok(mtls_http) => {
+                self.mtls_http_config_tx.send(mtls_http.map(Arc::new)).ok();
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Failed to derive mTLS HTTP server config: {e}. \
+                     Keeping previous mTLS HTTP server config"
+                );
+            }
+        }
         self.config_tx.send(Arc::new(config)).ok();
     }
 
@@ -173,7 +217,9 @@ impl ConfigManager {
     }
 
     fn all_receivers_dropped(&self) -> bool {
-        self.config_tx.receiver_count() == 0 && self.http_config_tx.receiver_count() == 0
+        self.config_tx.receiver_count() == 0
+            && self.http_config_tx.receiver_count() == 0
+            && self.mtls_http_config_tx.receiver_count() == 0
     }
 
     /// Start listening for SIGHUP signals and reload configuration when received.
@@ -371,6 +417,23 @@ pub async fn load_config(env: impl Fn(&str) -> anyhow::Result<String>) -> anyhow
         .ok()
         .map(std::path::PathBuf::from);
     let tls_key_path = env("VECTOR_STORE_TLS_KEY_PATH")
+        .ok()
+        .map(std::path::PathBuf::from);
+
+    config.mtls_addr = env("VECTOR_STORE_MTLS_URI")
+        .ok()
+        .map(|v| {
+            v.to_socket_addrs()
+                .map_err(|err| anyhow!("Unable to parse VECTOR_STORE_MTLS_URI env (host:port): {err}"))?
+                .next()
+                .ok_or_else(|| {
+                    anyhow!("Unable to parse VECTOR_STORE_MTLS_URI env (host:port): no addresses resolved")
+                })
+        })
+        .transpose()?
+        .unwrap_or(config.mtls_addr);
+
+    config.mtls_ca_cert_path = env("VECTOR_STORE_MTLS_CA_CERT_PATH")
         .ok()
         .map(std::path::PathBuf::from);
 

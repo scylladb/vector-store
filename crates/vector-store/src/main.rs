@@ -90,7 +90,7 @@ fn main() -> anyhow::Result<()> {
         let db_actor =
             vector_store::new_db(node_state.clone(), internals.clone(), config_rx).await?;
 
-        let server = vector_store::run(
+        let (server, _mtls) = vector_store::run(
             node_state,
             db_actor,
             internals,

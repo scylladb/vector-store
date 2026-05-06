@@ -200,12 +200,14 @@ async fn run_vector_store(
 
     let addr = config.borrow().vector_store_addr;
     let (http_tx, http_rx) = watch::channel(Some(Arc::new(HttpServerConfig { addr, tls: None })));
+    let (_mtls_tx, mtls_http_rx) = watch::channel(None);
     let receivers = ConfigReceivers {
         config,
         http: http_rx,
+        mtls_http: mtls_http_rx,
     };
 
-    let server = vector_store::run(node_state, db, internals, index_factory, receivers)
+    let (server, _mtls) = vector_store::run(node_state, db, internals, index_factory, receivers)
         .await
         .unwrap();
 

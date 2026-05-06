@@ -20,9 +20,10 @@ async fn run_vs(
     let (db_actor, _) = db_basic::new(node_state.clone());
 
     let (receivers, senders) = create_config_channels(test_config()).await;
-    let server = vector_store::run(node_state, db_actor, internals, index_factory, receivers)
-        .await
-        .unwrap();
+    let (server, _mtls) =
+        vector_store::run(node_state, db_actor, internals, index_factory, receivers)
+            .await
+            .unwrap();
     let addr = (*server.address().await.borrow()).unwrap();
     (HttpClient::new(addr), server, senders)
 }
