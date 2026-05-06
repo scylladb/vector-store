@@ -31,6 +31,8 @@ mod timestamp;
 pub mod tls;
 mod vector;
 
+mod fts;
+
 pub use crate::config_manager::ConfigManager;
 pub use crate::config_manager::ConfigReceivers;
 pub use crate::config_manager::HttpServerConfig;
@@ -172,6 +174,7 @@ pub struct Config {
     pub cdc_fine_safety_interval: Option<Duration>,
     pub cdc_fine_sleep_interval: Option<Duration>,
     pub disable_colors: bool,
+    pub fts_enabled: bool,
     pub tls_cert_path: Option<std::path::PathBuf>,
     pub tls_key_path: Option<std::path::PathBuf>,
 }
@@ -189,6 +192,7 @@ impl Default for Config {
             usearch_simulator: None,
             alter_index_simulator: false,
             disable_colors: false,
+            fts_enabled: false,
             tls_cert_path: None,
             tls_key_path: None,
             cql_connection_timeout: None,

@@ -87,6 +87,7 @@ uuid = "1.16.0"
 vector-store = { path = "crates/vector-store" }
 secrecy = "0.10.3"
 rayon = "1.11.0"
+tantivy = "0.22"
 
 [patch.crates-io]
 # Currently, axum-server-dual-protocol doesn't have a published version that supports axum 0.8, so we need to use the git version from the PR.

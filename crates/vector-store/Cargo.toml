@@ -72,6 +72,7 @@ utoipa-axum.workspace = true
 utoipa-swagger-ui.workspace = true
 uuid.workspace = true
 rayon.workspace = true
+tantivy.workspace = true
 
 [dev-dependencies]
 axum-test.workspace = true

@@ -305,6 +305,18 @@ pub async fn load_config(env: impl Fn(&str) -> anyhow::Result<String>) -> anyhow
         config.disable_colors = disable_colors;
     }
 
+    if let Some(fts_enabled) = env("VECTOR_STORE_FTS_ENABLED")
+        .ok()
+        .map(|v| {
+            v.trim().parse().or(Err(anyhow!(
+                "Unable to parse VECTOR_STORE_FTS_ENABLED env (true/false)"
+            )))
+        })
+        .transpose()?
+    {
+        config.fts_enabled = fts_enabled;
+    }
+
     if let Some(vector_store_addr) = env("VECTOR_STORE_URI")
         .ok()
         .map(|v| {
