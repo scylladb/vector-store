@@ -14,7 +14,10 @@ use futures::StreamExt;
 use futures::stream;
 use itertools::Itertools;
 use parquet::arrow::ProjectionMask;
+use parquet::arrow::arrow_reader::ArrowReaderMetadata;
+use parquet::arrow::arrow_reader::ArrowReaderOptions;
 use parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder;
+use parquet::file::metadata::ParquetMetaDataReader;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -24,6 +27,7 @@ use tap::Pipe;
 use tokio::fs;
 use tokio::fs::File;
 use tokio::runtime::Handle;
+use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReadDirStream;
 
@@ -220,66 +224,94 @@ pub(crate) async fn vector_stream(
     path: Arc<PathBuf>,
     config: Arc<Config>,
 ) -> mpsc::Receiver<(i64, Box<[f32]>)> {
-    let mut stream = train_files(path, Arc::clone(&config))
-        .await
-        .then({
+    let workers = Handle::current().metrics().num_workers();
+    const OVERLOAD_FACTOR: usize = 3;
+    let (tx, rx) = mpsc::channel(workers * OVERLOAD_FACTOR);
+    const BUFFER_SIZE: usize = 2;
+    let semaphore = Arc::new(Semaphore::new(BUFFER_SIZE));
+    tokio::spawn(async move {
+        let mut stream = std::pin::pin!(train_files(path, Arc::clone(&config)).await);
+        while let Some(path) = stream.next().await {
             let config = Arc::clone(&config);
-            move |path| {
+            let tx = tx.clone();
+            let semaphore = Arc::clone(&semaphore);
+            let mut file = File::open(&path).await.unwrap();
+            let file_size = file.metadata().await.unwrap().len();
+            let metadata = Arc::new(
+                ParquetMetaDataReader::new()
+                    .load_and_finish(&mut file, file_size)
+                    .await
+                    .unwrap(),
+            );
+            let reader_metadata =
+                ArrowReaderMetadata::try_new(Arc::clone(&metadata), ArrowReaderOptions::new())
+                    .unwrap();
+            for row_group_idx in 0..metadata.row_groups().len() {
+                tracing::info!("Processing {row_group_idx} row_group for {path:?}");
                 let config = Arc::clone(&config);
-                async move {
-                    ParquetRecordBatchStreamBuilder::new(File::open(path).await.unwrap())
-                        .await
-                        .unwrap()
+                let tx = tx.clone();
+                let reader_metadata = reader_metadata.clone();
+                let file = file.try_clone().await.unwrap();
+                let mut stream =
+                    ParquetRecordBatchStreamBuilder::new_with_metadata(file, reader_metadata)
                         .pipe(|builder| {
                             let mask = ProjectionMask::columns(
                                 builder.parquet_schema(),
                                 [&*config.id_column, &*config.embedding_column],
                             );
-                            builder.with_projection(mask)
+                            builder
+                                .with_projection(mask)
+                                .with_row_groups(vec![row_group_idx])
                         })
                         .build()
                         .unwrap()
-                }
-            }
-        })
-        .flatten()
-        .map(move |batch| batch.unwrap())
-        .map(move |batch| {
-            let ids = batch
-                .column_by_name(&config.id_column)
-                .unwrap()
-                .as_primitive::<Int64Type>();
-            let ids = ids.iter().map(|id| id.unwrap());
+                        .map(move |batch| batch.unwrap())
+                        .map(move |batch| {
+                            let ids = batch
+                                .column_by_name(&config.id_column)
+                                .unwrap()
+                                .as_primitive::<Int64Type>();
+                            let ids = ids.iter().map(|id| id.unwrap());
 
-            let ids_embs = if let Some(embs) = batch
-                .column_by_name(&config.embedding_column)
-                .unwrap()
-                .as_list_opt::<i32>()
-            {
-                extract_embedding(ids, embs.iter())
-            } else {
-                extract_embedding(
-                    ids,
-                    batch
-                        .column_by_name(&config.embedding_column)
-                        .unwrap()
-                        .as_list::<i64>()
-                        .iter(),
-                )
-            };
+                            if let Some(embs) = batch
+                                .column_by_name(&config.embedding_column)
+                                .unwrap()
+                                .as_list_opt::<i32>()
+                            {
+                                extract_embedding(ids, embs.iter())
+                            } else {
+                                extract_embedding(
+                                    ids,
+                                    batch
+                                        .column_by_name(&config.embedding_column)
+                                        .unwrap()
+                                        .as_list::<i64>()
+                                        .iter(),
+                                )
+                            }
+                        })
+                        .boxed();
 
-            stream::iter(ids_embs)
-        })
-        .flatten()
-        .boxed();
+                let Some(ids_embs) = stream.next().await else {
+                    continue;
+                };
 
-    let workers = Handle::current().metrics().num_workers();
-    const OVERLOAD_FACTOR: usize = 3;
-    let (tx, rx) = mpsc::channel(workers * OVERLOAD_FACTOR);
-    tokio::spawn(async move {
-        while let Some(id_emb) = stream.next().await {
-            if tx.send(id_emb).await.is_err() {
-                return;
+                let permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
+                tokio::spawn(async move {
+                    for (id, emb) in ids_embs {
+                        if tx.send((id, emb)).await.is_err() {
+                            break;
+                        }
+                    }
+                    while let Some(ids_embs) = stream.next().await {
+                        for (id, emb) in ids_embs {
+                            if tx.send((id, emb)).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    drop(permit);
+                });
             }
         }
     });
