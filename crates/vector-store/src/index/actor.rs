@@ -79,6 +79,7 @@ pub(crate) trait IndexExt {
 }
 
 impl IndexExt for mpsc::Sender<Index> {
+    #[hotpath::measure]
     async fn add_vector(
         &self,
         partition_id: PartitionId,
@@ -96,6 +97,7 @@ impl IndexExt for mpsc::Sender<Index> {
         .expect("internal actor should receive request");
     }
 
+    #[hotpath::measure]
     async fn remove_vector(
         &self,
         partition_id: PartitionId,
@@ -111,12 +113,14 @@ impl IndexExt for mpsc::Sender<Index> {
         .expect("internal actor should receive request");
     }
 
+    #[hotpath::measure]
     async fn remove_partition(&self, partition_id: PartitionId) {
         self.send(Index::RemovePartition { partition_id })
             .await
             .expect("internal actor should receive request");
     }
 
+    #[hotpath::measure]
     async fn ann(&self, index_key: IndexKey, embedding: Vector, limit: Limit) -> AnnR {
         let (tx, rx) = oneshot::channel();
         self.send(Index::Ann {
@@ -129,6 +133,7 @@ impl IndexExt for mpsc::Sender<Index> {
         rx.await?
     }
 
+    #[hotpath::measure]
     async fn filtered_ann(
         &self,
         index_key: IndexKey,
@@ -148,6 +153,7 @@ impl IndexExt for mpsc::Sender<Index> {
         rx.await?
     }
 
+    #[hotpath::measure]
     async fn count(&self, index_key: IndexKey) -> CountR {
         let (tx, rx) = oneshot::channel();
         self.send(Index::Count { index_key, tx }).await?;

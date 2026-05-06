@@ -26,9 +26,9 @@ use crate::table::PrimaryId;
 use crate::table::Table;
 use crate::table::TableSearch;
 use anyhow::anyhow;
+use itertools::Itertools;
 use std::collections::BTreeMap;
-use std::collections::HashSet;
-use std::iter;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicUsize;
@@ -260,7 +260,8 @@ struct Simulator {
     search: Duration,
     add_remove: Duration,
     reserve: Duration,
-    keys: RwLock<HashSet<PrimaryId>>,
+    keys: RwLock<BTreeSet<PrimaryId>>,
+    capacity: AtomicUsize,
     notify: Arc<Notify>,
 }
 
@@ -279,7 +280,8 @@ impl Simulator {
             search: Duration::ZERO,
             add_remove: Duration::ZERO,
             reserve: Duration::ZERO,
-            keys: RwLock::new(HashSet::new()),
+            keys: RwLock::new(BTreeSet::new()),
+            capacity: AtomicUsize::new(0),
             notify: Arc::new(Notify::new()),
         };
         sim.update(config);
@@ -353,6 +355,7 @@ impl Simulator {
 }
 
 impl UsearchIndex for RwLock<Simulator> {
+    #[hotpath::measure]
     fn reserve(&self, size: usize) -> anyhow::Result<()> {
         let start = Instant::now();
 
@@ -360,23 +363,24 @@ impl UsearchIndex for RwLock<Simulator> {
         #[allow(clippy::readonly_write_lock)]
         let sim = self.write().unwrap();
         {
-            let mut keys = sim.keys.write().unwrap();
-            let len = keys.len();
-            keys.reserve(size - len);
+            sim.capacity.store(size, Ordering::Relaxed);
         }
 
         sim.wait_reserve(start);
         Ok(())
     }
 
+    #[hotpath::measure]
     fn capacity(&self) -> usize {
-        self.read().unwrap().keys.read().unwrap().capacity()
+        self.read().unwrap().capacity.load(Ordering::Relaxed)
     }
 
+    #[hotpath::measure]
     fn size(&self) -> usize {
         self.read().unwrap().keys.read().unwrap().len()
     }
 
+    #[hotpath::measure]
     fn add(&self, row_id: PrimaryId, _: &Vector) -> anyhow::Result<()> {
         let start = Instant::now();
 
@@ -387,6 +391,7 @@ impl UsearchIndex for RwLock<Simulator> {
         Ok(())
     }
 
+    #[hotpath::measure]
     fn remove(&self, row_id: PrimaryId) -> anyhow::Result<()> {
         let start = Instant::now();
 
@@ -397,6 +402,7 @@ impl UsearchIndex for RwLock<Simulator> {
         Ok(())
     }
 
+    #[hotpath::measure]
     fn search(
         &self,
         _: &Vector,
@@ -406,15 +412,16 @@ impl UsearchIndex for RwLock<Simulator> {
 
         let sim = self.read().unwrap();
         let keys = {
-            let len = sim.keys.read().unwrap().len() as u64;
+            let len = sim.keys.read().unwrap().len();
             if len == 0 {
                 Vec::new()
             } else {
-                let keys = sim.keys.read().unwrap();
-                iter::repeat_with(|| rand::random_range(0..len))
-                    .map(PrimaryId::from)
-                    .filter(|row_id| keys.contains(row_id))
+                sim.keys
+                    .read()
+                    .unwrap()
+                    .iter()
                     .take(limit.0.get())
+                    .cloned()
                     .collect()
             }
         };
@@ -424,6 +431,7 @@ impl UsearchIndex for RwLock<Simulator> {
         Ok(keys.into_iter().map(move |row_id| Ok((row_id, distance))))
     }
 
+    #[hotpath::measure]
     fn filtered_search(
         &self,
         vector: &Vector,
@@ -433,6 +441,7 @@ impl UsearchIndex for RwLock<Simulator> {
         self.search(vector, limit)
     }
 
+    #[hotpath::measure]
     fn stop(&self) {
         self.read().unwrap().notify.notify_one();
     }
@@ -614,15 +623,18 @@ mod operation {
             }
         }
 
+        #[hotpath::measure]
         pub(super) async fn permit_for_message(&mut self, msg: &Index) -> Permit {
             self.permit(msg.into()).await
         }
 
+        #[hotpath::measure]
         pub(super) async fn permit_for_reserve(&mut self) -> Permit {
             self.permit(Mode::Reserve).await
         }
 
         /// Capacity and size permit cannot be concurrent only with reserve mode.
+        #[hotpath::measure]
         pub(super) async fn permit_for_capacity_and_size(&mut self) -> Permit {
             while self.mode == Mode::Reserve {
                 if self.counter.load(Ordering::Relaxed) == 0 {
@@ -740,6 +752,7 @@ fn new<I: UsearchIndex + Send + Sync + 'static>(
     Ok(tx)
 }
 
+#[hotpath::measure]
 fn preprocess<'a, I, T>(
     index_fn: impl FnOnce() -> anyhow::Result<Arc<I>>,
     states: &'a mut BTreeMap<IndexId, IndexState>,
@@ -893,6 +906,7 @@ where
     }
 }
 
+#[hotpath::measure]
 async fn dispatch_task<I, T>(
     state: &mut IndexState,
     partition: Arc<PartitionState<I>>,
@@ -945,10 +959,12 @@ async fn dispatch_task<I, T>(
     });
 }
 
+#[hotpath::measure]
 fn should_run_on_tokio(msg: &Index) -> bool {
     matches!(msg, Index::Ann { .. })
 }
 
+#[hotpath::measure]
 fn process<I, T>(
     partition: Arc<PartitionState<I>>,
     table: Arc<RwLock<T>>,
@@ -1002,6 +1018,7 @@ fn process<I, T>(
     }
 }
 
+#[hotpath::measure]
 fn reserve(idx: &impl UsearchIndex, capacity: usize) {
     let result = idx.reserve(capacity);
     if let Err(err) = &result {
@@ -1011,6 +1028,7 @@ fn reserve(idx: &impl UsearchIndex, capacity: usize) {
     }
 }
 
+#[hotpath::measure]
 fn needs_more_capacity(idx: &impl UsearchIndex, is_global: bool) -> Option<usize> {
     let capacity = idx.capacity();
     let free_space = capacity - idx.size();
@@ -1027,6 +1045,7 @@ fn needs_more_capacity(idx: &impl UsearchIndex, is_global: bool) -> Option<usize
     }
 }
 
+#[hotpath::measure]
 fn add(idx: &impl UsearchIndex, primary_id: PrimaryId, embedding: &Vector, size: &AtomicUsize) {
     if let Err(err) = idx.add(primary_id, embedding) {
         warn!("add: unable to add embedding: {err}");
@@ -1035,6 +1054,7 @@ fn add(idx: &impl UsearchIndex, primary_id: PrimaryId, embedding: &Vector, size:
     }
 }
 
+#[hotpath::measure]
 fn remove(idx: &impl UsearchIndex, row_id: PrimaryId, size: &AtomicUsize) {
     if let Err(err) = idx.remove(row_id) {
         warn!("remove: unable to remove embeddings: {err}");
@@ -1043,6 +1063,7 @@ fn remove(idx: &impl UsearchIndex, row_id: PrimaryId, size: &AtomicUsize) {
     }
 }
 
+#[hotpath::measure]
 fn validate_dimensions(
     tx_ann: oneshot::Sender<AnnR>,
     embedding: &Vector,
@@ -1058,6 +1079,7 @@ fn validate_dimensions(
     }
 }
 
+#[hotpath::measure]
 fn ann<I>(
     partition: Arc<PartitionState<I>>,
     tx_ann: oneshot::Sender<AnnR>,
@@ -1069,21 +1091,25 @@ fn ann<I>(
 {
     tx_ann
         .send(
-            partition.idx.search(&embedding, limit)
+            partition
+                .idx
+                .search(&embedding, limit)
                 .map_err(|err| anyhow!("ann: search failed: {err}"))
                 .and_then(|matches| {
                     let table = table.read().unwrap();
                     let (primary_keys, distances) = itertools::process_results(
-                        matches.map(|result| {
-                            result.and_then(|(primary_id, distance)| {
-                                table
-                                    .primary_key(partition.partition_id, primary_id)
-                                    .ok_or(anyhow!(
-                                        "not defined primary_key for partition_id {partition_id:?} and primary_id {primary_id:?}",
+                        matches.filter_map_ok(|(primary_id, distance)| {
+                            table
+                                .primary_key(partition.partition_id, primary_id)
+                                .or_else(|| {
+                                    debug!(
+                                        "not defined primary key for partition_id {partition_id:?} \
+                                        and primary_id {primary_id:?}",
                                         partition_id = partition.partition_id,
-                                    ))
-                                    .map(|primary_key| (primary_key, distance))
-                            })
+                                    );
+                                    None
+                                })
+                                .map(|primary_key| (primary_key, distance))
                         }),
                         |it| it.unzip(),
                     )?;
@@ -1093,6 +1119,7 @@ fn ann<I>(
         .unwrap_or_else(|_| trace!("ann: unable to send response"));
 }
 
+#[hotpath::measure]
 fn filtered_ann<I>(
     partition: Arc<PartitionState<I>>,
     tx_ann: oneshot::Sender<AnnR>,
@@ -1113,21 +1140,25 @@ fn filtered_ann<I>(
 
     tx_ann
         .send(
-            partition.idx.filtered_search(&embedding, limit, id_ok)
+            partition
+                .idx
+                .filtered_search(&embedding, limit, id_ok)
                 .map_err(|err| anyhow!("ann: search failed: {err}"))
                 .and_then(|matches| {
                     let table = table.read().unwrap();
                     let (primary_keys, distances) = itertools::process_results(
-                        matches.map(|result| {
-                            result.and_then(|(primary_id, distance)| {
-                                table
-                                    .primary_key(partition.partition_id, primary_id)
-                                    .ok_or(anyhow!(
-                                        "not defined primary key for partition_id {partition_id:?} and primary_id {primary_id:?}",
+                        matches.filter_map_ok(|(primary_id, distance)| {
+                            table
+                                .primary_key(partition.partition_id, primary_id)
+                                .or_else(|| {
+                                    debug!(
+                                        "not defined primary key for partition_id {partition_id:?} \
+                                        and primary_id {primary_id:?}",
                                         partition_id = partition.partition_id,
-                                    ))
-                                    .map(|primary_key| (primary_key, distance))
-                            })
+                                    );
+                                    None
+                                })
+                                .map(|primary_key| (primary_key, distance))
                         }),
                         |it| it.unzip(),
                     )?;
@@ -1137,6 +1168,7 @@ fn filtered_ann<I>(
         .unwrap_or_else(|_| trace!("ann: unable to send response"));
 }
 
+#[hotpath::measure]
 async fn check_memory_allocation(
     msg: &Index,
     memory: &mpsc::Sender<Memory>,

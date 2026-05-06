@@ -1,0 +1,17 @@
+# Copyright 2026-present ScyllaDB
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
+
+[package]
+name = "testclient"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+hotpath = ["hotpath/hotpath"]
+
+[dependencies]
+axum.workspace = true
+axum-test.workspace = true
+hotpath.workspace = true
+httpapi.workspace = true
