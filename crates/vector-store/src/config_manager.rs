@@ -34,7 +34,7 @@ impl HttpServerConfig {
 
 pub struct ConfigReceivers {
     pub config: watch::Receiver<Arc<Config>>,
-    pub http: watch::Receiver<Arc<HttpServerConfig>>,
+    pub http: watch::Receiver<Option<Arc<HttpServerConfig>>>,
 }
 
 async fn derive_http_config(config: &Config) -> anyhow::Result<HttpServerConfig> {
@@ -61,7 +61,7 @@ async fn load_server_identity(config: &Config) -> anyhow::Result<Option<tls::Ser
 
 pub struct ConfigManager {
     config_tx: watch::Sender<Arc<Config>>,
-    http_config_tx: watch::Sender<Arc<HttpServerConfig>>,
+    http_config_tx: watch::Sender<Option<Arc<HttpServerConfig>>>,
 }
 
 impl ConfigManager {
@@ -79,7 +79,7 @@ impl ConfigManager {
     pub async fn new(config: Config) -> anyhow::Result<(Self, ConfigReceivers)> {
         let http = derive_http_config(&config).await?;
         let (config_tx, config_rx) = watch::channel(Arc::new(config));
-        let (http_config_tx, http_config_rx) = watch::channel(Arc::new(http));
+        let (http_config_tx, http_config_rx) = watch::channel(Some(Arc::new(http)));
         Ok((
             Self {
                 config_tx,
@@ -128,7 +128,7 @@ impl ConfigManager {
     async fn send_config(&self, config: Config) {
         match derive_http_config(&config).await {
             Ok(http) => {
-                self.http_config_tx.send(Arc::new(http)).ok();
+                self.http_config_tx.send(Some(Arc::new(http))).ok();
             }
             Err(e) => {
                 tracing::error!(
@@ -611,7 +611,10 @@ mod tests {
         let initial = config_rx.borrow().clone();
         assert_eq!(initial.vector_store_addr.to_string(), "127.0.0.1:6080");
         assert_eq!(initial.scylladb_uri, "127.0.0.1:9042");
-        assert_eq!(http_rx.borrow().addr.to_string(), "127.0.0.1:6080");
+        assert_eq!(
+            http_rx.borrow().as_ref().unwrap().addr.to_string(),
+            "127.0.0.1:6080"
+        );
 
         // Reload config with different environment values
         let env = mock_env(HashMap::from([
@@ -628,7 +631,10 @@ mod tests {
         let updated = config_rx.borrow();
         assert_eq!(updated.vector_store_addr.to_string(), "192.168.1.100:7070");
         assert_eq!(updated.scylladb_uri, "192.168.1.200:9043");
-        assert_eq!(http_rx.borrow().addr.to_string(), "192.168.1.100:7070");
+        assert_eq!(
+            http_rx.borrow().as_ref().unwrap().addr.to_string(),
+            "192.168.1.100:7070"
+        );
     }
 
     #[tokio::test]

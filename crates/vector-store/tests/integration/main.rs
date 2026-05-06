@@ -72,7 +72,7 @@ pub(crate) struct ConfigSenders {
     #[allow(dead_code)]
     pub(crate) config: watch::Sender<Arc<Config>>,
     #[allow(dead_code)]
-    pub(crate) http: watch::Sender<Arc<HttpServerConfig>>,
+    pub(crate) http: watch::Sender<Option<Arc<HttpServerConfig>>>,
 }
 
 pub(crate) async fn create_config_channels(config: Config) -> (ConfigReceivers, ConfigSenders) {
@@ -88,7 +88,7 @@ pub(crate) async fn create_config_channels(config: Config) -> (ConfigReceivers, 
         tls,
     };
     let (config_tx, config_rx) = watch::channel(Arc::new(config));
-    let (http_tx, http_rx) = watch::channel(Arc::new(http));
+    let (http_tx, http_rx) = watch::channel(Some(Arc::new(http)));
     let receivers = ConfigReceivers {
         config: config_rx,
         http: http_rx,
