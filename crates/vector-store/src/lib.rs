@@ -174,6 +174,7 @@ pub struct Config {
     pub disable_colors: bool,
     pub tls_cert_path: Option<std::path::PathBuf>,
     pub tls_key_path: Option<std::path::PathBuf>,
+    pub mtls_ca_cert_path: Option<std::path::PathBuf>,
 }
 
 impl Default for Config {
@@ -191,6 +192,7 @@ impl Default for Config {
             disable_colors: false,
             tls_cert_path: None,
             tls_key_path: None,
+            mtls_ca_cert_path: None,
             cql_connection_timeout: None,
             cql_keepalive_interval: None,
             cql_keepalive_timeout: None,

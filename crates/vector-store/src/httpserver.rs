@@ -212,32 +212,38 @@ async fn spawn_server(
 
     let handle = Handle::new();
 
-    let tls_config = config
-        .tls
-        .as_ref()
-        .map(|t| RustlsConfig::from_config(Arc::clone(t.server_config())));
-
     let router = httproutes::new(
         deps.engine.clone(),
         deps.metrics.clone(),
         deps.state.clone(),
         deps.internals.clone(),
         deps.index_engine_version.clone(),
-        tls_config.is_some(),
+        config.tls.is_some(),
     );
     tokio::spawn({
         let handle = handle.clone();
         let router = router.clone();
+        let tls = config.tls.clone();
 
         async move {
-            let result = match tls_config {
-                Some(tls_config) => {
-                    axum_server_dual_protocol::bind_dual_protocol(addr, tls_config)
+            let result = match tls {
+                Some(ref tls_config) if tls_config.is_mtls() => {
+                    let rustls_config =
+                        RustlsConfig::from_config(Arc::clone(tls_config.server_config()));
+                    axum_server::bind_rustls(addr, rustls_config)
                         .handle(handle)
                         .serve(router.into_make_service())
                         .await
                 }
-                _ => {
+                Some(ref tls_config) => {
+                    let rustls_config =
+                        RustlsConfig::from_config(Arc::clone(tls_config.server_config()));
+                    axum_server_dual_protocol::bind_dual_protocol(addr, rustls_config)
+                        .handle(handle)
+                        .serve(router.into_make_service())
+                        .await
+                }
+                None => {
                     axum_server::bind(addr)
                         .handle(handle)
                         .acceptor(NoDelayAcceptor::new())
