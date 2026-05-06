@@ -31,6 +31,9 @@ mod timestamp;
 pub mod tls;
 mod vector;
 
+#[cfg(feature = "fts")]
+mod fts;
+
 pub use crate::config_manager::ConfigManager;
 pub use crate::config_manager::ConfigReceivers;
 pub use crate::config_manager::HttpServerConfig;
