@@ -640,7 +640,7 @@ pub async fn run(
     internals: Sender<Internals>,
     index_factory: Box<dyn IndexFactory + Send + Sync>,
     receivers: ConfigReceivers,
-) -> anyhow::Result<(Sender<HttpServer>, SocketAddr)> {
+) -> anyhow::Result<Sender<HttpServer>> {
     let metrics: Arc<Metrics> = Arc::new(metrics::Metrics::new());
     let index_engine_version = index_factory.index_engine_version();
     httpserver::new(

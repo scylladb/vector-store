@@ -205,7 +205,7 @@ async fn run_vector_store(
         http: http_rx,
     };
 
-    let (server, _) = vector_store::run(node_state, db, internals, index_factory, receivers)
+    let server = vector_store::run(node_state, db, internals, index_factory, receivers)
         .await
         .unwrap();
 

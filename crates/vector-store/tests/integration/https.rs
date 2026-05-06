@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::watch;
 use vector_store::Config;
+use vector_store::HttpServerExt;
 
 async fn run_server(
     addr: core::net::SocketAddr,
@@ -37,10 +38,11 @@ async fn run_server(
 
     let (receivers, senders) = create_config_channels(config).await;
 
-    let (server, addr) =
-        vector_store::run(node_state, db_actor, internals, index_factory, receivers)
-            .await
-            .unwrap();
+    let server = vector_store::run(node_state, db_actor, internals, index_factory, receivers)
+        .await
+        .unwrap();
+
+    let addr = (*server.address().await.borrow()).unwrap();
 
     (server, addr, senders)
 }

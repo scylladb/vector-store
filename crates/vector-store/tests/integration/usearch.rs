@@ -34,6 +34,7 @@ use vector_store::DbIndexType;
 use vector_store::Dimensions;
 use vector_store::ExpansionAdd;
 use vector_store::ExpansionSearch;
+use vector_store::HttpServerExt;
 use vector_store::IndexMetadata;
 use vector_store::Percentage;
 use vector_store::Quantization;
@@ -137,10 +138,11 @@ pub(crate) async fn setup_store_with_quantization(
     let run = {
         let node_state = node_state.clone();
         async move {
-            let (server, addr) =
+            let server =
                 vector_store::run(node_state, db_actor, internals, index_factory, receivers)
                     .await
                     .unwrap();
+            let addr = (*server.address().await.borrow()).unwrap();
 
             (HttpClient::new(addr), server, senders)
         }
@@ -303,10 +305,10 @@ async fn failed_db_index_create() {
     let index_factory = vector_store::new_index_factory_usearch(rx).unwrap();
 
     let (receivers, _senders) = create_config_channels(test_config()).await;
-    let (_server_actor, addr) =
-        vector_store::run(node_state, db_actor, internals, index_factory, receivers)
-            .await
-            .unwrap();
+    let server = vector_store::run(node_state, db_actor, internals, index_factory, receivers)
+        .await
+        .unwrap();
+    let addr = (*server.address().await.borrow()).unwrap();
 
     let client = HttpClient::new(addr);
 

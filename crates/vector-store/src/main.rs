@@ -14,6 +14,7 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
 use vector_store::ConfigManager;
+use vector_store::HttpServerExt;
 use vector_store::Info;
 
 #[derive(Parser)]
@@ -89,7 +90,7 @@ fn main() -> anyhow::Result<()> {
         let db_actor =
             vector_store::new_db(node_state.clone(), internals.clone(), config_rx).await?;
 
-        let (_server_actor, addr) = vector_store::run(
+        let server = vector_store::run(
             node_state,
             db_actor,
             internals,
@@ -97,6 +98,8 @@ fn main() -> anyhow::Result<()> {
             config_receivers,
         )
         .await?;
+        let addr = (*server.address().await.borrow())
+            .ok_or_else(|| anyhow!("failed to get server address"))?;
         tracing::info!("listening on {addr}");
 
         vector_store::wait_for_shutdown().await;

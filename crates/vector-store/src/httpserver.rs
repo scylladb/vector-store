@@ -23,14 +23,29 @@ use tokio::sync::watch;
 use tokio::time;
 
 pub enum HttpServer {
-    Router { tx: oneshot::Sender<Router> },
+    Router {
+        tx: oneshot::Sender<Router>,
+    },
+    Address {
+        tx: oneshot::Sender<watch::Receiver<Option<SocketAddr>>>,
+    },
 }
 
 pub trait HttpServerExt {
     fn router(&self) -> impl Future<Output = Router>;
+    fn address(&self) -> impl Future<Output = watch::Receiver<Option<SocketAddr>>>;
 }
 
-impl HttpServerExt for Sender<HttpServer> {
+impl HttpServerExt for mpsc::Sender<HttpServer> {
+    async fn address(&self) -> watch::Receiver<Option<SocketAddr>> {
+        let (tx, rx) = oneshot::channel();
+        self.send(HttpServer::Address { tx })
+            .await
+            .expect("HttpServerExt::address: internal actor should receive request");
+        rx.await
+            .expect("HttpServerExt::address: internal actor should send response")
+    }
+
     async fn router(&self) -> Router {
         let (tx, rx) = oneshot::channel();
         self.send(HttpServer::Router { tx })
@@ -92,10 +107,12 @@ pub(crate) async fn new(
     internals: Sender<Internals>,
     index_engine_version: String,
     mut config_rx: watch::Receiver<Arc<HttpServerConfig>>,
-) -> anyhow::Result<(Sender<HttpServer>, SocketAddr)> {
+) -> anyhow::Result<Sender<HttpServer>> {
     // minimal size as channel is used as a lifetime guard
     const CHANNEL_SIZE: usize = 1;
     let (tx, mut rx) = mpsc::channel(CHANNEL_SIZE);
+
+    let (addr_tx, addr_rx) = watch::channel::<Option<SocketAddr>>(None);
 
     let deps = ServerDeps {
         state,
@@ -110,6 +127,7 @@ pub(crate) async fn new(
     // Start initial server and get actual bound address
     let (initial_handle, actual_addr, mut router) =
         spawn_server_with_retry(&initial_config, &deps).await?;
+    addr_tx.send(Some(actual_addr)).ok();
 
     // Spawn supervisor task that monitors config changes and manages server restarts
     tokio::spawn(async move {
@@ -123,6 +141,9 @@ pub(crate) async fn new(
                          break;
                     };
                     match msg {
+                        HttpServer::Address { tx } => {
+                            tx.send(addr_rx.clone()).expect("failed to send response");
+                        }
                         HttpServer::Router { tx } => {
                             _ = tx.send(router.clone());
                         }
@@ -155,13 +176,16 @@ pub(crate) async fn new(
                                     current_config.protocol_label(),
                                     new_actual_addr
                                 );
+                                addr_tx.send(Some(new_actual_addr)).ok();
                             }
                             Err(e) => {
                                 tracing::error!("Failed to reload HTTP server: {e}");
                                 tracing::error!("HTTP server is now offline - previous server was shut down but new server failed to start");
+                                addr_tx.send(None).ok();
                             }
                         }
                     }
+
                 }
             }
         }
@@ -171,9 +195,10 @@ pub(crate) async fn new(
         current_handle.graceful_shutdown(Some(Duration::from_secs(10)));
         // Brief delay to allow clean shutdown
         tokio::time::sleep(Duration::from_millis(100)).await;
+        addr_tx.send(None).ok();
     });
 
-    Ok((tx, actual_addr))
+    Ok(tx)
 }
 
 /// Spawn a new HTTP server instance with the given configuration
