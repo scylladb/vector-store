@@ -637,8 +637,8 @@ async fn post_index_ann(
             } else {
                 let similarity_scores: Vec<httpapi::SimilarityScore> = distances
                     .iter()
-                    .map(|distance| (*distance).into())
-                    .map(|distance: f32| SimilarityScore::from(distance))
+                    .copied()
+                    .map(SimilarityScore::from)
                     .map(httpapi::SimilarityScore::from)
                     .collect();
 

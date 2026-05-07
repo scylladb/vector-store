@@ -5,7 +5,7 @@
 
 use crate::Distance;
 
-#[derive(Clone, Debug, derive_more::From, derive_more::Into)]
+#[derive(Clone, Debug, derive_more::Into)]
 /// Similarity score between vectors derived from the distance. Higher score means more similar.
 pub struct SimilarityScore(f32);
 
