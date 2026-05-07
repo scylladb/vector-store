@@ -58,6 +58,16 @@ pub(crate) async fn new() -> TestCase<TestActors> {
             ann_filter_by_non_indexed_column_fails,
         )
         .with_test(
+            "ann_filter_by_clustering_key_only",
+            timeout,
+            ann_filter_by_clustering_key_only,
+        )
+        .with_test(
+            "ann_filter_by_non_pk_column_rejected",
+            timeout,
+            ann_filter_by_non_pk_column_rejected,
+        )
+        .with_test(
             "local_index_filter_by_partition_key_eq",
             timeout,
             local_index_filter_by_partition_key_eq,
@@ -1017,6 +1027,186 @@ async fn local_ann_with_timestamp_gte_filter(actors: TestActors) {
         2,
         "Expected two rows with created_at >= 2024-01-01"
     );
+
+    session
+        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
+        .await
+        .expect("failed to drop a keyspace");
+
+    info!("finished");
+}
+
+#[framed]
+async fn ann_filter_by_clustering_key_only(actors: TestActors) {
+    info!("started");
+
+    let (session, clients) = prepare_connection(&actors).await;
+
+    let keyspace = create_keyspace(&session).await;
+    let table = create_table(
+        &session,
+        "p INT, v VECTOR<FLOAT, 3>, ck INT, PRIMARY KEY (p, ck)",
+        None,
+    )
+    .await;
+
+    session
+        .query_unpaged(
+            format!("INSERT INTO {table} (p, ck, v) VALUES (1, 1, [0.1, 0.2, 0.3])"),
+            (),
+        )
+        .await
+        .expect("failed to insert row p=1, ck=1");
+    session
+        .query_unpaged(
+            format!("INSERT INTO {table} (p, ck, v) VALUES (2, 1, [5.0, 5.0, 5.0])"),
+            (),
+        )
+        .await
+        .expect("failed to insert row p=2, ck=1");
+    session
+        .query_unpaged(
+            format!("INSERT INTO {table} (p, ck, v) VALUES (3, 2, [0.1, 0.2, 0.3])"),
+            (),
+        )
+        .await
+        .expect("failed to insert row p=3, ck=2");
+
+    let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
+
+    for client in &clients {
+        let index_status = wait_for_index(client, &index).await;
+        assert_eq!(index_status.count, 3, "Expected 3 vectors to be indexed");
+    }
+
+    info!("Verify ANN query with only ck filtering returns matching rows");
+    // Poll until the filtered query is operational on the index
+    wait_for(
+        || async {
+            get_opt_query_results(
+                format!("SELECT p, ck FROM {table} WHERE ck = 1 ORDER BY v ANN OF [0.1, 0.2, 0.3] LIMIT 5"),
+                &session,
+            )
+            .await
+            .is_some()
+        },
+        "Waiting for filtered ANN query (ck=1 only) to be operational",
+        DEFAULT_OPERATION_TIMEOUT,
+    )
+    .await;
+    let result = get_query_results(
+        format!("SELECT p, ck FROM {table} WHERE ck = 1 ORDER BY v ANN OF [0.1, 0.2, 0.3] LIMIT 5"),
+        &session,
+    )
+    .await;
+    let rows: Vec<(i32, i32)> = result
+        .rows::<(i32, i32)>()
+        .expect("failed to get rows")
+        .map(|row| row.expect("failed to get row"))
+        .collect();
+    assert_eq!(
+        rows.len(),
+        2,
+        "Expected two rows with ck=1 when filtering only by clustering key"
+    );
+    assert!(
+        rows.iter().all(|(_, ck)| *ck == 1),
+        "Expected only rows with ck=1"
+    );
+
+    info!("Verify the same query with ALLOW FILTERING returns matching rows");
+    // Poll until the filtered query with ALLOW FILTERING is operational on the index
+    wait_for(
+        || async {
+            get_opt_query_results(
+                format!(
+                    "SELECT p, ck FROM {table} WHERE ck = 1 ORDER BY v ANN OF [0.1, 0.2, 0.3] LIMIT 5 ALLOW FILTERING"
+                ),
+                &session,
+            )
+            .await
+            .is_some()
+        },
+        "Waiting for filtered ANN query (ck=1 with ALLOW FILTERING) to be operational",
+        DEFAULT_OPERATION_TIMEOUT,
+    )
+    .await;
+    let result = get_query_results(
+        format!(
+            "SELECT p, ck FROM {table} WHERE ck = 1 ORDER BY v ANN OF [0.1, 0.2, 0.3] LIMIT 5 ALLOW FILTERING"
+        ),
+        &session,
+    )
+    .await;
+    let rows: Vec<(i32, i32)> = result
+        .rows::<(i32, i32)>()
+        .expect("failed to get rows")
+        .map(|row| row.expect("failed to get row"))
+        .collect();
+    assert_eq!(
+        rows.len(),
+        2,
+        "Expected two rows with ck=1 when using ALLOW FILTERING"
+    );
+    assert!(
+        rows.iter().all(|(_, ck)| *ck == 1),
+        "Expected only rows with ck=1"
+    );
+
+    session
+        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
+        .await
+        .expect("failed to drop a keyspace");
+
+    info!("finished");
+}
+
+#[framed]
+async fn ann_filter_by_non_pk_column_rejected(actors: TestActors) {
+    info!("started");
+
+    let (session, clients) = prepare_connection(&actors).await;
+
+    let keyspace = create_keyspace(&session).await;
+    let table = create_table(
+        &session,
+        "p INT PRIMARY KEY, c INT, v VECTOR<FLOAT, 3>",
+        None,
+    )
+    .await;
+
+    let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
+
+    for client in &clients {
+        let index_status = wait_for_index(client, &index).await;
+        assert_eq!(index_status.count, 0, "Index should start empty");
+    }
+
+    info!("Create index on non-PK column c");
+    session
+        .query_unpaged(format!("CREATE INDEX ON {table}(c)"), ())
+        .await
+        .expect("failed to create index on c");
+
+    info!("Test ANN query with indexed non-PK column filtering");
+    session
+        .query_unpaged(
+            format!("SELECT * FROM {table} WHERE c = 1 ORDER BY v ANN OF [0.1, 0.2, 0.3] LIMIT 5"),
+            (),
+        )
+        .await
+        .expect_err("ANN query with non-PK column filtering should fail");
+
+    info!("Test ANN query with indexed non-PK column filtering and ALLOW FILTERING");
+    session
+        .query_unpaged(
+            format!(
+                "SELECT * FROM {table} WHERE c = 1 ORDER BY v ANN OF [0.1, 0.2, 0.3] LIMIT 5 ALLOW FILTERING"
+            ),
+            (),
+        )
+        .await
+        .expect_err("ANN query with non-PK column filtering and ALLOW FILTERING should fail");
 
     session
         .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
