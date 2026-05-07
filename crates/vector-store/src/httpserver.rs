@@ -23,15 +23,30 @@ use tokio::sync::watch;
 use tokio::time;
 
 pub enum HttpServer {
-    Router { tx: oneshot::Sender<Router> },
+    Router {
+        tx: oneshot::Sender<Option<Router>>,
+    },
+    Address {
+        tx: oneshot::Sender<watch::Receiver<Option<SocketAddr>>>,
+    },
 }
 
 pub trait HttpServerExt {
-    fn router(&self) -> impl Future<Output = Router>;
+    fn router(&self) -> impl Future<Output = Option<Router>>;
+    fn address(&self) -> impl Future<Output = watch::Receiver<Option<SocketAddr>>>;
 }
 
-impl HttpServerExt for Sender<HttpServer> {
-    async fn router(&self) -> Router {
+impl HttpServerExt for mpsc::Sender<HttpServer> {
+    async fn address(&self) -> watch::Receiver<Option<SocketAddr>> {
+        let (tx, rx) = oneshot::channel();
+        self.send(HttpServer::Address { tx })
+            .await
+            .expect("HttpServerExt::address: internal actor should receive request");
+        rx.await
+            .expect("HttpServerExt::address: internal actor should send response")
+    }
+
+    async fn router(&self) -> Option<Router> {
         let (tx, rx) = oneshot::channel();
         self.send(HttpServer::Router { tx })
             .await
@@ -85,17 +100,122 @@ async fn spawn_server_with_retry(
     unreachable!()
 }
 
+async fn enable_server(
+    config: &HttpServerConfig,
+    deps: &ServerDeps,
+) -> anyhow::Result<(Handle<SocketAddr>, SocketAddr, Router)> {
+    tracing::info!("HTTP server being enabled");
+    let (handle, addr, router) = spawn_server_with_retry(config, deps).await?;
+    tracing::info!(
+        "{} server started successfully on {}",
+        config.protocol_label(),
+        addr
+    );
+    Ok((handle, addr, router))
+}
+
+fn disable_server(handle: Option<Handle<SocketAddr>>) {
+    tracing::info!("HTTP server being disabled");
+    if let Some(handle) = handle {
+        handle.graceful_shutdown(Some(Duration::from_secs(10)));
+        tracing::info!("HTTP server shut down");
+    }
+}
+
+async fn reload_server(
+    old_config: &HttpServerConfig,
+    new_config: &HttpServerConfig,
+    current_handle: Option<Handle<SocketAddr>>,
+    deps: &ServerDeps,
+) -> (
+    Option<Handle<SocketAddr>>,
+    Option<SocketAddr>,
+    Option<Router>,
+) {
+    let changes = describe_config_changes(old_config, new_config);
+    tracing::info!("HTTP server configuration changed ({changes}), reloading...");
+
+    if let Some(handle) = current_handle {
+        tracing::info!("Shutting down old HTTP server");
+        handle.graceful_shutdown(Some(Duration::from_secs(10)));
+    }
+
+    match spawn_server_with_retry(new_config, deps).await {
+        Ok((handle, addr, router)) => {
+            tracing::info!(
+                "{} server reloaded successfully on {}",
+                new_config.protocol_label(),
+                addr
+            );
+            (Some(handle), Some(addr), Some(router))
+        }
+        Err(e) => {
+            tracing::error!("Failed to reload HTTP server: {e}");
+            tracing::error!(
+                "HTTP server is now offline - previous server was shut down but new server failed to start"
+            );
+            (None, None, None)
+        }
+    }
+}
+
+async fn handle_config_change(
+    current_config: &Option<Arc<HttpServerConfig>>,
+    new_config: &Option<Arc<HttpServerConfig>>,
+    current_handle: Option<Handle<SocketAddr>>,
+    deps: &ServerDeps,
+    addr_tx: &watch::Sender<Option<SocketAddr>>,
+    router: &mut Option<Router>,
+) -> Option<Handle<SocketAddr>> {
+    match (current_config, new_config) {
+        (None, None) => current_handle,
+        (None, Some(config)) => match enable_server(config, deps).await {
+            Ok((handle, addr, new_router)) => {
+                addr_tx.send(Some(addr)).ok();
+                *router = Some(new_router);
+                Some(handle)
+            }
+            Err(e) => {
+                tracing::error!("Failed to start HTTP server: {e}");
+                addr_tx.send(None).ok();
+                None
+            }
+        },
+        (Some(_), None) => {
+            disable_server(current_handle);
+            addr_tx.send(None).ok();
+            *router = None;
+            None
+        }
+        (Some(old), Some(new)) => {
+            if **old != **new {
+                let (handle, addr, new_router) =
+                    reload_server(old, new, current_handle, deps).await;
+                addr_tx.send(addr).ok();
+                if let Some(r) = new_router {
+                    *router = Some(r);
+                }
+                handle
+            } else {
+                current_handle
+            }
+        }
+    }
+}
+
 pub(crate) async fn new(
     state: Sender<NodeState>,
     engine: Sender<Engine>,
     metrics: Arc<Metrics>,
     internals: Sender<Internals>,
     index_engine_version: String,
-    mut config_rx: watch::Receiver<Arc<HttpServerConfig>>,
-) -> anyhow::Result<(Sender<HttpServer>, SocketAddr)> {
+    mut config_rx: watch::Receiver<Option<Arc<HttpServerConfig>>>,
+) -> anyhow::Result<Sender<HttpServer>> {
     // minimal size as channel is used as a lifetime guard
     const CHANNEL_SIZE: usize = 1;
     let (tx, mut rx) = mpsc::channel(CHANNEL_SIZE);
+
+    let (addr_tx, addr_rx) = watch::channel::<Option<SocketAddr>>(None);
 
     let deps = ServerDeps {
         state,
@@ -107,13 +227,18 @@ pub(crate) async fn new(
 
     let initial_config = config_rx.borrow().clone();
 
-    // Start initial server and get actual bound address
-    let (initial_handle, actual_addr, mut router) =
-        spawn_server_with_retry(&initial_config, &deps).await?;
+    // Start initial server if config is provided
+    let (mut current_handle, mut router) = if let Some(ref config) = initial_config {
+        let (handle, actual_addr, router) = spawn_server_with_retry(config, &deps).await?;
+        addr_tx.send(Some(actual_addr)).ok();
+        (Some(handle), Some(router))
+    } else {
+        tracing::info!("HTTP server disabled by configuration");
+        (None, None)
+    };
 
     // Spawn supervisor task that monitors config changes and manages server restarts
     tokio::spawn(async move {
-        let mut current_handle = initial_handle;
         let mut current_config = initial_config;
 
         loop {
@@ -123,6 +248,9 @@ pub(crate) async fn new(
                          break;
                     };
                     match msg {
+                        HttpServer::Address { tx } => {
+                            tx.send(addr_rx.clone()).expect("failed to send response");
+                        }
                         HttpServer::Router { tx } => {
                             _ = tx.send(router.clone());
                         }
@@ -136,44 +264,27 @@ pub(crate) async fn new(
 
                     let new_config = config_rx.borrow().clone();
 
-                    if *current_config != *new_config {
-                        let changes = describe_config_changes(&current_config, &new_config);
-                        tracing::info!("HTTP server configuration changed ({changes}), reloading...");
-
-                        // Gracefully shutdown old server and wait for it to complete
-                        tracing::info!("Shutting down old HTTP server");
-                        current_handle.graceful_shutdown(Some(Duration::from_secs(10)));
-
-                        // Start new server with retry
-                        match spawn_server_with_retry(&new_config, &deps).await {
-                            Ok((handle, new_actual_addr, new_router)) => {
-                                current_handle = handle;
-                                current_config = new_config;
-                                router = new_router;
-                                tracing::info!(
-                                    "{} server reloaded successfully on {}",
-                                    current_config.protocol_label(),
-                                    new_actual_addr
-                                );
-                            }
-                            Err(e) => {
-                                tracing::error!("Failed to reload HTTP server: {e}");
-                                tracing::error!("HTTP server is now offline - previous server was shut down but new server failed to start");
-                            }
-                        }
+                    if current_config != new_config {
+                        current_handle =
+                            handle_config_change(&current_config, &new_config, current_handle, &deps, &addr_tx, &mut router)
+                                .await;
+                        current_config = new_config;
                     }
                 }
             }
         }
 
         // Final shutdown
-        tracing::info!("HTTP server shutting down");
-        current_handle.graceful_shutdown(Some(Duration::from_secs(10)));
-        // Brief delay to allow clean shutdown
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        if let Some(handle) = current_handle {
+            tracing::info!("HTTP server shutting down");
+            handle.graceful_shutdown(Some(Duration::from_secs(10)));
+            // Brief delay to allow clean shutdown
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        addr_tx.send(None).ok();
     });
 
-    Ok((tx, actual_addr))
+    Ok(tx)
 }
 
 /// Spawn a new HTTP server instance with the given configuration
@@ -187,32 +298,38 @@ async fn spawn_server(
 
     let handle = Handle::new();
 
-    let tls_config = config
-        .tls
-        .as_ref()
-        .map(|t| RustlsConfig::from_config(Arc::clone(t.server_config())));
-
     let router = httproutes::new(
         deps.engine.clone(),
         deps.metrics.clone(),
         deps.state.clone(),
         deps.internals.clone(),
         deps.index_engine_version.clone(),
-        tls_config.is_some(),
+        config.tls.is_some(),
     );
     tokio::spawn({
         let handle = handle.clone();
         let router = router.clone();
+        let tls = config.tls.clone();
 
         async move {
-            let result = match tls_config {
-                Some(tls_config) => {
-                    axum_server_dual_protocol::bind_dual_protocol(addr, tls_config)
+            let result = match tls {
+                Some(ref tls_config) if tls_config.is_mtls() => {
+                    let rustls_config =
+                        RustlsConfig::from_config(Arc::clone(tls_config.server_config()));
+                    axum_server::bind_rustls(addr, rustls_config)
                         .handle(handle)
                         .serve(router.into_make_service())
                         .await
                 }
-                _ => {
+                Some(ref tls_config) => {
+                    let rustls_config =
+                        RustlsConfig::from_config(Arc::clone(tls_config.server_config()));
+                    axum_server_dual_protocol::bind_dual_protocol(addr, rustls_config)
+                        .handle(handle)
+                        .serve(router.into_make_service())
+                        .await
+                }
+                None => {
                     axum_server::bind(addr)
                         .handle(handle)
                         .acceptor(NoDelayAcceptor::new())

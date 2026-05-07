@@ -5,23 +5,18 @@
 
 use crate::create_config_channels;
 use crate::db_basic;
+use crate::tls_utils::generate_server_cert;
+use crate::tls_utils::init;
+use crate::tls_utils::read_cert;
 use crate::usearch::test_config;
 use httpapi::PostIndexAnnRequest;
-use rcgen::CertifiedKey;
 use reqwest::StatusCode;
-use std::io::Write;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tempfile::NamedTempFile;
 use tokio::sync::watch;
 use vector_store::Config;
-
-fn create_temp_file<C: AsRef<[u8]>>(content: C) -> NamedTempFile {
-    let mut file = NamedTempFile::new().unwrap();
-    file.write_all(content.as_ref()).unwrap();
-    file
-}
+use vector_store::HttpServerExt;
 
 async fn run_server(
     addr: core::net::SocketAddr,
@@ -43,28 +38,22 @@ async fn run_server(
 
     let (receivers, senders) = create_config_channels(config).await;
 
-    let (server, addr) =
+    let (server, _mtls) =
         vector_store::run(node_state, db_actor, internals, index_factory, receivers)
             .await
             .unwrap();
+
+    let addr = (*server.address().await.borrow()).unwrap();
 
     (server, addr, senders)
 }
 
 #[tokio::test]
 async fn test_https_server_responds() {
-    rustls::crypto::aws_lc_rs::default_provider()
-        .install_default()
-        .expect("install ring crypto provider");
-
-    crate::enable_tracing();
+    init();
 
     let addr = core::net::SocketAddr::from(([127, 0, 0, 1], 0));
-    let CertifiedKey { cert, signing_key } =
-        rcgen::generate_simple_self_signed(vec![addr.ip().to_string()]).unwrap();
-
-    let cert_file = create_temp_file(cert.pem().as_bytes());
-    let key_file = create_temp_file(signing_key.serialize_pem().as_bytes());
+    let (cert_file, key_file) = generate_server_cert(&addr);
 
     let (_server, addr, _config_senders) = run_server(
         addr,
@@ -74,7 +63,7 @@ async fn test_https_server_responds() {
     .await;
 
     let client = reqwest::Client::builder()
-        .add_root_certificate(reqwest::Certificate::from_pem(cert.pem().as_bytes()).unwrap())
+        .add_root_certificate(read_cert(&cert_file))
         .build()
         .unwrap();
 

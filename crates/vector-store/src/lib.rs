@@ -174,6 +174,8 @@ pub struct Config {
     pub disable_colors: bool,
     pub tls_cert_path: Option<std::path::PathBuf>,
     pub tls_key_path: Option<std::path::PathBuf>,
+    pub mtls_addr: SocketAddr,
+    pub mtls_ca_cert_path: Option<std::path::PathBuf>,
 }
 
 impl Default for Config {
@@ -191,6 +193,8 @@ impl Default for Config {
             disable_colors: false,
             tls_cert_path: None,
             tls_key_path: None,
+            mtls_addr: "127.0.0.1:6081".parse().unwrap(),
+            mtls_ca_cert_path: None,
             cql_connection_timeout: None,
             cql_keepalive_interval: None,
             cql_keepalive_timeout: None,
@@ -640,25 +644,39 @@ pub async fn run(
     internals: Sender<Internals>,
     index_factory: Box<dyn IndexFactory + Send + Sync>,
     receivers: ConfigReceivers,
-) -> anyhow::Result<(Sender<HttpServer>, SocketAddr)> {
+) -> anyhow::Result<(Sender<HttpServer>, Sender<HttpServer>)> {
     let metrics: Arc<Metrics> = Arc::new(metrics::Metrics::new());
     let index_engine_version = index_factory.index_engine_version();
-    httpserver::new(
+    let engine = engine::new(
+        db_actor,
+        index_factory,
         node_state.clone(),
-        engine::new(
-            db_actor,
-            index_factory,
-            node_state,
-            metrics.clone(),
-            receivers.config,
-        )
-        .await?,
+        metrics.clone(),
+        receivers.config,
+    )
+    .await?;
+
+    let main = httpserver::new(
+        node_state.clone(),
+        engine.clone(),
+        metrics.clone(),
+        internals.clone(),
+        index_engine_version.clone(),
+        receivers.http,
+    )
+    .await?;
+
+    let mtls = httpserver::new(
+        node_state,
+        engine,
         metrics,
         internals,
         index_engine_version,
-        receivers.http,
+        receivers.mtls_http,
     )
-    .await
+    .await?;
+
+    Ok((main, mtls))
 }
 
 pub async fn new_db(

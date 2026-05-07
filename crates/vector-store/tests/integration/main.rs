@@ -8,11 +8,13 @@ mod https;
 mod info;
 mod memory_limit;
 mod mock_opensearch;
+mod mtls;
 mod openapi;
 mod opensearch;
 mod quantization;
 mod routing;
 mod status;
+mod tls_utils;
 mod usearch;
 
 use std::sync::Arc;
@@ -71,30 +73,60 @@ pub(crate) struct ConfigSenders {
     #[allow(dead_code)]
     pub(crate) config: watch::Sender<Arc<Config>>,
     #[allow(dead_code)]
-    pub(crate) http: watch::Sender<Arc<HttpServerConfig>>,
+    pub(crate) http: watch::Sender<Option<Arc<HttpServerConfig>>>,
+    #[allow(dead_code)]
+    pub(crate) mtls_http: watch::Sender<Option<Arc<HttpServerConfig>>>,
 }
 
-pub(crate) async fn create_config_channels(config: Config) -> (ConfigReceivers, ConfigSenders) {
-    let tls = match (&config.tls_cert_path, &config.tls_key_path) {
-        (Some(cert), Some(key)) => {
-            let identity = tls::ServerIdentity::new(cert, key).await.unwrap();
-            Some(tls::TlsServerConfig::new(&identity).unwrap())
+impl ConfigSenders {
+    pub(crate) async fn send_config(&self, config: Config) {
+        let (http, mtls_http) = derive_http_configs(&config).await;
+        self.config.send(Arc::new(config)).unwrap();
+        self.http.send(Some(Arc::new(http))).unwrap();
+        self.mtls_http.send(mtls_http).unwrap();
+    }
+}
+
+async fn derive_http_configs(config: &Config) -> (HttpServerConfig, Option<Arc<HttpServerConfig>>) {
+    let identity = match (&config.tls_cert_path, &config.tls_key_path) {
+        (Some(cert), Some(key)) => Some(tls::ServerIdentity::new(cert, key).await.unwrap()),
+        _ => None,
+    };
+    let http_tls = identity
+        .as_ref()
+        .map(|id| tls::TlsServerConfig::new(id).unwrap());
+    let http = HttpServerConfig {
+        addr: config.vector_store_addr,
+        tls: http_tls,
+    };
+    let mtls_http = match (&identity, &config.mtls_ca_cert_path) {
+        (Some(id), Some(ca_path)) => {
+            let ca_bundle = tls::CaBundle::new(ca_path).await.unwrap();
+            let mtls_tls = tls::TlsServerConfig::new_mtls(id, &ca_bundle).unwrap();
+            Some(Arc::new(HttpServerConfig {
+                addr: config.mtls_addr,
+                tls: Some(mtls_tls),
+            }))
         }
         _ => None,
     };
-    let http = HttpServerConfig {
-        addr: config.vector_store_addr,
-        tls,
-    };
+    (http, mtls_http)
+}
+
+pub(crate) async fn create_config_channels(config: Config) -> (ConfigReceivers, ConfigSenders) {
+    let (http, mtls_http) = derive_http_configs(&config).await;
     let (config_tx, config_rx) = watch::channel(Arc::new(config));
-    let (http_tx, http_rx) = watch::channel(Arc::new(http));
+    let (http_tx, http_rx) = watch::channel(Some(Arc::new(http)));
+    let (mtls_http_tx, mtls_http_rx) = watch::channel(mtls_http);
     let receivers = ConfigReceivers {
         config: config_rx,
         http: http_rx,
+        mtls_http: mtls_http_rx,
     };
     let senders = ConfigSenders {
         config: config_tx,
         http: http_tx,
+        mtls_http: mtls_http_tx,
     };
     (receivers, senders)
 }

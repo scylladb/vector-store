@@ -199,17 +199,19 @@ async fn run_vector_store(
     let index_factory = vector_store::new_index_factory_usearch(config.clone()).unwrap();
 
     let addr = config.borrow().vector_store_addr;
-    let (http_tx, http_rx) = watch::channel(Arc::new(HttpServerConfig { addr, tls: None }));
+    let (http_tx, http_rx) = watch::channel(Some(Arc::new(HttpServerConfig { addr, tls: None })));
+    let (_mtls_tx, mtls_http_rx) = watch::channel(None);
     let receivers = ConfigReceivers {
         config,
         http: http_rx,
+        mtls_http: mtls_http_rx,
     };
 
-    let (server, _) = vector_store::run(node_state, db, internals, index_factory, receivers)
+    let (server, _mtls) = vector_store::run(node_state, db, internals, index_factory, receivers)
         .await
         .unwrap();
 
-    let client = Arc::new(TestClient::new(server.router().await));
+    let client = Arc::new(TestClient::new(server.router().await.unwrap()));
     ((http_tx, server), client)
 }
 
