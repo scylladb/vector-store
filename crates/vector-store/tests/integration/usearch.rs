@@ -1616,3 +1616,146 @@ async fn null_vector_is_not_indexed() {
     )
     .await;
 }
+
+// Regression test for the similarity_scores returned by ann(). These need
+// to be similarity scores (decreasing), not distance scores (increasing).
+//
+// This test inserts 3 vectors at different distances from the query and
+// checks that:
+//  1. similarity_scores are in strictly decreasing order (nearest = highest score).
+//  2. For Euclidean distance, the formula similarity = 1/(1+d) is applied
+//     correctly.
+#[tokio::test]
+#[ntest::timeout(10_000)]
+async fn similarity_scores_are_decreasing_and_correctly_converted() {
+    crate::enable_tracing();
+
+    let node_state = vector_store::new_node_state().await;
+    let internals = vector_store::new_internals();
+    let (db_actor, db) = db_basic::new(node_state.clone());
+
+    // Use a 1-D Euclidean index so distances are easy to predict.
+    let index = IndexMetadata {
+        keyspace_name: "vector".into(),
+        table_name: "items".into(),
+        index_name: "ann".into(),
+        target_column: "embedding".into(),
+        index_type: DbIndexType::Global,
+        filtering_columns: Arc::new(Vec::new()),
+        dimensions: NonZeroUsize::new(1).unwrap().into(),
+        connectivity: Connectivity::default(),
+        expansion_add: ExpansionAdd::default(),
+        expansion_search: ExpansionSearch::default(),
+        space_type: SpaceType::Euclidean,
+        version: Uuid::new_v4().into(),
+        quantization: Quantization::default(),
+    };
+
+    db.add_table(
+        index.keyspace_name.clone(),
+        index.table_name.clone(),
+        Table {
+            primary_keys: Arc::new(vec!["pk".into()]),
+            partition_key_count: 1,
+            columns: Arc::new([("pk".into(), NativeType::Int)].into_iter().collect()),
+            dimensions: [(index.target_column.clone(), index.dimensions)]
+                .into_iter()
+                .collect(),
+        },
+    )
+    .unwrap();
+
+    // Three items with 1-D vectors [0.0], [1.0], [3.0].
+    // Query vector is [0.0]. USearch computes squared L2 distance, so the
+    // squared distances are 0, 1, 9 respectively, and expected similarity
+    // scores (using 1/(1+d)) are 1/(1+0)=1.0, 1/(1+1)=0.5, 1/(1+9)=0.1.
+    db.add_index(
+        index.clone(),
+        Some(db_basic::scan_fn([
+            (
+                [CqlValue::Int(1)].into(),
+                Some(vec![0.0_f32].into()),
+                Timestamp::from_unix_timestamp(10),
+            ),
+            (
+                [CqlValue::Int(2)].into(),
+                Some(vec![1.0_f32].into()),
+                Timestamp::from_unix_timestamp(20),
+            ),
+            (
+                [CqlValue::Int(3)].into(),
+                Some(vec![3.0_f32].into()),
+                Timestamp::from_unix_timestamp(30),
+            ),
+        ])),
+        None,
+    )
+    .unwrap();
+
+    let (_, rx) = watch::channel(Arc::new(Config::default()));
+    let index_factory = vector_store::new_index_factory_usearch(rx).unwrap();
+    let (receivers, _senders) = create_config_channels(test_config()).await;
+    let (server, addr) =
+        vector_store::run(node_state, db_actor, internals, index_factory, receivers)
+            .await
+            .unwrap();
+    let client = HttpClient::new(addr);
+
+    let keyspace_name = index.keyspace_name.clone().into();
+    let index_name = index.index_name.clone().into();
+
+    wait_for(
+        || async {
+            client
+                .index_status(&keyspace_name, &index_name)
+                .await
+                .is_ok_and(|s| s.status == IndexStatus::Serving && s.count == 3)
+        },
+        "Waiting for 3 vectors to be indexed",
+    )
+    .await;
+
+    let (_primary_keys, distances, similarity_scores) = client
+        .ann(
+            &keyspace_name,
+            &index_name,
+            vec![0.0_f32].into(),
+            None,
+            NonZeroUsize::new(3).unwrap().into(),
+        )
+        .await;
+
+    assert_eq!(similarity_scores.len(), 3);
+    assert_eq!(distances.len(), 3);
+
+    let scores: Vec<f32> = similarity_scores
+        .iter()
+        .map(|s| serde_json::to_value(s).unwrap().as_f64().unwrap() as f32)
+        .collect();
+
+    // Scores must be in strictly decreasing order (nearest item has highest similarity).
+    assert!(
+        scores[0] > scores[1] && scores[1] > scores[2],
+        "similarity_scores must be in decreasing order, got: {scores:?}"
+    );
+
+    // Verify the Euclidean similarity formula 1/(1+d) is correctly applied.
+    let epsilon = 1e-5_f32;
+    assert!(
+        (scores[0] - 1.0).abs() < epsilon,
+        "nearest item (distance=0) should have similarity 1.0, got {}",
+        scores[0]
+    );
+    assert!(
+        (scores[1] - 0.5).abs() < epsilon,
+        "second item (distance=1) should have similarity 0.5, got {}",
+        scores[1]
+    );
+    assert!(
+        (scores[2] - 0.1).abs() < epsilon,
+        "farthest item (squared distance=9) should have similarity 0.1, got {}",
+        scores[2]
+    );
+
+    drop(server);
+}
