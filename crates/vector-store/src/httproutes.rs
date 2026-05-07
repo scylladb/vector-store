@@ -9,19 +9,20 @@ use crate::Progress;
 use crate::Quantization;
 use crate::Restriction;
 use crate::SimilarityScore;
-use crate::db_index::DbIndexExt;
 use crate::distance;
 use crate::engine::Engine;
 use crate::engine::EngineExt;
 use crate::index::IndexExt;
 use crate::index::validator;
 use crate::indexes;
+use crate::indexes::Indexes;
 use crate::info::Info;
 use crate::internals::Internals;
 use crate::internals::InternalsExt;
 use crate::metrics::Metrics;
 use crate::node_state::NodeState;
 use crate::node_state::NodeStateExt;
+use crate::perf;
 use crate::vector;
 use anyhow::anyhow;
 use anyhow::bail;
@@ -61,6 +62,7 @@ use std::num::NonZero;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::LazyLock;
+use std::sync::RwLock;
 use time::Date;
 use time::OffsetDateTime;
 use time::Time;
@@ -111,6 +113,7 @@ struct ApiDoc;
 #[derive(Clone)]
 struct RoutesInnerState {
     engine: Sender<Engine>,
+    indexes: Arc<RwLock<Indexes>>,
     metrics: Arc<Metrics>,
     node_state: Sender<NodeState>,
     internals: Sender<Internals>,
@@ -118,7 +121,7 @@ struct RoutesInnerState {
     use_tls: bool,
 }
 
-pub(crate) fn new(
+pub(crate) async fn new(
     engine: Sender<Engine>,
     metrics: Arc<Metrics>,
     node_state: Sender<NodeState>,
@@ -126,8 +129,10 @@ pub(crate) fn new(
     index_engine_version: String,
     use_tls: bool,
 ) -> Router {
+    let indexes = engine.get_indexes().await;
     let state = RoutesInnerState {
         engine,
+        indexes,
         metrics: metrics.clone(),
         node_state,
         internals,
@@ -316,35 +321,31 @@ async fn get_index_status(
     let keyspace_name: crate::KeyspaceName = keyspace_name.into();
     let index_name: crate::IndexName = index_name.into();
     let index_key = IndexKey::new(&keyspace_name, &index_name);
-    let Some((index, _)) = state.engine.get_index(index_key.clone()).await else {
+    let Some((index, status)) = state
+        .indexes
+        .read()
+        .unwrap()
+        .get(&index_key)
+        .map(|index| (index.index(), index.status()))
+    else {
         let msg = format!("missing index: {keyspace_name}.{index_name}");
         debug!("get_index_status: {msg}");
         return (StatusCode::NOT_FOUND, msg).into_response();
     };
-    if let Some(index_status) = state
-        .node_state
-        .get_index_status(keyspace_name.as_ref(), index_name.as_ref())
-        .await
-    {
-        match index.count(index_key).await {
-            Err(err) => {
-                let msg = format!("index.count request error: {err}");
-                debug!("get_index_status: {msg}");
-                (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
-            }
-            Ok(count) => (
-                StatusCode::OK,
-                response::Json(httpapi::IndexStatusResponse {
-                    status: index_status.into(),
-                    count,
-                }),
-            )
-                .into_response(),
+    match index.count(index_key).await {
+        Err(err) => {
+            let msg = format!("index.count request error: {err}");
+            debug!("get_index_status: {msg}");
+            (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
         }
-    } else {
-        let msg = format!("missing index status: {keyspace_name}.{index_name}");
-        debug!("get_index_status: {msg}");
-        (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
+        Ok(count) => (
+            StatusCode::OK,
+            response::Json(httpapi::IndexStatusResponse {
+                status: status.into(),
+                count,
+            }),
+        )
+            .into_response(),
     }
 }
 
@@ -500,196 +501,202 @@ async fn post_index_ann(
     Path((keyspace, index_name)): Path<(httpapi::KeyspaceName, httpapi::IndexName)>,
     extract::Json(request): extract::Json<httpapi::PostIndexAnnRequest>,
 ) -> Response {
-    let keyspace: crate::KeyspaceName = keyspace.into();
-    let index_name: crate::IndexName = index_name.into();
-    if state.use_tls
-        && extensions
-            .get::<Protocol>()
-            .is_some_and(|protocol| *protocol == Protocol::Plain)
-    {
-        let msg =
-            "TLS is required, but the request was made over an insecure connection.".to_string();
-        debug!("post_index_ann: {msg}");
-        return (StatusCode::FORBIDDEN, msg).into_response();
-    }
+    perf::hotpath_async(async move {
+        let keyspace: crate::KeyspaceName = keyspace.into();
+        let index_name: crate::IndexName = index_name.into();
+        if state.use_tls
+            && extensions
+                .get::<Protocol>()
+                .is_some_and(|protocol| *protocol == Protocol::Plain)
+        {
+            let msg = "TLS is required, but the request \
+            was made over an insecure connection."
+                .to_string();
+            debug!("post_index_ann: {msg}");
+            return (StatusCode::FORBIDDEN, msg).into_response();
+        }
 
-    // Start timing
-    let timer = state
-        .metrics
-        .latency
-        .with_label_values(&[keyspace.as_ref(), index_name.as_ref()])
-        .start_timer();
+        // Start timing
+        let timer = state
+            .metrics
+            .latency
+            .with_label_values(&[keyspace.as_ref(), index_name.as_ref()])
+            .start_timer();
 
-    let index_key = IndexKey::new(&keyspace, &index_name);
-    let (equality_cols, range_cols) = restriction_columns(&request.filter);
-    let allow_filtering = request.filter.as_ref().is_some_and(|f| f.allow_filtering);
-    let (routed_key, index, db_index) = match state
-        .engine
-        .get_best_index(index_key.clone(), equality_cols, range_cols)
-        .await
-    {
-        indexes::BestIndexState::Serving {
-            key: routed_key,
-            index,
-            db_index,
-            needs_filtering,
-        } => {
-            if matches!(needs_filtering, indexes::NeedsFiltering::Yes(_)) && !allow_filtering {
+        let index_key = IndexKey::new(&keyspace, &index_name);
+        let (equality_cols, range_cols) = restriction_columns(&request.filter);
+        let allow_filtering = request.filter.as_ref().is_some_and(|f| f.allow_filtering);
+        let (routed_key, index, primary_key_columns, table_columns) = match state
+            .indexes
+            .read()
+            .unwrap()
+            .best_index(&index_key, &equality_cols, &range_cols)
+        {
+            indexes::BestIndexState::Serving {
+                key: routed_key,
+                index,
+                needs_filtering,
+                primary_key_columns,
+                table_columns,
+            } => {
+                if matches!(needs_filtering, indexes::NeedsFiltering::Yes(_)) && !allow_filtering {
+                    timer.observe_duration();
+
+                    let msg = format!(
+                        "Index {keyspace}.{index_name} requires ALLOW FILTERING for this query"
+                    );
+                    debug!("post_index_ann: {msg}");
+                    return (StatusCode::BAD_REQUEST, msg).into_response();
+                }
+                (routed_key, index, primary_key_columns, table_columns)
+            }
+            indexes::BestIndexState::NotServing(progress) => {
                 timer.observe_duration();
 
-                let msg = format!(
-                    "Index {keyspace}.{index_name} requires ALLOW FILTERING for this query"
-                );
+                match progress {
+                    Progress::InProgress(percentage) => {
+                        let msg = format!(
+                            "Index {keyspace}.{index_name} is not available yet \
+                            as it is still being constructed, progress: {:.3}%",
+                            percentage.get()
+                        );
+                        debug!("post_index_ann: {msg}");
+                        return (StatusCode::SERVICE_UNAVAILABLE, msg).into_response();
+                    }
+                    Progress::Done => {
+                        let msg = format!(
+                            "Index {keyspace}.{index_name} is not serving, \
+                            but full scan did finish."
+                        );
+                        debug!("post_index_ann: {msg}");
+                        return (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response();
+                    }
+                }
+            }
+            indexes::BestIndexState::NotFound => {
+                timer.observe_duration();
+
+                let msg = format!("missing index: {keyspace}.{index_name}");
                 debug!("post_index_ann: {msg}");
-                return (StatusCode::BAD_REQUEST, msg).into_response();
-            }
-            (routed_key, index, db_index)
-        }
-        indexes::BestIndexState::NotServing(db_index) => {
-            timer.observe_duration();
-
-            let scan_progress = db_index.full_scan_progress().await;
-            match scan_progress {
-                Progress::InProgress(percentage) => {
-                    let msg = format!(
-                        "Index {keyspace}.{index_name} is not available yet as it is still being constructed, progress: {:.3}%",
-                        percentage.get()
-                    );
-                    debug!("post_index_ann: {msg}");
-                    return (StatusCode::SERVICE_UNAVAILABLE, msg).into_response();
-                }
-                Progress::Done => {
-                    let msg = format!(
-                        "Index {keyspace}.{index_name} is not serving, but full scan did finish."
-                    );
-                    debug!("post_index_ann: {msg}");
-                    return (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response();
-                }
-            }
-        }
-        indexes::BestIndexState::NotFound => {
-            timer.observe_duration();
-
-            let msg = format!("missing index: {keyspace}.{index_name}");
-            debug!("post_index_ann: {msg}");
-            return (StatusCode::NOT_FOUND, msg).into_response();
-        }
-    };
-
-    #[cfg(feature = "slow-test-hooks")]
-    state
-        .internals
-        .increment_counter(format!(
-            "ann-served-request--{}--{}",
-            routed_key.keyspace(),
-            routed_key.index(),
-        ))
-        .await;
-
-    let primary_key_columns = db_index.get_primary_key_columns().await;
-    let search_result = if let Some(filter) = request.filter {
-        let filter = match try_from_post_index_ann_filter(
-            filter,
-            &primary_key_columns,
-            db_index.get_table_columns().await.as_ref(),
-        ) {
-            Ok(filter) => filter,
-            Err(err) => {
-                debug!("post_index_ann: {err}");
-                return (StatusCode::BAD_REQUEST, err.to_string()).into_response();
+                return (StatusCode::NOT_FOUND, msg).into_response();
             }
         };
-        index
-            .filtered_ann(
-                routed_key,
-                request.vector.into(),
+
+        #[cfg(feature = "slow-test-hooks")]
+        state
+            .internals
+            .increment_counter(format!(
+                "ann-served-request--{}--{}",
+                routed_key.keyspace(),
+                routed_key.index(),
+            ))
+            .await;
+
+        let search_result = if let Some(filter) = request.filter {
+            let filter = match try_from_post_index_ann_filter(
                 filter,
-                request.limit.into(),
-            )
-            .await
-    } else {
-        index
-            .ann(routed_key, request.vector.into(), request.limit.into())
-            .await
-    };
+                &primary_key_columns,
+                &table_columns,
+            ) {
+                Ok(filter) => filter,
+                Err(err) => {
+                    debug!("post_index_ann: {err}");
+                    return (StatusCode::BAD_REQUEST, err.to_string()).into_response();
+                }
+            };
+            index
+                .filtered_ann(
+                    routed_key,
+                    request.vector.into(),
+                    filter,
+                    request.limit.into(),
+                )
+                .await
+        } else {
+            index
+                .ann(routed_key, request.vector.into(), request.limit.into())
+                .await
+        };
 
-    // Record duration in Prometheus
-    timer.observe_duration();
+        // Record duration in Prometheus
+        timer.observe_duration();
 
-    match search_result {
-        Err(err) => match err.downcast_ref::<validator::Error>() {
-            Some(err) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
-            None => {
-                let msg = format!("index.ann request error: {err}");
-                debug!("post_index_ann: {msg}");
-                (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
-            }
-        },
-        Ok((primary_keys, distances)) => {
-            if primary_keys.len() != distances.len() {
-                let msg = format!(
-                    "wrong size of an ann response: number of primary_keys = {}, number of distances = {}",
-                    primary_keys.len(),
-                    distances.len()
-                );
-                debug!("post_index_ann: {msg}");
-                (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
-            } else {
-                let similarity_scores: Vec<httpapi::SimilarityScore> = distances
-                    .iter()
-                    .map(|distance| (*distance).into())
-                    .map(|distance: f32| SimilarityScore::from(distance))
-                    .map(httpapi::SimilarityScore::from)
-                    .collect();
+        match search_result {
+            Err(err) => match err.downcast_ref::<validator::Error>() {
+                Some(err) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
+                None => {
+                    let msg = format!("index.ann request error: {err}");
+                    debug!("post_index_ann: {msg}");
+                    (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
+                }
+            },
+            Ok((primary_keys, distances)) => {
+                if primary_keys.len() != distances.len() {
+                    let msg = format!(
+                        "wrong size of an ann response: \
+                    number of primary_keys = {}, number of distances = {}",
+                        primary_keys.len(),
+                        distances.len()
+                    );
+                    debug!("post_index_ann: {msg}");
+                    (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
+                } else {
+                    let similarity_scores: Vec<httpapi::SimilarityScore> = distances
+                        .iter()
+                        .map(|distance| (*distance).into())
+                        .map(|distance: f32| SimilarityScore::from(distance))
+                        .map(httpapi::SimilarityScore::from)
+                        .collect();
 
-                let primary_keys: anyhow::Result<_> = primary_key_columns
-                    .iter()
-                    .cloned()
-                    .enumerate()
-                    .map(|(idx_column, column)| {
-                        let primary_keys: anyhow::Result<_> = primary_keys
-                            .iter()
-                            .map(|primary_key| {
-                                if primary_key.len() != primary_key_columns.len() {
-                                    bail!(
-                                        "wrong size of a primary key: {}, {}",
-                                        primary_key_columns.len(),
-                                        primary_key.len()
-                                    );
-                                }
-                                Ok(primary_key)
-                            })
-                            .map_ok(|primary_key| {
-                                primary_key
-                                    .get(idx_column)
-                                    .expect("primary key index out of bounds after length check")
-                            })
-                            .map_ok(try_to_json)
-                            .map(|primary_key| primary_key.flatten())
-                            .collect();
-                        primary_keys.map(|primary_keys| (column.into(), primary_keys))
-                    })
-                    .collect();
+                    let primary_keys: anyhow::Result<_> = primary_key_columns
+                        .iter()
+                        .cloned()
+                        .enumerate()
+                        .map(|(idx_column, column)| {
+                            let primary_keys: anyhow::Result<_> = primary_keys
+                                .iter()
+                                .map(|primary_key| {
+                                    if primary_key.len() != primary_key_columns.len() {
+                                        bail!(
+                                            "wrong size of a primary key: {}, {}",
+                                            primary_key_columns.len(),
+                                            primary_key.len()
+                                        );
+                                    }
+                                    Ok(primary_key)
+                                })
+                                .map_ok(|primary_key| {
+                                    primary_key.get(idx_column).expect(
+                                        "primary key index out of bounds after length check",
+                                    )
+                                })
+                                .map_ok(try_to_json)
+                                .map(|primary_key| primary_key.flatten())
+                                .collect();
+                            primary_keys.map(|primary_keys| (column.into(), primary_keys))
+                        })
+                        .collect();
 
-                match primary_keys {
-                    Err(err) => {
-                        debug!("post_index_ann: {err}");
-                        (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
+                    match primary_keys {
+                        Err(err) => {
+                            debug!("post_index_ann: {err}");
+                            (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
+                        }
+                        Ok(primary_keys) => (
+                            StatusCode::OK,
+                            response::Json(httpapi::PostIndexAnnResponse {
+                                primary_keys,
+                                distances: distances.into_iter().map(|d| d.into()).collect(),
+                                similarity_scores,
+                            }),
+                        )
+                            .into_response(),
                     }
-
-                    Ok(primary_keys) => (
-                        StatusCode::OK,
-                        response::Json(httpapi::PostIndexAnnResponse {
-                            primary_keys,
-                            distances: distances.into_iter().map(|d| d.into()).collect(),
-                            similarity_scores,
-                        }),
-                    )
-                        .into_response(),
                 }
             }
         }
-    }
+    })
+    .await
 }
 
 fn try_from_post_index_ann_filter(

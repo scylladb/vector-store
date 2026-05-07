@@ -5100,6 +5100,7 @@ name = "vector-store"
 version = "0.0.0-dev"
 dependencies = [
  "anyhow",
+ "async-channel",
  "async-trait",
  "axum",
  "axum-server",
@@ -5127,7 +5128,6 @@ dependencies = [
  "opensearch",
  "prometheus",
  "rand 0.10.1",
- "rayon",
  "rcgen",
  "regex",
  "reqwest",

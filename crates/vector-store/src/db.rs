@@ -29,6 +29,7 @@ use crate::internals::InternalsExt;
 use crate::node_state::Event;
 use crate::node_state::NodeState;
 use crate::node_state::NodeStateExt;
+use crate::perf;
 use anyhow::Context;
 use anyhow::anyhow;
 use anyhow::bail;
@@ -253,7 +254,7 @@ pub(crate) async fn new(
     internals: Sender<Internals>,
     mut config_rx: watch::Receiver<Arc<Config>>,
 ) -> anyhow::Result<mpsc::Sender<Db>> {
-    let (tx, mut rx) = mpsc::channel(10);
+    let (tx, mut rx) = mpsc::channel(perf::channel_size().into());
     tokio::spawn(
         async move {
             let mut config = config_rx.borrow().clone();

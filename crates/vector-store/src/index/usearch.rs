@@ -20,11 +20,15 @@ use crate::index::validator;
 use crate::memory::Allocate;
 use crate::memory::Memory;
 use crate::memory::MemoryExt;
+use crate::perf;
 use crate::table::IndexId;
 use crate::table::PartitionId;
 use crate::table::PrimaryId;
 use crate::table::Table;
 use crate::table::TableSearch;
+use crate::worker;
+use crate::worker::Worker;
+use crate::worker::WorkerExt;
 use anyhow::anyhow;
 use itertools::Itertools;
 use std::collections::BTreeMap;
@@ -35,9 +39,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
-use tokio::runtime::Handle;
 use tokio::sync::Notify;
-use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
@@ -54,8 +56,7 @@ use usearch::ScalarKind;
 use usearch::b1x8;
 
 pub struct UsearchIndexFactory {
-    tokio_semaphore: Arc<Semaphore>,
-    rayon_semaphore: Arc<Semaphore>,
+    worker: async_channel::Sender<Worker>,
     mode: Mode,
 }
 
@@ -77,15 +78,13 @@ impl IndexFactory for UsearchIndexFactory {
                     quantization: index.quantization.into(),
                     ..Default::default()
                 };
-                let threads =
-                    Handle::current().metrics().num_workers() + rayon::current_num_threads();
+                let threads = perf::num_workers().into();
                 new(
                     move || Ok(Arc::new(ThreadedUsearchIndex::new(options, threads)?)),
                     index.key,
                     index.dimensions,
                     table,
-                    Arc::clone(&self.tokio_semaphore),
-                    Arc::clone(&self.rayon_semaphore),
+                    self.worker.clone(),
                     memory,
                 )
             }
@@ -99,8 +98,7 @@ impl IndexFactory for UsearchIndexFactory {
                 index.key,
                 index.dimensions,
                 table,
-                Arc::clone(&self.tokio_semaphore),
-                Arc::clone(&self.rayon_semaphore),
+                self.worker.clone(),
                 memory,
             ),
         }
@@ -115,14 +113,11 @@ impl IndexFactory for UsearchIndexFactory {
 }
 
 pub fn new_usearch(
-    tokio_semaphore: Arc<Semaphore>,
-    rayon_semaphore: Arc<Semaphore>,
     mut config_rx: watch::Receiver<Arc<Config>>,
 ) -> anyhow::Result<UsearchIndexFactory> {
     let config = config_rx.borrow_and_update().clone();
     Ok(UsearchIndexFactory {
-        tokio_semaphore,
-        rayon_semaphore,
+        worker: worker::new(),
         mode: if config.usearch_simulator.is_none() {
             Mode::Usearch
         } else {
@@ -141,7 +136,6 @@ enum Mode {
 
 trait UsearchIndex {
     fn reserve(&self, size: usize) -> anyhow::Result<()>;
-    fn size(&self) -> usize;
     fn capacity(&self) -> usize;
     fn add(&self, primary_id: PrimaryId, vector: &Vector) -> anyhow::Result<()>;
     fn remove(&self, primary_id: PrimaryId) -> anyhow::Result<()>;
@@ -187,10 +181,6 @@ impl UsearchIndex for ThreadedUsearchIndex {
 
     fn capacity(&self) -> usize {
         self.inner.capacity()
-    }
-
-    fn size(&self) -> usize {
-        self.inner.size()
     }
 
     fn add(&self, primary_id: PrimaryId, vector: &Vector) -> anyhow::Result<()> {
@@ -376,11 +366,6 @@ impl UsearchIndex for RwLock<Simulator> {
     }
 
     #[hotpath::measure]
-    fn size(&self) -> usize {
-        self.read().unwrap().keys.read().unwrap().len()
-    }
-
-    #[hotpath::measure]
     fn add(&self, row_id: PrimaryId, _: &Vector) -> anyhow::Result<()> {
         let start = Instant::now();
 
@@ -451,11 +436,6 @@ impl UsearchIndex for RwLock<Simulator> {
 // The value was taken for initial benchmarks (size similar to benchmark size)
 const RESERVE_INCREMENT_GLOBAL: usize = 1000000;
 const RESERVE_INCREMENT_LOCAL: usize = 1000;
-
-// When free space for index vectors drops below this, will reserve more space
-// The ratio was taken for initial benchmarks
-const RESERVE_THRESHOLD_GLOBAL: usize = RESERVE_INCREMENT_GLOBAL / 3;
-const RESERVE_THRESHOLD_LOCAL: usize = RESERVE_INCREMENT_LOCAL / 3;
 
 struct MetricConfig {
     quantization: Quantization,
@@ -632,30 +612,15 @@ mod operation {
         pub(super) async fn permit_for_reserve(&mut self) -> Permit {
             self.permit(Mode::Reserve).await
         }
-
-        /// Capacity and size permit cannot be concurrent only with reserve mode.
-        #[hotpath::measure]
-        pub(super) async fn permit_for_capacity_and_size(&mut self) -> Permit {
-            while self.mode == Mode::Reserve {
-                if self.counter.load(Ordering::Relaxed) == 0 {
-                    // checking for capacity is during add, so insert mode is fine
-                    self.mode = Mode::Insert;
-                    break;
-                }
-                self.notify.notified().await;
-            }
-
-            self.counter.fetch_add(1, Ordering::Relaxed);
-            Permit {
-                notify: Arc::clone(&self.notify),
-                counter: Arc::clone(&self.counter),
-            }
-        }
     }
 }
 
 struct PartitionState<I: UsearchIndex + Send + Sync + 'static> {
     partition_id: PartitionId,
+    size: Arc<AtomicUsize>,
+    capacity: Arc<AtomicUsize>,
+    capacity_increment: usize,
+    free_threshold: usize,
     idx: Arc<I>,
 }
 
@@ -664,7 +629,31 @@ where
     I: UsearchIndex + Send + Sync + 'static,
 {
     fn new(partition_id: PartitionId, idx: Arc<I>) -> Self {
-        Self { partition_id, idx }
+        let capacity_increment = if partition_id.index_id().is_global() {
+            RESERVE_INCREMENT_GLOBAL
+        } else {
+            RESERVE_INCREMENT_LOCAL
+        };
+        Self {
+            partition_id,
+            size: Arc::new(AtomicUsize::new(0)),
+            capacity: Arc::new(AtomicUsize::new(0)),
+            capacity_increment,
+            free_threshold: perf::channel_size().into(),
+            idx,
+        }
+    }
+
+    fn needs_more_capacity(&self) -> Option<usize> {
+        let capacity = self.capacity.load(Ordering::Relaxed);
+        let size = self.size.load(Ordering::Relaxed);
+        let free_space = capacity - size;
+
+        if free_space < self.free_threshold {
+            Some(capacity + self.capacity_increment)
+        } else {
+            None
+        }
     }
 
     fn stop(&self) {
@@ -693,15 +682,12 @@ fn new<I: UsearchIndex + Send + Sync + 'static>(
     index_key: IndexKey,
     dimensions: Dimensions,
     table: Arc<RwLock<impl TableSearch + Send + Sync + 'static>>,
-    tokio_semaphore: Arc<Semaphore>,
-    rayon_semaphore: Arc<Semaphore>,
+    worker: async_channel::Sender<Worker>,
     memory: mpsc::Sender<Memory>,
 ) -> anyhow::Result<mpsc::Sender<Index>> {
-    // TODO: The value of channel size was taken from initial benchmarks. Needs more testing
-    const CHANNEL_SIZE: usize = 10;
-    let (tx, mut rx) = mpsc::channel(CHANNEL_SIZE);
+    let (tx, mut rx) = mpsc::channel(perf::channel_size().into());
 
-    tokio::spawn(
+    tokio::spawn(perf::hotpath_async(
         {
             let index_key = index_key.clone();
             async move {
@@ -710,9 +696,11 @@ fn new<I: UsearchIndex + Send + Sync + 'static>(
                 let mut partitions = BTreeMap::new();
 
                 let mut allocate_prev = Allocate::Can;
+                let allocate_rx = memory.subscribe_allocate().await;
 
                 while let Some(msg) = rx.recv().await {
-                    if !check_memory_allocation(&msg, &memory, &mut allocate_prev, &index_key).await
+                    if !check_memory_allocation(&msg, &allocate_rx, &mut allocate_prev, &index_key)
+                        .await
                     {
                         continue;
                     }
@@ -728,15 +716,8 @@ fn new<I: UsearchIndex + Send + Sync + 'static>(
                         continue;
                     };
 
-                    dispatch_task(
-                        state,
-                        partition,
-                        &table,
-                        &tokio_semaphore,
-                        &rayon_semaphore,
-                        msg,
-                    )
-                    .await;
+                    dispatch_task(state, partition, &table, &worker, msg).await;
+                    hotpath::val!("usearch-rx.len-end").set(&rx.len());
                 }
 
                 partitions
@@ -747,7 +728,7 @@ fn new<I: UsearchIndex + Send + Sync + 'static>(
             }
         }
         .instrument(error_span!("usearch", "{index_key}")),
-    );
+    ));
 
     Ok(tx)
 }
@@ -911,28 +892,24 @@ async fn dispatch_task<I, T>(
     state: &mut IndexState,
     partition: Arc<PartitionState<I>>,
     table: &Arc<RwLock<T>>,
-    tokio_semaphore: &Arc<Semaphore>,
-    rayon_semaphore: &Arc<Semaphore>,
+    worker: &async_channel::Sender<Worker>,
     msg: Index,
 ) where
     I: UsearchIndex + Send + Sync + 'static,
     T: TableSearch + Send + Sync + 'static,
 {
-    if let Index::AddVector { .. } = &msg {
-        let operation_permit = state.operation.permit_for_capacity_and_size().await;
-        let is_global = partition.partition_id.index_id().is_global();
-        if needs_more_capacity(partition.idx.as_ref(), is_global).is_some() {
-            drop(operation_permit);
-            let operation_permit = state.operation.permit_for_reserve().await;
-            if let Some(capacity) = needs_more_capacity(partition.idx.as_ref(), is_global) {
-                let permit = Arc::clone(rayon_semaphore).acquire_owned().await.unwrap();
-                let idx = Arc::clone(&partition.idx);
-                rayon::spawn(move || {
-                    reserve(idx.as_ref(), capacity);
-                    drop(permit);
+    if let Index::AddVector { .. } = &msg
+        && partition.needs_more_capacity().is_some()
+    {
+        let operation_permit = state.operation.permit_for_reserve().await;
+        if let Some(capacity) = partition.needs_more_capacity() {
+            let partiton = Arc::clone(&partition);
+            worker
+                .spawn_blocking(move || {
+                    reserve(&partiton, capacity);
                     drop(operation_permit);
-                });
-            }
+                })
+                .await;
         }
     }
 
@@ -941,32 +918,31 @@ async fn dispatch_task<I, T>(
     let table = Arc::clone(table);
     let dimensions = state.dimensions;
     let size = Arc::clone(&state.size);
-    if should_run_on_tokio(&msg) {
-        let permit = Arc::clone(tokio_semaphore).acquire_owned().await.unwrap();
-        tokio::spawn(async move {
-            crate::move_to_the_end_of_async_runtime_queue().await;
-            process(partition, table, dimensions, size, msg);
-            drop(permit);
-            drop(operation_permit);
-        });
+    if is_non_blocking(&msg) {
+        worker
+            .spawn_non_blocking(move || {
+                process(&partition, table, dimensions, size, msg);
+                drop(operation_permit);
+            })
+            .await;
         return;
     }
-    let permit = Arc::clone(rayon_semaphore).acquire_owned().await.unwrap();
-    rayon::spawn(move || {
-        process(partition, table, dimensions, size, msg);
-        drop(permit);
-        drop(operation_permit);
-    });
+    worker
+        .spawn_blocking(move || {
+            process(&partition, table, dimensions, size, msg);
+            drop(operation_permit);
+        })
+        .await;
 }
 
 #[hotpath::measure]
-fn should_run_on_tokio(msg: &Index) -> bool {
+fn is_non_blocking(msg: &Index) -> bool {
     matches!(msg, Index::Ann { .. })
 }
 
 #[hotpath::measure]
 fn process<I, T>(
-    partition: Arc<PartitionState<I>>,
+    partition: &PartitionState<I>,
     table: Arc<RwLock<T>>,
     dimensions: Dimensions,
     size: Arc<AtomicUsize>,
@@ -981,7 +957,7 @@ fn process<I, T>(
             embedding,
             in_progress: _in_progress,
             ..
-        } => add(partition.idx.as_ref(), primary_id, &embedding, &size),
+        } => add(partition, primary_id, &embedding, &size),
 
         Index::Ann {
             embedding,
@@ -1012,53 +988,53 @@ fn process<I, T>(
             primary_id,
             in_progress: _in_progress,
             ..
-        } => remove(partition.idx.as_ref(), primary_id, &size),
+        } => remove(partition, primary_id, &size),
 
         Index::RemovePartition { .. } => unreachable!(),
     }
 }
 
 #[hotpath::measure]
-fn reserve(idx: &impl UsearchIndex, capacity: usize) {
-    let result = idx.reserve(capacity);
+fn reserve<I>(partition: &PartitionState<I>, capacity: usize)
+where
+    I: UsearchIndex + Send + Sync + 'static,
+{
+    let result = partition.idx.reserve(capacity);
     if let Err(err) = &result {
         error!("unable to reserve index capacity for {capacity} in usearch: {err}");
     } else {
-        debug!("reserve: reserved index capacity for {capacity}");
+        let actual_capacity = partition.idx.capacity();
+        debug!("reserve: reserved index capacity for {actual_capacity}");
+        partition.capacity.store(actual_capacity, Ordering::Relaxed);
     }
 }
 
 #[hotpath::measure]
-fn needs_more_capacity(idx: &impl UsearchIndex, is_global: bool) -> Option<usize> {
-    let capacity = idx.capacity();
-    let free_space = capacity - idx.size();
-    let (increment, threshold) = if is_global {
-        (RESERVE_INCREMENT_GLOBAL, RESERVE_THRESHOLD_GLOBAL)
-    } else {
-        (RESERVE_INCREMENT_LOCAL, RESERVE_THRESHOLD_LOCAL)
-    };
-
-    if free_space < threshold {
-        Some(capacity + increment)
-    } else {
-        None
-    }
-}
-
-#[hotpath::measure]
-fn add(idx: &impl UsearchIndex, primary_id: PrimaryId, embedding: &Vector, size: &AtomicUsize) {
-    if let Err(err) = idx.add(primary_id, embedding) {
+fn add<I>(
+    partition: &PartitionState<I>,
+    primary_id: PrimaryId,
+    embedding: &Vector,
+    size: &AtomicUsize,
+) where
+    I: UsearchIndex + Send + Sync + 'static,
+{
+    if let Err(err) = partition.idx.add(primary_id, embedding) {
         warn!("add: unable to add embedding: {err}");
     } else {
+        partition.size.fetch_add(1, Ordering::Relaxed);
         size.fetch_add(1, Ordering::Relaxed);
     }
 }
 
 #[hotpath::measure]
-fn remove(idx: &impl UsearchIndex, row_id: PrimaryId, size: &AtomicUsize) {
-    if let Err(err) = idx.remove(row_id) {
+fn remove<I>(partition: &PartitionState<I>, row_id: PrimaryId, size: &AtomicUsize)
+where
+    I: UsearchIndex + Send + Sync + 'static,
+{
+    if let Err(err) = partition.idx.remove(row_id) {
         warn!("remove: unable to remove embeddings: {err}");
     } else {
+        partition.size.fetch_sub(1, Ordering::Relaxed);
         size.fetch_sub(1, Ordering::Relaxed);
     }
 }
@@ -1081,7 +1057,7 @@ fn validate_dimensions(
 
 #[hotpath::measure]
 fn ann<I>(
-    partition: Arc<PartitionState<I>>,
+    partition: &PartitionState<I>,
     tx_ann: oneshot::Sender<AnnR>,
     table: &Arc<RwLock<impl TableSearch>>,
     embedding: Vector,
@@ -1121,7 +1097,7 @@ fn ann<I>(
 
 #[hotpath::measure]
 fn filtered_ann<I>(
-    partition: Arc<PartitionState<I>>,
+    partition: &PartitionState<I>,
     tx_ann: oneshot::Sender<AnnR>,
     table: &Arc<RwLock<impl TableSearch>>,
     embedding: Vector,
@@ -1171,7 +1147,7 @@ fn filtered_ann<I>(
 #[hotpath::measure]
 async fn check_memory_allocation(
     msg: &Index,
-    memory: &mpsc::Sender<Memory>,
+    rx_allocate: &watch::Receiver<Allocate>,
     allocate_prev: &mut Allocate,
     key: &IndexKey,
 ) -> bool {
@@ -1179,7 +1155,7 @@ async fn check_memory_allocation(
         return true;
     }
 
-    let allocate = memory.can_allocate().await;
+    let allocate = *rx_allocate.borrow();
     if allocate == Allocate::Cannot {
         if *allocate_prev == Allocate::Can {
             error!("Unable to add vector for index {key}: not enough memory to reserve more space");
@@ -1301,7 +1277,7 @@ mod tests {
             metric: MetricKind::L2sq,
             ..Default::default()
         };
-        let threads = Handle::current().metrics().num_workers() + rayon::current_num_threads();
+        let threads = perf::num_workers().into();
         let table = Arc::new(RwLock::new(MockTableSearch::new()));
         let index_key = IndexKey::new(&"vector".into(), &"store".into());
         let actor = new(
@@ -1309,8 +1285,7 @@ mod tests {
             index_key.clone(),
             NonZeroUsize::new(3).unwrap().into(),
             Arc::clone(&table),
-            Arc::new(Semaphore::new(4)),
-            Arc::new(Semaphore::new(4)),
+            worker::new(),
             memory::new(config_rx),
         )
         .unwrap();
@@ -1437,13 +1412,19 @@ mod tests {
     #[tokio::test]
     async fn allocate_parameter_works() {
         let (memory_tx, mut memory_rx) = mpsc::channel(1);
+        let (allocate_tx, allocate_rx) = watch::channel(Allocate::Can);
+        let memory_respond = tokio::spawn(async move {
+            let Memory::SubscribeAllocate { tx } = memory_rx.recv().await.unwrap();
+            _ = tx.send(allocate_rx);
+            memory_rx
+        });
 
         let options = IndexOptions {
             dimensions: 3,
             metric: MetricKind::L2sq,
             ..Default::default()
         };
-        let threads = Handle::current().metrics().num_workers() + rayon::current_num_threads();
+        let threads = perf::num_workers().into();
         let table = Arc::new(RwLock::new(MockTableSearch::new()));
         let index_key = IndexKey::new(&"vector".into(), &"store".into());
         let actor = new(
@@ -1451,23 +1432,18 @@ mod tests {
             index_key.clone(),
             NonZeroUsize::new(3).unwrap().into(),
             Arc::clone(&table),
-            Arc::new(Semaphore::new(4)),
-            Arc::new(Semaphore::new(4)),
+            worker::new(),
             memory_tx,
         )
         .unwrap();
+        memory_respond.await.unwrap();
 
-        let memory_respond = tokio::spawn(async move {
-            let Memory::CanAllocate { tx } = memory_rx.recv().await.unwrap();
-            _ = tx.send(Allocate::Cannot);
-            memory_rx
-        });
+        allocate_tx.send(Allocate::Cannot).unwrap();
         let index_id = IndexIdGenerator::new().next(true).unwrap();
         let partition_id = PartitionId::global(index_id);
         actor
             .add_vector(partition_id, 1.into(), vec![1., 1., 1.].into(), None)
             .await;
-        let mut memory_rx = memory_respond.await.unwrap();
 
         table
             .write()
@@ -1478,14 +1454,10 @@ mod tests {
 
         assert_eq!(actor.count(index_key.clone()).await.unwrap(), 0);
 
-        let memory_respond = tokio::spawn(async move {
-            let Memory::CanAllocate { tx } = memory_rx.recv().await.unwrap();
-            _ = tx.send(Allocate::Can);
-        });
+        allocate_tx.send(Allocate::Can).unwrap();
         actor
             .add_vector(partition_id, 1.into(), vec![1., 1., 1.].into(), None)
             .await;
-        memory_respond.await.unwrap();
 
         // Wait for the add operation to complete, as it runs in a separate task.
         time::timeout(Duration::from_secs(10), async {
@@ -1511,7 +1483,7 @@ mod tests {
             metric: MetricKind::L2sq,
             ..Default::default()
         };
-        let threads = Handle::current().metrics().num_workers() + rayon::current_num_threads();
+        let threads = perf::num_workers().into();
         let table = Arc::new(RwLock::new(MockTableSearch::new()));
         let index_key = IndexKey::new(&"vector".into(), &"store".into());
         let index = new(
@@ -1519,8 +1491,7 @@ mod tests {
             index_key.clone(),
             dimensions.into(),
             Arc::clone(&table),
-            Arc::new(Semaphore::new(Semaphore::MAX_PERMITS)),
-            Arc::new(Semaphore::new(Semaphore::MAX_PERMITS)),
+            worker::new(),
             memory::new(config_rx),
         )
         .unwrap();
@@ -1536,6 +1507,12 @@ mod tests {
                 assert_eq!(key, &index_key);
                 assert!(restrictions.is_none());
                 Some((partition_id, None))
+            }
+        });
+        table.write().unwrap().expect_primary_key().returning({
+            move |check_partition_id, _| {
+                assert_eq!(partition_id, check_partition_id);
+                None
             }
         });
         let add_handles = add_concurrently(

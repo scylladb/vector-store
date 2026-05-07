@@ -89,25 +89,10 @@ fn init() {
     });
 }
 
-static INIT_RAYON: Once = Once::new();
-
 fn default_runtime() -> Runtime {
     let threads = dotenvy::var("VECTOR_STORE_THREADS")
         .ok()
         .and_then(|s| s.parse().ok());
-    INIT_RAYON.call_once(|| {
-        rayon::ThreadPoolBuilder::new()
-            .pipe(|b| {
-                if let Some(threads) = threads {
-                    b.num_threads(threads)
-                } else {
-                    b
-                }
-            })
-            .build_global()
-            .unwrap();
-    });
-
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .pipe(|mut b| {
             if let Some(threads) = threads {

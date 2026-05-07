@@ -73,7 +73,7 @@ async fn quantization_is_effectively_applied() {
                 client
                     .index_status(&keyspace_name, &index_name)
                     .await
-                    .is_ok_and(|s| s.count == values_len)
+                    .is_ok_and(|s| s.status == IndexStatus::Serving && s.count == values_len)
             },
             &format!("Waiting for 1 vector to be indexed ({:?})", quantization),
         )

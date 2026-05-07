@@ -199,7 +199,8 @@ async fn spawn_server(
         deps.internals.clone(),
         deps.index_engine_version.clone(),
         tls_config.is_some(),
-    );
+    )
+    .await;
     tokio::spawn({
         let handle = handle.clone();
         let router = router.clone();

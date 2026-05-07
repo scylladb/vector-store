@@ -3,7 +3,6 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
-use crate::ColumnName;
 use crate::Config;
 use crate::DbIndexType;
 use crate::IndexKey;
@@ -17,23 +16,25 @@ use crate::db_index::DbIndexExt;
 use crate::factory::IndexFactory;
 use crate::index::Index;
 use crate::index::factory::IndexConfiguration;
-use crate::indexes;
-use crate::indexes::BestIndexState;
 use crate::indexes::IndexEntry;
 use crate::indexes::Indexes;
-use crate::indexes::RoutingMap;
 use crate::memory;
 use crate::memory::Memory;
 use crate::monitor_indexes;
 use crate::monitor_items;
 use crate::node_state::NodeState;
+use crate::node_state::NodeStateExt;
+use crate::perf;
 use crate::table::Table;
+use itertools::Itertools;
 use std::sync::Arc;
 use std::sync::RwLock;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
+use tokio::time;
 use tracing::Instrument;
 use tracing::debug;
 use tracing::debug_span;
@@ -43,7 +44,7 @@ use tracing::trace;
 type GetIndexKeysR = Vec<(IndexKey, Quantization)>;
 type AddIndexR = anyhow::Result<()>;
 type GetIndexR = Option<(mpsc::Sender<Index>, mpsc::Sender<DbIndex>)>;
-type GetBestIndexR = BestIndexState;
+type GetIndexesR = Arc<RwLock<Indexes>>;
 
 pub(crate) enum Engine {
     GetIndexIds {
@@ -60,11 +61,8 @@ pub(crate) enum Engine {
         key: IndexKey,
         tx: oneshot::Sender<GetIndexR>,
     },
-    GetBestIndex {
-        key: IndexKey,
-        equality_columns: Vec<ColumnName>,
-        range_columns: Vec<ColumnName>,
-        tx: oneshot::Sender<GetBestIndexR>,
+    GetIndexes {
+        tx: oneshot::Sender<GetIndexesR>,
     },
 }
 
@@ -73,12 +71,7 @@ pub(crate) trait EngineExt {
     async fn add_index(&self, metadata: IndexMetadata) -> AddIndexR;
     async fn del_index(&self, key: IndexKey);
     async fn get_index(&self, key: IndexKey) -> GetIndexR;
-    async fn get_best_index(
-        &self,
-        key: IndexKey,
-        equality_columns: Vec<ColumnName>,
-        range_columns: Vec<ColumnName>,
-    ) -> GetBestIndexR;
+    async fn get_indexes(&self) -> GetIndexesR;
 }
 
 impl EngineExt for mpsc::Sender<Engine> {
@@ -115,23 +108,13 @@ impl EngineExt for mpsc::Sender<Engine> {
             .expect("EngineExt::get_index: internal actor should send response")
     }
 
-    async fn get_best_index(
-        &self,
-        key: IndexKey,
-        equality_columns: Vec<ColumnName>,
-        range_columns: Vec<ColumnName>,
-    ) -> GetBestIndexR {
+    async fn get_indexes(&self) -> GetIndexesR {
         let (tx, rx) = oneshot::channel();
-        self.send(Engine::GetBestIndex {
-            key,
-            equality_columns,
-            range_columns,
-            tx,
-        })
-        .await
-        .expect("EngineExt::get_best_index: internal actor should receive request");
+        self.send(Engine::GetIndexes { tx })
+            .await
+            .expect("EngineExt::get_indexes: internal actor should receive request");
         rx.await
-            .expect("EngineExt::get_best_index: internal actor should send response")
+            .expect("EngineExt::get_indexes: internal actor should send response")
     }
 }
 
@@ -142,7 +125,7 @@ pub(crate) async fn new(
     metrics: Arc<Metrics>,
     config_rx: watch::Receiver<Arc<Config>>,
 ) -> anyhow::Result<mpsc::Sender<Engine>> {
-    let (tx, mut rx) = mpsc::channel(10);
+    let (tx, mut rx) = mpsc::channel(perf::channel_size().into());
 
     let monitor_actor = monitor_indexes::new(
         db.clone(),
@@ -157,50 +140,42 @@ pub(crate) async fn new(
         async move {
             debug!("starting");
 
-            let mut indexes = Indexes::new();
-            let mut routing_map = RoutingMap::new();
-            while let Some(msg) = rx.recv().await {
-                match msg {
-                    Engine::GetIndexIds { tx } => get_index_keys(tx, &indexes).await,
+            let indexes = Arc::new(RwLock::new(Indexes::new()));
+            const CHECK_INTERVAL: Duration = Duration::from_secs(1);
+            let mut interval = time::interval(CHECK_INTERVAL);
+            loop {
+                tokio::select! {
+                    msg = rx.recv() => {
+                        let Some(msg) = msg else {
+                            break;
+                        };
+                        match msg {
+                            Engine::GetIndexIds { tx } => get_index_keys(tx, &indexes).await,
 
-                    Engine::AddIndex { metadata, tx } => {
-                        add_index(
-                            metadata,
-                            tx,
-                            &db,
-                            index_factory.as_ref(),
-                            &mut indexes,
-                            &mut routing_map,
-                            metrics.clone(),
-                            memory_actor.clone(),
-                        )
-                        .await
+                            Engine::AddIndex { metadata, tx } => {
+                                add_index(
+                                    metadata,
+                                    tx,
+                                    &db,
+                                    index_factory.as_ref(),
+                                    &indexes,
+                                    metrics.clone(),
+                                    memory_actor.clone(),
+                                )
+                                .await
+                            }
+
+                            Engine::DelIndex { key } => del_index(key, &indexes).await,
+
+                            Engine::GetIndex { key, tx } => get_index(key, tx, &indexes).await,
+
+                            Engine::GetIndexes { tx } => tx.send(Arc::clone(&indexes)).unwrap_or(()),
+                        }
                     }
 
-                    Engine::DelIndex { key } => {
-                        del_index(key, &mut indexes, &mut routing_map).await
-                    }
-
-                    Engine::GetIndex { key, tx } => get_index(key, tx, &indexes).await,
-
-                    Engine::GetBestIndex {
-                        key,
-                        equality_columns,
-                        range_columns,
-                        tx,
-                    } => {
-                        get_best_index(
-                            key,
-                            equality_columns,
-                            range_columns,
-                            tx,
-                            &indexes,
-                            &routing_map,
-                            &node_state,
-                        )
-                        .await
-                    }
+                    _ = interval.tick() => update_indexes(&node_state, &indexes).await,
                 }
+
             }
             drop(monitor_actor);
 
@@ -212,11 +187,13 @@ pub(crate) async fn new(
     Ok(tx)
 }
 
-async fn get_index_keys(tx: oneshot::Sender<GetIndexKeysR>, indexes: &Indexes) {
+async fn get_index_keys(tx: oneshot::Sender<GetIndexKeysR>, indexes: &RwLock<Indexes>) {
     tx.send(
         indexes
+            .read()
+            .unwrap()
             .iter()
-            .map(|(key, entry)| (key.clone(), entry.quantization))
+            .map(|(key, entry)| (key.clone(), entry.quantization()))
             .collect(),
     )
     .unwrap_or_else(|_| trace!("Engine::GetIndexIds: unable to send response"));
@@ -228,13 +205,12 @@ async fn add_index(
     tx: oneshot::Sender<AddIndexR>,
     db: &mpsc::Sender<Db>,
     index_factory: &(dyn IndexFactory + Send + Sync),
-    indexes: &mut Indexes,
-    routing_map: &mut RoutingMap,
+    indexes: &RwLock<Indexes>,
     metrics: Arc<Metrics>,
     memory: Sender<Memory>,
 ) {
     let key = metadata.key();
-    if indexes.contains_key(&key) {
+    if indexes.read().unwrap().contains_key(&key) {
         trace!("add_index: trying to replace index with key {key}");
         tx.send(Ok(()))
             .unwrap_or_else(|_| trace!("add_index: unable to send response"));
@@ -317,56 +293,60 @@ async fn add_index(
         }
     };
 
-    let index_entry = IndexEntry::new(
-        index_actor,
-        monitor_actor,
-        db_index,
-        primary_key_columns,
-        metadata,
-    );
+    let index_entry = IndexEntry::new(index_actor, monitor_actor, db_index, metadata).await;
 
-    routing_map.add(index_entry.routing_group.clone(), key.clone());
-
-    indexes.insert(key.clone(), index_entry);
-
+    indexes.write().unwrap().insert(key.clone(), index_entry);
     info!("creating the index {key}");
     tx.send(Ok(()))
         .unwrap_or_else(|_| trace!("add_index: unable to send response"));
 }
 
-async fn del_index(key: IndexKey, indexes: &mut Indexes, routing_map: &mut RoutingMap) {
-    if let Some(entry) = indexes.remove(&key) {
-        routing_map.remove(entry.routing_group, &key);
+async fn del_index(key: IndexKey, indexes: &RwLock<Indexes>) {
+    if indexes.write().unwrap().remove(&key) {
+        info!("removed the index {key}");
     }
-    info!("removed the index {key}");
 }
 
-async fn get_index(key: IndexKey, tx: oneshot::Sender<GetIndexR>, indexes: &Indexes) {
-    let result = indexes::get_index(&key, indexes);
-    tx.send(result)
-        .unwrap_or_else(|_| trace!("get_index: unable to send response"));
+async fn get_index(key: IndexKey, tx: oneshot::Sender<GetIndexR>, indexes: &RwLock<Indexes>) {
+    _ = tx.send(
+        indexes
+            .read()
+            .unwrap()
+            .get(&key)
+            .map(|entry| (entry.index(), entry.db_index())),
+    );
 }
 
-async fn get_best_index(
-    key: IndexKey,
-    equality_columns: Vec<ColumnName>,
-    range_columns: Vec<ColumnName>,
-    tx: oneshot::Sender<GetBestIndexR>,
-    indexes: &Indexes,
-    routing_map: &RoutingMap,
-    node_state: &mpsc::Sender<NodeState>,
-) {
-    let result = indexes::route_index(
-        &key,
-        &equality_columns,
-        &range_columns,
-        indexes,
-        routing_map,
-        node_state,
-    )
-    .await;
-    tx.send(result)
-        .unwrap_or_else(|_| trace!("get_best_index: unable to send response"));
+async fn update_indexes(node_state: &Sender<NodeState>, indexes: &RwLock<Indexes>) {
+    let actual_indexes = indexes
+        .read()
+        .unwrap()
+        .iter()
+        .map(|(key, entry)| {
+            (
+                key.clone(),
+                entry.db_index(),
+                entry.progress(),
+                entry.status(),
+            )
+        })
+        .collect_vec();
+
+    for (key, db_index, progress, status) in actual_indexes.into_iter() {
+        let Some(new_status) = node_state
+            .get_index_status(key.keyspace().as_ref(), key.index().as_ref())
+            .await
+        else {
+            continue;
+        };
+        let new_progress = db_index.full_scan_progress().await;
+        if (new_progress != progress || new_status != status)
+            && let Some(entry) = indexes.write().unwrap().get_mut(&key)
+        {
+            entry.set_progress(new_progress);
+            entry.set_status(new_status);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -394,14 +374,6 @@ pub(crate) mod tests {
             key: IndexKey,
             tx: oneshot::Sender<GetIndexR>,
         ) -> impl Future<Output = ()> + Send + 'static;
-
-        fn get_best_index(
-            &self,
-            key: IndexKey,
-            equality_columns: Vec<ColumnName>,
-            range_columns: Vec<ColumnName>,
-            tx: oneshot::Sender<GetBestIndexR>,
-        ) -> impl Future<Output = ()> + Send + 'static;
     }
 
     pub(crate) fn new(sim: impl SimEngine + Send + 'static) -> mpsc::Sender<Engine> {
@@ -424,15 +396,7 @@ pub(crate) mod tests {
                         Engine::AddIndex { metadata, tx } => sim.add_index(metadata, tx).await,
                         Engine::DelIndex { key } => sim.del_index(key).await,
                         Engine::GetIndex { key, tx } => sim.get_index(key, tx).await,
-                        Engine::GetBestIndex {
-                            key,
-                            equality_columns,
-                            range_columns,
-                            tx,
-                        } => {
-                            sim.get_best_index(key, equality_columns, range_columns, tx)
-                                .await
-                        }
+                        Engine::GetIndexes { .. } => unimplemented!(),
                     }
                 }
 
