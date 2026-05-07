@@ -156,6 +156,7 @@ pub(crate) async fn setup_store_and_wait_for_index(
     columns: impl IntoIterator<Item = (ColumnName, NativeType)>,
     fullscan_fn: Option<ScanFn>,
     cdc_fn: Option<ScanFn>,
+    expected_count: Option<usize>,
 ) -> (
     IndexMetadata,
     HttpClient,
@@ -183,7 +184,10 @@ pub(crate) async fn setup_store_and_wait_for_index(
             client
                 .index_status(&keyspace_name, &index_name)
                 .await
-                .is_ok_and(|status| status.status == IndexStatus::Serving)
+                .is_ok_and(|status| {
+                    status.status == IndexStatus::Serving
+                        && expected_count.is_none_or(|count| status.count == count)
+                })
         },
         "Waiting for index to be serving",
     )
@@ -414,6 +418,7 @@ async fn ann_returns_bad_request_when_provided_vector_size_is_not_eq_index_dimen
             Timestamp::from_unix_timestamp(10),
         )])),
         None,
+        Some(1),
     )
     .await;
 
@@ -451,6 +456,7 @@ async fn ann_returns_bad_request_when_filtering_required_but_not_allowed() {
             Timestamp::from_unix_timestamp(10),
         )])),
         None,
+        Some(1),
     )
     .await;
 
@@ -541,6 +547,7 @@ async fn ann_failed_when_wrong_number_of_primary_keys() {
             Timestamp::from_unix_timestamp(10),
         )])),
         None,
+        Some(1),
     )
     .await;
 
@@ -576,28 +583,11 @@ async fn ann_failed_when_wrong_number_of_primary_keys() {
 async fn ann_filter_partition_key_int_eq() {
     crate::enable_tracing();
 
-    let pk_column: ColumnName = "pk".into();
-    let ck_column: ColumnName = "ck".into();
-    let pk_column_http: httpapi::ColumnName = pk_column.clone().into();
-    let ck_column_http: httpapi::ColumnName = ck_column.clone().into();
-    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
-        DbIndexType::Global,
-        [pk_column.clone(), ck_column.clone()],
-        1,
-        [
-            (pk_column.clone(), NativeType::Int),
-            (ck_column.clone(), NativeType::Int),
-        ],
-        Some(db_basic::scan_fn((0..30).map(|i| {
-            (
-                [CqlValue::Int(i / 10), CqlValue::Int(i % 10)].into(),
-                Some(vec![i as f32, i as f32, i as f32].into()),
-                Timestamp::from_unix_timestamp(10),
-            )
-        }))),
-        None,
-    )
-    .await;
+    let (index, client, pk_column, ck_column, _db, _server, _node_state) =
+        setup_int_int_store().await;
+
+    let pk_column_http: httpapi::ColumnName = pk_column.into();
+    let ck_column_http: httpapi::ColumnName = ck_column.into();
 
     let keyspace_name = index.keyspace_name.into();
     let index_name = index.index_name.into();
@@ -650,28 +640,11 @@ async fn ann_filter_partition_key_int_eq() {
 async fn ann_filter_clustering_key_int_eq() {
     crate::enable_tracing();
 
-    let pk_column: ColumnName = "pk".into();
-    let ck_column: ColumnName = "ck".into();
-    let pk_column_http: httpapi::ColumnName = pk_column.clone().into();
-    let ck_column_http: httpapi::ColumnName = ck_column.clone().into();
-    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
-        DbIndexType::Global,
-        [pk_column.clone(), ck_column.clone()],
-        1,
-        [
-            (pk_column.clone(), NativeType::Int),
-            (ck_column.clone(), NativeType::Int),
-        ],
-        Some(db_basic::scan_fn((0..30).map(|i| {
-            (
-                [CqlValue::Int(i / 10), CqlValue::Int(i % 10)].into(),
-                Some(vec![i as f32, i as f32, i as f32].into()),
-                Timestamp::from_unix_timestamp(10),
-            )
-        }))),
-        None,
-    )
-    .await;
+    let (index, client, pk_column, ck_column, _db, _server, _node_state) =
+        setup_int_int_store().await;
+
+    let pk_column_http: httpapi::ColumnName = pk_column.into();
+    let ck_column_http: httpapi::ColumnName = ck_column.into();
 
     let keyspace_name = index.keyspace_name.clone().into();
     let index_name = index.index_name.clone().into();
@@ -724,28 +697,11 @@ async fn ann_filter_clustering_key_int_eq() {
 async fn ann_filter_partition_key_int_in() {
     crate::enable_tracing();
 
-    let pk_column: ColumnName = "pk".into();
-    let ck_column: ColumnName = "ck".into();
-    let pk_column_http: httpapi::ColumnName = pk_column.clone().into();
-    let ck_column_http: httpapi::ColumnName = ck_column.clone().into();
-    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
-        DbIndexType::Global,
-        [pk_column.clone(), ck_column.clone()],
-        1,
-        [
-            (pk_column.clone(), NativeType::Int),
-            (ck_column.clone(), NativeType::Int),
-        ],
-        Some(db_basic::scan_fn((0..30).map(|i| {
-            (
-                [CqlValue::Int(i / 10), CqlValue::Int(i % 10)].into(),
-                Some(vec![i as f32, i as f32, i as f32].into()),
-                Timestamp::from_unix_timestamp(10),
-            )
-        }))),
-        None,
-    )
-    .await;
+    let (index, client, pk_column, ck_column, _db, _server, _node_state) =
+        setup_int_int_store().await;
+
+    let pk_column_http: httpapi::ColumnName = pk_column.into();
+    let ck_column_http: httpapi::ColumnName = ck_column.into();
 
     let keyspace_name = index.keyspace_name.clone().into();
     let index_name = index.index_name.clone().into();
@@ -802,28 +758,11 @@ async fn ann_filter_partition_key_int_in() {
 async fn ann_filter_clustering_key_int_in() {
     crate::enable_tracing();
 
-    let pk_column: ColumnName = "pk".into();
-    let ck_column: ColumnName = "ck".into();
-    let pk_column_http: httpapi::ColumnName = pk_column.clone().into();
-    let ck_column_http: httpapi::ColumnName = ck_column.clone().into();
-    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
-        DbIndexType::Global,
-        [pk_column.clone(), ck_column.clone()],
-        1,
-        [
-            (pk_column.clone(), NativeType::Int),
-            (ck_column.clone(), NativeType::Int),
-        ],
-        Some(db_basic::scan_fn((0..30).map(|i| {
-            (
-                [CqlValue::Int(i / 10), CqlValue::Int(i % 10)].into(),
-                Some(vec![i as f32, i as f32, i as f32].into()),
-                Timestamp::from_unix_timestamp(10),
-            )
-        }))),
-        None,
-    )
-    .await;
+    let (index, client, pk_column, ck_column, _db, _server, _node_state) =
+        setup_int_int_store().await;
+
+    let pk_column_http: httpapi::ColumnName = pk_column.into();
+    let ck_column_http: httpapi::ColumnName = ck_column.into();
 
     let keyspace_name = index.keyspace_name.clone().into();
     let index_name = index.index_name.clone().into();
@@ -880,28 +819,11 @@ async fn ann_filter_clustering_key_int_in() {
 async fn ann_filter_primary_key_int_eq_tuple() {
     crate::enable_tracing();
 
-    let pk_column: ColumnName = "pk".into();
-    let ck_column: ColumnName = "ck".into();
-    let pk_column_http: httpapi::ColumnName = pk_column.clone().into();
-    let ck_column_http: httpapi::ColumnName = ck_column.clone().into();
-    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
-        DbIndexType::Global,
-        [pk_column.clone(), ck_column.clone()],
-        1,
-        [
-            (pk_column.clone(), NativeType::Int),
-            (ck_column.clone(), NativeType::Int),
-        ],
-        Some(db_basic::scan_fn((0..30).map(|i| {
-            (
-                [CqlValue::Int(i / 10), CqlValue::Int(i % 10)].into(),
-                Some(vec![i as f32, i as f32, i as f32].into()),
-                Timestamp::from_unix_timestamp(10),
-            )
-        }))),
-        None,
-    )
-    .await;
+    let (index, client, pk_column, ck_column, _db, _server, _node_state) =
+        setup_int_int_store().await;
+
+    let pk_column_http: httpapi::ColumnName = pk_column.into();
+    let ck_column_http: httpapi::ColumnName = ck_column.into();
 
     // Search for nearest neighbors with a filter on primary key ("pk", "ck") = (1, 5)
     let pk_ck_values = run_ann_filter_int_int(
@@ -924,28 +846,11 @@ async fn ann_filter_primary_key_int_eq_tuple() {
 async fn ann_filter_primary_key_int_in_tuple() {
     crate::enable_tracing();
 
-    let pk_column: ColumnName = "pk".into();
-    let ck_column: ColumnName = "ck".into();
-    let pk_column_http: httpapi::ColumnName = pk_column.clone().into();
-    let ck_column_http: httpapi::ColumnName = ck_column.clone().into();
-    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
-        DbIndexType::Global,
-        [pk_column.clone(), ck_column.clone()],
-        1,
-        [
-            (pk_column.clone(), NativeType::Int),
-            (ck_column.clone(), NativeType::Int),
-        ],
-        Some(db_basic::scan_fn((0..30).map(|i| {
-            (
-                [CqlValue::Int(i / 10), CqlValue::Int(i % 10)].into(),
-                Some(vec![i as f32, i as f32, i as f32].into()),
-                Timestamp::from_unix_timestamp(10),
-            )
-        }))),
-        None,
-    )
-    .await;
+    let (index, client, pk_column, ck_column, _db, _server, _node_state) =
+        setup_int_int_store().await;
+
+    let pk_column_http: httpapi::ColumnName = pk_column.into();
+    let ck_column_http: httpapi::ColumnName = ck_column.into();
 
     // Search for nearest neighbors with a filter on primary key ("pk", "ck") IN ((0,7), (1, 5))
     let pk_ck_values = run_ann_filter_int_int(
@@ -962,6 +867,8 @@ async fn ann_filter_primary_key_int_in_tuple() {
     .await;
     assert_pk_ck_combinations(&pk_ck_values, [(0, 7), (1, 5)]);
 }
+
+const INT_INT_VECTOR_COUNT: usize = 30;
 
 /// Sets up a store with pk (Int) and ck (Int) columns with 30 vectors.
 /// Vectors are created with pk = i/10 and ck = i%10 for i in 0..30.
@@ -984,16 +891,20 @@ async fn setup_int_int_store() -> (
             (pk_column.clone(), NativeType::Int),
             (ck_column.clone(), NativeType::Int),
         ],
-        Some(db_basic::scan_fn((0..30).map(|i| {
-            (
-                [CqlValue::Int(i / 10), CqlValue::Int(i % 10)].into(),
-                Some(vec![i as f32, i as f32, i as f32].into()),
-                Timestamp::from_unix_timestamp(10),
-            )
-        }))),
+        Some(db_basic::scan_fn((0..INT_INT_VECTOR_COUNT as i32).map(
+            |i| {
+                (
+                    [CqlValue::Int(i / 10), CqlValue::Int(i % 10)].into(),
+                    Some(vec![i as f32, i as f32, i as f32].into()),
+                    Timestamp::from_unix_timestamp(10),
+                )
+            },
+        ))),
         None,
+        Some(INT_INT_VECTOR_COUNT),
     )
     .await;
+
     (index, client, pk_column, ck_column, db, server, node_state)
 }
 
@@ -1480,6 +1391,7 @@ async fn ann_filter_partition_key_text_gt() {
             }),
         )),
         None,
+        Some(5),
     )
     .await;
 
