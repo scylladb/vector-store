@@ -1,0 +1,134 @@
+#!/bin/bash
+
+set -e
+
+repo=$(dirname "${BASH_SOURCE[0]}")
+repo=$(realpath "$repo/..")
+
+cd "$repo"
+
+# Colors (disabled if not a terminal).
+if [[ -t 1 ]]; then
+    bold=$'\033[1m'
+    red=$'\033[0;31m'
+    green=$'\033[0;32m'
+    cyan=$'\033[0;36m'
+    reset=$'\033[0m'
+else
+    bold="" red="" green="" cyan="" reset=""
+fi
+
+usage() {
+    echo "Usage: $0 <version>"
+    echo ""
+    echo "  <version>           Release version (e.g. 1.6.0)"
+    exit 1
+}
+
+# Parse arguments.
+version=""
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help)
+            usage
+            ;;
+        *)
+            if [[ -z $version ]]; then
+                version=$1
+            else
+                echo "error: unexpected argument: $1"
+                usage
+            fi
+            ;;
+    esac
+    shift
+done
+
+[[ -n $version ]] || { echo "error: version argument is required"; usage; }
+
+if ! [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
+    echo "${red}error: '$version' does not look like a valid semver (expected e.g. 1.6.0 or 1.6.0-rc.1)${reset}"
+    exit 1
+fi
+
+step=0
+total_steps=6
+
+step_header() {
+    step=$((step + 1))
+    echo ""
+    echo "${bold}${cyan}==> [$step/$total_steps] $1${reset}"
+    echo ""
+}
+
+step_header "Validating dependencies"
+
+missing=()
+command -v docker > /dev/null 2>&1 || missing+=("docker")
+docker buildx version > /dev/null 2>&1 || missing+=("docker buildx")
+command -v cargo > /dev/null 2>&1 || missing+=("cargo")
+command -v cargo-cyclonedx > /dev/null 2>&1 || missing+=("cargo-cyclonedx (cargo install cargo-cyclonedx)")
+command -v syft > /dev/null 2>&1 || missing+=("syft (https://github.com/anchore/syft)")
+command -v gh > /dev/null 2>&1 || missing+=("gh (https://cli.github.com/)")
+
+if [[ ${#missing[@]} -gt 0 ]]; then
+    echo "${red}error: missing required tools:${reset}"
+    for tool in "${missing[@]}"; do
+        echo "  - $tool"
+    done
+    exit 1
+fi
+echo "  ${green}All dependencies available.${reset}"
+
+step_header "Preparing Docker QEMU for multi-platform images"
+
+./scripts/prepare-docker-qemu
+echo "  ${green}QEMU handlers registered.${reset}"
+
+step_header "Creating and pushing annotated tag $version"
+
+github_repo=$(git remote get-url origin | sed 's|.*github.com[:/]||;s|\.git$||')
+[[ -n $github_repo ]] || { echo "${red}error: could not determine GitHub repo from origin remote${reset}"; exit 1; }
+echo "  Releasing to: $github_repo"
+
+if git rev-parse "$version" > /dev/null 2>&1; then
+    echo "  Tag $version already exists, skipping creation."
+else
+    git tag -a "$version" -m "Release version $version"
+    echo "  ${green}Created annotated tag: $version${reset}"
+fi
+
+git push origin "$version"
+echo "  ${green}Pushed tag $version to origin ($github_repo).${reset}"
+
+step_header "Building release"
+
+./scripts/build-release "$version"
+
+step_header "Uploading release"
+
+GH_REPO="$github_repo" ./scripts/upload-release "$version"
+
+step_header "Done"
+
+echo ""
+echo "${bold}${green}========================================"
+echo " RELEASE COMPLETE: vector-store $version"
+echo "========================================${reset}"
+echo ""
+echo "Checklist:"
+echo "  - [ ] Review auto-generated release notes: https://github.com/$github_repo/releases/tag/$version"
+echo ""
+echo "To generate release notes, paste the following prompt into Copilot:"
+echo ""
+echo "--------"
+echo "Generate release notes based on the PRs linked here:"
+echo "https://github.com/$github_repo/releases/tag/$version"
+echo "- prepare them in Markdown format. For each PR analyze its"
+echo "description, not just the title. Assume that everything related"
+echo "to validator should be gathered in the QA related section. Make"
+echo "them consistent in style with release notes for the previous"
+echo "version available at"
+echo "https://github.com/$github_repo/releases/."
+echo "--------"
