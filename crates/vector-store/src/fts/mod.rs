@@ -6,3 +6,5 @@
 mod analyzer;
 mod index;
 mod query;
+
+pub(crate) use index::FtsIndex;
