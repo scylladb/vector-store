@@ -146,3 +146,101 @@ fn extract_doc_id(doc: &TantivyDocument, doc_id_field: Field) -> anyhow::Result<
         .and_then(|v| v.as_u64())
         .ok_or_else(|| anyhow!("document missing doc_id field"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::num::NonZeroUsize;
+
+    fn limit(n: usize) -> Limit {
+        Limit::from(NonZeroUsize::new(n).unwrap())
+    }
+
+    fn pid(id: u64) -> PrimaryId {
+        PrimaryId::from(id)
+    }
+
+    #[test]
+    fn create_fts_index() {
+        let index = FtsIndex::new();
+        assert!(index.is_ok());
+    }
+
+    #[test]
+    fn add_and_search_document() {
+        let index = FtsIndex::new().unwrap();
+        index
+            .add_document(pid(1), "the quick brown fox jumps over the lazy dog")
+            .unwrap();
+
+        let results = index.search("fox", limit(10)).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, pid(1));
+        assert!(results[0].1 > 0.0);
+    }
+
+    #[test]
+    fn search_no_match() {
+        let index = FtsIndex::new().unwrap();
+        index
+            .add_document(pid(1), "the quick brown fox")
+            .unwrap();
+
+        let results = index.search("elephant", limit(10)).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn remove_document() {
+        let index = FtsIndex::new().unwrap();
+        index.add_document(pid(1), "hello world").unwrap();
+        index.remove_document(pid(1)).unwrap();
+
+        let results = index.search("hello", limit(10)).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn count_documents() {
+        let index = FtsIndex::new().unwrap();
+        assert_eq!(index.count().unwrap(), 0);
+
+        index.add_document(pid(1), "first document").unwrap();
+        index.add_document(pid(2), "second document").unwrap();
+        index.add_document(pid(3), "third document").unwrap();
+
+        assert_eq!(index.count().unwrap(), 3);
+    }
+
+    #[test]
+    fn search_relevance_ordering() {
+        let index = FtsIndex::new().unwrap();
+        index
+            .add_document(pid(1), "the cat sat on the mat")
+            .unwrap();
+        index
+            .add_document(pid(2), "rust rust rust is great for rust developers who love rust")
+            .unwrap();
+        index
+            .add_document(pid(3), "rust is a programming language")
+            .unwrap();
+
+        let results = index.search("rust", limit(10)).unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(
+            results[0].1 >= results[1].1,
+            "results should be ordered by descending score"
+        );
+    }
+
+    #[test]
+    fn search_respects_limit() {
+        let index = FtsIndex::new().unwrap();
+        index.add_document(pid(1), "apple banana cherry").unwrap();
+        index.add_document(pid(2), "apple date elderberry").unwrap();
+        index.add_document(pid(3), "apple fig grape").unwrap();
+
+        let results = index.search("apple", limit(2)).unwrap();
+        assert_eq!(results.len(), 2);
+    }
+}
