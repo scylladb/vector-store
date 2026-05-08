@@ -11,6 +11,7 @@ use tantivy::IndexReader;
 use tantivy::IndexWriter;
 use tantivy::ReloadPolicy;
 use tantivy::TantivyDocument;
+use tantivy::Term;
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
 use tantivy::schema::Field;
@@ -19,7 +20,6 @@ use tantivy::schema::Schema;
 use tantivy::schema::TextFieldIndexing;
 use tantivy::schema::TextOptions;
 use tantivy::schema::Value;
-use tantivy::Term;
 
 /// Full-text search index backed by Tantivy with an in-memory directory.
 ///
@@ -92,10 +92,7 @@ impl FtsIndex {
     ) -> anyhow::Result<Vec<(PrimaryId, f32)>> {
         self.reader.reload()?;
         let searcher = self.reader.searcher();
-        let query_parser = QueryParser::for_index(
-            searcher.index(),
-            vec![self.text_content_field],
-        );
+        let query_parser = QueryParser::for_index(searcher.index(), vec![self.text_content_field]);
         let query = query_parser.parse_query(query_str)?;
         let top_docs = searcher.search(&query, &TopDocs::with_limit(limit.0.get()))?;
 
@@ -182,9 +179,7 @@ mod tests {
     #[test]
     fn search_no_match() {
         let index = FtsIndex::new().unwrap();
-        index
-            .add_document(pid(1), "the quick brown fox")
-            .unwrap();
+        index.add_document(pid(1), "the quick brown fox").unwrap();
 
         let results = index.search("elephant", limit(10)).unwrap();
         assert!(results.is_empty());
@@ -219,7 +214,10 @@ mod tests {
             .add_document(pid(1), "the cat sat on the mat")
             .unwrap();
         index
-            .add_document(pid(2), "rust rust rust is great for rust developers who love rust")
+            .add_document(
+                pid(2),
+                "rust rust rust is great for rust developers who love rust",
+            )
             .unwrap();
         index
             .add_document(pid(3), "rust is a programming language")

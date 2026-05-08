@@ -115,6 +115,9 @@ async fn add(
             Operation::RemovePartition { partition_id } => {
                 index.remove_partition(partition_id).await;
             }
+            Operation::AddDocument { .. } => {
+                tracing::debug!("AddDocument operation received but FTS actor not yet wired");
+            }
         }
     }
 

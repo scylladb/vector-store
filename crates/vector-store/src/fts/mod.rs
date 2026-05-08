@@ -79,8 +79,7 @@ impl FtsIndexExt for mpsc::Sender<FtsMessage> {
 
     async fn search(&self, query: String, limit: Limit) -> FtsSearchR {
         let (tx, rx) = oneshot::channel();
-        self.send(FtsMessage::Search { query, limit, tx })
-            .await?;
+        self.send(FtsMessage::Search { query, limit, tx }).await?;
         rx.await?
     }
 

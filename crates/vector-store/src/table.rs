@@ -1486,6 +1486,11 @@ pub(crate) enum Operation {
     RemovePartition {
         partition_id: PartitionId,
     },
+    AddDocument {
+        primary_id: PrimaryId,
+        partition_id: PartitionId,
+        text_content: String,
+    },
 }
 
 #[cfg(test)]
