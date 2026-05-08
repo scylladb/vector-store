@@ -3,16 +3,23 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+use crate::Limit;
 use crate::table::PrimaryId;
+use anyhow::anyhow;
 use std::sync::Mutex;
 use tantivy::IndexReader;
 use tantivy::IndexWriter;
 use tantivy::ReloadPolicy;
+use tantivy::TantivyDocument;
+use tantivy::collector::TopDocs;
+use tantivy::query::QueryParser;
 use tantivy::schema::Field;
 use tantivy::schema::NumericOptions;
 use tantivy::schema::Schema;
 use tantivy::schema::TextFieldIndexing;
 use tantivy::schema::TextOptions;
+use tantivy::schema::Value;
+use tantivy::Term;
 
 /// Full-text search index backed by Tantivy with an in-memory directory.
 ///
@@ -53,12 +60,64 @@ impl FtsIndex {
         self.text_content_field
     }
 
-    pub(crate) fn reader(&self) -> &IndexReader {
-        &self.reader
+    /// Adds a document to the index and commits immediately.
+    pub(crate) fn add_document(
+        &self,
+        primary_id: PrimaryId,
+        text_content: &str,
+    ) -> anyhow::Result<()> {
+        let mut writer = self.writer.lock().map_err(|e| anyhow!("{e}"))?;
+        let mut doc = TantivyDocument::new();
+        doc.add_u64(self.doc_id_field, u64::from(primary_id));
+        doc.add_text(self.text_content_field, text_content);
+        writer.add_document(doc)?;
+        writer.commit()?;
+        Ok(())
     }
 
-    pub(crate) fn writer(&self) -> &Mutex<IndexWriter> {
-        &self.writer
+    /// Removes all documents matching the given `primary_id` and commits.
+    pub(crate) fn remove_document(&self, primary_id: PrimaryId) -> anyhow::Result<()> {
+        let mut writer = self.writer.lock().map_err(|e| anyhow!("{e}"))?;
+        let term = Term::from_field_u64(self.doc_id_field, u64::from(primary_id));
+        writer.delete_term(term);
+        writer.commit()?;
+        Ok(())
+    }
+
+    /// Searches the index and returns matching `(PrimaryId, score)` pairs.
+    pub(crate) fn search(
+        &self,
+        query_str: &str,
+        limit: Limit,
+    ) -> anyhow::Result<Vec<(PrimaryId, f32)>> {
+        self.reader.reload()?;
+        let searcher = self.reader.searcher();
+        let query_parser = QueryParser::for_index(
+            searcher.index(),
+            vec![self.text_content_field],
+        );
+        let query = query_parser.parse_query(query_str)?;
+        let top_docs = searcher.search(&query, &TopDocs::with_limit(limit.0.get()))?;
+
+        top_docs
+            .into_iter()
+            .map(|(score, doc_address)| {
+                let doc: TantivyDocument = searcher.doc(doc_address)?;
+                let doc_id = extract_doc_id(&doc, self.doc_id_field)?;
+                Ok((PrimaryId::from(doc_id), score))
+            })
+            .collect()
+    }
+
+    /// Returns the total number of documents in the index.
+    pub(crate) fn count(&self) -> anyhow::Result<usize> {
+        self.reader.reload()?;
+        let searcher = self.reader.searcher();
+        Ok(searcher
+            .segment_readers()
+            .iter()
+            .map(|r| r.num_docs() as usize)
+            .sum())
     }
 }
 
@@ -80,4 +139,10 @@ fn build_schema() -> (Schema, Field, Field) {
     );
 
     (builder.build(), doc_id_field, text_content_field)
+}
+
+fn extract_doc_id(doc: &TantivyDocument, doc_id_field: Field) -> anyhow::Result<u64> {
+    doc.get_first(doc_id_field)
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| anyhow!("document missing doc_id field"))
 }
