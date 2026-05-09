@@ -62,6 +62,7 @@ use scylla::serialize::writers::CellWriter;
 use scylla::serialize::writers::WrittenCellProof;
 use scylla::value::CqlValue;
 use scylla_cdc::CqlIdentifier;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::net::SocketAddr;
@@ -173,6 +174,7 @@ pub struct Config {
     pub cdc_fine_safety_interval: Option<Duration>,
     pub cdc_fine_sleep_interval: Option<Duration>,
     pub monitor_indexes_interval: Option<Duration>,
+    pub engine_status_update_interval: Option<Duration>,
     pub disable_colors: bool,
     pub tls_cert_path: Option<std::path::PathBuf>,
     pub tls_key_path: Option<std::path::PathBuf>,
@@ -207,6 +209,7 @@ impl Default for Config {
             cdc_fine_safety_interval: None,
             cdc_fine_sleep_interval: None,
             monitor_indexes_interval: None,
+            engine_status_update_interval: None,
         }
     }
 }
@@ -237,7 +240,7 @@ pub struct KeyspaceName(String);
 impl KeyspaceName {
     /// Returns true if this keyspace is backed by Alternator (DynamoDB-compatible API).
     /// Alternator keyspaces are prefixed with `alternator_`.
-    fn is_alternator(&self) -> bool {
+    pub(crate) fn is_alternator(&self) -> bool {
         self.0.starts_with("alternator_")
     }
 }
@@ -608,8 +611,18 @@ impl DbCustomIndex {
 #[derive(Clone, Debug, PartialEq)]
 pub struct DbEmbedding {
     pub primary_key: PrimaryKey,
-    pub embedding: Option<Vector>,
+    /// `None` = vector unchanged (skip update), `Some(None)` = vector deleted,
+    /// `Some(Some(v))` = vector set to `v`.
+    pub embedding: Option<Option<Vector>>,
     pub timestamp: Timestamp,
+    /// Values for filtering columns, keyed by column name.
+    /// For Alternator tables, these are extracted from the `:attrs` map.
+    /// Each value carries the write timestamp of that column so that the index
+    /// layer can apply last-writer-wins per column independently of the vector
+    /// column's timestamp.  `None` represents a tombstone: the column was
+    /// explicitly absent or deleted in this write, which clears any
+    /// previously-stored value for this row.
+    pub column_values: BTreeMap<ColumnName, (Timestamp, Option<CqlValue>)>,
 }
 
 #[derive(Clone, derive_more::From)]

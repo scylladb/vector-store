@@ -58,6 +58,7 @@ pub(crate) fn scan_fn(
                             primary_key,
                             embedding,
                             timestamp,
+                            column_values: Default::default(),
                         },
                         Some(tx_in_progress.clone().into()),
                     ))

@@ -7,6 +7,7 @@ use crate::Dimensions;
 use anyhow::anyhow;
 use anyhow::bail;
 use scylla::value::CqlValue;
+use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 
 #[derive(Clone, Debug, PartialEq, derive_more::AsRef, derive_more::From)]
@@ -59,10 +60,15 @@ impl TryFrom<CqlValue> for Vector {
     }
 }
 
+/// Alternator type tags, matching the `alternator_type` enum in Scylla's serialization.hh.
+/// These values are written to disk and must not be reordered.
+pub(crate) const ALTERNATOR_TYPE_S: u8 = 0; // String: raw UTF-8 bytes follow the tag
+pub(crate) const ALTERNATOR_TYPE_N: u8 = 3; // Number: CQL decimal (4-byte big-endian scale + big-endian signed varint) follows the tag
+
 /// Alternator type tag for unoptimized JSON encoding.
 /// Type `0x04` (`NOT_SUPPORTED_YET`) is used for any type that does not have an optimized encoding.
 /// The payload is an unoptimized JSON value.
-const ALTERNATOR_TYPE_JSON: u8 = 4;
+pub(crate) const ALTERNATOR_TYPE_JSON: u8 = 4;
 
 /// Alternator type tag for the optimized `FLOAT32VECTOR` type.
 /// The value is serialized as this 1-byte tag followed by sequential 32-bit big-endian floats,
@@ -164,6 +170,60 @@ impl TryFrom<AlternatorAttrs<'_>> for Option<Vector> {
             .map(Vector::try_from)
             .transpose()
     }
+}
+
+/// Extracts a scalar value from an Alternator-encoded attribute blob, preserving
+/// the raw bytes (including the type-tag byte) as a [`CqlValue::Blob`].
+///
+/// The type tag is preserved so that [`cql_cmp`] can later distinguish S-type (string)
+/// from N-type (number) attributes and apply type-correct comparisons.  Without the tag,
+/// a string `"1"` and a number `1` would both be stored as `"1"` and a numeric filter
+/// `< 5` would incorrectly match the string.
+///
+/// Supported types: S (`0x00`), N (`0x03`), and JSON-wrapped (`0x04`).  All other
+/// attribute types (B, BOOL, L, M, SS, NS, BS, NULL) return `None`.
+pub(crate) fn extract_alternator_scalar(blob: &[u8]) -> Option<CqlValue> {
+    let (&tag, _rest) = blob.split_first()?;
+    match tag {
+        ALTERNATOR_TYPE_S | ALTERNATOR_TYPE_N | ALTERNATOR_TYPE_JSON => {
+            Some(CqlValue::Blob(blob.to_vec()))
+        }
+        _ => None,
+    }
+}
+
+/// Extracts scalar values for the given attribute names from the Alternator `:attrs` map.
+///
+/// Each entry whose key matches a requested column name and whose value is a scalar S or N
+/// attribute is included in the returned map.  Non-scalar or unrecognised attributes are skipped.
+pub(crate) fn extract_alternator_scalars(
+    attrs: CqlValue,
+    columns: &[crate::ColumnName],
+) -> BTreeMap<crate::ColumnName, CqlValue> {
+    let CqlValue::Map(entries) = attrs else {
+        return BTreeMap::new();
+    };
+    let mut result = BTreeMap::new();
+    for (key, value) in entries {
+        let name = match &key {
+            CqlValue::Blob(b) => std::str::from_utf8(b).ok().map(str::to_owned),
+            CqlValue::Text(s) => Some(s.clone()),
+            _ => None,
+        };
+        let Some(name) = name else { continue };
+        let col = crate::ColumnName::from(name);
+        if !columns.contains(&col) {
+            continue;
+        }
+        let blob = match value {
+            CqlValue::Blob(b) => b,
+            _ => continue,
+        };
+        if let Some(scalar) = extract_alternator_scalar(&blob) {
+            result.insert(col, scalar);
+        }
+    }
+    result
 }
 
 #[cfg(test)]
@@ -349,5 +409,212 @@ mod tests {
         })
         .unwrap();
         assert_eq!(result, Some(Vector::from(vec![1.0, 2.0, 3.0])));
+    }
+
+    // --- extract_alternator_scalar ---
+
+    fn s_blob(s: &str) -> Vec<u8> {
+        let mut b = vec![ALTERNATOR_TYPE_S];
+        b.extend_from_slice(s.as_bytes());
+        b
+    }
+
+    fn n_blob(scale: i32, unscaled: &[u8]) -> Vec<u8> {
+        let mut b = vec![ALTERNATOR_TYPE_N];
+        b.extend_from_slice(&scale.to_be_bytes());
+        b.extend_from_slice(unscaled);
+        b
+    }
+
+    fn json_s_blob(s: &str) -> Vec<u8> {
+        let json = format!(r#"{{"S":"{}"}}"#, s);
+        let mut b = vec![ALTERNATOR_TYPE_JSON];
+        b.extend_from_slice(json.as_bytes());
+        b
+    }
+
+    #[test]
+    fn extract_scalar_s_type_returns_raw_blob() {
+        let raw = s_blob("hello");
+        let result = extract_alternator_scalar(&raw);
+        assert_eq!(result, Some(CqlValue::Blob(raw)));
+    }
+
+    #[test]
+    fn extract_scalar_n_type_returns_raw_blob() {
+        // 5 = 5 * 10^0
+        let raw = n_blob(0, &[0x05]);
+        let result = extract_alternator_scalar(&raw);
+        assert_eq!(result, Some(CqlValue::Blob(raw)));
+    }
+
+    #[test]
+    fn extract_scalar_json_type_returns_raw_blob() {
+        let raw = json_s_blob("world");
+        let result = extract_alternator_scalar(&raw);
+        assert_eq!(result, Some(CqlValue::Blob(raw)));
+    }
+
+    #[test]
+    fn extract_scalar_empty_blob_returns_none() {
+        assert_eq!(extract_alternator_scalar(&[]), None);
+    }
+
+    #[test]
+    fn extract_scalar_float32vector_tag_returns_none() {
+        // FLOAT32VECTOR (0x05) is not a scalar attribute type
+        let raw = alternator_vector_blob(&[1.0, 2.0]);
+        assert_eq!(extract_alternator_scalar(&raw), None);
+    }
+
+    #[test]
+    fn extract_scalar_unknown_tag_returns_none() {
+        assert_eq!(extract_alternator_scalar(&[0x99, b'x']), None);
+    }
+
+    // --- extract_alternator_scalars ---
+
+    #[test]
+    fn extract_scalars_non_map_returns_empty() {
+        let result = extract_alternator_scalars(&CqlValue::Int(42), &["col".into()]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn extract_scalars_s_type_included() {
+        let raw = s_blob("hello");
+        let attrs = CqlValue::Map(vec![(
+            CqlValue::Blob(b"col".to_vec()),
+            CqlValue::Blob(raw.clone()),
+        )]);
+        let result = extract_alternator_scalars(&attrs, &["col".into()]);
+        assert_eq!(result.get(&"col".into()), Some(&Some(CqlValue::Blob(raw))));
+    }
+
+    #[test]
+    fn extract_scalars_n_type_included() {
+        let raw = n_blob(0, &[0x07]);
+        let attrs = CqlValue::Map(vec![(
+            CqlValue::Blob(b"num".to_vec()),
+            CqlValue::Blob(raw.clone()),
+        )]);
+        let result = extract_alternator_scalars(&attrs, &["num".into()]);
+        assert_eq!(result.get(&"num".into()), Some(&Some(CqlValue::Blob(raw))));
+    }
+
+    #[test]
+    fn extract_scalars_json_type_included() {
+        let raw = json_s_blob("value");
+        let attrs = CqlValue::Map(vec![(
+            CqlValue::Text("col".to_string()),
+            CqlValue::Blob(raw.clone()),
+        )]);
+        let result = extract_alternator_scalars(&attrs, &["col".into()]);
+        assert_eq!(result.get(&"col".into()), Some(&Some(CqlValue::Blob(raw))));
+    }
+
+    #[test]
+    fn extract_scalars_float32vector_skipped() {
+        // FLOAT32VECTOR is not a scalar; extract_alternator_scalar returns None -> entry omitted
+        let raw = alternator_vector_blob(&[1.0, 2.0]);
+        let attrs = CqlValue::Map(vec![(CqlValue::Blob(b"vec".to_vec()), CqlValue::Blob(raw))]);
+        let result = extract_alternator_scalars(&attrs, &["vec".into()]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn extract_scalars_unrequested_column_skipped() {
+        let raw = s_blob("hi");
+        let attrs = CqlValue::Map(vec![(
+            CqlValue::Blob(b"other".to_vec()),
+            CqlValue::Blob(raw),
+        )]);
+        let result = extract_alternator_scalars(&attrs, &["col".into()]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn extract_scalars_non_blob_value_skipped() {
+        let attrs = CqlValue::Map(vec![(
+            CqlValue::Blob(b"col".to_vec()),
+            CqlValue::Text("not a blob".to_string()),
+        )]);
+        let result = extract_alternator_scalars(&attrs, &["col".into()]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn extract_scalars_non_utf8_blob_key_skipped() {
+        let raw = s_blob("hi");
+        let attrs = CqlValue::Map(vec![(
+            CqlValue::Blob(vec![0xFF, 0xFE]), // invalid UTF-8
+            CqlValue::Blob(raw),
+        )]);
+        let result = extract_alternator_scalars(&attrs, &["col".into()]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn extract_scalars_text_key_works() {
+        let raw = s_blob("val");
+        let attrs = CqlValue::Map(vec![(
+            CqlValue::Text("col".to_string()),
+            CqlValue::Blob(raw.clone()),
+        )]);
+        let result = extract_alternator_scalars(&attrs, &["col".into()]);
+        assert_eq!(result.get(&"col".into()), Some(&Some(CqlValue::Blob(raw))));
+    }
+
+    #[test]
+    fn extract_scalars_mixed_map() {
+        // S scalar, N scalar, vector (skipped), unrequested column (skipped), non-blob (skipped)
+        let s_raw = s_blob("hello");
+        let n_raw = n_blob(0, &[0x03]);
+        let attrs = CqlValue::Map(vec![
+            (
+                CqlValue::Blob(b"s_col".to_vec()),
+                CqlValue::Blob(s_raw.clone()),
+            ),
+            (
+                CqlValue::Blob(b"n_col".to_vec()),
+                CqlValue::Blob(n_raw.clone()),
+            ),
+            (
+                CqlValue::Blob(b"vec".to_vec()),
+                CqlValue::Blob(alternator_vector_blob(&[1.0])),
+            ),
+            (
+                CqlValue::Blob(b"other".to_vec()),
+                CqlValue::Blob(s_blob("ignored")),
+            ),
+            (CqlValue::Blob(b"non_blob".to_vec()), CqlValue::Int(99)),
+        ]);
+        let result =
+            extract_alternator_scalars(&attrs, &["s_col".into(), "n_col".into(), "vec".into()]);
+        assert_eq!(result.len(), 2);
+        assert_eq!(
+            result.get(&"s_col".into()),
+            Some(&Some(CqlValue::Blob(s_raw)))
+        );
+        assert_eq!(
+            result.get(&"n_col".into()),
+            Some(&Some(CqlValue::Blob(n_raw)))
+        );
+        assert!(!result.contains_key(&"other".into()));
+        assert!(!result.contains_key(&"non_blob".into()));
+        // vec is requested but FLOAT32VECTOR is not a scalar -> absent
+        assert!(!result.contains_key(&"vec".into()));
+    }
+
+    #[test]
+    fn extract_scalars_absent_column_not_included() {
+        // Absent columns must NOT appear in the result (callers add tombstones separately)
+        let attrs = CqlValue::Map(vec![(
+            CqlValue::Blob(b"present".to_vec()),
+            CqlValue::Blob(s_blob("hi")),
+        )]);
+        let result = extract_alternator_scalars(&attrs, &["present".into(), "absent".into()]);
+        assert!(result.contains_key(&"present".into()));
+        assert!(!result.contains_key(&"absent".into()));
     }
 }

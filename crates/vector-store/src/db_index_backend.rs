@@ -14,14 +14,20 @@ use crate::TableIdentifier;
 use crate::TableName;
 use crate::Vector;
 use crate::vector;
+use anyhow::bail;
 use futures::TryStreamExt;
 use regex::Regex;
 use scylla::client::session::Session;
+use scylla::cluster::metadata::ColumnType;
+use scylla::cluster::metadata::NativeType;
+use scylla::cluster::metadata::Table;
 use scylla::statement::prepared::PreparedStatement;
 use scylla::value::CqlValue;
 use scylla_cdc::CqlIdentifier;
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 
 pub(crate) struct IndexLocation {
     pub keyspace: KeyspaceName,
@@ -29,18 +35,33 @@ pub(crate) struct IndexLocation {
     pub index: IndexName,
 }
 
+#[derive(Clone)]
 pub(crate) enum DbIndexBackend {
-    Cql { target_column: ColumnName },
-    Alternator { target_column: ColumnName },
+    Cql {
+        target_column: ColumnName,
+        filtering_columns: Arc<Vec<ColumnName>>,
+    },
+    Alternator {
+        target_column: ColumnName,
+        /// Non-primary-key filtering columns, extracted from `:attrs` during scan/CDC.
+        filtering_columns: Arc<Vec<ColumnName>>,
+    },
 }
 
 impl From<&IndexMetadata> for DbIndexBackend {
     fn from(metadata: &IndexMetadata) -> Self {
         let target_column = metadata.target_column.clone();
+        let filtering_columns = Arc::clone(&metadata.filtering_columns);
         if metadata.keyspace_name.is_alternator() {
-            Self::Alternator { target_column }
+            Self::Alternator {
+                target_column,
+                filtering_columns,
+            }
         } else {
-            Self::Cql { target_column }
+            Self::Cql {
+                target_column,
+                filtering_columns,
+            }
         }
     }
 }
@@ -48,7 +69,7 @@ impl From<&IndexMetadata> for DbIndexBackend {
 impl DbIndexBackend {
     pub fn vector_column_name(&self) -> &str {
         match self {
-            Self::Cql { target_column } => target_column.as_ref(),
+            Self::Cql { target_column, .. } => target_column.as_ref(),
             Self::Alternator { .. } => ":attrs",
         }
     }
@@ -56,32 +77,109 @@ impl DbIndexBackend {
     pub fn extract_vector(&self, value: CqlValue) -> anyhow::Result<Option<Vector>> {
         match self {
             Self::Cql { .. } => Vector::try_from(value).map(Some),
-            Self::Alternator { target_column } => vector::AlternatorAttrs {
+            Self::Alternator { target_column, .. } => vector::AlternatorAttrs {
                 attrs: value,
                 target_column: target_column.as_ref(),
             }
             .try_into(),
         }
     }
+
+    /// Converts a raw scan value for a filtering column into its stored form.
+    ///
+    /// For Alternator tables the scan returns a raw blob from `:attrs['col']`;
+    /// pass it through `extract_alternator_scalar` so only scalar S/N attributes
+    /// are kept (as `CqlValue::Blob` with the type-tag byte preserved) and
+    /// unsupported types are dropped.
+    /// For CQL tables the value is already typed; return it directly.
+    pub(crate) fn extract_scan_column_value(&self, raw: CqlValue) -> Option<CqlValue> {
+        match self {
+            Self::Alternator { .. } => {
+                if let CqlValue::Blob(blob) = &raw {
+                    vector::extract_alternator_scalar(blob)
+                } else {
+                    Some(raw)
+                }
+            }
+            Self::Cql { .. } => Some(raw),
+        }
+    }
+    /// Injects Alternator filtering columns (absent from the CQL schema) into the
+    /// table-columns map as `NativeType::Blob` so that downstream code can create
+    /// storage for them.  For CQL backends the map is returned unchanged.
+    pub(crate) fn enrich_table_columns(
+        &self,
+        table_columns: Arc<HashMap<ColumnName, NativeType>>,
+        filtering_columns: &[ColumnName],
+    ) -> Arc<HashMap<ColumnName, NativeType>> {
+        match self {
+            Self::Alternator { .. } => {
+                let mut cols = (*table_columns).clone();
+                for fc in filtering_columns {
+                    if !cols.contains_key(fc) {
+                        cols.insert(fc.clone(), NativeType::Blob);
+                    }
+                }
+                Arc::new(cols)
+            }
+            Self::Cql { .. } => table_columns,
+        }
+    }
+}
+
+/// Validates that the target column of an index is a CQL vector column.
+///
+/// For Alternator keyspaces the vector attribute is stored inside the `:attrs`
+/// map and is not a real CQL column, so the check is skipped for those.
+pub(crate) fn validate_target_type(
+    table: &Table,
+    keyspace_name: &KeyspaceName,
+    target_name: &str,
+) -> anyhow::Result<()> {
+    if keyspace_name.is_alternator() {
+        return Ok(());
+    }
+    let column = table.columns.get(target_name).ok_or_else(|| {
+        anyhow::anyhow!("invalid target option: column {target_name} does not exist in a table")
+    })?;
+    if !matches!(column.typ, ColumnType::Vector { .. }) {
+        bail!("invalid target option: column {target_name} is not a vector column in a table");
+    }
+    Ok(())
 }
 
 /// Builds the CQL range scan query appropriate for the given keyspace.
 ///
-/// For CQL-native tables, selects the vector column directly.
-/// For Alternator tables, selects from the `:attrs` map column.
+/// For CQL-native tables, selects the vector column and any filtering columns directly.
+/// For Alternator tables, selects from the `:attrs` map column for the vector,
+/// and from individual `:attrs['col']` subscripts for each non-primary-key filtering column.
 pub(crate) fn range_scan_query(
     keyspace: &KeyspaceIdentifier,
     table: &TableIdentifier,
     target_column: &ColumnName,
+    primary_key_columns: &[ColumnName],
     primary_key_list: &str,
     partition_key_list: &str,
+    filtering_columns: &[ColumnName],
 ) -> String {
     if keyspace.is_alternator() {
         let attributes = CqlIdentifier::new(":attrs");
         let vector = CqlLiteral::new(target_column.as_ref());
+        // Collect non-primary-key filtering columns to fetch from :attrs.
+        let extra_cols: Vec<_> = filtering_columns
+            .iter()
+            .filter(|c| !primary_key_columns.contains(c))
+            .collect();
+        let extra_select: String = extra_cols
+            .iter()
+            .map(|c| {
+                let lit = CqlLiteral::new(c.as_ref());
+                format!(", {attributes}[{lit}], writetime({attributes}[{lit}])")
+            })
+            .collect();
         format!(
             "
-            SELECT {primary_key_list}, {attributes}[{vector}], writetime({attributes}[{vector}])
+            SELECT {primary_key_list}, {attributes}[{vector}], writetime({attributes}[{vector}]){extra_select}
             FROM {keyspace}.{table}
             WHERE
                 token({partition_key_list}) >= ?
@@ -91,9 +189,21 @@ pub(crate) fn range_scan_query(
         )
     } else {
         let vector = CqlIdentifier::new(target_column.as_ref());
+        // Collect non-primary-key filtering columns to fetch directly.
+        let extra_cols: Vec<_> = filtering_columns
+            .iter()
+            .filter(|c| !primary_key_columns.contains(c))
+            .collect();
+        let extra_select: String = extra_cols
+            .iter()
+            .map(|c| {
+                let ident = CqlIdentifier::new(c.as_ref());
+                format!(", {ident}, writetime({ident})")
+            })
+            .collect();
         format!(
             "
-            SELECT {primary_key_list}, {vector}, writetime({vector})
+            SELECT {primary_key_list}, {vector}, writetime({vector}){extra_select}
             FROM {keyspace}.{table}
             WHERE
                 token({partition_key_list}) >= ?
@@ -194,8 +304,10 @@ mod tests {
             &KeyspaceIdentifier::from("ks"),
             &TableIdentifier::from("tbl"),
             &ColumnName::from("embedding"),
+            &[],
             &CqlIdentifier::new("id").to_string(),
             &CqlIdentifier::new("id").to_string(),
+            &[],
         );
         assert!(query.contains(r#""embedding""#));
         assert!(query.contains(r#"FROM "ks"."tbl""#));
@@ -214,8 +326,10 @@ mod tests {
             &KeyspaceIdentifier::from("MyKeyspace"),
             &TableIdentifier::from("MyTable"),
             &ColumnName::from("EmbeddingCol"),
+            &[],
             &pk_list,
             &CqlIdentifier::new("UserId").to_string(),
+            &[],
         );
         assert!(
             query.contains(r#""EmbeddingCol""#),
@@ -237,8 +351,10 @@ mod tests {
             &KeyspaceIdentifier::from("UPPER_KS"),
             &TableIdentifier::from("UPPER_TBL"),
             &ColumnName::from("VEC"),
+            &[],
             &CqlIdentifier::new("ID").to_string(),
             &CqlIdentifier::new("ID").to_string(),
+            &[],
         );
         assert!(
             query.contains(r#""VEC""#),
@@ -259,8 +375,10 @@ mod tests {
             &KeyspaceIdentifier::from("my-app"),
             &TableIdentifier::from("my-table:v1"),
             &ColumnName::from("my-vector"),
+            &[],
             &pk_list,
             &CqlIdentifier::new(":pk").to_string(),
+            &[],
         );
         assert!(
             query.contains(r#""my-vector""#),
@@ -285,8 +403,10 @@ mod tests {
             &KeyspaceIdentifier::from("alternator_my-app"),
             &TableIdentifier::from("my-table"),
             &ColumnName::from("v"),
+            &[],
             &pk_list,
             &CqlIdentifier::new(":pk").to_string(),
+            &[],
         );
         assert!(
             query.contains(r#"":attrs"['v']"#),
@@ -313,8 +433,10 @@ mod tests {
             &KeyspaceIdentifier::from("alternator_ks"),
             &TableIdentifier::from("tbl"),
             &ColumnName::from("my-vector:v1"),
+            &[],
             &pk_list,
             &pk_list,
+            &[],
         );
         assert!(
             query.contains(r#"":attrs"['my-vector:v1']"#),
@@ -333,8 +455,10 @@ mod tests {
             &KeyspaceIdentifier::from("alternator_Ks"),
             &TableIdentifier::from("Tbl"),
             &ColumnName::from("EmbeddingCol"),
+            &[],
             &pk_list,
             &pk_list,
+            &[],
         );
         assert!(
             query.contains(r#"":attrs"['EmbeddingCol']"#),
@@ -353,8 +477,10 @@ mod tests {
             &KeyspaceIdentifier::from("alternator_ks"),
             &TableIdentifier::from("tbl"),
             &ColumnName::from("it's a \"test\""),
+            &[],
             &pk_list,
             &pk_list,
+            &[],
         );
         assert!(
             query.contains(r#"":attrs"['it''s a "test"']"#),

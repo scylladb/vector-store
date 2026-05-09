@@ -526,7 +526,7 @@ async fn post_index_ann(
         let index_key = IndexKey::new(&keyspace, &index_name);
         let (equality_cols, range_cols) = restriction_columns(&request.filter);
         let allow_filtering = request.filter.as_ref().is_some_and(|f| f.allow_filtering);
-        let (routed_key, index, primary_key_columns, table_columns) = match state
+        let (routed_key, index, primary_key_columns, table_columns, index_filtering_columns) = match state
             .indexes
             .read()
             .unwrap()
@@ -538,6 +538,7 @@ async fn post_index_ann(
                 needs_filtering,
                 primary_key_columns,
                 table_columns,
+                filtering_columns,
             } => {
                 if matches!(needs_filtering, indexes::NeedsFiltering::Yes(_)) && !allow_filtering {
                     timer.observe_duration();
@@ -548,7 +549,7 @@ async fn post_index_ann(
                     debug!("post_index_ann: {msg}");
                     return (StatusCode::BAD_REQUEST, msg).into_response();
                 }
-                (routed_key, index, primary_key_columns, table_columns)
+                (routed_key, index, primary_key_columns, table_columns, filtering_columns)
             }
             indexes::BestIndexState::NotServing(progress) => {
                 timer.observe_duration();
@@ -597,6 +598,8 @@ async fn post_index_ann(
                 filter,
                 &primary_key_columns,
                 &table_columns,
+                &index_filtering_columns,
+                keyspace.is_alternator(),
             ) {
                 Ok(filter) => filter,
                 Err(err) => {
@@ -703,6 +706,8 @@ fn try_from_post_index_ann_filter(
     json_filter: httpapi::PostIndexAnnFilter,
     primary_key_columns: &[crate::ColumnName],
     table_columns: &HashMap<crate::ColumnName, NativeType>,
+    filtering_columns: &[crate::ColumnName],
+    is_alternator: bool,
 ) -> anyhow::Result<Filter> {
     let is_same_len = |columns: &[crate::ColumnName], values: &[Value]| -> anyhow::Result<()> {
         if columns.len() != values.len() {
@@ -715,14 +720,34 @@ fn try_from_post_index_ann_filter(
         Ok(())
     };
     let from_json = |column: &crate::ColumnName, value: Value| -> anyhow::Result<CqlValue> {
-        if !primary_key_columns.contains(column) {
-            bail!("Filtering on non primary key columns is not supported");
+        if !primary_key_columns.contains(column) && !filtering_columns.contains(column) {
+            bail!("Column '{column}' is not a primary key column or a filtering column");
         };
         let Some(native_type) = table_columns.get(column) else {
             bail!(
                 "Column '{column}' in filter restriction is not part of the table or is not a supported native type",
             )
         };
+        // Alternator non-key filtering columns are injected as NativeType::Blob (raw `:attrs`
+        // bytes with type-tag).  A JSON string filter value is an S-type comparison
+        // (CqlValue::Text) and a JSON number filter value is an N-type comparison
+        // (CqlValue::Decimal).  cql_cmp inspects the tag byte in the stored blob to enforce
+        // type-correct comparisons, so e.g. the string "1" will not match a numeric filter < 5.
+        // Gate this on is_alternator so that genuine CQL blob columns keep the normal
+        // hex-encoded-string → CqlValue::Blob conversion path.
+        if is_alternator
+            && !primary_key_columns.contains(column)
+            && matches!(native_type, NativeType::Blob)
+        {
+            return match value {
+                Value::String(s) => Ok(CqlValue::Text(s)),
+                Value::Number(_) => try_from_json(value, &NativeType::Decimal),
+                _ => bail!(
+                    "Column '{column}' is an Alternator attribute column; \
+                     only string (S-type) and number (N-type) filter values are supported"
+                ),
+            };
+        }
         try_from_json(value, native_type)
     };
     Ok(Filter {
@@ -1189,6 +1214,8 @@ mod tests {
             .unwrap(),
             &primary_key_columns,
             &table_columns,
+            &[],
+            false,
         )
         .unwrap();
         assert!(filter.allow_filtering);
@@ -1267,7 +1294,9 @@ mod tests {
                 )
                 .unwrap(),
                 &primary_key_columns,
-                &table_columns
+                &table_columns,
+                &[],
+                false
             )
             .is_err()
         );
@@ -1285,7 +1314,9 @@ mod tests {
                 )
                 .unwrap(),
                 &primary_key_columns,
-                &table_columns
+                &table_columns,
+                &[],
+                false
             )
             .is_err()
         );
@@ -1301,7 +1332,9 @@ mod tests {
                 )
                 .unwrap(),
                 &primary_key_columns,
-                &table_columns
+                &table_columns,
+                &[],
+                false
             )
             .is_err()
         );
@@ -1317,7 +1350,9 @@ mod tests {
                 )
                 .unwrap(),
                 &primary_key_columns,
-                &table_columns
+                &table_columns,
+                &[],
+                false
             )
             .is_err()
         );
@@ -1333,7 +1368,9 @@ mod tests {
                 )
                 .unwrap(),
                 &primary_key_columns,
-                &table_columns
+                &table_columns,
+                &[],
+                false
             )
             .is_err()
         );
@@ -1351,7 +1388,9 @@ mod tests {
                 )
                 .unwrap(),
                 &primary_key_columns,
-                &[("pk".into(), NativeType::Int),].into_iter().collect()
+                &[("pk".into(), NativeType::Int),].into_iter().collect(),
+                &[],
+                false
             )
             .is_err()
         );
@@ -1369,7 +1408,9 @@ mod tests {
                 )
                 .unwrap(),
                 &primary_key_columns,
-                &table_columns
+                &table_columns,
+                &[],
+                false
             )
             .is_err()
         );
@@ -1387,7 +1428,9 @@ mod tests {
                 )
                 .unwrap(),
                 &primary_key_columns,
-                &table_columns
+                &table_columns,
+                &[],
+                false
             )
             .is_err()
         );
@@ -1405,7 +1448,9 @@ mod tests {
                 )
                 .unwrap(),
                 &primary_key_columns,
-                &table_columns
+                &table_columns,
+                &[],
+                false
             )
             .is_err()
         );
@@ -1423,7 +1468,9 @@ mod tests {
                 )
                 .unwrap(),
                 &primary_key_columns,
-                &table_columns
+                &table_columns,
+                &[],
+                false
             )
             .is_err()
         );
@@ -1441,7 +1488,9 @@ mod tests {
                 )
                 .unwrap(),
                 &primary_key_columns,
-                &table_columns
+                &table_columns,
+                &[],
+                false
             )
             .is_err()
         );

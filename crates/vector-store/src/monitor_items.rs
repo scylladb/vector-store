@@ -176,6 +176,7 @@ mod tests {
             primary_key: [CqlValue::Int(1)].into(),
             embedding: Some(vec![1.].into()),
             timestamp: Timestamp::from_unix_timestamp(10),
+            column_values: Default::default(),
         };
         table
             .write()
@@ -211,6 +212,7 @@ mod tests {
             primary_key: [CqlValue::Int(1)].into(),
             embedding: Some(vec![1.].into()),
             timestamp: Timestamp::from_unix_timestamp(10),
+            column_values: Default::default(),
         };
         let (tx_progress, _rx_progress) = mpsc::channel(1);
         table
@@ -271,6 +273,7 @@ mod tests {
             primary_key: [CqlValue::Int(1)].into(),
             embedding: Some(vec![1.].into()),
             timestamp: Timestamp::from_unix_timestamp(10),
+            column_values: Default::default(),
         };
         table
             .write()
@@ -327,6 +330,7 @@ mod tests {
             primary_key: [CqlValue::Int(1)].into(),
             embedding: Some(vec![1.].into()),
             timestamp: Timestamp::from_unix_timestamp(10),
+            column_values: Default::default(),
         };
         table
             .write()
@@ -400,6 +404,7 @@ mod tests {
             primary_key: [CqlValue::Int(1)].into(),
             embedding: Some(vec![1.].into()),
             timestamp: Timestamp::from_unix_timestamp(10),
+            column_values: Default::default(),
         };
         table
             .write()
@@ -498,6 +503,7 @@ mod tests {
             primary_key: [CqlValue::Int(1)].into(),
             embedding: None,
             timestamp: Timestamp::from_unix_timestamp(10),
+            column_values: Default::default(),
         };
         table
             .write()
@@ -550,6 +556,7 @@ mod tests {
             primary_key: [CqlValue::Int(1)].into(),
             embedding: None,
             timestamp: Timestamp::from_unix_timestamp(10),
+            column_values: Default::default(),
         };
         table
             .write()

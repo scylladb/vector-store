@@ -507,12 +507,41 @@ impl Consumer for CdcConsumer {
         }
 
         let source = &self.0.backend;
-        let column = source.vector_column_name();
-        if !row.column_deletable(column) {
-            bail!("CDC error: column {column} should be deletable");
+        let vector_col = source.vector_column_name();
+        if !row.column_deletable(vector_col) {
+            bail!("CDC error: column {vector_col} should be deletable");
         }
-        let embedding = row
-            .take_value(column)
+
+        // For Alternator, the whole `:attrs` map is the vector column.  Clone it so we can
+        // also extract filtering column values from it in a second pass.
+        let raw_vector_value = row.take_value(vector_col);
+
+        let column_values = match source {
+            crate::db_index_backend::DbIndexBackend::Alternator {
+                filtering_columns, ..
+            } => {
+                if let Some(attrs_val) = raw_vector_value.as_ref().cloned() {
+                    crate::vector::extract_alternator_scalars(attrs_val, filtering_columns)
+                } else {
+                    std::collections::BTreeMap::new()
+                }
+            }
+            crate::db_index_backend::DbIndexBackend::Cql {
+                filtering_columns, ..
+            } => {
+                let mut vals = std::collections::BTreeMap::new();
+                for fc in filtering_columns.iter() {
+                    if !self.0.primary_key_columns.contains(fc)
+                        && let Some(v) = row.take_value(fc.as_ref())
+                    {
+                        vals.insert(fc.clone(), v);
+                    }
+                }
+                vals
+            }
+        };
+
+        let embedding = raw_vector_value
             .map(|v| source.extract_vector(v))
             .transpose()?
             .flatten();
@@ -546,6 +575,14 @@ impl Consumer for CdcConsumer {
             ))
         .into();
 
+
+        // All columns changed in a single CDC event share the same write timestamp
+        // (the timestamp of the originating CQL statement).  Attach it to each
+        // filtering column value so the index can apply last-writer-wins per column.
+        let column_values = column_values
+            .into_iter()
+            .map(|(k, v)| (k, (timestamp, v)))
+            .collect();
         _ = self
             .0
             .tx
@@ -554,6 +591,7 @@ impl Consumer for CdcConsumer {
                     primary_key,
                     embedding,
                     timestamp,
+                    column_values,
                 },
                 None,
             ))
