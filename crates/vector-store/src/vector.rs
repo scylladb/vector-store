@@ -196,16 +196,21 @@ pub(crate) fn extract_alternator_scalar(blob: &[u8]) -> Option<CqlValue> {
 ///
 /// Each entry whose key matches a requested column name and whose value is a scalar S or N
 /// attribute is included in the returned map.  Non-scalar or unrecognised attributes are skipped.
+///
+/// Filtering columns that are absent from the `:attrs` map are **not** included.  Callers that
+/// need tombstones for absent columns (e.g. when the collection was fully replaced) must add
+/// them separately.
 pub(crate) fn extract_alternator_scalars(
-    attrs: CqlValue,
+    attrs: &CqlValue,
     columns: &[crate::ColumnName],
-) -> BTreeMap<crate::ColumnName, CqlValue> {
+) -> BTreeMap<crate::ColumnName, Option<CqlValue>> {
     let CqlValue::Map(entries) = attrs else {
+        // `:attrs` is not a map (unexpected); return empty — callers handle tombstones.
         return BTreeMap::new();
     };
     let mut result = BTreeMap::new();
     for (key, value) in entries {
-        let name = match &key {
+        let name = match key {
             CqlValue::Blob(b) => std::str::from_utf8(b).ok().map(str::to_owned),
             CqlValue::Text(s) => Some(s.clone()),
             _ => None,
@@ -219,8 +224,8 @@ pub(crate) fn extract_alternator_scalars(
             CqlValue::Blob(b) => b,
             _ => continue,
         };
-        if let Some(scalar) = extract_alternator_scalar(&blob) {
-            result.insert(col, scalar);
+        if let Some(scalar) = extract_alternator_scalar(blob) {
+            result.insert(col, Some(scalar));
         }
     }
     result

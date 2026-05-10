@@ -174,7 +174,7 @@ mod tests {
 
         let embedding = DbEmbedding {
             primary_key: [CqlValue::Int(1)].into(),
-            embedding: Some(vec![1.].into()),
+            embedding: Some(Some(vec![1.].into())),
             timestamp: Timestamp::from_unix_timestamp(10),
             column_values: Default::default(),
         };
@@ -210,7 +210,7 @@ mod tests {
 
         let embedding = DbEmbedding {
             primary_key: [CqlValue::Int(1)].into(),
-            embedding: Some(vec![1.].into()),
+            embedding: Some(Some(vec![1.].into())),
             timestamp: Timestamp::from_unix_timestamp(10),
             column_values: Default::default(),
         };
@@ -271,7 +271,7 @@ mod tests {
 
         let embedding = DbEmbedding {
             primary_key: [CqlValue::Int(1)].into(),
-            embedding: Some(vec![1.].into()),
+            embedding: Some(Some(vec![1.].into())),
             timestamp: Timestamp::from_unix_timestamp(10),
             column_values: Default::default(),
         };
@@ -328,7 +328,7 @@ mod tests {
 
         let embedding = DbEmbedding {
             primary_key: [CqlValue::Int(1)].into(),
-            embedding: Some(vec![1.].into()),
+            embedding: Some(Some(vec![1.].into())),
             timestamp: Timestamp::from_unix_timestamp(10),
             column_values: Default::default(),
         };
@@ -402,7 +402,7 @@ mod tests {
 
         let embedding = DbEmbedding {
             primary_key: [CqlValue::Int(1)].into(),
-            embedding: Some(vec![1.].into()),
+            embedding: Some(Some(vec![1.].into())),
             timestamp: Timestamp::from_unix_timestamp(10),
             column_values: Default::default(),
         };
@@ -501,7 +501,7 @@ mod tests {
 
         let embedding = DbEmbedding {
             primary_key: [CqlValue::Int(1)].into(),
-            embedding: None,
+            embedding: Some(None),
             timestamp: Timestamp::from_unix_timestamp(10),
             column_values: Default::default(),
         };
@@ -554,7 +554,7 @@ mod tests {
 
         let embedding = DbEmbedding {
             primary_key: [CqlValue::Int(1)].into(),
-            embedding: None,
+            embedding: Some(None),
             timestamp: Timestamp::from_unix_timestamp(10),
             column_values: Default::default(),
         };

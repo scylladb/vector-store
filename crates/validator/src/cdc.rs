@@ -51,6 +51,11 @@ pub(crate) async fn new() -> TestCase<TestActors> {
             timeout,
             cql_per_row_ttl_expires_from_index,
         )
+        .with_test(
+            "cql_explicit_vector_column_deletion_removes_from_index",
+            timeout,
+            cql_explicit_vector_column_deletion_removes_from_index,
+        )
 }
 
 #[framed]
@@ -656,6 +661,97 @@ async fn cql_per_row_ttl_expires_from_index(actors: TestActors) {
         .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
         .await
         .expect("failed to drop a keyspace");
+
+    info!("finished");
+}
+
+/// Regression test: explicitly deleting the vector column (`DELETE v FROM t WHERE pk = ?`)
+/// must remove the item from the vector index, not leave it as "unchanged".
+///
+/// Previously the CQL CDC path only treated full row/partition deletions as
+/// removals.  An explicit column tombstone produced `embedding = None`
+/// ("unchanged") instead of `Some(None)` ("delete from index"), so the stale
+/// vector remained searchable.
+#[framed]
+async fn cql_explicit_vector_column_deletion_removes_from_index(actors: TestActors) {
+    info!("started");
+
+    let (session, clients) = prepare_connection_single_vs(&actors).await;
+    let client = clients.first().unwrap();
+    let keyspace = create_keyspace(&session).await;
+    let table = create_table(&session, "pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None).await;
+
+    session
+        .query_unpaged(
+            format!("INSERT INTO {table} (pk, v) VALUES (1, [1.0, 0.0, 0.0])"),
+            (),
+        )
+        .await
+        .expect("failed to insert data");
+    session
+        .query_unpaged(
+            format!("INSERT INTO {table} (pk, v) VALUES (2, [0.0, 1.0, 0.0])"),
+            (),
+        )
+        .await
+        .expect("failed to insert data");
+
+    let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
+
+    let status = wait_for_index(client, &index).await;
+    assert_eq!(
+        status.count, 2,
+        "Index should have 2 vectors after full scan"
+    );
+
+    // Explicitly delete only the vector column of pk=1 (not the whole row).
+    // This is a column tombstone, not a row deletion — the CQL CDC path
+    // must recognise it via is_value_deleted() and remove the vector from the index.
+    session
+        .query_unpaged(format!("DELETE v FROM {table} WHERE pk = 1"), ())
+        .await
+        .expect("failed to delete vector column");
+
+    // Wait for the index count to drop to 1.
+    wait_for(
+        || async {
+            let status = client.index_status(&index.keyspace, &index.index).await;
+            matches!(status, Ok(s) if s.count == 1)
+        },
+        "Waiting for index count to drop to 1 after explicit column deletion",
+        FINE_GRAINED_CDC_MAX_LATENCY,
+    )
+    .await;
+
+    // ANN query should only return pk=2.
+    let result = wait_for_value(
+        || async {
+            let result = get_opt_query_results(
+                format!("SELECT pk FROM {table} ORDER BY v ANN OF [0.0, 1.0, 0.0] LIMIT 10"),
+                &session,
+            )
+            .await;
+            result.filter(|r| r.rows_num() == 1)
+        },
+        "Waiting for ANN query to return only pk=2",
+        FINE_GRAINED_CDC_MAX_LATENCY,
+    )
+    .await;
+    let pks: Vec<i32> = result
+        .rows::<(i32,)>()
+        .expect("failed to get rows")
+        .map(|r| r.expect("row error").0)
+        .collect();
+    assert_eq!(
+        pks,
+        vec![2],
+        "Only pk=2 should remain after explicit vector column deletion"
+    );
+
+    session
+        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
+        .await
+        .expect("failed to drop keyspace");
 
     info!("finished");
 }

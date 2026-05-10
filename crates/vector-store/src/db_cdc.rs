@@ -26,6 +26,7 @@ use scylla::client::session::Session;
 use scylla_cdc::consumer::CDCRow;
 use scylla_cdc::consumer::Consumer;
 use scylla_cdc::consumer::ConsumerFactory;
+use scylla_cdc::consumer::OperationType;
 use scylla_cdc::log_reader::CDCLogReaderBuilder;
 use std::sync::Arc;
 use std::time::Duration;
@@ -512,39 +513,23 @@ impl Consumer for CdcConsumer {
             bail!("CDC error: column {vector_col} should be deletable");
         }
 
-        // For Alternator, the whole `:attrs` map is the vector column.  Clone it so we can
-        // also extract filtering column values from it in a second pass.
-        let raw_vector_value = row.take_value(vector_col);
+        // Is this a row/partition deletion operation?
+        let is_deletion_op = matches!(
+            row.operation,
+            OperationType::RowDelete
+                | OperationType::PartitionDelete
+                | OperationType::RowRangeDelInclLeft
+                | OperationType::RowRangeDelExclLeft
+                | OperationType::RowRangeDelInclRight
+                | OperationType::RowRangeDelExclRight
+        );
 
-        let column_values = match source {
-            crate::db_index_backend::DbIndexBackend::Alternator {
-                filtering_columns, ..
-            } => {
-                if let Some(attrs_val) = raw_vector_value.as_ref().cloned() {
-                    crate::vector::extract_alternator_scalars(attrs_val, filtering_columns)
-                } else {
-                    std::collections::BTreeMap::new()
-                }
-            }
-            crate::db_index_backend::DbIndexBackend::Cql {
-                filtering_columns, ..
-            } => {
-                let mut vals = std::collections::BTreeMap::new();
-                for fc in filtering_columns.iter() {
-                    if !self.0.primary_key_columns.contains(fc)
-                        && let Some(v) = row.take_value(fc.as_ref())
-                    {
-                        vals.insert(fc.clone(), v);
-                    }
-                }
-                vals
-            }
-        };
-
-        let embedding = raw_vector_value
-            .map(|v| source.extract_vector(v))
-            .transpose()?
-            .flatten();
+        let (column_values, embedding) = source.get_column_values(
+            &mut row,
+            is_deletion_op,
+            &self.0.primary_key_columns,
+            vector_col,
+        )?;
 
         let primary_key = self
             .0
@@ -575,7 +560,6 @@ impl Consumer for CdcConsumer {
             ))
         .into();
 
-
         // All columns changed in a single CDC event share the same write timestamp
         // (the timestamp of the originating CQL statement).  Attach it to each
         // filtering column value so the index can apply last-writer-wins per column.
@@ -583,6 +567,7 @@ impl Consumer for CdcConsumer {
             .into_iter()
             .map(|(k, v)| (k, (timestamp, v)))
             .collect();
+
         _ = self
             .0
             .tx

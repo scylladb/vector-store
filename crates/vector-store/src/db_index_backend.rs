@@ -24,6 +24,7 @@ use scylla::cluster::metadata::Table;
 use scylla::statement::prepared::PreparedStatement;
 use scylla::value::CqlValue;
 use scylla_cdc::CqlIdentifier;
+use scylla_cdc::consumer::CDCRow;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
@@ -82,6 +83,141 @@ impl DbIndexBackend {
                 target_column: target_column.as_ref(),
             }
             .try_into(),
+        }
+    }
+
+    /// Extracts filtering-column values and the embedding action from a CDC row delta.
+    ///
+    /// Returns `(column_values, embedding)` where:
+    /// - `column_values`: map from filtering column name to new value (`None` = deleted).
+    /// - `embedding`:
+    ///   - `None` = vector unchanged (no update needed)
+    ///   - `Some(None)` = vector deleted
+    ///   - `Some(Some(v))` = new vector value
+    pub(crate) fn get_column_values(
+        &self,
+        row: &mut CDCRow<'_>,
+        is_deletion_op: bool,
+        primary_key_columns: &[ColumnName],
+        vector_col: &str,
+    ) -> anyhow::Result<(BTreeMap<ColumnName, Option<CqlValue>>, Option<Option<Vector>>)> {
+        let raw_vector_value = row.take_value(vector_col);
+
+        match self {
+            Self::Alternator {
+                filtering_columns,
+                target_column,
+                ..
+            } => {
+                // cdc$deleted_elements_:attrs lists map keys explicitly deleted in this delta.
+                let deleted_elements: Vec<CqlValue> = if row.collection_exists(vector_col) {
+                    row.take_deleted_elements(vector_col)
+                } else {
+                    vec![]
+                };
+
+                // cdc$deleted_:attrs is true when the whole :attrs collection was tombstoned
+                // (e.g. PutItem replaces the item entirely).
+                let whole_col_deleted = row.is_value_deleted(vector_col);
+
+                // Returns true if the given attribute name was explicitly deleted from :attrs.
+                let attr_key_deleted = |attr: &str| -> bool {
+                    deleted_elements.iter().any(|k| match k {
+                        CqlValue::Text(s) | CqlValue::Ascii(s) => s == attr,
+                        CqlValue::Blob(b) => b.as_slice() == attr.as_bytes(),
+                        _ => false,
+                    })
+                };
+
+                let mut col_vals = BTreeMap::new();
+
+                if is_deletion_op {
+                    // Full row/partition deletion: tombstone every filtering column.
+                    for fc in filtering_columns.iter() {
+                        col_vals.insert(fc.clone(), None);
+                    }
+                } else {
+                    // Partial update (RowUpdate / RowInsert / PostImage):
+                    // CDC carries a delta — only changed entries appear in :attrs.
+                    // 1. Extract new values from the :attrs delta for filtering columns.
+                    if let Some(ref attrs) = raw_vector_value {
+                        let delta_vals = vector::extract_alternator_scalars(attrs, filtering_columns);
+                        col_vals.extend(delta_vals);
+                    }
+                    // 2. Tombstone filtering columns that were explicitly deleted or whose
+                    //    collection was replaced (whole_col_deleted) and are absent from the delta.
+                    for fc in filtering_columns.iter() {
+                        if attr_key_deleted(fc.as_ref())
+                            || (whole_col_deleted && !col_vals.contains_key(fc))
+                        {
+                            col_vals.insert(fc.clone(), None);
+                        }
+                    }
+                }
+
+                // Determine embedding action (tri-state):
+                //   Some(None)      = delete vector
+                //   Some(Some(v))   = set vector
+                //   None            = vector unchanged, skip
+                let emb: Option<Option<Vector>> =
+                    if is_deletion_op || attr_key_deleted(target_column.as_ref()) {
+                        // Row deleted, or vector attribute explicitly removed from the map.
+                        Some(None)
+                    } else {
+                        // Try to extract the vector from the :attrs delta.
+                        let extracted = raw_vector_value
+                            .as_ref()
+                            .map(|v| self.extract_vector(v.clone()))
+                            .transpose()?;
+                        // extracted: Option<Option<Vector>>
+                        //   None        => no :attrs delta at all
+                        //   Some(None)  => :attrs delta present but vector key absent
+                        //   Some(Some(v)) => vector present in delta
+                        if whole_col_deleted {
+                            // Collection replaced: if vector not in new delta it was deleted.
+                            Some(extracted.flatten())
+                        } else {
+                            // Normal partial update: vector absent from delta = unchanged.
+                            extracted.flatten().map(Some)
+                        }
+                    };
+
+                Ok((col_vals, emb))
+            }
+            Self::Cql { filtering_columns, .. } => {
+                // For CQL tables a CDC row may be a partial update (only the changed columns
+                // appear).  We can therefore only record values for columns that are present
+                // in this event; absent columns are left unchanged.
+                let mut vals = BTreeMap::new();
+                for fc in filtering_columns.iter() {
+                    if !primary_key_columns.contains(fc) {
+                        if let Some(v) = row.take_value(fc.as_ref()) {
+                            vals.insert(fc.clone(), Some(v));
+                        } else if row.is_value_deleted(fc.as_ref()) {
+                            // Explicit column tombstone, e.g. `DELETE fc FROM t WHERE pk = ?`.
+                            vals.insert(fc.clone(), None);
+                        }
+                    }
+                }
+
+                // For CQL, derive embedding from the raw vector column value.
+                // Signal index removal (`Some(None)`) for:
+                //   - row/partition deletions (is_deletion_op)
+                //   - explicit column tombstones, e.g. `DELETE v FROM t WHERE pk = ?`
+                //     or `UPDATE t SET v = null WHERE pk = ?`, where the column is
+                //     absent from the CDC row but marked deleted via is_value_deleted.
+                let emb = if is_deletion_op || row.is_value_deleted(vector_col) {
+                    Some(None)
+                } else {
+                    raw_vector_value
+                        .map(|v| self.extract_vector(v))
+                        .transpose()?
+                        .flatten()
+                        .map(Some)
+                };
+
+                Ok((vals, emb))
+            }
         }
     }
 

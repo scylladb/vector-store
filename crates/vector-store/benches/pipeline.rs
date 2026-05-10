@@ -265,7 +265,7 @@ fn scan_fn_mpsc(
                     .send((
                         DbEmbedding {
                             primary_key,
-                            embedding,
+                            embedding: Some(embedding),
                             timestamp,
                             column_values: Default::default(),
                         },

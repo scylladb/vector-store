@@ -1939,4 +1939,144 @@ mod tests {
             httpapi::IndexStatus::Serving
         );
     }
+
+    // Helpers shared by the filtering-column tests below.
+    fn filtering_table_columns() -> HashMap<crate::ColumnName, NativeType> {
+        [
+            ("pk".into(), NativeType::Int),
+            ("ck".into(), NativeType::Int),
+            // A plain CQL text filtering column
+            ("tag".into(), NativeType::Text),
+            // A blob column — used for Alternator non-key attributes
+            ("attr".into(), NativeType::Blob),
+        ]
+        .into_iter()
+        .collect()
+    }
+
+    #[test]
+    fn filter_on_non_pk_filtering_column_ok() {
+        // Filtering on a non-primary-key column that appears in filtering_columns succeeds.
+        let filter = try_from_post_index_ann_filter(
+            serde_json::from_str(
+                r#"{ "restrictions": [{ "type": "==", "lhs": "tag", "rhs": "hello" }],
+                    "allow_filtering": true }"#,
+            )
+            .unwrap(),
+            &["pk".into(), "ck".into()],
+            &filtering_table_columns(),
+            &["tag".into()],
+            false,
+        )
+        .unwrap();
+        assert!(
+            matches!(filter.restrictions.first(), Some(Restriction::Eq { lhs, rhs })
+                if *lhs == "tag".into() && *rhs == CqlValue::Text("hello".to_string()))
+        );
+    }
+
+    #[test]
+    fn filter_on_non_pk_column_not_in_filtering_columns_fails() {
+        // A non-primary-key column that is NOT listed in filtering_columns must be rejected.
+        assert!(
+            try_from_post_index_ann_filter(
+                serde_json::from_str(
+                    r#"{ "restrictions": [{ "type": "==", "lhs": "tag", "rhs": "hello" }],
+                        "allow_filtering": true }"#,
+                )
+                .unwrap(),
+                &["pk".into(), "ck".into()],
+                &filtering_table_columns(),
+                &[], // tag is not listed here
+                false,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn alternator_blob_column_string_maps_to_text() {
+        // For Alternator indexes, a JSON string value for a Blob filtering column
+        // must be converted to CqlValue::Text (S-type comparison).
+        let filter = try_from_post_index_ann_filter(
+            serde_json::from_str(
+                r#"{ "restrictions": [{ "type": "==", "lhs": "attr", "rhs": "hello" }],
+                    "allow_filtering": true }"#,
+            )
+            .unwrap(),
+            &["pk".into(), "ck".into()],
+            &filtering_table_columns(),
+            &["attr".into()],
+            true, // is_alternator
+        )
+        .unwrap();
+        assert!(
+            matches!(filter.restrictions.first(), Some(Restriction::Eq { lhs, rhs })
+                if *lhs == "attr".into() && *rhs == CqlValue::Text("hello".to_string()))
+        );
+    }
+
+    #[test]
+    fn alternator_blob_column_number_maps_to_decimal() {
+        // For Alternator indexes, a JSON number value for a Blob filtering column
+        // must be converted to CqlValue::Decimal (N-type comparison).
+        let filter = try_from_post_index_ann_filter(
+            serde_json::from_str(
+                r#"{ "restrictions": [{ "type": "<", "lhs": "attr", "rhs": 42 }],
+                    "allow_filtering": true }"#,
+            )
+            .unwrap(),
+            &["pk".into(), "ck".into()],
+            &filtering_table_columns(),
+            &["attr".into()],
+            true, // is_alternator
+        )
+        .unwrap();
+        assert!(
+            matches!(filter.restrictions.first(), Some(Restriction::Lt { lhs, rhs })
+                if *lhs == "attr".into() && matches!(rhs, CqlValue::Decimal(_)))
+        );
+    }
+
+    #[test]
+    fn alternator_blob_column_unsupported_type_fails() {
+        // A boolean value for an Alternator blob filtering column must be rejected.
+        assert!(
+            try_from_post_index_ann_filter(
+                serde_json::from_str(
+                    r#"{ "restrictions": [{ "type": "==", "lhs": "attr", "rhs": true }],
+                        "allow_filtering": true }"#,
+                )
+                .unwrap(),
+                &["pk".into(), "ck".into()],
+                &filtering_table_columns(),
+                &["attr".into()],
+                true, // is_alternator
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn non_alternator_blob_column_uses_hex_path() {
+        // For non-Alternator (plain CQL) indexes the Blob column must still accept
+        // a "0x"-prefixed hex string and produce CqlValue::Blob.
+        let filter = try_from_post_index_ann_filter(
+            serde_json::from_str(
+                r#"{ "restrictions": [{ "type": "==", "lhs": "attr", "rhs": "0xdeadbeef" }],
+                    "allow_filtering": true }"#,
+            )
+            .unwrap(),
+            &["pk".into(), "ck".into()],
+            &filtering_table_columns(),
+            &["attr".into()],
+            false, // is_alternator = false
+        )
+        .unwrap();
+        assert!(
+            matches!(filter.restrictions.first(), Some(Restriction::Eq { lhs, rhs })
+                if *lhs == "attr".into()
+                    && *rhs == CqlValue::Blob(vec![0xde, 0xad, 0xbe, 0xef]))
+        );
+    }
 }
