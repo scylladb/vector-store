@@ -270,6 +270,10 @@ pub struct PostIndexAnnRequest {
     pub filter: Option<PostIndexAnnFilter>,
     #[serde(default)]
     pub limit: Limit,
+    /// Filtering-column names whose stored values should be returned alongside
+    /// the primary keys.  Empty (the default) means return no column values.
+    #[serde(default)]
+    pub return_columns: Vec<ColumnName>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
@@ -277,6 +281,14 @@ pub struct PostIndexAnnResponse {
     pub primary_keys: HashMap<ColumnName, Vec<Value>>,
     pub distances: Vec<Distance>,
     pub similarity_scores: Vec<SimilarityScore>,
+    /// Per-column stored values for the filtering columns requested in
+    /// `return_columns`.  Each entry maps a column name to a Vec of
+    /// `Option<Value>` — one entry per returned nearest neighbour, in the
+    /// same order as `similarity_scores`.  `None` means the value was not
+    /// present for that row (e.g. the attribute did not exist when the row
+    /// was indexed).  Absent when `return_columns` was empty.
+    #[serde(default)]
+    pub column_values: HashMap<ColumnName, Vec<Option<Value>>>,
 }
 
 #[derive(

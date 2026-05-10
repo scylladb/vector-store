@@ -407,6 +407,13 @@
           "limit": {
             "$ref": "#/components/schemas/Limit"
           },
+          "return_columns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ColumnName"
+            },
+            "description": "Filtering-column names whose stored values should be returned alongside\nthe primary keys.  Empty (the default) means return no column values."
+          },
           "vector": {
             "$ref": "#/components/schemas/Vector"
           }
@@ -420,6 +427,18 @@
           "similarity_scores"
         ],
         "properties": {
+          "column_values": {
+            "type": "object",
+            "description": "Per-column stored values for the filtering columns requested in\n`return_columns`.  Each entry maps a column name to a Vec of\n`Option<Value>` — one entry per returned nearest neighbour, in the\nsame order as `similarity_scores`.  `None` means the value was not\npresent for that row (e.g. the attribute did not exist when the row\nwas indexed).  Absent when `return_columns` was empty.",
+            "additionalProperties": {
+              "type": "array",
+              "items": {}
+            },
+            "propertyNames": {
+              "type": "string",
+              "description": "Name of the column in a db table."
+            }
+          },
           "distances": {
             "type": "array",
             "items": {

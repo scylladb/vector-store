@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+use crate::ColumnName;
 use crate::Connectivity;
 use crate::Dimensions;
 use crate::Distance;
@@ -295,11 +296,20 @@ async fn process(
         Index::Ann {
             embedding,
             limit,
+            return_columns,
             tx,
             ..
         } => {
             ann(
-                index_key, tx, embedding, dimensions, limit, space_type, table, client,
+                index_key,
+                tx,
+                embedding,
+                dimensions,
+                limit,
+                space_type,
+                return_columns,
+                table,
+                client,
             )
             .await
         }
@@ -360,6 +370,7 @@ async fn ann(
     dimensions: Dimensions,
     limit: Limit,
     space_type: SpaceType,
+    return_columns: Arc<[ColumnName]>,
     table: Arc<RwLock<impl TableSearch>>,
     client: Arc<OpenSearch>,
 ) {
@@ -417,7 +428,7 @@ async fn ann(
     let index_id = IndexIdGenerator::new().next(true).unwrap();
     let partition_id = PartitionId::global(index_id);
 
-    let hits = {
+    let (keys, scores, column_values_vec) = {
         let table = table.read().unwrap();
         hits.unwrap()
             .iter()
@@ -426,12 +437,16 @@ async fn ann(
                 let score = hit["_score"].as_f64().unwrap();
                 let primary_id = PrimaryId::from(id.parse::<u64>().unwrap());
                 let primary_key = table.primary_key(partition_id, primary_id).unwrap();
-                (primary_key, score)
+                let col_vals = if return_columns.is_empty() {
+                    Default::default()
+                } else {
+                    table.column_values_for(partition_id, primary_id, &return_columns)
+                };
+                (primary_key, score, col_vals)
             })
-            .collect::<Vec<_>>()
+            .collect::<(Vec<_>, Vec<_>, Vec<_>)>()
     };
 
-    let (keys, scores): (Vec<_>, Vec<_>) = hits.iter().cloned().unzip();
     let distances: anyhow::Result<Vec<_>> = scores
         .iter()
         .map(|score| Distance::try_from((*score as f32, space_type, Some(dimensions))))
@@ -445,7 +460,7 @@ async fn ann(
     };
 
     tx_ann
-        .send(Ok((keys, distances)))
+        .send(Ok((keys, distances, column_values_vec)))
         .unwrap_or_else(|_| trace!("ann: unable to send response"));
 }
 

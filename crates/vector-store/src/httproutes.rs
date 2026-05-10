@@ -593,6 +593,12 @@ async fn post_index_ann(
             ))
             .await;
 
+        let return_columns: std::sync::Arc<[crate::ColumnName]> = request
+            .return_columns
+            .into_iter()
+            .map(crate::ColumnName::from)
+            .collect::<Vec<_>>()
+            .into();
         let search_result = if let Some(filter) = request.filter {
             let filter = match try_from_post_index_ann_filter(
                 filter,
@@ -613,11 +619,17 @@ async fn post_index_ann(
                     request.vector.into(),
                     filter,
                     request.limit.into(),
+                    std::sync::Arc::clone(&return_columns),
                 )
                 .await
         } else {
             index
-                .ann(routed_key, request.vector.into(), request.limit.into())
+                .ann(
+                    routed_key,
+                    request.vector.into(),
+                    request.limit.into(),
+                    std::sync::Arc::clone(&return_columns),
+                )
                 .await
         };
 
@@ -633,7 +645,7 @@ async fn post_index_ann(
                     (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
                 }
             },
-            Ok((primary_keys, distances)) => {
+            Ok((primary_keys, distances, column_values_per_row)) => {
                 if primary_keys.len() != distances.len() {
                     let msg = format!(
                         "wrong size of an ann response: \
@@ -685,15 +697,35 @@ async fn post_index_ann(
                             debug!("post_index_ann: {err}");
                             (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
                         }
-                        Ok(primary_keys) => (
-                            StatusCode::OK,
-                            response::Json(httpapi::PostIndexAnnResponse {
-                                primary_keys,
-                                distances: distances.into_iter().map(|d| d.into()).collect(),
-                                similarity_scores,
-                            }),
-                        )
-                            .into_response(),
+                        Ok(primary_keys) => {
+                            let column_values: HashMap<
+                                httpapi::ColumnName,
+                                Vec<Option<serde_json::Value>>,
+                            > = return_columns
+                                .iter()
+                                .map(|col_name| {
+                                    let values = column_values_per_row
+                                        .iter()
+                                        .map(|row_vals| {
+                                            row_vals
+                                                .get(col_name)
+                                                .and_then(|v| try_to_json(v.clone()).ok())
+                                        })
+                                        .collect();
+                                    (col_name.clone().into(), values)
+                                })
+                                .collect();
+                            (
+                                StatusCode::OK,
+                                response::Json(httpapi::PostIndexAnnResponse {
+                                    primary_keys,
+                                    distances: distances.into_iter().map(|d| d.into()).collect(),
+                                    similarity_scores,
+                                    column_values,
+                                }),
+                            )
+                                .into_response()
+                        }
                     }
                 }
             }
