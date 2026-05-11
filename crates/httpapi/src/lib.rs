@@ -287,7 +287,7 @@ pub struct PostIndexAnnResponse {
     /// same order as `similarity_scores`.  `None` means the value was not
     /// present for that row (e.g. the attribute did not exist when the row
     /// was indexed).  Absent when `return_columns` was empty.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub column_values: HashMap<ColumnName, Vec<Option<Value>>>,
 }
 

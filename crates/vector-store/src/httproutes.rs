@@ -526,62 +526,71 @@ async fn post_index_ann(
         let index_key = IndexKey::new(&keyspace, &index_name);
         let (equality_cols, range_cols) = restriction_columns(&request.filter);
         let allow_filtering = request.filter.as_ref().is_some_and(|f| f.allow_filtering);
-        let (routed_key, index, primary_key_columns, table_columns, index_filtering_columns) = match state
-            .indexes
-            .read()
-            .unwrap()
-            .best_index(&index_key, &equality_cols, &range_cols)
-        {
-            indexes::BestIndexState::Serving {
-                key: routed_key,
-                index,
-                needs_filtering,
-                primary_key_columns,
-                table_columns,
-                filtering_columns,
-            } => {
-                if matches!(needs_filtering, indexes::NeedsFiltering::Yes(_)) && !allow_filtering {
+        let (routed_key, index, primary_key_columns, table_columns, index_filtering_columns) =
+            match state
+                .indexes
+                .read()
+                .unwrap()
+                .best_index(&index_key, &equality_cols, &range_cols)
+            {
+                indexes::BestIndexState::Serving {
+                    key: routed_key,
+                    index,
+                    needs_filtering,
+                    primary_key_columns,
+                    table_columns,
+                    filtering_columns,
+                } => {
+                    if matches!(needs_filtering, indexes::NeedsFiltering::Yes(_))
+                        && !allow_filtering
+                    {
+                        timer.observe_duration();
+
+                        let msg = format!(
+                            "Index {keyspace}.{index_name} requires ALLOW FILTERING for this query"
+                        );
+                        debug!("post_index_ann: {msg}");
+                        return (StatusCode::BAD_REQUEST, msg).into_response();
+                    }
+                    (
+                        routed_key,
+                        index,
+                        primary_key_columns,
+                        table_columns,
+                        filtering_columns,
+                    )
+                }
+                indexes::BestIndexState::NotServing(progress) => {
                     timer.observe_duration();
 
-                    let msg = format!(
-                        "Index {keyspace}.{index_name} requires ALLOW FILTERING for this query"
-                    );
-                    debug!("post_index_ann: {msg}");
-                    return (StatusCode::BAD_REQUEST, msg).into_response();
-                }
-                (routed_key, index, primary_key_columns, table_columns, filtering_columns)
-            }
-            indexes::BestIndexState::NotServing(progress) => {
-                timer.observe_duration();
-
-                match progress {
-                    Progress::InProgress(percentage) => {
-                        let msg = format!(
-                            "Index {keyspace}.{index_name} is not available yet \
+                    match progress {
+                        Progress::InProgress(percentage) => {
+                            let msg = format!(
+                                "Index {keyspace}.{index_name} is not available yet \
                             as it is still being constructed, progress: {:.3}%",
-                            percentage.get()
-                        );
-                        debug!("post_index_ann: {msg}");
-                        return (StatusCode::SERVICE_UNAVAILABLE, msg).into_response();
-                    }
-                    Progress::Done => {
-                        let msg = format!(
-                            "Index {keyspace}.{index_name} is not serving, \
+                                percentage.get()
+                            );
+                            debug!("post_index_ann: {msg}");
+                            return (StatusCode::SERVICE_UNAVAILABLE, msg).into_response();
+                        }
+                        Progress::Done => {
+                            let msg = format!(
+                                "Index {keyspace}.{index_name} is not serving, \
                             but full scan did finish."
-                        );
-                        debug!("post_index_ann: {msg}");
-                        return (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response();
+                            );
+                            debug!("post_index_ann: {msg}");
+                            return (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response();
+                        }
                     }
                 }
-            }
-            indexes::BestIndexState::NotFound => {
-                timer.observe_duration();
+                indexes::BestIndexState::NotFound => {
+                    timer.observe_duration();
 
-                let msg = format!("missing index: {keyspace}.{index_name}");
-                debug!("post_index_ann: {msg}");
-                return (StatusCode::NOT_FOUND, msg).into_response();
-            }
-        };
+                    let msg = format!("missing index: {keyspace}.{index_name}");
+                    debug!("post_index_ann: {msg}");
+                    return (StatusCode::NOT_FOUND, msg).into_response();
+                }
+            };
 
         #[cfg(feature = "slow-test-hooks")]
         state
@@ -968,7 +977,9 @@ fn try_to_json(value: CqlValue) -> anyhow::Result<Value> {
 
         CqlValue::Decimal(value) => Ok(Value::String(BigDecimal::from(value).to_string())),
 
-        _ => unimplemented!(),
+        CqlValue::Inet(value) => Ok(Value::String(value.to_string())),
+
+        other => bail!("unsupported CqlValue variant for JSON conversion: {other:?}"),
     }
 }
 
@@ -1898,6 +1909,22 @@ mod tests {
             .unwrap(),
             Value::String("-98765432109876543210.123456789".to_string())
         );
+
+        // Inet (IPv4 and IPv6)
+        assert_eq!(
+            try_to_json(CqlValue::Inet(
+                "192.168.1.1".parse::<std::net::IpAddr>().unwrap()
+            ))
+            .unwrap(),
+            Value::String("192.168.1.1".to_string())
+        );
+        assert_eq!(
+            try_to_json(CqlValue::Inet("::1".parse::<std::net::IpAddr>().unwrap())).unwrap(),
+            Value::String("::1".to_string())
+        );
+
+        // Unsupported variant returns an error instead of panicking.
+        assert!(try_to_json(CqlValue::Counter(scylla::value::Counter(0))).is_err());
     }
 
     #[test]
