@@ -731,17 +731,22 @@ struct Index {
     /// All column names that are used in this index (key columns + filtering columns)
     _available_columns: BTreeSet<ColumnName>,
 
-    /// Timestamps of the last vector update
-    vector_timestamps: ColumnVec<PrimaryId, ETValue<()>>,
+    /// Timestamps of the last vector update, one per target column (positional).
+    vector_timestamps: Vec<ColumnVec<PrimaryId, ETValue<()>>>,
 }
 
 impl Index {
     const INCREMENT_SIZE: usize = 1 << 8;
 
+    fn num_target_columns(&self) -> usize {
+        self.vector_timestamps.len()
+    }
+
     fn new_global(
         index_id: IndexId,
         primary_key_columns: Arc<Vec<ColumnName>>,
         filtering_columns: &[ColumnName],
+        num_target_columns: usize,
     ) -> Self {
         Self {
             index_id,
@@ -751,7 +756,7 @@ impl Index {
                 .chain(filtering_columns.iter())
                 .cloned()
                 .collect(),
-            vector_timestamps: ColumnVec::new(),
+            vector_timestamps: (0..num_target_columns).map(|_| ColumnVec::new()).collect(),
         }
     }
 
@@ -759,6 +764,7 @@ impl Index {
         index_id: IndexId,
         key_columns: Arc<Vec<ColumnName>>,
         filtering_columns: &[ColumnName],
+        num_target_columns: usize,
     ) -> Self {
         Self {
             index_id,
@@ -767,7 +773,7 @@ impl Index {
                 .chain(filtering_columns.iter())
                 .cloned()
                 .collect(),
-            vector_timestamps: ColumnVec::new(),
+            vector_timestamps: (0..num_target_columns).map(|_| ColumnVec::new()).collect(),
             data: IndexData::Local {
                 key_columns,
                 map: BTreeMap::new(),
@@ -784,8 +790,10 @@ impl Index {
             IndexData::Global => {}
             IndexData::Local { ids, .. } => ids.resize_with(new_size, || None),
         }
-        self.vector_timestamps.resize_with(new_size, || {
-            ETValue::None(Epoch::new(), Timestamp::UNIX_EPOCH)
+        self.vector_timestamps.iter_mut().for_each(|ts| {
+            ts.resize_with(new_size, || {
+                ETValue::None(Epoch::new(), Timestamp::UNIX_EPOCH)
+            })
         });
     }
 
@@ -923,6 +931,7 @@ impl Table {
         partition_key_columns: Option<Arc<Vec<ColumnName>>>,
         filtering_columns: &[ColumnName],
         table_columns: Arc<HashMap<ColumnName, NativeType>>,
+        num_target_columns: usize,
     ) -> anyhow::Result<Self> {
         let partition_key_count = partition_key_count.min(primary_key_columns.len());
         let mut index_id_generator = IndexIdGenerator::new();
@@ -934,12 +943,14 @@ impl Table {
                 index_id,
                 Arc::clone(partition_key_columns),
                 filtering_columns,
+                num_target_columns,
             )
         } else {
             Index::new_global(
                 index_id,
                 Arc::clone(&primary_key_columns),
                 filtering_columns,
+                num_target_columns,
             )
         };
         indexes.insert(index_id, index);
@@ -1049,14 +1060,27 @@ impl Table {
         Ok(())
     }
 
+    fn index_by_key(&self, index_key: &IndexKey) -> anyhow::Result<&Index> {
+        self.index_ids
+            .get(index_key)
+            .and_then(|id| self.indexes.get(id))
+            .ok_or_else(|| anyhow!("Index not found for key {index_key:?}"))
+    }
+
+    /// All target columns must have a valid epoch for the primary id to be considered valid.
     fn is_valid_primary_id(&self, partition_id: PartitionId, primary_id: PrimaryId) -> bool {
         self.indexes
             .get(&partition_id.index_id())
-            .and_then(|index| match index.vector_timestamps.get(primary_id)? {
-                ETValue::Some(epoch, _, _) => Some(*epoch),
-                ETValue::None(_, _) => None,
+            .is_some_and(|index| {
+                index.vector_timestamps.iter().all(|ts| {
+                    ts.get(primary_id)
+                        .and_then(|v| match v {
+                            ETValue::Some(epoch, _, _) => Some(*epoch),
+                            ETValue::None(_, _) => None,
+                        })
+                        .is_some_and(|epoch| epoch == primary_id.epoch())
+                })
             })
-            .is_some_and(|epoch| epoch == primary_id.epoch())
     }
 }
 
@@ -1067,23 +1091,35 @@ pub(crate) trait TableAdd {
         &mut self,
         index_key: &IndexKey,
         db_embedding: DbEmbedding,
-    ) -> anyhow::Result<Vec<Operation>>;
+    ) -> anyhow::Result<Vec<Operations>>;
 }
 
 impl TableAdd for Table {
+    /// Adds a new row or updates an existing row in the table.
+    /// Returns operations for each target column. The index in the vector corresponds to the target column index defined in the index metadata.
     #[hotpath::measure]
     fn add(
         &mut self,
-        _index_key: &IndexKey,
+        index_key: &IndexKey,
         db_embedding: DbEmbedding,
-    ) -> anyhow::Result<Vec<Operation>> {
+    ) -> anyhow::Result<Vec<Operations>> {
+        let num_target_columns = self.index_by_key(index_key)?.num_target_columns();
+        if db_embedding.embeddings.len() != num_target_columns {
+            bail!(
+                "Mismatched number of embeddings: expected {}, got {}",
+                num_target_columns,
+                db_embedding.embeddings.len()
+            );
+        }
         self.reserve_primary_ids()?;
         self.reserve_partition_ids()?;
 
-        let mut operations = vec![];
+        let mut all_operations: Vec<Operations> = (0..db_embedding.embeddings.len())
+            .map(|_| Vec::new())
+            .collect();
 
         let primary_key = db_embedding.primary_key;
-        let vector = db_embedding.embedding;
+        let embeddings = db_embedding.embeddings;
 
         let normalized_key = self.normalize_primary_key(&primary_key);
         let row_map = &mut self.primary_ids;
@@ -1092,106 +1128,136 @@ impl TableAdd for Table {
             Entry::Occupied(entry) => {
                 let primary_id = *entry.get();
                 self.indexes.iter_mut().try_for_each(|(index_id, index)| {
-                    let (epoch, timestamp, vector_already_exists) = match index
-                        .vector_timestamps
-                        .get(primary_id)
-                    {
-                        Some(ETValue::Some(epoch, timestamp, _)) => (*epoch, timestamp, true),
-                        Some(ETValue::None(epoch, timestamp)) => (*epoch, timestamp, false),
-                        None => {
-                            bail!(
+                    for (col_idx, embedding) in embeddings.iter().enumerate() {
+                        let (vector, vector_timestamp) = match embedding {
+                            Some(ev) => (&ev.embedding, ev.timestamp),
+                            None => continue,
+                        };
+                        let vector_timestamps=  index
+                            .vector_timestamps
+                            .get(col_idx)
+                            .ok_or_else(|| {
+                                anyhow!(
+                                    "Missing embedding_timestamps for col_idx {col_idx}, \
+                                    index_id {index_id:?}"
+                                )
+                            })?;
+                        let (epoch, stored_timestamp, vector_already_exists) = match
+                            vector_timestamps
+                            .get(primary_id)
+                        {
+                            Some(ETValue::Some(epoch, stored_timestamp, _)) => {
+                                (*epoch, *stored_timestamp, true)
+                            }
+                            Some(ETValue::None(epoch, stored_timestamp)) => {
+                                (*epoch, *stored_timestamp, false)
+                            }
+                            None => {
+                                bail!(
+                                    "Failed to update vector: \
+                                    missing embedding timestamp for index_id {index_id:?}, \
+                                    col_idx {col_idx} and primary_id {primary_id:?}"
+                                );
+                            }
+                        };
+                        if stored_timestamp >= vector_timestamp {
+                            continue;
+                        }
+                        let primary_id = primary_id.new_epoch(epoch);
+                        let partition_id = index.partition_id(primary_id).ok_or_else(|| {
+                            anyhow!(
                                 "Failed to update vector: \
-                                missing vector timestamp for index_id {index_id:?} and primary_id {primary_id:?}"
-                            );
-                        }
-                    };
-                    if *timestamp >= db_embedding.timestamp {
-                        return Ok(());
-                    }
-                    let primary_id = primary_id.new_epoch(epoch);
-                    let partition_id = index.partition_id(primary_id).ok_or_else(|| {
-                        anyhow!(
-                            "Failed to update vector: \
-                            missing partition id for index_id {index_id:?} and primary_id {primary_id:?}"
-                        )
-                    })?;
-                    if let Some(vector) = &vector {
-                        if vector_already_exists {
-                            operations.push(Operation::RemoveBeforeAddVector {
-                                primary_id,
-                                partition_id,
-                            });
-                        }
+                                missing partition id for index_id {index_id:?} and primary_id {primary_id:?}"
+                            )
+                        })?;
+                        let ops = &mut all_operations[col_idx];
+                        if let Some(vector) = vector {
+                            if vector_already_exists {
+                                ops.push(Operation::RemoveBeforeAddVector {
+                                    primary_id,
+                                    partition_id,
+                                });
+                            }
 
-                        let primary_id = primary_id.next_epoch();
-                        let timestamp = db_embedding.timestamp;
-                        operations.push(Operation::AddVector {
-                            primary_id,
-                            partition_id,
-                            vector: vector.clone(),
-                            is_update: vector_already_exists,
-                        });
-                        index
-                            .vector_timestamps
-                            .update_epoch_timestamp(primary_id, timestamp)?;
-                    } else {
-                        let epoch = primary_id.epoch().next();
-                        index
-                            .vector_timestamps
-                            .update(primary_id, ETValue::None(epoch, *timestamp))?;
-                        if vector_already_exists {
-                            operations.push(Operation::RemoveVector {
+                            let primary_id = primary_id.next_epoch();
+                            ops.push(Operation::AddVector {
                                 primary_id,
                                 partition_id,
+                                vector: vector.clone(),
+                                is_update: vector_already_exists,
                             });
-                            if index.data.remove_row(primary_id) {
-                                operations.push(Operation::RemovePartition { partition_id });
+                            index.vector_timestamps[col_idx]
+                                .update_epoch_timestamp(primary_id, vector_timestamp)?;
+                        } else {
+                            let epoch = primary_id.epoch().next();
+                            index.vector_timestamps[col_idx].update(
+                                primary_id,
+                                ETValue::None(epoch, stored_timestamp),
+                            )?;
+                            if vector_already_exists {
+                                ops.push(Operation::RemoveVector {
+                                    primary_id,
+                                    partition_id,
+                                });
+                                if index.data.remove_row(primary_id) {
+                                    ops.push(Operation::RemovePartition { partition_id });
+                                }
                             }
                         }
                     }
                     Ok(())
                 })?;
-                Ok(operations)
+                Ok(all_operations)
             }
 
             Entry::Vacant(entry) => {
-                if let Some(vector) = &vector {
-                    let primary_id = self.free_primary_ids.take_id()?;
-                    entry.insert(primary_id);
-                    self.primary_keys
-                        .get_mut(primary_id)
-                        .ok_or_else(|| anyhow!("PrimaryId index out of primary keys bounds"))?
-                        .replace(primary_key.clone());
-                    self.indexes.iter_mut().try_for_each(
-                        |(index_id, index)| -> anyhow::Result<()> {
-                            let partition_id = match index.data {
-                                IndexData::Global => PartitionId::global(*index_id),
-                                IndexData::Local { .. } => {
-                                    let Some(partition_key) = index
-                                        .partition_key(&self.primary_key_columns, &primary_key)
-                                    else {
-                                        return Ok(());
-                                    };
-                                    index.add(primary_id, partition_key)?
-                                }
-                            };
-                            index.vector_timestamps.update(
-                                primary_id,
-                                ETValue::Some(primary_id.epoch(), db_embedding.timestamp, ()),
-                            )?;
-                            operations.push(Operation::AddVector {
-                                primary_id,
-                                partition_id,
-                                vector: vector.clone(),
-                                is_update: false,
-                            });
-                            Ok(())
-                        },
-                    )?;
-                } else {
+                let has_any_vector = embeddings
+                    .iter()
+                    .any(|e| e.as_ref().is_some_and(|ev| ev.embedding.is_some()));
+                if !has_any_vector {
                     warn!("Added row with no vector, skipping vector addition");
+                    return Ok(all_operations);
                 }
-                Ok(operations)
+
+                let primary_id = self.free_primary_ids.take_id()?;
+                entry.insert(primary_id);
+                self.primary_keys
+                    .get_mut(primary_id)
+                    .ok_or_else(|| anyhow!("PrimaryId index out of primary keys bounds"))?
+                    .replace(primary_key.clone());
+                self.indexes.iter_mut().try_for_each(
+                    |(index_id, index)| -> anyhow::Result<()> {
+                        let partition_id = match index.data {
+                            IndexData::Global => PartitionId::global(*index_id),
+                            IndexData::Local { .. } => {
+                                let Some(partition_key) =
+                                    index.partition_key(&self.primary_key_columns, &primary_key)
+                                else {
+                                    return Ok(());
+                                };
+                                index.add(primary_id, partition_key)?
+                            }
+                        };
+                        for (col_idx, embedding) in embeddings.iter().enumerate() {
+                            let Some(ev) = embedding else { continue };
+                            if let Some(vector) = &ev.embedding {
+                                index.vector_timestamps[col_idx].update(
+                                    primary_id,
+                                    ETValue::Some(primary_id.epoch(), ev.timestamp, ()),
+                                )?;
+                                all_operations[col_idx].push(Operation::AddVector {
+                                    primary_id,
+                                    partition_id,
+                                    vector: vector.clone(),
+                                    is_update: false,
+                                });
+                            }
+                        }
+                        Ok(())
+                    },
+                )?;
+
+                Ok(all_operations)
             }
         }
     }
@@ -1488,9 +1554,17 @@ pub(crate) enum Operation {
     },
 }
 
+pub(crate) type Operations = Vec<Operation>;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::EmbeddingValue;
+
+    fn single_col_ops(all: Vec<Operations>) -> Operations {
+        all.into_iter().next().unwrap_or_default()
+    }
 
     #[test]
     fn flow() {
@@ -1510,20 +1584,25 @@ mod tests {
                     .into_iter()
                     .collect(),
                 ),
+                1,
             )
             .unwrap();
 
             // insert first vector
-            let operations = table
-                .add(
-                    &index_key,
-                    DbEmbedding {
-                        primary_key: [CqlValue::Int(1), CqlValue::Int(1)].into(),
-                        embedding: Some(vec![0.1, 0.2, 0.3].into()),
-                        timestamp: Timestamp::from_unix_timestamp(100),
-                    },
-                )
-                .unwrap();
+            let operations = single_col_ops(
+                table
+                    .add(
+                        &index_key,
+                        DbEmbedding {
+                            primary_key: [CqlValue::Int(1), CqlValue::Int(1)].into(),
+                            embeddings: vec![Some(EmbeddingValue {
+                                embedding: Some(vec![0.1, 0.2, 0.3].into()),
+                                timestamp: Timestamp::from_unix_timestamp(100),
+                            })],
+                        },
+                    )
+                    .unwrap(),
+            );
             assert_eq!(operations.len(), 1);
             let (primary_id11, partition_id11) = match operations.first().unwrap() {
                 Operation::AddVector {
@@ -1539,16 +1618,20 @@ mod tests {
             };
 
             // insert second vector
-            let operations = table
-                .add(
-                    &index_key,
-                    DbEmbedding {
-                        primary_key: [CqlValue::Int(1), CqlValue::Int(2)].into(),
-                        embedding: Some(vec![0.2, 0.2, 0.3].into()),
-                        timestamp: Timestamp::from_unix_timestamp(100),
-                    },
-                )
-                .unwrap();
+            let operations = single_col_ops(
+                table
+                    .add(
+                        &index_key,
+                        DbEmbedding {
+                            primary_key: [CqlValue::Int(1), CqlValue::Int(2)].into(),
+                            embeddings: vec![Some(EmbeddingValue {
+                                embedding: Some(vec![0.2, 0.2, 0.3].into()),
+                                timestamp: Timestamp::from_unix_timestamp(100),
+                            })],
+                        },
+                    )
+                    .unwrap(),
+            );
             assert_eq!(operations.len(), 1);
             let (primary_id21, partition_id21) = match operations.first().unwrap() {
                 Operation::AddVector {
@@ -1566,16 +1649,20 @@ mod tests {
             assert_eq!(partition_id11, partition_id21);
 
             // insert third vector
-            let operations = table
-                .add(
-                    &index_key,
-                    DbEmbedding {
-                        primary_key: [CqlValue::Int(1), CqlValue::Int(3)].into(),
-                        embedding: Some(vec![0.3, 0.2, 0.3].into()),
-                        timestamp: Timestamp::from_unix_timestamp(100),
-                    },
-                )
-                .unwrap();
+            let operations = single_col_ops(
+                table
+                    .add(
+                        &index_key,
+                        DbEmbedding {
+                            primary_key: [CqlValue::Int(1), CqlValue::Int(3)].into(),
+                            embeddings: vec![Some(EmbeddingValue {
+                                embedding: Some(vec![0.3, 0.2, 0.3].into()),
+                                timestamp: Timestamp::from_unix_timestamp(100),
+                            })],
+                        },
+                    )
+                    .unwrap(),
+            );
             assert_eq!(operations.len(), 1);
             let (primary_id31, partition_id31) = match operations.first().unwrap() {
                 Operation::AddVector {
@@ -1633,29 +1720,37 @@ mod tests {
             ));
 
             // insert second vector with older timestamp - should not update the vector
-            let operations = table
-                .add(
-                    &index_key,
-                    DbEmbedding {
-                        primary_key: [CqlValue::Int(1), CqlValue::Int(2)].into(),
-                        embedding: Some(vec![0.2, 0.2, 0.3].into()),
-                        timestamp: Timestamp::from_unix_timestamp(50),
-                    },
-                )
-                .unwrap();
+            let operations = single_col_ops(
+                table
+                    .add(
+                        &index_key,
+                        DbEmbedding {
+                            primary_key: [CqlValue::Int(1), CqlValue::Int(2)].into(),
+                            embeddings: vec![Some(EmbeddingValue {
+                                embedding: Some(vec![0.2, 0.2, 0.3].into()),
+                                timestamp: Timestamp::from_unix_timestamp(50),
+                            })],
+                        },
+                    )
+                    .unwrap(),
+            );
             assert_eq!(operations.len(), 0);
 
             // insert second vector with newer timestamp - should update the vector
-            let operations = table
-                .add(
-                    &index_key,
-                    DbEmbedding {
-                        primary_key: [CqlValue::Int(1), CqlValue::Int(2)].into(),
-                        embedding: Some(vec![0.5, 0.5, 0.3].into()),
-                        timestamp: Timestamp::from_unix_timestamp(150),
-                    },
-                )
-                .unwrap();
+            let operations = single_col_ops(
+                table
+                    .add(
+                        &index_key,
+                        DbEmbedding {
+                            primary_key: [CqlValue::Int(1), CqlValue::Int(2)].into(),
+                            embeddings: vec![Some(EmbeddingValue {
+                                embedding: Some(vec![0.5, 0.5, 0.3].into()),
+                                timestamp: Timestamp::from_unix_timestamp(150),
+                            })],
+                        },
+                    )
+                    .unwrap(),
+            );
             assert_eq!(operations.len(), 2);
             let (primary_id22, partition_id22) = match operations.first().unwrap() {
                 Operation::RemoveBeforeAddVector {
@@ -1688,16 +1783,20 @@ mod tests {
             );
 
             // remove first vector
-            let operations = table
-                .add(
-                    &index_key,
-                    DbEmbedding {
-                        primary_key: [CqlValue::Int(1), CqlValue::Int(1)].into(),
-                        embedding: None,
-                        timestamp: Timestamp::from_unix_timestamp(200),
-                    },
-                )
-                .unwrap();
+            let operations = single_col_ops(
+                table
+                    .add(
+                        &index_key,
+                        DbEmbedding {
+                            primary_key: [CqlValue::Int(1), CqlValue::Int(1)].into(),
+                            embeddings: vec![Some(EmbeddingValue {
+                                embedding: None,
+                                timestamp: Timestamp::from_unix_timestamp(200),
+                            })],
+                        },
+                    )
+                    .unwrap(),
+            );
             assert_eq!(operations.len(), 1);
             let (primary_id13, partition_id13) = match operations.first().unwrap() {
                 Operation::RemoveVector {
@@ -1711,16 +1810,20 @@ mod tests {
             assert!(table.primary_key(partition_id13, primary_id13).is_none());
 
             // remove second vector
-            let operations = table
-                .add(
-                    &index_key,
-                    DbEmbedding {
-                        primary_key: [CqlValue::Int(1), CqlValue::Int(2)].into(),
-                        embedding: None,
-                        timestamp: Timestamp::from_unix_timestamp(200),
-                    },
-                )
-                .unwrap();
+            let operations = single_col_ops(
+                table
+                    .add(
+                        &index_key,
+                        DbEmbedding {
+                            primary_key: [CqlValue::Int(1), CqlValue::Int(2)].into(),
+                            embeddings: vec![Some(EmbeddingValue {
+                                embedding: None,
+                                timestamp: Timestamp::from_unix_timestamp(200),
+                            })],
+                        },
+                    )
+                    .unwrap(),
+            );
             assert_eq!(operations.len(), 1);
             let (primary_id23, partition_id23) = match operations.first().unwrap() {
                 Operation::RemoveVector {
@@ -1734,16 +1837,20 @@ mod tests {
             assert!(table.primary_key(partition_id23, primary_id23).is_none());
 
             // remove third vector
-            let operations = table
-                .add(
-                    &index_key,
-                    DbEmbedding {
-                        primary_key: [CqlValue::Int(1), CqlValue::Int(3)].into(),
-                        embedding: None,
-                        timestamp: Timestamp::from_unix_timestamp(200),
-                    },
-                )
-                .unwrap();
+            let operations = single_col_ops(
+                table
+                    .add(
+                        &index_key,
+                        DbEmbedding {
+                            primary_key: [CqlValue::Int(1), CqlValue::Int(3)].into(),
+                            embeddings: vec![Some(EmbeddingValue {
+                                embedding: None,
+                                timestamp: Timestamp::from_unix_timestamp(200),
+                            })],
+                        },
+                    )
+                    .unwrap(),
+            );
             if partition_key_columns.is_none() {
                 assert_eq!(operations.len(), 1);
             } else {

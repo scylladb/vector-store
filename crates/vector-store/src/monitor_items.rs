@@ -65,7 +65,7 @@ async fn add(
     metrics: &Metrics,
     key: &IndexKey,
 ) {
-    let Ok(operations) = table
+    let Ok(all_operations) = table
         .write()
         .unwrap()
         .add(key, embedding)
@@ -76,43 +76,53 @@ async fn add(
         return;
     };
     let in_progress = &mut in_progress;
-    for operation in operations.into_iter() {
-        match operation {
-            Operation::AddVector {
-                primary_id,
-                partition_id,
-                vector,
-                is_update,
-            } => {
-                let op_label = if is_update { "update" } else { "insert" };
-                index
-                    .add_vector(partition_id, primary_id, vector, in_progress.take())
-                    .await;
-                metrics
-                    .modified
-                    .with_label_values(&[key.keyspace().as_ref(), key.index().as_ref(), op_label])
-                    .inc();
-            }
-            Operation::RemoveBeforeAddVector {
-                primary_id,
-                partition_id,
-            } => {
-                index.remove_vector(partition_id, primary_id, None).await;
-            }
-            Operation::RemoveVector {
-                primary_id,
-                partition_id,
-            } => {
-                index
-                    .remove_vector(partition_id, primary_id, in_progress.take())
-                    .await;
-                metrics
-                    .modified
-                    .with_label_values(&[key.keyspace().as_ref(), key.index().as_ref(), "remove"])
-                    .inc();
-            }
-            Operation::RemovePartition { partition_id } => {
-                index.remove_partition(partition_id).await;
+    for operations in all_operations.into_iter() {
+        for operation in operations.into_iter() {
+            match operation {
+                Operation::AddVector {
+                    primary_id,
+                    partition_id,
+                    vector,
+                    is_update,
+                } => {
+                    let op_label = if is_update { "update" } else { "insert" };
+                    index
+                        .add_vector(partition_id, primary_id, vector, in_progress.take())
+                        .await;
+                    metrics
+                        .modified
+                        .with_label_values(&[
+                            key.keyspace().as_ref(),
+                            key.index().as_ref(),
+                            op_label,
+                        ])
+                        .inc();
+                }
+                Operation::RemoveBeforeAddVector {
+                    primary_id,
+                    partition_id,
+                } => {
+                    index.remove_vector(partition_id, primary_id, None).await;
+                }
+                Operation::RemoveVector {
+                    primary_id,
+                    partition_id,
+                } => {
+                    index
+                        .remove_vector(partition_id, primary_id, in_progress.take())
+                        .await;
+                    metrics
+                        .modified
+                        .with_label_values(&[
+                            key.keyspace().as_ref(),
+                            key.index().as_ref(),
+                            "remove",
+                        ])
+                        .inc();
+                }
+                Operation::RemovePartition { partition_id } => {
+                    index.remove_partition(partition_id).await;
+                }
             }
         }
     }
@@ -123,6 +133,7 @@ async fn add(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::EmbeddingValue;
     use crate::Timestamp;
     use crate::metrics::Metrics;
     use crate::table::MockTableAdd;
@@ -174,8 +185,10 @@ mod tests {
 
         let embedding = DbEmbedding {
             primary_key: [CqlValue::Int(1)].into(),
-            embedding: Some(vec![1.].into()),
-            timestamp: Timestamp::from_unix_timestamp(10),
+            embeddings: vec![Some(EmbeddingValue {
+                embedding: Some(vec![1.].into()),
+                timestamp: Timestamp::from_unix_timestamp(10),
+            })],
         };
         table
             .write()
@@ -209,8 +222,10 @@ mod tests {
 
         let embedding = DbEmbedding {
             primary_key: [CqlValue::Int(1)].into(),
-            embedding: Some(vec![1.].into()),
-            timestamp: Timestamp::from_unix_timestamp(10),
+            embeddings: vec![Some(EmbeddingValue {
+                embedding: Some(vec![1.].into()),
+                timestamp: Timestamp::from_unix_timestamp(10),
+            })],
         };
         let (tx_progress, _rx_progress) = mpsc::channel(1);
         table
@@ -220,12 +235,12 @@ mod tests {
             .with(eq(index_key), eq(embedding.clone()))
             .once()
             .returning(|_, _| {
-                Ok(vec![Operation::AddVector {
+                Ok(vec![vec![Operation::AddVector {
                     primary_id: 2.into(),
                     partition_id: 3.into(),
                     vector: vec![4.].into(),
                     is_update: false,
-                }])
+                }]])
             });
         tx_embeddings
             .send((embedding, Some(AsyncInProgress(tx_progress))))
@@ -269,8 +284,10 @@ mod tests {
 
         let embedding = DbEmbedding {
             primary_key: [CqlValue::Int(1)].into(),
-            embedding: Some(vec![1.].into()),
-            timestamp: Timestamp::from_unix_timestamp(10),
+            embeddings: vec![Some(EmbeddingValue {
+                embedding: Some(vec![1.].into()),
+                timestamp: Timestamp::from_unix_timestamp(10),
+            })],
         };
         table
             .write()
@@ -279,12 +296,12 @@ mod tests {
             .with(eq(index_key), eq(embedding.clone()))
             .once()
             .returning(|_, _| {
-                Ok(vec![Operation::AddVector {
+                Ok(vec![vec![Operation::AddVector {
                     primary_id: 2.into(),
                     partition_id: 3.into(),
                     vector: vec![4.].into(),
                     is_update: false,
-                }])
+                }]])
             });
         tx_embeddings.send((embedding, None)).await.unwrap();
         let Some(Index::AddVector {
@@ -325,8 +342,10 @@ mod tests {
 
         let embedding = DbEmbedding {
             primary_key: [CqlValue::Int(1)].into(),
-            embedding: Some(vec![1.].into()),
-            timestamp: Timestamp::from_unix_timestamp(10),
+            embeddings: vec![Some(EmbeddingValue {
+                embedding: Some(vec![1.].into()),
+                timestamp: Timestamp::from_unix_timestamp(10),
+            })],
         };
         table
             .write()
@@ -335,7 +354,7 @@ mod tests {
             .with(eq(index_key), eq(embedding.clone()))
             .once()
             .returning(|_, _| {
-                Ok(vec![
+                Ok(vec![vec![
                     Operation::RemoveBeforeAddVector {
                         primary_id: 2.into(),
                         partition_id: 3.into(),
@@ -346,7 +365,7 @@ mod tests {
                         vector: vec![4.].into(),
                         is_update: true,
                     },
-                ])
+                ]])
             });
         tx_embeddings.send((embedding, None)).await.unwrap();
 
@@ -398,8 +417,10 @@ mod tests {
 
         let embedding = DbEmbedding {
             primary_key: [CqlValue::Int(1)].into(),
-            embedding: Some(vec![1.].into()),
-            timestamp: Timestamp::from_unix_timestamp(10),
+            embeddings: vec![Some(EmbeddingValue {
+                embedding: Some(vec![1.].into()),
+                timestamp: Timestamp::from_unix_timestamp(10),
+            })],
         };
         table
             .write()
@@ -408,7 +429,7 @@ mod tests {
             .with(eq(index_key), eq(embedding.clone()))
             .once()
             .returning(|_, _| {
-                Ok(vec![
+                Ok(vec![vec![
                     // Plain insert
                     Operation::AddVector {
                         primary_id: 1.into(),
@@ -427,7 +448,7 @@ mod tests {
                         vector: vec![20.].into(),
                         is_update: true,
                     },
-                ])
+                ]])
             });
         tx_embeddings.send((embedding, None)).await.unwrap();
 
@@ -496,8 +517,10 @@ mod tests {
 
         let embedding = DbEmbedding {
             primary_key: [CqlValue::Int(1)].into(),
-            embedding: None,
-            timestamp: Timestamp::from_unix_timestamp(10),
+            embeddings: vec![Some(EmbeddingValue {
+                embedding: None,
+                timestamp: Timestamp::from_unix_timestamp(10),
+            })],
         };
         table
             .write()
@@ -506,10 +529,10 @@ mod tests {
             .with(eq(index_key), eq(embedding.clone()))
             .once()
             .returning(|_, _| {
-                Ok(vec![Operation::RemoveVector {
+                Ok(vec![vec![Operation::RemoveVector {
                     primary_id: 5.into(),
                     partition_id: 6.into(),
-                }])
+                }]])
             });
         tx_embeddings.send((embedding, None)).await.unwrap();
 
@@ -548,8 +571,10 @@ mod tests {
 
         let embedding = DbEmbedding {
             primary_key: [CqlValue::Int(1)].into(),
-            embedding: None,
-            timestamp: Timestamp::from_unix_timestamp(10),
+            embeddings: vec![Some(EmbeddingValue {
+                embedding: None,
+                timestamp: Timestamp::from_unix_timestamp(10),
+            })],
         };
         table
             .write()
@@ -558,9 +583,9 @@ mod tests {
             .with(eq(index_key), eq(embedding.clone()))
             .once()
             .returning(|_, _| {
-                Ok(vec![Operation::RemovePartition {
+                Ok(vec![vec![Operation::RemovePartition {
                     partition_id: 6.into(),
-                }])
+                }]])
             });
         tx_embeddings.send((embedding, None)).await.unwrap();
 

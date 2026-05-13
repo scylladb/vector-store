@@ -757,7 +757,7 @@ impl Statements {
                                     keyspace: keyspace_name.into(),
                                     index: index_name.clone().into(),
                                     table: table_name.into(),
-                                    target_column,
+                                    target_columns: vec![target_column],
                                     index_type,
                                     filtering_columns: Arc::new(filtering_columns),
                                 },

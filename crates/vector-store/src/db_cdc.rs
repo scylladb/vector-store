@@ -7,6 +7,7 @@ use crate::AsyncInProgress;
 use crate::ColumnName;
 use crate::Config;
 use crate::DbEmbedding;
+use crate::EmbeddingValue;
 use crate::IndexMetadata;
 use crate::db_index_backend::DbIndexBackend;
 use crate::internals::Internals;
@@ -552,8 +553,10 @@ impl Consumer for CdcConsumer {
             .send((
                 DbEmbedding {
                     primary_key,
-                    embedding,
-                    timestamp,
+                    embeddings: vec![Some(EmbeddingValue {
+                        embedding,
+                        timestamp,
+                    })],
                 },
                 None,
             ))

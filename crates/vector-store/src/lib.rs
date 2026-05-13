@@ -557,7 +557,7 @@ pub struct IndexMetadata {
     pub keyspace_name: KeyspaceName,
     pub index_name: IndexName,
     pub table_name: TableName,
-    pub target_column: ColumnName,
+    pub target_columns: Vec<ColumnName>,
     pub index_type: DbIndexType,
     pub filtering_columns: Arc<Vec<ColumnName>>,
     pub dimensions: Dimensions,
@@ -592,7 +592,7 @@ pub struct DbCustomIndex {
     pub keyspace: KeyspaceName,
     pub index: IndexName,
     pub table: TableName,
-    pub target_column: ColumnName,
+    pub target_columns: Vec<ColumnName>,
     pub index_type: DbIndexType,
     pub filtering_columns: Arc<Vec<ColumnName>>,
 }
@@ -604,10 +604,17 @@ impl DbCustomIndex {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct DbEmbedding {
-    pub primary_key: PrimaryKey,
+pub struct EmbeddingValue {
     pub embedding: Option<Vector>,
     pub timestamp: Timestamp,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DbEmbedding {
+    pub primary_key: PrimaryKey,
+    /// List of embeddings for each indexed column.
+    /// The order corresponds to the order of target columns in IndexMetadata.
+    pub embeddings: Vec<Option<EmbeddingValue>>,
 }
 
 #[derive(Clone, derive_more::From)]

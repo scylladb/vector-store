@@ -178,7 +178,10 @@ async fn get_indexes(db: &Sender<Db>) -> anyhow::Result<HashSet<IndexMetadata>> 
             .get_index_target_type(
                 idx.keyspace.clone(),
                 idx.table.clone(),
-                idx.target_column.clone(),
+                idx.target_columns
+                    .first()
+                    .ok_or_else(|| anyhow::anyhow!("index {idx:?} has empty target_columns"))?
+                    .clone(),
                 idx.index.clone(),
             )
             .await
@@ -210,7 +213,7 @@ async fn get_indexes(db: &Sender<Db>) -> anyhow::Result<HashSet<IndexMetadata>> 
             keyspace_name: idx.keyspace,
             index_name: idx.index,
             table_name: idx.table,
-            target_column: idx.target_column,
+            target_columns: idx.target_columns,
             index_type: idx.index_type,
             filtering_columns: idx.filtering_columns,
             dimensions,
@@ -414,7 +417,7 @@ mod tests {
                 keyspace: "ks".to_string().into(),
                 index: name.to_string().into(),
                 table: "tbl".to_string().into(),
-                target_column: "embedding".to_string().into(),
+                target_columns: vec!["embedding".to_string().into()],
                 index_type: DbIndexType::Global,
                 filtering_columns: Arc::new(Vec::new()),
             }
@@ -472,7 +475,7 @@ mod tests {
                         keyspace: idx.keyspace.clone(),
                         index: idx.index.clone(),
                         table: idx.table.clone(),
-                        target_column: idx.target_column.clone(),
+                        target_columns: idx.target_columns.clone(),
                         index_type: DbIndexType::Global,
                         filtering_columns: Arc::new(Vec::new()),
                     })
@@ -666,7 +669,7 @@ mod tests {
                         keyspace: "ks".to_string().into(),
                         index: "idx".to_string().into(),
                         table: "tbl".to_string().into(),
-                        target_column: "embedding".to_string().into(),
+                        target_columns: vec!["embedding".to_string().into()],
                         index_type: DbIndexType::Global,
                         filtering_columns: Arc::new(Vec::new()),
                     };
@@ -739,7 +742,7 @@ mod tests {
             keyspace_name: "ks".into(),
             index_name: "idx".into(),
             table_name: "tbl".into(),
-            target_column: "embedding".into(),
+            target_columns: vec!["embedding".into()],
             index_type: DbIndexType::Global,
             filtering_columns: Arc::new(Vec::new()),
             dimensions: NonZeroUsize::new(3).unwrap().into(),
@@ -780,7 +783,7 @@ mod tests {
             keyspace_name: "ks".into(),
             index_name: "idx".into(),
             table_name: "tbl".into(),
-            target_column: "embedding".into(),
+            target_columns: vec!["embedding".into()],
             index_type: DbIndexType::Global,
             filtering_columns: Arc::new(Vec::new()),
             dimensions: NonZeroUsize::new(3).unwrap().into(),
@@ -837,7 +840,7 @@ mod tests {
             keyspace_name: "ks".into(),
             index_name: "idx".into(),
             table_name: "tbl".into(),
-            target_column: "embedding".into(),
+            target_columns: vec!["embedding".into()],
             index_type: DbIndexType::Global,
             filtering_columns: Arc::new(Vec::new()),
             dimensions: NonZeroUsize::new(3).unwrap().into(),
@@ -864,7 +867,7 @@ mod tests {
             keyspace_name: "ks".into(),
             index_name: "idx".into(),
             table_name: "tbl".into(),
-            target_column: "embedding".into(),
+            target_columns: vec!["embedding".into()],
             index_type: DbIndexType::Global,
             filtering_columns: Arc::new(Vec::new()),
             dimensions: NonZeroUsize::new(3).unwrap().into(),
@@ -909,7 +912,7 @@ mod tests {
             keyspace_name: "ks".into(),
             index_name: "idx".into(),
             table_name: "tbl".into(),
-            target_column: "embedding".into(),
+            target_columns: vec!["embedding".into()],
             index_type: DbIndexType::Global,
             filtering_columns: Arc::new(Vec::new()),
             dimensions: NonZeroUsize::new(3).unwrap().into(),

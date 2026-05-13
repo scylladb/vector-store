@@ -61,7 +61,7 @@ fn make_index(
         keyspace_name: "vector".into(),
         table_name: "items".into(),
         index_name: name.into(),
-        target_column: column.into(),
+        target_columns: vec![column.into()],
         index_type,
         filtering_columns: Arc::new(
             filtering_columns

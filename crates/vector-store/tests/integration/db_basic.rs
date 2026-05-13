@@ -23,6 +23,7 @@ use vector_store::ColumnName;
 use vector_store::DbCustomIndex;
 use vector_store::DbEmbedding;
 use vector_store::Dimensions;
+use vector_store::EmbeddingValue;
 use vector_store::IndexMetadata;
 use vector_store::IndexName;
 use vector_store::IndexVersion;
@@ -56,8 +57,10 @@ pub(crate) fn scan_fn(
                     .send((
                         DbEmbedding {
                             primary_key,
-                            embedding,
-                            timestamp,
+                            embeddings: vec![Some(EmbeddingValue {
+                                embedding,
+                                timestamp,
+                            })],
                         },
                         Some(tx_in_progress.clone().into()),
                     ))
@@ -267,7 +270,7 @@ fn process_db(db: &DbBasic, msg: Db, node_state: Sender<NodeState>) {
                                 keyspace: keyspace_name.clone(),
                                 index: index_name.clone(),
                                 table: index.metadata.table_name.clone(),
-                                target_column: index.metadata.target_column.clone(),
+                                target_columns: index.metadata.target_columns.clone(),
                                 index_type: index.metadata.index_type.clone(),
                                 filtering_columns: index.metadata.filtering_columns.clone(),
                             })

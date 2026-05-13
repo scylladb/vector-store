@@ -7,6 +7,7 @@ use crate::AsyncInProgress;
 use crate::ColumnName;
 use crate::Config;
 use crate::DbEmbedding;
+use crate::EmbeddingValue;
 use crate::IndexMetadata;
 use crate::KeyspaceIdentifier;
 use crate::Percentage;
@@ -362,7 +363,7 @@ impl Statements {
         let query = db_index_backend::range_scan_query(
             &keyspace_identifier,
             &table_identifier,
-            &metadata.target_column,
+            &metadata.target_columns,
             &st_primary_key_list,
             &st_partition_key_list,
         );
@@ -619,8 +620,10 @@ impl Statements {
 
                 Some(DbEmbedding {
                     primary_key,
-                    embedding: vector,
-                    timestamp,
+                    embeddings: vec![Some(EmbeddingValue {
+                        embedding: vector,
+                        timestamp,
+                    })],
                 })
             })
             .filter_map(|value| async move {
