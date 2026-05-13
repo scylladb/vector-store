@@ -43,6 +43,8 @@ use axum_server_dual_protocol::Protocol;
 use bigdecimal::BigDecimal;
 use httpapi::DataType;
 use httpapi::IndexInfo;
+use httpapi::IndexStatus;
+use httpapi::IndexStatusResponse;
 use itertools::Itertools;
 use num_bigint::BigInt;
 use prometheus::Encoder;
@@ -316,7 +318,7 @@ async fn get_index_status(
     let keyspace_name: crate::KeyspaceName = keyspace_name.into();
     let index_name: crate::IndexName = index_name.into();
     let index_key = IndexKey::new(&keyspace_name, &index_name);
-    let Some((index, _)) = state.engine.get_index(index_key.clone()).await else {
+    let Some((index, db_index)) = state.engine.get_index(index_key.clone()).await else {
         let msg = format!("missing index: {keyspace_name}.{index_name}");
         debug!("get_index_status: {msg}");
         return (StatusCode::NOT_FOUND, msg).into_response();
@@ -326,6 +328,13 @@ async fn get_index_status(
         .get_index_status(keyspace_name.as_ref(), index_name.as_ref())
         .await
     {
+        // Use the same full-scan-progress check as the ANN endpoint: if the scan
+        // is still in progress, report BOOTSTRAPPING even if the state machine
+        // already transitioned to Serving.
+        let status = match db_index.full_scan_progress().await {
+            Progress::InProgress(_) => IndexStatus::Bootstrapping,
+            Progress::Done => IndexStatus::from(index_status),
+        };
         match index.count(index_key).await {
             Err(err) => {
                 let msg = format!("index.count request error: {err}");
@@ -334,10 +343,7 @@ async fn get_index_status(
             }
             Ok(count) => (
                 StatusCode::OK,
-                response::Json(httpapi::IndexStatusResponse {
-                    status: index_status.into(),
-                    count,
-                }),
+                response::Json(IndexStatusResponse { status, count }),
             )
                 .into_response(),
         }
