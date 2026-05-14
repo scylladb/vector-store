@@ -293,6 +293,7 @@ struct Statements {
     session_rx: tokio::sync::watch::Receiver<Option<Arc<Session>>>,
     primary_key_columns: Arc<Vec<ColumnName>>,
     partition_key_count: usize,
+    target_column_count: usize,
     table_columns: GetTableColumnsR,
     st_range_scan: PreparedStatement,
 }
@@ -379,6 +380,7 @@ impl Statements {
         Ok(Self {
             primary_key_columns,
             partition_key_count,
+            target_column_count: metadata.target_columns.len(),
             table_columns,
             st_range_scan,
             session_rx,
@@ -554,8 +556,9 @@ impl Statements {
         begin: Token,
         end: Token,
     ) -> anyhow::Result<BoxStream<'static, DbEmbedding>> {
-        // last two columns are embedding and writetime
-        let columns_len_expected = self.primary_key_columns.len() + 2;
+        // every row should have primary key columns and 2 columns for each target column (embedding value and writetime)
+        let columns_len_expected = self.primary_key_columns.len() + 2 * self.target_column_count;
+        let target_column_count = self.target_column_count;
 
         // wait for an active session
         let session = {
@@ -586,22 +589,7 @@ impl Statements {
                     return None;
                 }
 
-                let Some(CqlValue::BigInt(timestamp)) = row.columns.pop().unwrap() else {
-                    debug!("range_scan_stream: bad type of a writetime");
-                    return None;
-                };
-                let timestamp = Timestamp::UNIX_EPOCH + Duration::from_micros(timestamp as u64);
-
-                let Some(vector_value) = row.columns.pop().unwrap() else {
-                    debug!("range_scan_stream: missing vector column");
-                    return None;
-                };
-                let Ok(vector) = Vector::try_from(vector_value)
-                    .inspect_err(|err| debug!("range_scan_stream: {err}"))
-                else {
-                    return None;
-                };
-                let vector = Some(vector);
+                let embeddings = extract_embeddings_from_row(&mut row, target_column_count)?;
 
                 let Ok(primary_key) = row
                     .columns
@@ -620,10 +608,7 @@ impl Statements {
 
                 Some(DbEmbedding {
                     primary_key,
-                    embeddings: vec![Some(EmbeddingValue {
-                        embedding: vector,
-                        timestamp,
-                    })],
+                    embeddings,
                 })
             })
             .filter_map(|value| async move {
@@ -634,6 +619,39 @@ impl Statements {
             })
             .boxed())
     }
+}
+
+fn extract_embeddings_from_row(
+    row: &mut Row,
+    num_target_columns: usize,
+) -> Option<Vec<Option<EmbeddingValue>>> {
+    let mut embeddings = Vec::with_capacity(num_target_columns);
+    for _ in 0..num_target_columns {
+        let Some(CqlValue::BigInt(timestamp)) = row.columns.pop().unwrap() else {
+            debug!("range_scan_stream: bad type of a writetime");
+            return None;
+        };
+
+        let timestamp = Timestamp::UNIX_EPOCH + Duration::from_micros(timestamp as u64);
+
+        let Some(vector_value) = row.columns.pop().unwrap() else {
+            debug!("range_scan_stream: missing vector column");
+            return None;
+        };
+        let Ok(vector) =
+            Vector::try_from(vector_value).inspect_err(|err| debug!("range_scan_stream: {err}"))
+        else {
+            return None;
+        };
+        let vector = Some(vector);
+
+        embeddings.push(Some(EmbeddingValue {
+            embedding: vector,
+            timestamp,
+        }));
+    }
+    embeddings.reverse();
+    Some(embeddings)
 }
 
 #[cfg(test)]

@@ -9,6 +9,7 @@ use crate::Config;
 use crate::DbEmbedding;
 use crate::EmbeddingValue;
 use crate::IndexMetadata;
+use crate::PrimaryKey;
 use crate::db_index_backend::DbIndexBackend;
 use crate::internals::Internals;
 use crate::internals::InternalsExt;
@@ -508,32 +509,13 @@ impl Consumer for CdcConsumer {
         }
 
         let source = &self.0.backend;
-        let column = source.vector_column_name();
-        if !row.column_deletable(column) {
-            bail!("CDC error: column {column} should be deletable");
-        }
-        let embedding = row
-            .take_value(column)
-            .map(|v| source.extract_vector(v))
-            .transpose()?
-            .flatten();
+        let embeddings = source.extract_cdc_embeddings(&mut row)?;
 
-        let primary_key = self
-            .0
-            .primary_key_columns
-            .iter()
-            .map(|column| {
-                if !row.column_exists(column.as_ref()) {
-                    bail!("CDC error: primary key column {column} should exist");
-                }
-                if row.column_deletable(column.as_ref()) {
-                    bail!("CDC error: primary key column {column} should not be deletable");
-                }
-                row.take_value(column.as_ref()).ok_or(anyhow!(
-                    "CDC error: primary key column {column} value should exist"
-                ))
-            })
-            .collect::<anyhow::Result<_>>()?;
+        if embeddings.iter().all(|e| e.is_none()) {
+            return Ok(());
+        }
+
+        let primary_key = extract_primary_key(&mut row, &self.0.primary_key_columns)?;
 
         const HUNDREDS_NANOS_TO_MICROS: u64 = 10;
         let timestamp = (self.0.gregorian_epoch
@@ -547,16 +529,23 @@ impl Consumer for CdcConsumer {
             ))
         .into();
 
+        let embeddings = embeddings
+            .into_iter()
+            .map(|embedding| {
+                embedding.map(|embedding| EmbeddingValue {
+                    embedding,
+                    timestamp,
+                })
+            })
+            .collect();
+
         _ = self
             .0
             .tx
             .send((
                 DbEmbedding {
                     primary_key,
-                    embeddings: vec![Some(EmbeddingValue {
-                        embedding,
-                        timestamp,
-                    })],
+                    embeddings,
                 },
                 None,
             ))
@@ -610,4 +599,25 @@ impl CdcConsumerFactory {
             gregorian_epoch,
         })))
     }
+}
+
+fn extract_primary_key(
+    row: &mut CDCRow<'_>,
+    primary_key_columns: &[ColumnName],
+) -> anyhow::Result<PrimaryKey> {
+    primary_key_columns
+        .iter()
+        .map(|column| {
+            if !row.column_exists(column.as_ref()) {
+                bail!("CDC error: primary key column {column} should exist");
+            }
+            if row.column_deletable(column.as_ref()) {
+                bail!("CDC error: primary key column {column} should not be deletable");
+            }
+            row.take_value(column.as_ref()).ok_or(anyhow!(
+                "CDC error: primary key column {column} value should exist"
+            ))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()
+        .map(PrimaryKey::from)
 }
