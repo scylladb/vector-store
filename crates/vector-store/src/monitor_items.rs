@@ -78,56 +78,58 @@ async fn add(
     let in_progress = &mut in_progress;
     for operations in all_operations.into_iter() {
         for operation in operations.into_iter() {
-            match operation {
-                Operation::AddVector {
-                    primary_id,
-                    partition_id,
-                    vector,
-                    is_update,
-                } => {
-                    let op_label = if is_update { "update" } else { "insert" };
-                    index
-                        .add_vector(partition_id, primary_id, vector, in_progress.take())
-                        .await;
-                    metrics
-                        .modified
-                        .with_label_values(&[
-                            key.keyspace().as_ref(),
-                            key.index().as_ref(),
-                            op_label,
-                        ])
-                        .inc();
-                }
-                Operation::RemoveBeforeAddVector {
-                    primary_id,
-                    partition_id,
-                } => {
-                    index.remove_vector(partition_id, primary_id, None).await;
-                }
-                Operation::RemoveVector {
-                    primary_id,
-                    partition_id,
-                } => {
-                    index
-                        .remove_vector(partition_id, primary_id, in_progress.take())
-                        .await;
-                    metrics
-                        .modified
-                        .with_label_values(&[
-                            key.keyspace().as_ref(),
-                            key.index().as_ref(),
-                            "remove",
-                        ])
-                        .inc();
-                }
-                Operation::RemovePartition { partition_id } => {
-                    index.remove_partition(partition_id).await;
-                }
-            }
+            execute_operation(operation, index, in_progress, metrics, key).await;
         }
     }
 
     metrics.mark_dirty(key.keyspace().as_ref(), key.index().as_ref());
+}
+
+async fn execute_operation(
+    operation: Operation,
+    index: &Sender<Index>,
+    in_progress: &mut Option<AsyncInProgress>,
+    metrics: &Metrics,
+    key: &IndexKey,
+) {
+    match operation {
+        Operation::AddVector {
+            primary_id,
+            partition_id,
+            vector,
+            is_update,
+        } => {
+            let op_label = if is_update { "update" } else { "insert" };
+            index
+                .add_vector(partition_id, primary_id, vector, in_progress.take())
+                .await;
+            metrics
+                .modified
+                .with_label_values(&[key.keyspace().as_ref(), key.index().as_ref(), op_label])
+                .inc();
+        }
+        Operation::RemoveBeforeAddVector {
+            primary_id,
+            partition_id,
+        } => {
+            index.remove_vector(partition_id, primary_id, None).await;
+        }
+        Operation::RemoveVector {
+            primary_id,
+            partition_id,
+        } => {
+            index
+                .remove_vector(partition_id, primary_id, in_progress.take())
+                .await;
+            metrics
+                .modified
+                .with_label_values(&[key.keyspace().as_ref(), key.index().as_ref(), "remove"])
+                .inc();
+        }
+        Operation::RemovePartition { partition_id } => {
+            index.remove_partition(partition_id).await;
+        }
+    }
 }
 
 #[cfg(test)]
