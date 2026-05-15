@@ -902,6 +902,53 @@ impl Index {
             },
         }
     }
+
+    fn vector_timestamps_for_mut(
+        &mut self,
+        col_idx: usize,
+    ) -> anyhow::Result<&mut ColumnVec<PrimaryId, ETValue<()>>> {
+        self.vector_timestamps.get_mut(col_idx).ok_or_else(|| {
+            let index_id = self.index_id;
+            anyhow!("Missing embedding_timestamps for index_id {index_id:?}, col_idx {col_idx}")
+        })
+    }
+
+    fn read_column_state(
+        &self,
+        primary_id: PrimaryId,
+        col_idx: usize,
+    ) -> anyhow::Result<(Epoch, Timestamp, bool)> {
+        let index_id = self.index_id;
+        let vector_timestamps = self.vector_timestamps.get(col_idx).ok_or_else(|| {
+            anyhow!(
+                "Failed to read column state: \
+                    missing embedding timestamps for index_id {index_id:?} and col_idx {col_idx}"
+            )
+        })?;
+        match vector_timestamps.get(primary_id) {
+            Some(ETValue::Some(epoch, stored_timestamp, _)) => {
+                Ok((*epoch, *stored_timestamp, true))
+            }
+            Some(ETValue::None(epoch, stored_timestamp)) => Ok((*epoch, *stored_timestamp, false)),
+            None => {
+                bail!(
+                    "Failed to update vector: \
+                    missing embedding timestamp for index_id {index_id:?}, \
+                    col_idx {col_idx} and primary_id {primary_id:?}"
+                );
+            }
+        }
+    }
+
+    fn require_partition_id(&self, primary_id: PrimaryId) -> anyhow::Result<PartitionId> {
+        let index_id = self.index_id;
+        self.partition_id(primary_id).ok_or_else(|| {
+            anyhow!(
+                "Failed to update vector: \
+                missing partition id for index_id {index_id:?} and primary_id {primary_id:?}"
+            )
+        })
+    }
 }
 
 /// A struct that represents a table in the database.
@@ -1127,86 +1174,61 @@ impl TableAdd for Table {
         match row_map.entry(normalized_key) {
             Entry::Occupied(entry) => {
                 let primary_id = *entry.get();
-                self.indexes.iter_mut().try_for_each(|(index_id, index)| {
-                    for (col_idx, embedding) in embeddings.iter().enumerate() {
-                        let (vector, vector_timestamp) = match embedding {
-                            Some(ev) => (&ev.embedding, ev.timestamp),
-                            None => continue,
-                        };
-                        let vector_timestamps=  index
-                            .vector_timestamps
-                            .get(col_idx)
-                            .ok_or_else(|| {
-                                anyhow!(
-                                    "Missing embedding_timestamps for col_idx {col_idx}, \
-                                    index_id {index_id:?}"
-                                )
+                self.indexes.iter_mut().try_for_each(
+                    |(_index_id, index)| -> anyhow::Result<()> {
+                        for (col_idx, embedding) in embeddings.iter().enumerate() {
+                            let (vector, vector_timestamp) = match embedding {
+                                Some(ev) => (&ev.embedding, ev.timestamp),
+                                None => continue,
+                            };
+                            let (epoch, stored_timestamp, vector_already_exists) =
+                                index.read_column_state(primary_id, col_idx)?;
+                            if stored_timestamp >= vector_timestamp {
+                                continue;
+                            }
+                            let primary_id = primary_id.new_epoch(epoch);
+                            let partition_id = index.require_partition_id(primary_id)?;
+                            let ops = all_operations.get_mut(col_idx).ok_or_else(|| {
+                                anyhow!("col_idx {col_idx} out of bounds for all_operations")
                             })?;
-                        let (epoch, stored_timestamp, vector_already_exists) = match
-                            vector_timestamps
-                            .get(primary_id)
-                        {
-                            Some(ETValue::Some(epoch, stored_timestamp, _)) => {
-                                (*epoch, *stored_timestamp, true)
-                            }
-                            Some(ETValue::None(epoch, stored_timestamp)) => {
-                                (*epoch, *stored_timestamp, false)
-                            }
-                            None => {
-                                bail!(
-                                    "Failed to update vector: \
-                                    missing embedding timestamp for index_id {index_id:?}, \
-                                    col_idx {col_idx} and primary_id {primary_id:?}"
-                                );
-                            }
-                        };
-                        if stored_timestamp >= vector_timestamp {
-                            continue;
-                        }
-                        let primary_id = primary_id.new_epoch(epoch);
-                        let partition_id = index.partition_id(primary_id).ok_or_else(|| {
-                            anyhow!(
-                                "Failed to update vector: \
-                                missing partition id for index_id {index_id:?} and primary_id {primary_id:?}"
-                            )
-                        })?;
-                        let ops = &mut all_operations[col_idx];
-                        if let Some(vector) = vector {
-                            if vector_already_exists {
-                                ops.push(Operation::RemoveBeforeAddVector {
-                                    primary_id,
-                                    partition_id,
-                                });
-                            }
+                            let vector_timestamp_storage =
+                                index.vector_timestamps_for_mut(col_idx)?;
 
-                            let primary_id = primary_id.next_epoch();
-                            ops.push(Operation::AddVector {
-                                primary_id,
-                                partition_id,
-                                vector: vector.clone(),
-                                is_update: vector_already_exists,
-                            });
-                            index.vector_timestamps[col_idx]
-                                .update_epoch_timestamp(primary_id, vector_timestamp)?;
-                        } else {
-                            let epoch = primary_id.epoch().next();
-                            index.vector_timestamps[col_idx].update(
-                                primary_id,
-                                ETValue::None(epoch, stored_timestamp),
-                            )?;
-                            if vector_already_exists {
-                                ops.push(Operation::RemoveVector {
+                            if let Some(vector) = vector {
+                                if vector_already_exists {
+                                    ops.push(Operation::RemoveBeforeAddVector {
+                                        primary_id,
+                                        partition_id,
+                                    });
+                                }
+
+                                let primary_id = primary_id.next_epoch();
+                                ops.push(Operation::AddVector {
                                     primary_id,
                                     partition_id,
+                                    vector: vector.clone(),
+                                    is_update: vector_already_exists,
                                 });
-                                if index.data.remove_row(primary_id) {
-                                    ops.push(Operation::RemovePartition { partition_id });
+                                vector_timestamp_storage
+                                    .update_epoch_timestamp(primary_id, vector_timestamp)?;
+                            } else {
+                                let epoch = primary_id.epoch().next();
+                                vector_timestamp_storage
+                                    .update(primary_id, ETValue::None(epoch, stored_timestamp))?;
+                                if vector_already_exists {
+                                    ops.push(Operation::RemoveVector {
+                                        primary_id,
+                                        partition_id,
+                                    });
+                                    if index.data.remove_row(primary_id) {
+                                        ops.push(Operation::RemovePartition { partition_id });
+                                    }
                                 }
                             }
                         }
-                    }
-                    Ok(())
-                })?;
+                        Ok(())
+                    },
+                )?;
                 Ok(all_operations)
             }
 
@@ -1239,19 +1261,38 @@ impl TableAdd for Table {
                             }
                         };
                         for (col_idx, embedding) in embeddings.iter().enumerate() {
-                            let Some(ev) = embedding else { continue };
-                            if let Some(vector) = &ev.embedding {
-                                index.vector_timestamps[col_idx].update(
+                            let ts = index.vector_timestamps.get_mut(col_idx).ok_or_else(|| {
+                                anyhow!("col_idx {col_idx} out of bounds for vector_timestamps")
+                            })?;
+                            if let Some(ev) = embedding {
+                                if let Some(vector) = &ev.embedding {
+                                    ts.update(
+                                        primary_id,
+                                        ETValue::Some(primary_id.epoch(), ev.timestamp, ()),
+                                    )?;
+                                    let ops = all_operations.get_mut(col_idx).ok_or_else(|| {
+                                        anyhow!(
+                                            "col_idx {col_idx} out of bounds for all_operations"
+                                        )
+                                    })?;
+                                    ops.push(Operation::AddVector {
+                                        primary_id,
+                                        partition_id,
+                                        vector: vector.clone(),
+                                        is_update: false,
+                                    });
+                                } else {
+                                    ts.update(
+                                        primary_id,
+                                        ETValue::None(primary_id.epoch(), ev.timestamp),
+                                    )?;
+                                }
+                            } else {
+                                ts.update(
                                     primary_id,
-                                    ETValue::Some(primary_id.epoch(), ev.timestamp, ()),
+                                    ETValue::None(primary_id.epoch(), Timestamp::UNIX_EPOCH),
                                 )?;
-                                all_operations[col_idx].push(Operation::AddVector {
-                                    primary_id,
-                                    partition_id,
-                                    vector: vector.clone(),
-                                    is_update: false,
-                                });
-                            }
+                            };
                         }
                         Ok(())
                     },
