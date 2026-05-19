@@ -491,6 +491,12 @@ pub async fn load_config(env: impl Fn(&str) -> anyhow::Result<String>) -> anyhow
         .transpose()?
         .map(|v| v.into());
 
+    config.engine_status_update_interval = env("VECTOR_STORE_INDEX_STATUS_UPDATE_INTERVAL")
+        .ok()
+        .map(|v| v.parse::<humantime::Duration>())
+        .transpose()?
+        .map(|v| v.into());
+
     config.cql_uri_translation_map = env("VECTOR_STORE_CQL_URI_TRANSLATION_MAP")
         .ok()
         .map(|v| serde_json::from_str(&v))

@@ -32,6 +32,7 @@ service supports also `.env` files.
 | `VECTOR_STORE_CDC_FINE_SAFETY_INTERVAL`    | Fine-grained CDC reader's safety interval for low-latency updates (ie. `100ms`)                                                                                                      | `100ms`                  |
 | `VECTOR_STORE_CDC_FINE_SLEEP_INTERVAL`     | Fine-grained CDC reader's sleep interval for low-latency updates (ie. `500ms`)                                                                                                       | `500ms`                  |
 | `VECTOR_STORE_MONITOR_INDEXES_INTERVAL`    | How often to poll Scylla for schema changes (new/removed vector indexes). The value is in human readable format (ie. `100ms`)                                                        | `1s`                     |
+| `VECTOR_STORE_INDEX_STATUS_UPDATE_INTERVAL` | How often to sync index status (e.g., BOOTSTRAPPING->SERVING) into the engine's cached state. The value is in human readable format (ie. `100ms`) | `1s`            |
 | `VECTOR_STORE_USEARCH_SIMULATOR`           | Enable simulator for USearch. Provides human readable delays for simulated operations (`search:add-remove:reserve`).                                                                 |                          |
 | `VECTOR_STORE_ALTER_INDEX_SIMULATOR`       | Enable simulator for missing `ALTER INDEX`. When enable indexes aren't deleted and their version is not checked.                                                                     | `false`                  |
 

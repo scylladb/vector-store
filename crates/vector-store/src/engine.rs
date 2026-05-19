@@ -121,14 +121,17 @@ pub(crate) async fn new(
         config_rx.clone(),
     )
     .await?;
+    let check_interval = config_rx
+        .borrow()
+        .engine_status_update_interval
+        .unwrap_or(Duration::from_secs(1));
     let memory_actor = memory::new(config_rx);
 
     tokio::spawn(
         async move {
             debug!("starting");
 
-            const CHECK_INTERVAL: Duration = Duration::from_secs(1);
-            let mut interval = time::interval(CHECK_INTERVAL);
+            let mut interval = time::interval(check_interval);
             loop {
                 tokio::select! {
                     msg = rx.recv() => {
