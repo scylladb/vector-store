@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+mod alternator;
 mod ann;
 mod auth;
 mod cdc;
@@ -245,4 +246,5 @@ pub async fn test_cases() -> impl Iterator<Item = (String, TestCase<TestActors>)
     ]
     .into_iter()
     .map(|(name, test_case)| (name.to_string(), test_case))
+    .chain(alternator::test_cases().await)
 }
