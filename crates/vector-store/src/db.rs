@@ -9,8 +9,8 @@ use crate::Config;
 use crate::Connectivity;
 use crate::Credentials;
 use crate::DbCustomIndex;
-use crate::DbEmbedding;
 use crate::DbIndexType;
+use crate::DbIndexedRow;
 use crate::Dimensions;
 use crate::ExpansionAdd;
 use crate::ExpansionSearch;
@@ -67,7 +67,7 @@ use uuid::Uuid;
 
 type GetDbIndexR = anyhow::Result<(
     mpsc::Sender<DbIndex>,
-    mpsc::Receiver<(DbEmbedding, Option<AsyncInProgress>)>,
+    mpsc::Receiver<(DbIndexedRow, Option<AsyncInProgress>)>,
 )>;
 pub(crate) type LatestSchemaVersionR = anyhow::Result<Option<CqlTimeuuid>>;
 type GetIndexesR = anyhow::Result<Vec<DbCustomIndex>>;

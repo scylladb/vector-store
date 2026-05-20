@@ -604,17 +604,17 @@ impl DbCustomIndex {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct EmbeddingValue {
+pub struct DbIndexedValue {
     pub embedding: Option<Vector>,
     pub timestamp: Timestamp,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct DbEmbedding {
+pub struct DbIndexedRow {
     pub primary_key: PrimaryKey,
-    /// List of embeddings for each indexed column.
+    /// List of values for each indexed column.
     /// The order corresponds to the order of target columns in IndexMetadata.
-    pub embeddings: Vec<Option<EmbeddingValue>>,
+    pub values: Vec<Option<DbIndexedValue>>,
 }
 
 #[derive(Clone, derive_more::From)]

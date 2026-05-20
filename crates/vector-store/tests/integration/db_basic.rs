@@ -21,9 +21,9 @@ use uuid::Uuid;
 use vector_store::AsyncInProgress;
 use vector_store::ColumnName;
 use vector_store::DbCustomIndex;
-use vector_store::DbEmbedding;
+use vector_store::DbIndexedRow;
+use vector_store::DbIndexedValue;
 use vector_store::Dimensions;
-use vector_store::EmbeddingValue;
 use vector_store::IndexMetadata;
 use vector_store::IndexName;
 use vector_store::IndexVersion;
@@ -39,8 +39,8 @@ use vector_store::db_index::DbIndex;
 use vector_store::node_state::Event;
 use vector_store::node_state::NodeState;
 
-pub(crate) type RxEmbeddings = mpsc::Receiver<(DbEmbedding, Option<AsyncInProgress>)>;
-pub(crate) type TxEmbeddings = mpsc::Sender<(DbEmbedding, Option<AsyncInProgress>)>;
+pub(crate) type RxEmbeddings = mpsc::Receiver<(DbIndexedRow, Option<AsyncInProgress>)>;
+pub(crate) type TxEmbeddings = mpsc::Sender<(DbIndexedRow, Option<AsyncInProgress>)>;
 pub(crate) type ScanFn = Box<dyn FnOnce(TxEmbeddings) -> BoxFuture<'static, ()> + Send + Sync>;
 
 pub(crate) fn scan_fn(
@@ -55,9 +55,9 @@ pub(crate) fn scan_fn(
             for (primary_key, embedding, timestamp) in items.iter().cloned() {
                 let _ = tx
                     .send((
-                        DbEmbedding {
+                        DbIndexedRow {
                             primary_key,
-                            embeddings: vec![Some(EmbeddingValue {
+                            values: vec![Some(DbIndexedValue {
                                 embedding,
                                 timestamp,
                             })],

@@ -6,8 +6,8 @@
 use crate::AsyncInProgress;
 use crate::ColumnName;
 use crate::Config;
-use crate::DbEmbedding;
-use crate::EmbeddingValue;
+use crate::DbIndexedRow;
+use crate::DbIndexedValue;
 use crate::IndexMetadata;
 use crate::KeyspaceIdentifier;
 use crate::Percentage;
@@ -66,7 +66,7 @@ use tracing::warn;
 type GetPrimaryKeyColumnsR = Arc<Vec<ColumnName>>;
 type GetTableColumnsR = Arc<HashMap<ColumnName, NativeType>>;
 type RangeScanResult =
-    anyhow::Result<Pin<Box<dyn Stream<Item = DbEmbedding> + std::marker::Send>>, anyhow::Error>;
+    anyhow::Result<Pin<Box<dyn Stream<Item = DbIndexedRow> + std::marker::Send>>, anyhow::Error>;
 
 const START_RETRY_TIMEOUT: Duration = Duration::from_millis(100);
 const RETRY_TIMEOUT_LIMIT: Duration = Duration::from_secs(16);
@@ -153,7 +153,7 @@ pub(crate) async fn new(
     cdc_error_notify: Arc<Notify>,
 ) -> anyhow::Result<(
     mpsc::Sender<DbIndex>,
-    mpsc::Receiver<(DbEmbedding, Option<AsyncInProgress>)>,
+    mpsc::Receiver<(DbIndexedRow, Option<AsyncInProgress>)>,
 )> {
     let key = metadata.key();
 
@@ -429,7 +429,7 @@ impl Statements {
     /// to send read embeddings into the pipeline.
     async fn initial_scan(
         &self,
-        tx: mpsc::Sender<(DbEmbedding, Option<AsyncInProgress>)>,
+        tx: mpsc::Sender<(DbIndexedRow, Option<AsyncInProgress>)>,
         completed_scan_length: Arc<AtomicU64>,
     ) {
         let semaphore_capacity = self.nr_parallel_queries().get();
@@ -555,7 +555,7 @@ impl Statements {
         &self,
         begin: Token,
         end: Token,
-    ) -> anyhow::Result<BoxStream<'static, DbEmbedding>> {
+    ) -> anyhow::Result<BoxStream<'static, DbIndexedRow>> {
         // every row should have primary key columns and 2 columns for each target column (embedding value and writetime)
         let columns_len_expected = self.primary_key_columns.len() + 2 * self.target_column_count;
         let target_column_count = self.target_column_count;
@@ -606,9 +606,9 @@ impl Statements {
                     return None;
                 };
 
-                Some(DbEmbedding {
+                Some(DbIndexedRow {
                     primary_key,
-                    embeddings,
+                    values: embeddings,
                 })
             })
             .filter_map(|value| async move {
@@ -624,7 +624,7 @@ impl Statements {
 fn extract_embeddings_from_row(
     row: &mut Row,
     num_target_columns: usize,
-) -> Option<Vec<Option<EmbeddingValue>>> {
+) -> Option<Vec<Option<DbIndexedValue>>> {
     let mut embeddings = Vec::with_capacity(num_target_columns);
     for _ in 0..num_target_columns {
         let Some(CqlValue::BigInt(timestamp)) = row.columns.pop().unwrap() else {
@@ -645,7 +645,7 @@ fn extract_embeddings_from_row(
         };
         let vector = Some(vector);
 
-        embeddings.push(Some(EmbeddingValue {
+        embeddings.push(Some(DbIndexedValue {
             embedding: vector,
             timestamp,
         }));

@@ -4,7 +4,7 @@
  */
 
 use crate::AsyncInProgress;
-use crate::DbEmbedding;
+use crate::DbIndexedRow;
 use crate::IndexKey;
 use crate::Metrics;
 use crate::index::Index;
@@ -27,7 +27,7 @@ pub(crate) enum MonitorItems {}
 pub(crate) async fn new(
     key: IndexKey,
     table: Arc<RwLock<impl TableAdd + Send + Sync + 'static>>,
-    mut embeddings: Receiver<(DbEmbedding, Option<AsyncInProgress>)>,
+    mut embeddings: Receiver<(DbIndexedRow, Option<AsyncInProgress>)>,
     index: Sender<Index>,
     metrics: Arc<Metrics>,
 ) -> anyhow::Result<Sender<MonitorItems>> {
@@ -60,7 +60,7 @@ pub(crate) async fn new(
 async fn add(
     table: &Arc<RwLock<impl TableAdd>>,
     index: &Sender<Index>,
-    embedding: DbEmbedding,
+    embedding: DbIndexedRow,
     mut in_progress: Option<AsyncInProgress>,
     metrics: &Metrics,
     key: &IndexKey,
@@ -135,7 +135,7 @@ async fn execute_operation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::EmbeddingValue;
+    use crate::DbIndexedValue;
     use crate::Timestamp;
     use crate::metrics::Metrics;
     use crate::table::MockTableAdd;
@@ -185,9 +185,9 @@ mod tests {
         .await
         .unwrap();
 
-        let embedding = DbEmbedding {
+        let embedding = DbIndexedRow {
             primary_key: [CqlValue::Int(1)].into(),
-            embeddings: vec![Some(EmbeddingValue {
+            values: vec![Some(DbIndexedValue {
                 embedding: Some(vec![1.].into()),
                 timestamp: Timestamp::from_unix_timestamp(10),
             })],
@@ -222,9 +222,9 @@ mod tests {
         .await
         .unwrap();
 
-        let embedding = DbEmbedding {
+        let embedding = DbIndexedRow {
             primary_key: [CqlValue::Int(1)].into(),
-            embeddings: vec![Some(EmbeddingValue {
+            values: vec![Some(DbIndexedValue {
                 embedding: Some(vec![1.].into()),
                 timestamp: Timestamp::from_unix_timestamp(10),
             })],
@@ -284,9 +284,9 @@ mod tests {
         .await
         .unwrap();
 
-        let embedding = DbEmbedding {
+        let embedding = DbIndexedRow {
             primary_key: [CqlValue::Int(1)].into(),
-            embeddings: vec![Some(EmbeddingValue {
+            values: vec![Some(DbIndexedValue {
                 embedding: Some(vec![1.].into()),
                 timestamp: Timestamp::from_unix_timestamp(10),
             })],
@@ -342,9 +342,9 @@ mod tests {
         .await
         .unwrap();
 
-        let embedding = DbEmbedding {
+        let embedding = DbIndexedRow {
             primary_key: [CqlValue::Int(1)].into(),
-            embeddings: vec![Some(EmbeddingValue {
+            values: vec![Some(DbIndexedValue {
                 embedding: Some(vec![1.].into()),
                 timestamp: Timestamp::from_unix_timestamp(10),
             })],
@@ -417,9 +417,9 @@ mod tests {
         .await
         .unwrap();
 
-        let embedding = DbEmbedding {
+        let embedding = DbIndexedRow {
             primary_key: [CqlValue::Int(1)].into(),
-            embeddings: vec![Some(EmbeddingValue {
+            values: vec![Some(DbIndexedValue {
                 embedding: Some(vec![1.].into()),
                 timestamp: Timestamp::from_unix_timestamp(10),
             })],
@@ -517,9 +517,9 @@ mod tests {
         .await
         .unwrap();
 
-        let embedding = DbEmbedding {
+        let embedding = DbIndexedRow {
             primary_key: [CqlValue::Int(1)].into(),
-            embeddings: vec![Some(EmbeddingValue {
+            values: vec![Some(DbIndexedValue {
                 embedding: None,
                 timestamp: Timestamp::from_unix_timestamp(10),
             })],
@@ -571,9 +571,9 @@ mod tests {
         .await
         .unwrap();
 
-        let embedding = DbEmbedding {
+        let embedding = DbIndexedRow {
             primary_key: [CqlValue::Int(1)].into(),
-            embeddings: vec![Some(EmbeddingValue {
+            values: vec![Some(DbIndexedValue {
                 embedding: None,
                 timestamp: Timestamp::from_unix_timestamp(10),
             })],

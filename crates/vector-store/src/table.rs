@@ -4,7 +4,7 @@
  */
 
 use crate::ColumnName;
-use crate::DbEmbedding;
+use crate::DbIndexedRow;
 use crate::IndexKey;
 use crate::PartitionKey;
 use crate::PrimaryKey;
@@ -1137,7 +1137,7 @@ pub(crate) trait TableAdd {
     fn add(
         &mut self,
         index_key: &IndexKey,
-        db_embedding: DbEmbedding,
+        db_embedding: DbIndexedRow,
     ) -> anyhow::Result<Vec<Operations>>;
 }
 
@@ -1148,25 +1148,24 @@ impl TableAdd for Table {
     fn add(
         &mut self,
         index_key: &IndexKey,
-        db_embedding: DbEmbedding,
+        db_embedding: DbIndexedRow,
     ) -> anyhow::Result<Vec<Operations>> {
         let num_target_columns = self.index_by_key(index_key)?.num_target_columns();
-        if db_embedding.embeddings.len() != num_target_columns {
+        if db_embedding.values.len() != num_target_columns {
             bail!(
                 "Mismatched number of embeddings: expected {}, got {}",
                 num_target_columns,
-                db_embedding.embeddings.len()
+                db_embedding.values.len()
             );
         }
         self.reserve_primary_ids()?;
         self.reserve_partition_ids()?;
 
-        let mut all_operations: Vec<Operations> = (0..db_embedding.embeddings.len())
-            .map(|_| Vec::new())
-            .collect();
+        let mut all_operations: Vec<Operations> =
+            (0..db_embedding.values.len()).map(|_| Vec::new()).collect();
 
         let primary_key = db_embedding.primary_key;
-        let embeddings = db_embedding.embeddings;
+        let embeddings = db_embedding.values;
 
         let normalized_key = self.normalize_primary_key(&primary_key);
         let row_map = &mut self.primary_ids;
@@ -1601,7 +1600,7 @@ pub(crate) type Operations = Vec<Operation>;
 mod tests {
     use super::*;
 
-    use crate::EmbeddingValue;
+    use crate::DbIndexedValue;
 
     fn single_col_ops(all: Vec<Operations>) -> Operations {
         all.into_iter().next().unwrap_or_default()
@@ -1634,9 +1633,9 @@ mod tests {
                 table
                     .add(
                         &index_key,
-                        DbEmbedding {
+                        DbIndexedRow {
                             primary_key: [CqlValue::Int(1), CqlValue::Int(1)].into(),
-                            embeddings: vec![Some(EmbeddingValue {
+                            values: vec![Some(DbIndexedValue {
                                 embedding: Some(vec![0.1, 0.2, 0.3].into()),
                                 timestamp: Timestamp::from_unix_timestamp(100),
                             })],
@@ -1663,9 +1662,9 @@ mod tests {
                 table
                     .add(
                         &index_key,
-                        DbEmbedding {
+                        DbIndexedRow {
                             primary_key: [CqlValue::Int(1), CqlValue::Int(2)].into(),
-                            embeddings: vec![Some(EmbeddingValue {
+                            values: vec![Some(DbIndexedValue {
                                 embedding: Some(vec![0.2, 0.2, 0.3].into()),
                                 timestamp: Timestamp::from_unix_timestamp(100),
                             })],
@@ -1694,9 +1693,9 @@ mod tests {
                 table
                     .add(
                         &index_key,
-                        DbEmbedding {
+                        DbIndexedRow {
                             primary_key: [CqlValue::Int(1), CqlValue::Int(3)].into(),
-                            embeddings: vec![Some(EmbeddingValue {
+                            values: vec![Some(DbIndexedValue {
                                 embedding: Some(vec![0.3, 0.2, 0.3].into()),
                                 timestamp: Timestamp::from_unix_timestamp(100),
                             })],
@@ -1765,9 +1764,9 @@ mod tests {
                 table
                     .add(
                         &index_key,
-                        DbEmbedding {
+                        DbIndexedRow {
                             primary_key: [CqlValue::Int(1), CqlValue::Int(2)].into(),
-                            embeddings: vec![Some(EmbeddingValue {
+                            values: vec![Some(DbIndexedValue {
                                 embedding: Some(vec![0.2, 0.2, 0.3].into()),
                                 timestamp: Timestamp::from_unix_timestamp(50),
                             })],
@@ -1782,9 +1781,9 @@ mod tests {
                 table
                     .add(
                         &index_key,
-                        DbEmbedding {
+                        DbIndexedRow {
                             primary_key: [CqlValue::Int(1), CqlValue::Int(2)].into(),
-                            embeddings: vec![Some(EmbeddingValue {
+                            values: vec![Some(DbIndexedValue {
                                 embedding: Some(vec![0.5, 0.5, 0.3].into()),
                                 timestamp: Timestamp::from_unix_timestamp(150),
                             })],
@@ -1828,9 +1827,9 @@ mod tests {
                 table
                     .add(
                         &index_key,
-                        DbEmbedding {
+                        DbIndexedRow {
                             primary_key: [CqlValue::Int(1), CqlValue::Int(1)].into(),
-                            embeddings: vec![Some(EmbeddingValue {
+                            values: vec![Some(DbIndexedValue {
                                 embedding: None,
                                 timestamp: Timestamp::from_unix_timestamp(200),
                             })],
@@ -1855,9 +1854,9 @@ mod tests {
                 table
                     .add(
                         &index_key,
-                        DbEmbedding {
+                        DbIndexedRow {
                             primary_key: [CqlValue::Int(1), CqlValue::Int(2)].into(),
-                            embeddings: vec![Some(EmbeddingValue {
+                            values: vec![Some(DbIndexedValue {
                                 embedding: None,
                                 timestamp: Timestamp::from_unix_timestamp(200),
                             })],
@@ -1882,9 +1881,9 @@ mod tests {
                 table
                     .add(
                         &index_key,
-                        DbEmbedding {
+                        DbIndexedRow {
                             primary_key: [CqlValue::Int(1), CqlValue::Int(3)].into(),
-                            embeddings: vec![Some(EmbeddingValue {
+                            values: vec![Some(DbIndexedValue {
                                 embedding: None,
                                 timestamp: Timestamp::from_unix_timestamp(200),
                             })],
