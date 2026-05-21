@@ -33,7 +33,7 @@ async fn simple_create_search_delete_index() {
         keyspace_name: "vector".into(),
         table_name: "items".into(),
         index_name: "ann".into(),
-        target_column: "embedding".into(),
+        target_columns: vec!["embedding".into()],
         index_type: DbIndexType::Global,
         filtering_columns: Arc::new(Vec::new()),
         dimensions: NonZeroUsize::new(3).unwrap().into(),
@@ -73,7 +73,7 @@ async fn simple_create_search_delete_index() {
                 .into_iter()
                 .collect(),
             ),
-            dimensions: [(index.target_column.clone(), index.dimensions)]
+            dimensions: [(index.target_columns[0].clone(), index.dimensions)]
                 .into_iter()
                 .collect(),
         },

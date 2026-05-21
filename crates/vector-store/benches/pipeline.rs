@@ -46,8 +46,9 @@ use vector_store::ColumnName;
 use vector_store::Config;
 use vector_store::ConfigReceivers;
 use vector_store::Connectivity;
-use vector_store::DbEmbedding;
 use vector_store::DbIndexType;
+use vector_store::DbIndexedRow;
+use vector_store::DbIndexedValue;
 use vector_store::ExpansionAdd;
 use vector_store::ExpansionSearch;
 use vector_store::HttpServerConfig;
@@ -112,7 +113,7 @@ fn default_index_metadata(dimensions: usize) -> IndexMetadata {
         keyspace_name: "vector".into(),
         table_name: "items".into(),
         index_name: "ann".into(),
-        target_column: "embedding".into(),
+        target_columns: vec!["embedding".into()],
         index_type: DbIndexType::Global,
         filtering_columns: Arc::new(vec![]),
         dimensions: NonZeroUsize::new(dimensions).unwrap().into(),
@@ -153,7 +154,7 @@ fn setup_table(
             primary_keys: Arc::new(primary_keys.into_iter().collect()),
             partition_key_count,
             columns: Arc::new(columns.into_iter().collect()),
-            dimensions: [(index.target_column.clone(), index.dimensions)]
+            dimensions: [(index.target_columns[0].clone(), index.dimensions)]
                 .into_iter()
                 .collect(),
         },
@@ -263,10 +264,12 @@ fn scan_fn_mpsc(
             while let Some((primary_key, embedding, timestamp, in_progress)) = items.recv().await {
                 let _ = tx
                     .send((
-                        DbEmbedding {
+                        DbIndexedRow {
                             primary_key,
-                            embedding,
-                            timestamp,
+                            values: vec![Some(DbIndexedValue {
+                                embedding,
+                                timestamp,
+                            })],
                         },
                         in_progress,
                     ))

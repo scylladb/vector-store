@@ -104,7 +104,7 @@ pub(crate) async fn setup_store_with_quantization(
         keyspace_name: "vector".into(),
         table_name: "items".into(),
         index_name: "ann".into(),
-        target_column: "embedding".into(),
+        target_columns: vec!["embedding".into()],
         index_type,
         filtering_columns: Arc::new(columns.keys().cloned().collect()),
         dimensions: dimension,
@@ -123,7 +123,7 @@ pub(crate) async fn setup_store_with_quantization(
             primary_keys: Arc::new(primary_keys.into_iter().collect()),
             partition_key_count,
             columns,
-            dimensions: [(index.target_column.clone(), index.dimensions)]
+            dimensions: [(index.target_columns[0].clone(), index.dimensions)]
                 .into_iter()
                 .collect(),
         },
@@ -291,7 +291,7 @@ async fn failed_db_index_create() {
         keyspace_name: "vector".into(),
         table_name: "items".into(),
         index_name: "ann".into(),
-        target_column: "embedding".into(),
+        target_columns: vec!["embedding".into()],
         index_type: DbIndexType::Global,
         filtering_columns: Arc::new(Vec::new()),
         dimensions: NonZeroUsize::new(3).unwrap().into(),
@@ -331,7 +331,7 @@ async fn failed_db_index_create() {
                 .into_iter()
                 .collect(),
             ),
-            dimensions: [(index.target_column.clone(), index.dimensions)]
+            dimensions: [(index.target_columns[0].clone(), index.dimensions)]
                 .into_iter()
                 .collect(),
         },
@@ -1552,7 +1552,7 @@ async fn similarity_scores_are_decreasing_and_correctly_converted() {
         keyspace_name: "vector".into(),
         table_name: "items".into(),
         index_name: "ann".into(),
-        target_column: "embedding".into(),
+        target_columns: vec!["embedding".into()],
         index_type: DbIndexType::Global,
         filtering_columns: Arc::new(Vec::new()),
         dimensions: NonZeroUsize::new(1).unwrap().into(),
@@ -1571,7 +1571,7 @@ async fn similarity_scores_are_decreasing_and_correctly_converted() {
             primary_keys: Arc::new(vec!["pk".into()]),
             partition_key_count: 1,
             columns: Arc::new([("pk".into(), NativeType::Int)].into_iter().collect()),
-            dimensions: [(index.target_column.clone(), index.dimensions)]
+            dimensions: [(index.target_columns[0].clone(), index.dimensions)]
                 .into_iter()
                 .collect(),
         },

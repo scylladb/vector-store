@@ -4,7 +4,7 @@
  */
 
 use crate::AsyncInProgress;
-use crate::DbEmbedding;
+use crate::DbIndexedRow;
 use crate::IndexKey;
 use crate::Metrics;
 use crate::index::Index;
@@ -27,7 +27,7 @@ pub(crate) enum MonitorItems {}
 pub(crate) async fn new(
     key: IndexKey,
     table: Arc<RwLock<impl TableAdd + Send + Sync + 'static>>,
-    mut embeddings: Receiver<(DbEmbedding, Option<AsyncInProgress>)>,
+    mut embeddings: Receiver<(DbIndexedRow, Option<AsyncInProgress>)>,
     index: Sender<Index>,
     metrics: Arc<Metrics>,
 ) -> anyhow::Result<Sender<MonitorItems>> {
@@ -60,12 +60,12 @@ pub(crate) async fn new(
 async fn add(
     table: &Arc<RwLock<impl TableAdd>>,
     index: &Sender<Index>,
-    embedding: DbEmbedding,
+    embedding: DbIndexedRow,
     mut in_progress: Option<AsyncInProgress>,
     metrics: &Metrics,
     key: &IndexKey,
 ) {
-    let Ok(operations) = table
+    let Ok(all_operations) = table
         .write()
         .unwrap()
         .add(key, embedding)
@@ -76,53 +76,66 @@ async fn add(
         return;
     };
     let in_progress = &mut in_progress;
-    for operation in operations.into_iter() {
-        match operation {
-            Operation::AddVector {
-                primary_id,
-                partition_id,
-                vector,
-                is_update,
-            } => {
-                let op_label = if is_update { "update" } else { "insert" };
-                index
-                    .add_vector(partition_id, primary_id, vector, in_progress.take())
-                    .await;
-                metrics
-                    .modified
-                    .with_label_values(&[key.keyspace().as_ref(), key.index().as_ref(), op_label])
-                    .inc();
-            }
-            Operation::RemoveBeforeAddVector {
-                primary_id,
-                partition_id,
-            } => {
-                index.remove_vector(partition_id, primary_id, None).await;
-            }
-            Operation::RemoveVector {
-                primary_id,
-                partition_id,
-            } => {
-                index
-                    .remove_vector(partition_id, primary_id, in_progress.take())
-                    .await;
-                metrics
-                    .modified
-                    .with_label_values(&[key.keyspace().as_ref(), key.index().as_ref(), "remove"])
-                    .inc();
-            }
-            Operation::RemovePartition { partition_id } => {
-                index.remove_partition(partition_id).await;
-            }
+    for operations in all_operations.into_iter() {
+        for operation in operations.into_iter() {
+            execute_operation(operation, index, in_progress, metrics, key).await;
         }
     }
 
     metrics.mark_dirty(key.keyspace().as_ref(), key.index().as_ref());
 }
 
+async fn execute_operation(
+    operation: Operation,
+    index: &Sender<Index>,
+    in_progress: &mut Option<AsyncInProgress>,
+    metrics: &Metrics,
+    key: &IndexKey,
+) {
+    match operation {
+        Operation::AddVector {
+            primary_id,
+            partition_id,
+            vector,
+            is_update,
+        } => {
+            let op_label = if is_update { "update" } else { "insert" };
+            index
+                .add_vector(partition_id, primary_id, vector, in_progress.take())
+                .await;
+            metrics
+                .modified
+                .with_label_values(&[key.keyspace().as_ref(), key.index().as_ref(), op_label])
+                .inc();
+        }
+        Operation::RemoveBeforeAddVector {
+            primary_id,
+            partition_id,
+        } => {
+            index.remove_vector(partition_id, primary_id, None).await;
+        }
+        Operation::RemoveVector {
+            primary_id,
+            partition_id,
+        } => {
+            index
+                .remove_vector(partition_id, primary_id, in_progress.take())
+                .await;
+            metrics
+                .modified
+                .with_label_values(&[key.keyspace().as_ref(), key.index().as_ref(), "remove"])
+                .inc();
+        }
+        Operation::RemovePartition { partition_id } => {
+            index.remove_partition(partition_id).await;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DbIndexedValue;
     use crate::Timestamp;
     use crate::metrics::Metrics;
     use crate::table::MockTableAdd;
@@ -172,10 +185,12 @@ mod tests {
         .await
         .unwrap();
 
-        let embedding = DbEmbedding {
+        let embedding = DbIndexedRow {
             primary_key: [CqlValue::Int(1)].into(),
-            embedding: Some(vec![1.].into()),
-            timestamp: Timestamp::from_unix_timestamp(10),
+            values: vec![Some(DbIndexedValue {
+                embedding: Some(vec![1.].into()),
+                timestamp: Timestamp::from_unix_timestamp(10),
+            })],
         };
         table
             .write()
@@ -207,10 +222,12 @@ mod tests {
         .await
         .unwrap();
 
-        let embedding = DbEmbedding {
+        let embedding = DbIndexedRow {
             primary_key: [CqlValue::Int(1)].into(),
-            embedding: Some(vec![1.].into()),
-            timestamp: Timestamp::from_unix_timestamp(10),
+            values: vec![Some(DbIndexedValue {
+                embedding: Some(vec![1.].into()),
+                timestamp: Timestamp::from_unix_timestamp(10),
+            })],
         };
         let (tx_progress, _rx_progress) = mpsc::channel(1);
         table
@@ -220,12 +237,12 @@ mod tests {
             .with(eq(index_key), eq(embedding.clone()))
             .once()
             .returning(|_, _| {
-                Ok(vec![Operation::AddVector {
+                Ok(vec![vec![Operation::AddVector {
                     primary_id: 2.into(),
                     partition_id: 3.into(),
                     vector: vec![4.].into(),
                     is_update: false,
-                }])
+                }]])
             });
         tx_embeddings
             .send((embedding, Some(AsyncInProgress(tx_progress))))
@@ -267,10 +284,12 @@ mod tests {
         .await
         .unwrap();
 
-        let embedding = DbEmbedding {
+        let embedding = DbIndexedRow {
             primary_key: [CqlValue::Int(1)].into(),
-            embedding: Some(vec![1.].into()),
-            timestamp: Timestamp::from_unix_timestamp(10),
+            values: vec![Some(DbIndexedValue {
+                embedding: Some(vec![1.].into()),
+                timestamp: Timestamp::from_unix_timestamp(10),
+            })],
         };
         table
             .write()
@@ -279,12 +298,12 @@ mod tests {
             .with(eq(index_key), eq(embedding.clone()))
             .once()
             .returning(|_, _| {
-                Ok(vec![Operation::AddVector {
+                Ok(vec![vec![Operation::AddVector {
                     primary_id: 2.into(),
                     partition_id: 3.into(),
                     vector: vec![4.].into(),
                     is_update: false,
-                }])
+                }]])
             });
         tx_embeddings.send((embedding, None)).await.unwrap();
         let Some(Index::AddVector {
@@ -323,10 +342,12 @@ mod tests {
         .await
         .unwrap();
 
-        let embedding = DbEmbedding {
+        let embedding = DbIndexedRow {
             primary_key: [CqlValue::Int(1)].into(),
-            embedding: Some(vec![1.].into()),
-            timestamp: Timestamp::from_unix_timestamp(10),
+            values: vec![Some(DbIndexedValue {
+                embedding: Some(vec![1.].into()),
+                timestamp: Timestamp::from_unix_timestamp(10),
+            })],
         };
         table
             .write()
@@ -335,7 +356,7 @@ mod tests {
             .with(eq(index_key), eq(embedding.clone()))
             .once()
             .returning(|_, _| {
-                Ok(vec![
+                Ok(vec![vec![
                     Operation::RemoveBeforeAddVector {
                         primary_id: 2.into(),
                         partition_id: 3.into(),
@@ -346,7 +367,7 @@ mod tests {
                         vector: vec![4.].into(),
                         is_update: true,
                     },
-                ])
+                ]])
             });
         tx_embeddings.send((embedding, None)).await.unwrap();
 
@@ -396,10 +417,12 @@ mod tests {
         .await
         .unwrap();
 
-        let embedding = DbEmbedding {
+        let embedding = DbIndexedRow {
             primary_key: [CqlValue::Int(1)].into(),
-            embedding: Some(vec![1.].into()),
-            timestamp: Timestamp::from_unix_timestamp(10),
+            values: vec![Some(DbIndexedValue {
+                embedding: Some(vec![1.].into()),
+                timestamp: Timestamp::from_unix_timestamp(10),
+            })],
         };
         table
             .write()
@@ -408,7 +431,7 @@ mod tests {
             .with(eq(index_key), eq(embedding.clone()))
             .once()
             .returning(|_, _| {
-                Ok(vec![
+                Ok(vec![vec![
                     // Plain insert
                     Operation::AddVector {
                         primary_id: 1.into(),
@@ -427,7 +450,7 @@ mod tests {
                         vector: vec![20.].into(),
                         is_update: true,
                     },
-                ])
+                ]])
             });
         tx_embeddings.send((embedding, None)).await.unwrap();
 
@@ -494,10 +517,12 @@ mod tests {
         .await
         .unwrap();
 
-        let embedding = DbEmbedding {
+        let embedding = DbIndexedRow {
             primary_key: [CqlValue::Int(1)].into(),
-            embedding: None,
-            timestamp: Timestamp::from_unix_timestamp(10),
+            values: vec![Some(DbIndexedValue {
+                embedding: None,
+                timestamp: Timestamp::from_unix_timestamp(10),
+            })],
         };
         table
             .write()
@@ -506,10 +531,10 @@ mod tests {
             .with(eq(index_key), eq(embedding.clone()))
             .once()
             .returning(|_, _| {
-                Ok(vec![Operation::RemoveVector {
+                Ok(vec![vec![Operation::RemoveVector {
                     primary_id: 5.into(),
                     partition_id: 6.into(),
-                }])
+                }]])
             });
         tx_embeddings.send((embedding, None)).await.unwrap();
 
@@ -546,10 +571,12 @@ mod tests {
         .await
         .unwrap();
 
-        let embedding = DbEmbedding {
+        let embedding = DbIndexedRow {
             primary_key: [CqlValue::Int(1)].into(),
-            embedding: None,
-            timestamp: Timestamp::from_unix_timestamp(10),
+            values: vec![Some(DbIndexedValue {
+                embedding: None,
+                timestamp: Timestamp::from_unix_timestamp(10),
+            })],
         };
         table
             .write()
@@ -558,9 +585,9 @@ mod tests {
             .with(eq(index_key), eq(embedding.clone()))
             .once()
             .returning(|_, _| {
-                Ok(vec![Operation::RemovePartition {
+                Ok(vec![vec![Operation::RemovePartition {
                     partition_id: 6.into(),
-                }])
+                }]])
             });
         tx_embeddings.send((embedding, None)).await.unwrap();
 

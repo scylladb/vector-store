@@ -49,7 +49,7 @@ async fn memory_limit_during_index_build() {
         keyspace_name: "ksp".into(),
         table_name: "tbl".into(),
         index_name: "idx".into(),
-        target_column: "v".into(),
+        target_columns: vec!["v".into()],
         index_type: DbIndexType::Global,
         filtering_columns: Arc::new(Vec::new()),
         dimensions: NonZeroUsize::new(3).unwrap().into(),
@@ -68,7 +68,7 @@ async fn memory_limit_during_index_build() {
             primary_keys: Arc::new(vec!["pk".into()]),
             partition_key_count: 1,
             columns: Arc::new([("pk".into(), NativeType::Int)].into_iter().collect()),
-            dimensions: [(index.target_column.clone(), index.dimensions)]
+            dimensions: [(index.target_columns[0].clone(), index.dimensions)]
                 .into_iter()
                 .collect(),
         },

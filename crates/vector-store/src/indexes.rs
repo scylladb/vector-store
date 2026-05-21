@@ -57,12 +57,12 @@ impl Ord for NeedsFiltering {
 }
 
 /// Key for grouping indexes that can be routed between each other
-/// (i.e., indexes over the same keyspace, table, and target column).
+/// (i.e., indexes over the same keyspace, table, and target columns).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct RoutingGroupKey {
     keyspace: KeyspaceName,
     table: TableName,
-    column: ColumnName,
+    columns: Vec<ColumnName>,
 }
 
 impl From<&IndexMetadata> for RoutingGroupKey {
@@ -70,7 +70,7 @@ impl From<&IndexMetadata> for RoutingGroupKey {
         Self {
             keyspace: metadata.keyspace_name.clone(),
             table: metadata.table_name.clone(),
-            column: metadata.target_column.clone(),
+            columns: metadata.target_columns.clone(),
         }
     }
 }
