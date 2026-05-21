@@ -56,8 +56,9 @@ pub(crate) fn scan_fn(
                     .send((
                         DbEmbedding {
                             primary_key,
-                            embedding,
+                            embedding: Some(embedding),
                             timestamp,
+                            column_values: Default::default(),
                         },
                         Some(tx_in_progress.clone().into()),
                     ))

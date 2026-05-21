@@ -12,6 +12,9 @@ use crate::Restriction;
 use crate::Timestamp;
 use crate::Vector;
 use crate::primary_key::normalize;
+use crate::vector::ALTERNATOR_TYPE_JSON;
+use crate::vector::ALTERNATOR_TYPE_N;
+use crate::vector::ALTERNATOR_TYPE_S;
 use anyhow::anyhow;
 use anyhow::bail;
 use bigdecimal::BigDecimal;
@@ -325,6 +328,12 @@ enum TValue<T> {
     Some(Timestamp, T),
 }
 impl<T> TValue<T> {
+    fn timestamp(&self) -> Timestamp {
+        match self {
+            Self::None(t) | Self::Some(t, _) => *t,
+        }
+    }
+
     fn get(&self) -> Option<&T> {
         match self {
             Self::None(_) => None,
@@ -409,6 +418,30 @@ impl Column {
             Self::Uuid(vec) => vec.resize_with(size, || TValue::None(timestamp)),
             Self::Varint(vec) => vec.resize_with(size, || TValue::None(timestamp)),
             Self::PrimaryKey(_) => {}
+        }
+    }
+
+    fn stored_timestamp(&self, primary_id: PrimaryId) -> Option<Timestamp> {
+        match self {
+            Self::Ascii(vec) => vec.get(primary_id).map(|v| v.timestamp()),
+            Self::BigInt(vec) => vec.get(primary_id).map(|v| v.timestamp()),
+            Self::Blob(vec) => vec.get(primary_id).map(|v| v.timestamp()),
+            Self::Boolean(vec) => vec.get(primary_id).map(|v| v.timestamp()),
+            Self::Date(vec) => vec.get(primary_id).map(|v| v.timestamp()),
+            Self::Decimal(vec) => vec.get(primary_id).map(|v| v.timestamp()),
+            Self::Double(vec) => vec.get(primary_id).map(|v| v.timestamp()),
+            Self::Float(vec) => vec.get(primary_id).map(|v| v.timestamp()),
+            Self::Inet(vec) => vec.get(primary_id).map(|v| v.timestamp()),
+            Self::Int(vec) => vec.get(primary_id).map(|v| v.timestamp()),
+            Self::SmallInt(vec) => vec.get(primary_id).map(|v| v.timestamp()),
+            Self::Text(vec) => vec.get(primary_id).map(|v| v.timestamp()),
+            Self::Time(vec) => vec.get(primary_id).map(|v| v.timestamp()),
+            Self::Timestamp(vec) => vec.get(primary_id).map(|v| v.timestamp()),
+            Self::Timeuuid(vec) => vec.get(primary_id).map(|v| v.timestamp()),
+            Self::TinyInt(vec) => vec.get(primary_id).map(|v| v.timestamp()),
+            Self::Uuid(vec) => vec.get(primary_id).map(|v| v.timestamp()),
+            Self::Varint(vec) => vec.get(primary_id).map(|v| v.timestamp()),
+            Self::PrimaryKey(_) => None,
         }
     }
 
@@ -529,6 +562,37 @@ impl Column {
                 vec.update(primary_id, TValue::Some(timestamp, value))
             }
             Self::PrimaryKey(_) => bail!("Cannot insert value into PrimaryKey column"),
+        }
+    }
+
+    /// Records a tombstone for this column at the given primary id and timestamp, clearing any
+    /// previously-stored value.  Analogous to [`Self::insert_cqlvalue`] but writes
+    /// [`TValue::None`] so the column appears absent to the filter evaluator.
+    fn insert_tombstone(
+        &mut self,
+        primary_id: PrimaryId,
+        timestamp: Timestamp,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::Ascii(vec) => vec.update(primary_id, TValue::None(timestamp)),
+            Self::BigInt(vec) => vec.update(primary_id, TValue::None(timestamp)),
+            Self::Blob(vec) => vec.update(primary_id, TValue::None(timestamp)),
+            Self::Boolean(vec) => vec.update(primary_id, TValue::None(timestamp)),
+            Self::Date(vec) => vec.update(primary_id, TValue::None(timestamp)),
+            Self::Decimal(vec) => vec.update(primary_id, TValue::None(timestamp)),
+            Self::Double(vec) => vec.update(primary_id, TValue::None(timestamp)),
+            Self::Float(vec) => vec.update(primary_id, TValue::None(timestamp)),
+            Self::Inet(vec) => vec.update(primary_id, TValue::None(timestamp)),
+            Self::Int(vec) => vec.update(primary_id, TValue::None(timestamp)),
+            Self::SmallInt(vec) => vec.update(primary_id, TValue::None(timestamp)),
+            Self::Text(vec) => vec.update(primary_id, TValue::None(timestamp)),
+            Self::Time(vec) => vec.update(primary_id, TValue::None(timestamp)),
+            Self::Timestamp(vec) => vec.update(primary_id, TValue::None(timestamp)),
+            Self::Timeuuid(vec) => vec.update(primary_id, TValue::None(timestamp)),
+            Self::TinyInt(vec) => vec.update(primary_id, TValue::None(timestamp)),
+            Self::Uuid(vec) => vec.update(primary_id, TValue::None(timestamp)),
+            Self::Varint(vec) => vec.update(primary_id, TValue::None(timestamp)),
+            Self::PrimaryKey(_) => bail!("Cannot insert tombstone into PrimaryKey column"),
         }
     }
 
@@ -1084,6 +1148,7 @@ impl TableAdd for Table {
 
         let primary_key = db_embedding.primary_key;
         let vector = db_embedding.embedding;
+        let column_values = db_embedding.column_values;
 
         let normalized_key = self.normalize_primary_key(&primary_key);
         let row_map = &mut self.primary_ids;
@@ -1115,47 +1180,77 @@ impl TableAdd for Table {
                             missing partition id for index_id {index_id:?} and primary_id {primary_id:?}"
                         )
                     })?;
-                    if let Some(vector) = &vector {
-                        if vector_already_exists {
-                            operations.push(Operation::RemoveBeforeAddVector {
-                                primary_id,
-                                partition_id,
-                            });
-                        }
-
-                        let primary_id = primary_id.next_epoch();
-                        let timestamp = db_embedding.timestamp;
-                        operations.push(Operation::AddVector {
-                            primary_id,
-                            partition_id,
-                            vector: vector.clone(),
-                            is_update: vector_already_exists,
-                        });
-                        index
-                            .vector_timestamps
-                            .update_epoch_timestamp(primary_id, timestamp)?;
-                    } else {
-                        let epoch = primary_id.epoch().next();
-                        index
-                            .vector_timestamps
-                            .update(primary_id, ETValue::None(epoch, *timestamp))?;
-                        if vector_already_exists {
-                            operations.push(Operation::RemoveVector {
-                                primary_id,
-                                partition_id,
-                            });
-                            if index.data.remove_row(primary_id) {
-                                operations.push(Operation::RemovePartition { partition_id });
+                    match &vector {
+                        Some(Some(vector)) => {
+                            if vector_already_exists {
+                                operations.push(Operation::RemoveBeforeAddVector {
+                                    primary_id,
+                                    partition_id,
+                                });
                             }
+
+                            let primary_id = primary_id.next_epoch();
+                            let timestamp = db_embedding.timestamp;
+                            operations.push(Operation::AddVector {
+                                primary_id,
+                                partition_id,
+                                vector: vector.clone(),
+                                is_update: vector_already_exists,
+                            });
+                            index
+                                .vector_timestamps
+                                .update_epoch_timestamp(primary_id, timestamp)?;
+                        }
+                        Some(None) => {
+                            // Explicit deletion: clear the vector.
+                            let epoch = primary_id.epoch().next();
+                            index
+                                .vector_timestamps
+                                .update(primary_id, ETValue::None(epoch, *timestamp))?;
+                            if vector_already_exists {
+                                operations.push(Operation::RemoveVector {
+                                    primary_id,
+                                    partition_id,
+                                });
+                                if index.data.remove_row(primary_id) {
+                                    operations.push(Operation::RemovePartition { partition_id });
+                                }
+                            }
+                        }
+                        None => {
+                            // Vector unchanged; skip the vector update entirely.
                         }
                     }
                     Ok(())
                 })?;
+                // Update filtering column values for this row.
+                // Apply last-writer-wins per column using the column's own timestamp,
+                // which may differ from the vector's timestamp.
+                // A `None` value is a tombstone that clears a previously-stored value.
+                for (col_name, (col_ts, val)) in column_values {
+                    if let Some(col) = self.columns.get_mut(&col_name) {
+                        if col
+                            .stored_timestamp(primary_id)
+                            .is_some_and(|t| t >= col_ts)
+                        {
+                            continue;
+                        }
+                        let result = match val {
+                            Some(val) => {
+                                col.insert_cqlvalue(primary_id, col_ts, val)
+                            }
+                            None => col.insert_tombstone(primary_id, col_ts),
+                        };
+                        if let Err(err) = result {
+                            warn!("Failed to update filtering column '{col_name}': {err}");
+                        }
+                    }
+                }
                 Ok(operations)
             }
 
             Entry::Vacant(entry) => {
-                if let Some(vector) = &vector {
+                if let Some(Some(vector)) = &vector {
                     let primary_id = self.free_primary_ids.take_id()?;
                     entry.insert(primary_id);
                     self.primary_keys
@@ -1188,9 +1283,25 @@ impl TableAdd for Table {
                             Ok(())
                         },
                     )?;
-                } else {
-                    warn!("Added row with no vector, skipping vector addition");
+                    // Store filtering column values for this new row.
+                    // A `None` value is a tombstone that records the column as absent at
+                    // this timestamp, preventing stale out-of-order CDC updates from
+                    // setting it to a value that was already cleared.
+                    for (col_name, (col_ts, val)) in column_values {
+                        if let Some(col) = self.columns.get_mut(&col_name) {
+                            let result = match val {
+                                Some(val) => {
+                                    col.insert_cqlvalue(primary_id, col_ts, val)
+                                }
+                                None => col.insert_tombstone(primary_id, col_ts),
+                            };
+                            if let Err(err) = result {
+                                warn!("Failed to store filtering column '{col_name}': {err}");
+                            }
+                        }
+                    }
                 }
+                // None or Some(None): no vector to add (skip or deletion of non-existent row).
                 Ok(operations)
             }
         }
@@ -1216,6 +1327,18 @@ pub(crate) trait TableSearch {
         primary_id: PrimaryId,
         restriction: &Restriction,
     ) -> bool;
+
+    /// Return the stored values for the given filtering columns for a single
+    /// row identified by `primary_id`.  Columns that have no stored value
+    /// (e.g. the attribute was absent when the row was indexed) are omitted
+    /// from the returned map.  Returns an empty map when `columns` is empty
+    /// or the `primary_id` is invalid.
+    fn column_values_for(
+        &self,
+        partition_id: PartitionId,
+        primary_id: PrimaryId,
+        columns: &[ColumnName],
+    ) -> std::collections::BTreeMap<ColumnName, scylla::value::CqlValue>;
 }
 
 impl TableSearch for Table {
@@ -1351,6 +1474,26 @@ impl TableSearch for Table {
             }
         }
     }
+
+    fn column_values_for(
+        &self,
+        partition_id: PartitionId,
+        primary_id: PrimaryId,
+        columns: &[ColumnName],
+    ) -> std::collections::BTreeMap<ColumnName, scylla::value::CqlValue> {
+        if !self.is_valid_primary_id(partition_id, primary_id) {
+            return std::collections::BTreeMap::new();
+        }
+        columns
+            .iter()
+            .filter_map(|col_name| {
+                self.columns
+                    .get(col_name)
+                    .and_then(|col| col.get(primary_id, &self.primary_keys))
+                    .map(|value| (col_name.clone(), value))
+            })
+            .collect()
+    }
 }
 
 /// Construct a partition key from the given restrictions.
@@ -1392,6 +1535,54 @@ fn partition_key_from_restrictions(
         })
 }
 
+/// Compare an Alternator `:attrs` blob (S-type) against a Text filter restriction.
+/// Returns None if the blob is not an S-type attribute (type mismatch).
+fn alternator_blob_cmp_text(blob: &[u8], b: &str) -> Option<Ordering> {
+    let (&tag, rest) = blob.split_first()?;
+    match tag {
+        ALTERNATOR_TYPE_S => {
+            let a = std::str::from_utf8(rest).ok()?;
+            Some(a.cmp(b))
+        }
+        ALTERNATOR_TYPE_JSON => {
+            let obj: serde_json::Value = serde_json::from_slice(rest).ok()?;
+            let s = obj.as_object()?.get("S")?.as_str()?;
+            Some(s.cmp(b))
+        }
+        _ => None, // N-type or unknown vs Text filter → type mismatch
+    }
+}
+
+/// Compare an Alternator `:attrs` blob (N-type) against a Decimal filter restriction.
+/// Returns None if the blob is not an N-type attribute (type mismatch).
+fn alternator_blob_cmp_decimal(blob: &[u8], b: &CqlDecimal) -> Option<Ordering> {
+    let (&tag, rest) = blob.split_first()?;
+    let (b_bytes, b_scale) = b.as_signed_be_bytes_slice_and_exponent();
+    let b_bd = BigDecimal::from(CqlDecimalBorrowed::from_signed_be_bytes_slice_and_exponent(
+        b_bytes, b_scale,
+    ));
+    let a_bd: BigDecimal = match tag {
+        ALTERNATOR_TYPE_N => {
+            if rest.len() < 4 {
+                return None;
+            }
+            let scale = i32::from_be_bytes([rest[0], rest[1], rest[2], rest[3]]);
+            let varint_bytes = &rest[4..];
+            BigDecimal::from(CqlDecimalBorrowed::from_signed_be_bytes_slice_and_exponent(
+                varint_bytes,
+                scale,
+            ))
+        }
+        ALTERNATOR_TYPE_JSON => {
+            let obj: serde_json::Value = serde_json::from_slice(rest).ok()?;
+            let n_str = obj.as_object()?.get("N")?.as_str()?;
+            n_str.parse().ok()?
+        }
+        _ => return None, // S-type or unknown vs Decimal filter → type mismatch
+    };
+    Some(a_bd.cmp(&b_bd))
+}
+
 /// Compare two CqlValues, returning an Ordering if they are comparable.
 /// Only Numeric, Text, Date, Time, and Timestamp types support comparison operators.
 fn cql_cmp(lhs: &CqlValue, rhs: &CqlValue) -> Option<Ordering> {
@@ -1424,6 +1615,21 @@ fn cql_cmp(lhs: &CqlValue, rhs: &CqlValue) -> Option<Ordering> {
                 CqlDecimalBorrowed::from_signed_be_bytes_slice_and_exponent(b_bytes, b_scale),
             );
             Some(a_bd.cmp(&b_bd))
+        }
+        // Cross-type: Blob (raw Alternator `:attrs` value with type-tag byte) vs Text or Decimal.
+        // The tag byte determines the DynamoDB attribute type:
+        //   ALTERNATOR_TYPE_S (0x00): S-type, payload = raw UTF-8 bytes
+        //   ALTERNATOR_TYPE_N (0x03): N-type, payload = CQL decimal (4-byte BE scale + BE varint)
+        //   ALTERNATOR_TYPE_JSON (0x04): JSON-wrapped {"S":...} or {"N":...}
+        // A type mismatch (S-type blob vs Decimal restriction, or N-type blob vs Text restriction)
+        // returns None, so that e.g. the string "1" does not match a numeric filter < 5.
+        (CqlValue::Blob(blob), CqlValue::Text(b)) => alternator_blob_cmp_text(blob, b),
+        (CqlValue::Text(a), CqlValue::Blob(blob)) => {
+            alternator_blob_cmp_text(blob, a).map(Ordering::reverse)
+        }
+        (CqlValue::Blob(blob), CqlValue::Decimal(b)) => alternator_blob_cmp_decimal(blob, b),
+        (CqlValue::Decimal(a), CqlValue::Blob(blob)) => {
+            alternator_blob_cmp_decimal(blob, a).map(Ordering::reverse)
         }
         // Text types
         (CqlValue::Text(a), CqlValue::Text(b)) => Some(a.cmp(b)),
@@ -1519,8 +1725,9 @@ mod tests {
                     &index_key,
                     DbEmbedding {
                         primary_key: [CqlValue::Int(1), CqlValue::Int(1)].into(),
-                        embedding: Some(vec![0.1, 0.2, 0.3].into()),
+                        embedding: Some(Some(vec![0.1, 0.2, 0.3].into())),
                         timestamp: Timestamp::from_unix_timestamp(100),
+                        column_values: Default::default(),
                     },
                 )
                 .unwrap();
@@ -1544,8 +1751,9 @@ mod tests {
                     &index_key,
                     DbEmbedding {
                         primary_key: [CqlValue::Int(1), CqlValue::Int(2)].into(),
-                        embedding: Some(vec![0.2, 0.2, 0.3].into()),
+                        embedding: Some(Some(vec![0.2, 0.2, 0.3].into())),
                         timestamp: Timestamp::from_unix_timestamp(100),
+                        column_values: Default::default(),
                     },
                 )
                 .unwrap();
@@ -1571,8 +1779,9 @@ mod tests {
                     &index_key,
                     DbEmbedding {
                         primary_key: [CqlValue::Int(1), CqlValue::Int(3)].into(),
-                        embedding: Some(vec![0.3, 0.2, 0.3].into()),
+                        embedding: Some(Some(vec![0.3, 0.2, 0.3].into())),
                         timestamp: Timestamp::from_unix_timestamp(100),
+                        column_values: Default::default(),
                     },
                 )
                 .unwrap();
@@ -1638,8 +1847,9 @@ mod tests {
                     &index_key,
                     DbEmbedding {
                         primary_key: [CqlValue::Int(1), CqlValue::Int(2)].into(),
-                        embedding: Some(vec![0.2, 0.2, 0.3].into()),
+                        embedding: Some(Some(vec![0.2, 0.2, 0.3].into())),
                         timestamp: Timestamp::from_unix_timestamp(50),
+                        column_values: Default::default(),
                     },
                 )
                 .unwrap();
@@ -1651,8 +1861,9 @@ mod tests {
                     &index_key,
                     DbEmbedding {
                         primary_key: [CqlValue::Int(1), CqlValue::Int(2)].into(),
-                        embedding: Some(vec![0.5, 0.5, 0.3].into()),
+                        embedding: Some(Some(vec![0.5, 0.5, 0.3].into())),
                         timestamp: Timestamp::from_unix_timestamp(150),
+                        column_values: Default::default(),
                     },
                 )
                 .unwrap();
@@ -1693,8 +1904,9 @@ mod tests {
                     &index_key,
                     DbEmbedding {
                         primary_key: [CqlValue::Int(1), CqlValue::Int(1)].into(),
-                        embedding: None,
+                        embedding: Some(None),
                         timestamp: Timestamp::from_unix_timestamp(200),
+                        column_values: Default::default(),
                     },
                 )
                 .unwrap();
@@ -1716,8 +1928,9 @@ mod tests {
                     &index_key,
                     DbEmbedding {
                         primary_key: [CqlValue::Int(1), CqlValue::Int(2)].into(),
-                        embedding: None,
+                        embedding: Some(None),
                         timestamp: Timestamp::from_unix_timestamp(200),
+                        column_values: Default::default(),
                     },
                 )
                 .unwrap();
@@ -1739,8 +1952,9 @@ mod tests {
                     &index_key,
                     DbEmbedding {
                         primary_key: [CqlValue::Int(1), CqlValue::Int(3)].into(),
-                        embedding: None,
+                        embedding: Some(None),
                         timestamp: Timestamp::from_unix_timestamp(200),
+                        column_values: Default::default(),
                     },
                 )
                 .unwrap();
@@ -2172,6 +2386,248 @@ mod tests {
                     rhs: CqlValue::Int(4)
                 }]),
             ))
+        );
+    }
+
+    // Helpers shared by the Alternator blob comparison tests below.
+    fn s_blob(s: &str) -> CqlValue {
+        let mut b = vec![ALTERNATOR_TYPE_S];
+        b.extend_from_slice(s.as_bytes());
+        CqlValue::Blob(b)
+    }
+
+    // N-type blob: [ALTERNATOR_TYPE_N] + 4-byte BE scale + signed BE varint.
+    // value = unscaled_bigint * 10^(-scale)
+    fn n_blob(scale: i32, unscaled: &[u8]) -> CqlValue {
+        let mut b = vec![ALTERNATOR_TYPE_N];
+        b.extend_from_slice(&scale.to_be_bytes());
+        b.extend_from_slice(unscaled);
+        CqlValue::Blob(b)
+    }
+
+    fn json_blob(json: &str) -> CqlValue {
+        let mut b = vec![ALTERNATOR_TYPE_JSON];
+        b.extend_from_slice(json.as_bytes());
+        CqlValue::Blob(b)
+    }
+
+    fn decimal(s: &str) -> CqlValue {
+        CqlValue::Decimal(CqlDecimal::try_from(s.parse::<BigDecimal>().unwrap()).unwrap())
+    }
+
+    #[test]
+    fn alternator_blob_text_s_type() {
+        assert_eq!(
+            cql_cmp(&s_blob("apple"), &CqlValue::Text("apple".into())),
+            Some(Ordering::Equal)
+        );
+        assert_eq!(
+            cql_cmp(&s_blob("apple"), &CqlValue::Text("banana".into())),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            cql_cmp(&s_blob("banana"), &CqlValue::Text("apple".into())),
+            Some(Ordering::Greater)
+        );
+        // empty S-type payload is a valid empty string
+        assert_eq!(
+            cql_cmp(&s_blob(""), &CqlValue::Text("".into())),
+            Some(Ordering::Equal)
+        );
+        assert_eq!(
+            cql_cmp(&s_blob(""), &CqlValue::Text("a".into())),
+            Some(Ordering::Less)
+        );
+    }
+
+    #[test]
+    fn alternator_blob_text_s_type_reversed() {
+        // (Text, Blob) path should be the mirror image
+        assert_eq!(
+            cql_cmp(&CqlValue::Text("apple".into()), &s_blob("apple")),
+            Some(Ordering::Equal)
+        );
+        assert_eq!(
+            cql_cmp(&CqlValue::Text("apple".into()), &s_blob("banana")),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            cql_cmp(&CqlValue::Text("banana".into()), &s_blob("apple")),
+            Some(Ordering::Greater)
+        );
+    }
+
+    #[test]
+    fn alternator_blob_text_json_s_type() {
+        assert_eq!(
+            cql_cmp(
+                &json_blob(r#"{"S":"hello"}"#),
+                &CqlValue::Text("hello".into())
+            ),
+            Some(Ordering::Equal)
+        );
+        assert_eq!(
+            cql_cmp(&json_blob(r#"{"S":"aaa"}"#), &CqlValue::Text("bbb".into())),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            cql_cmp(&json_blob(r#"{"S":"bbb"}"#), &CqlValue::Text("aaa".into())),
+            Some(Ordering::Greater)
+        );
+    }
+
+    #[test]
+    fn alternator_blob_text_type_mismatch() {
+        // N-type blob vs Text -> type mismatch -> None
+        assert_eq!(
+            cql_cmp(&n_blob(0, &[0x05]), &CqlValue::Text("5".into())),
+            None
+        );
+        // JSON N-type blob vs Text -> None (no "S" key in the object)
+        assert_eq!(
+            cql_cmp(&json_blob(r#"{"N":"5"}"#), &CqlValue::Text("5".into())),
+            None
+        );
+        // Unknown tag byte -> None
+        assert_eq!(
+            cql_cmp(
+                &CqlValue::Blob(vec![0x99, b'x']),
+                &CqlValue::Text("x".into())
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn alternator_blob_text_edge_cases() {
+        // Empty blob (no tag byte) -> None
+        assert_eq!(
+            cql_cmp(&CqlValue::Blob(vec![]), &CqlValue::Text("x".into())),
+            None
+        );
+        // Invalid UTF-8 in S-type payload -> None
+        assert_eq!(
+            cql_cmp(
+                &CqlValue::Blob(vec![ALTERNATOR_TYPE_S, 0xFF, 0xFE]),
+                &CqlValue::Text("x".into())
+            ),
+            None
+        );
+        // Malformed JSON -> None
+        assert_eq!(
+            cql_cmp(&json_blob("not json"), &CqlValue::Text("x".into())),
+            None
+        );
+        // JSON with neither "S" nor correct key -> None
+        assert_eq!(
+            cql_cmp(
+                &json_blob(r#"{"X":"hello"}"#),
+                &CqlValue::Text("hello".into())
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn alternator_blob_decimal_n_type() {
+        // 5 = 5 * 10^0 : scale=0, unscaled=[0x05]
+        assert_eq!(
+            cql_cmp(&n_blob(0, &[0x05]), &decimal("5")),
+            Some(Ordering::Equal)
+        );
+        // 1.5 = 15 * 10^-1 : scale=1, unscaled=[0x0F]
+        assert_eq!(
+            cql_cmp(&n_blob(1, &[0x0F]), &decimal("1.5")),
+            Some(Ordering::Equal)
+        );
+        assert_eq!(
+            cql_cmp(&n_blob(0, &[0x01]), &decimal("2")),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            cql_cmp(&n_blob(0, &[0x03]), &decimal("2")),
+            Some(Ordering::Greater)
+        );
+        // negative: -1 = 0xFF in signed BE, scale=0
+        assert_eq!(
+            cql_cmp(&n_blob(0, &[0xFF]), &decimal("0")),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            cql_cmp(&n_blob(0, &[0xFF]), &decimal("-1")),
+            Some(Ordering::Equal)
+        );
+    }
+
+    #[test]
+    fn alternator_blob_decimal_n_type_reversed() {
+        // (Decimal, Blob) path
+        assert_eq!(
+            cql_cmp(&decimal("1.5"), &n_blob(1, &[0x0F])),
+            Some(Ordering::Equal)
+        );
+        assert_eq!(
+            cql_cmp(&decimal("2"), &n_blob(1, &[0x0F])),
+            Some(Ordering::Greater)
+        );
+        assert_eq!(
+            cql_cmp(&decimal("1"), &n_blob(1, &[0x0F])),
+            Some(Ordering::Less)
+        );
+    }
+
+    #[test]
+    fn alternator_blob_decimal_json_n_type() {
+        assert_eq!(
+            cql_cmp(&json_blob(r#"{"N":"3.14"}"#), &decimal("3.14")),
+            Some(Ordering::Equal)
+        );
+        assert_eq!(
+            cql_cmp(&json_blob(r#"{"N":"1"}"#), &decimal("2")),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            cql_cmp(&json_blob(r#"{"N":"3"}"#), &decimal("2")),
+            Some(Ordering::Greater)
+        );
+    }
+
+    #[test]
+    fn alternator_blob_decimal_type_mismatch() {
+        // S-type blob vs Decimal -> None
+        assert_eq!(cql_cmp(&s_blob("1"), &decimal("1")), None);
+        // JSON S-type blob vs Decimal -> None (no "N" key in the object)
+        assert_eq!(cql_cmp(&json_blob(r#"{"S":"1"}"#), &decimal("1")), None);
+        // Unknown tag -> None
+        assert_eq!(
+            cql_cmp(&CqlValue::Blob(vec![0x99, 0, 0, 0, 0, 1]), &decimal("1")),
+            None
+        );
+    }
+
+    #[test]
+    fn alternator_blob_decimal_edge_cases() {
+        // Empty blob -> None
+        assert_eq!(cql_cmp(&CqlValue::Blob(vec![]), &decimal("1")), None);
+        // N-type but payload too short for 4-byte scale -> None
+        assert_eq!(
+            cql_cmp(
+                &CqlValue::Blob(vec![ALTERNATOR_TYPE_N, 0, 0]),
+                &decimal("1")
+            ),
+            None
+        );
+        // Malformed JSON -> None
+        assert_eq!(cql_cmp(&json_blob("not json"), &decimal("1")), None);
+        // JSON with no "N" key -> None
+        assert_eq!(
+            cql_cmp(&json_blob(r#"{"X":"3.14"}"#), &decimal("3.14")),
+            None
+        );
+        // JSON "N" value that is not a valid decimal string -> None
+        assert_eq!(
+            cql_cmp(&json_blob(r#"{"N":"not-a-number"}"#), &decimal("1")),
+            None
         );
     }
 }

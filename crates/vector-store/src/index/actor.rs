@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 use crate::AsyncInProgress;
+use crate::ColumnName;
 use crate::Distance;
 use crate::Filter;
 use crate::IndexKey;
@@ -11,10 +12,17 @@ use crate::PrimaryKey;
 use crate::Vector;
 use crate::table::PartitionId;
 use crate::table::PrimaryId;
+use scylla::value::CqlValue;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
-pub(crate) type AnnR = anyhow::Result<(Vec<PrimaryKey>, Vec<Distance>)>;
+pub(crate) type AnnR = anyhow::Result<(
+    Vec<PrimaryKey>,
+    Vec<Distance>,
+    Vec<BTreeMap<ColumnName, CqlValue>>,
+)>;
 pub(crate) type CountR = anyhow::Result<usize>;
 
 pub enum Index {
@@ -36,6 +44,7 @@ pub enum Index {
         index_key: IndexKey,
         embedding: Vector,
         limit: Limit,
+        return_columns: Arc<[ColumnName]>,
         tx: oneshot::Sender<AnnR>,
     },
     FilteredAnn {
@@ -43,6 +52,7 @@ pub enum Index {
         embedding: Vector,
         filter: Filter,
         limit: Limit,
+        return_columns: Arc<[ColumnName]>,
         tx: oneshot::Sender<AnnR>,
     },
     Count {
@@ -66,13 +76,20 @@ pub(crate) trait IndexExt {
         in_progress: Option<AsyncInProgress>,
     );
     async fn remove_partition(&self, partition_id: PartitionId);
-    async fn ann(&self, index_key: IndexKey, embedding: Vector, limit: Limit) -> AnnR;
+    async fn ann(
+        &self,
+        index_key: IndexKey,
+        embedding: Vector,
+        limit: Limit,
+        return_columns: Arc<[ColumnName]>,
+    ) -> AnnR;
     async fn filtered_ann(
         &self,
         index_key: IndexKey,
         embedding: Vector,
         filter: Filter,
         limit: Limit,
+        return_columns: Arc<[ColumnName]>,
     ) -> AnnR;
     async fn count(&self, index_key: IndexKey) -> CountR;
 }
@@ -120,12 +137,19 @@ impl IndexExt for mpsc::Sender<Index> {
     }
 
     #[hotpath::measure]
-    async fn ann(&self, index_key: IndexKey, embedding: Vector, limit: Limit) -> AnnR {
+    async fn ann(
+        &self,
+        index_key: IndexKey,
+        embedding: Vector,
+        limit: Limit,
+        return_columns: Arc<[ColumnName]>,
+    ) -> AnnR {
         let (tx, rx) = oneshot::channel();
         self.send(Index::Ann {
             index_key,
             embedding,
             limit,
+            return_columns,
             tx,
         })
         .await?;
@@ -139,6 +163,7 @@ impl IndexExt for mpsc::Sender<Index> {
         embedding: Vector,
         filter: Filter,
         limit: Limit,
+        return_columns: Arc<[ColumnName]>,
     ) -> AnnR {
         let (tx, rx) = oneshot::channel();
         self.send(Index::FilteredAnn {
@@ -146,6 +171,7 @@ impl IndexExt for mpsc::Sender<Index> {
             embedding,
             filter,
             limit,
+            return_columns,
             tx,
         })
         .await?;

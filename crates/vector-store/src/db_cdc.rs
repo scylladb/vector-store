@@ -26,6 +26,7 @@ use scylla::client::session::Session;
 use scylla_cdc::consumer::CDCRow;
 use scylla_cdc::consumer::Consumer;
 use scylla_cdc::consumer::ConsumerFactory;
+use scylla_cdc::consumer::OperationType;
 use scylla_cdc::log_reader::CDCLogReaderBuilder;
 use std::sync::Arc;
 use std::time::Duration;
@@ -507,15 +508,28 @@ impl Consumer for CdcConsumer {
         }
 
         let source = &self.0.backend;
-        let column = source.vector_column_name();
-        if !row.column_deletable(column) {
-            bail!("CDC error: column {column} should be deletable");
+        let vector_col = source.vector_column_name();
+        if !row.column_deletable(vector_col) {
+            bail!("CDC error: column {vector_col} should be deletable");
         }
-        let embedding = row
-            .take_value(column)
-            .map(|v| source.extract_vector(v))
-            .transpose()?
-            .flatten();
+
+        // Is this a row/partition deletion operation?
+        let is_deletion_op = matches!(
+            row.operation,
+            OperationType::RowDelete
+                | OperationType::PartitionDelete
+                | OperationType::RowRangeDelInclLeft
+                | OperationType::RowRangeDelExclLeft
+                | OperationType::RowRangeDelInclRight
+                | OperationType::RowRangeDelExclRight
+        );
+
+        let (column_values, embedding) = source.get_column_values(
+            &mut row,
+            is_deletion_op,
+            &self.0.primary_key_columns,
+            vector_col,
+        )?;
 
         let primary_key = self
             .0
@@ -546,6 +560,14 @@ impl Consumer for CdcConsumer {
             ))
         .into();
 
+        // All columns changed in a single CDC event share the same write timestamp
+        // (the timestamp of the originating CQL statement).  Attach it to each
+        // filtering column value so the index can apply last-writer-wins per column.
+        let column_values = column_values
+            .into_iter()
+            .map(|(k, v)| (k, (timestamp, v)))
+            .collect();
+
         _ = self
             .0
             .tx
@@ -554,6 +576,7 @@ impl Consumer for CdcConsumer {
                     primary_key,
                     embedding,
                     timestamp,
+                    column_values,
                 },
                 None,
             ))

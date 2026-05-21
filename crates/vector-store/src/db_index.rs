@@ -294,6 +294,9 @@ struct Statements {
     partition_key_count: usize,
     table_columns: GetTableColumnsR,
     st_range_scan: PreparedStatement,
+    /// Non-primary-key filtering columns included in the range scan query (in SELECT order).
+    scan_filtering_columns: Vec<ColumnName>,
+    backend: db_index_backend::DbIndexBackend,
 }
 
 impl Statements {
@@ -346,8 +349,17 @@ impl Statements {
                         None
                     }
                 })
-                .collect(),
+                .collect::<HashMap<_, _>>(),
         );
+
+        // For Alternator tables, non-key attributes live in `:attrs` and are not schema
+        // columns.  Inject them as Blob so that Table::new() can create storage for them.
+        // Using Blob (rather than Text) preserves the Alternator type-tag byte, which lets
+        // cql_cmp distinguish S-type strings from N-type numbers and apply the correct
+        // comparison semantics (e.g. the string "1" must not match a numeric filter < 5).
+        let backend = db_index_backend::DbIndexBackend::from(&metadata);
+        let table_columns = backend.enrich_table_columns(table_columns, &metadata.filtering_columns);
+
         let st_partition_key_list = table
             .partition_key
             .iter()
@@ -359,12 +371,24 @@ impl Statements {
             .join(", ");
         let keyspace_identifier = KeyspaceIdentifier::from(&metadata.keyspace_name);
         let table_identifier = TableIdentifier::from(&metadata.table_name);
+
+        // Determine which filtering columns are non-PK (these will appear as extra
+        // SELECT columns in the range scan query, after the vector+writetime columns).
+        let scan_filtering_columns: Vec<ColumnName> = metadata
+            .filtering_columns
+            .iter()
+            .filter(|c| !primary_key_columns.contains(c))
+            .cloned()
+            .collect();
+
         let query = db_index_backend::range_scan_query(
             &keyspace_identifier,
             &table_identifier,
             &metadata.target_column,
+            &primary_key_columns,
             &st_primary_key_list,
             &st_partition_key_list,
+            &metadata.filtering_columns,
         );
         let st_range_scan = session
             .prepare(query)
@@ -380,6 +404,8 @@ impl Statements {
             partition_key_count,
             table_columns,
             st_range_scan,
+            scan_filtering_columns,
+            backend,
             session_rx,
         })
     }
@@ -553,8 +579,9 @@ impl Statements {
         begin: Token,
         end: Token,
     ) -> anyhow::Result<BoxStream<'static, DbEmbedding>> {
-        // last two columns are embedding and writetime
-        let columns_len_expected = self.primary_key_columns.len() + 2;
+        // Columns: pk_cols | vector | writetime(vector) | col1 | writetime(col1) | ... (in order)
+        let n_extra = self.scan_filtering_columns.len();
+        let columns_len_expected = self.primary_key_columns.len() + 2 + 2 * n_extra;
 
         // wait for an active session
         let session = {
@@ -570,6 +597,9 @@ impl Statements {
             }
         };
 
+        let scan_filtering_columns = self.scan_filtering_columns.clone();
+        let backend = self.backend.clone();
+
         Ok(session
             .execute_iter(self.st_range_scan.clone(), (begin.value(), end.value()))
             .await?
@@ -583,6 +613,23 @@ impl Statements {
                         columns_len_expected
                     );
                     return None;
+                }
+
+                // Pop extra filtering columns (appended after vector writetime) in reverse
+                // order.  Each column is followed by its own writetime, so we pop the
+                // writetime first, then the value.
+                let mut column_values = std::collections::BTreeMap::new();
+                for col_name in scan_filtering_columns.iter().rev() {
+                    let Some(CqlValue::BigInt(col_ts_us)) = row.columns.pop().unwrap() else {
+                        debug!("range_scan_stream: bad type of writetime for filtering column");
+                        return None;
+                    };
+                    let col_ts = Timestamp::UNIX_EPOCH + Duration::from_micros(col_ts_us as u64);
+                    let raw = row.columns.pop().unwrap();
+                    // A null/absent column in the base table is stored as a tombstone (`None`)
+                    // so that previously-stored values for this row are cleared.
+                    let scalar = raw.and_then(|v| backend.extract_scan_column_value(v));
+                    column_values.insert(col_name.clone(), (col_ts, scalar));
                 }
 
                 let Some(CqlValue::BigInt(timestamp)) = row.columns.pop().unwrap() else {
@@ -619,8 +666,9 @@ impl Statements {
 
                 Some(DbEmbedding {
                     primary_key,
-                    embedding: vector,
+                    embedding: Some(vector),
                     timestamp,
+                    column_values,
                 })
             })
             .filter_map(|value| async move {

@@ -100,6 +100,11 @@ pub(crate) async fn new() -> TestCase<TestActors> {
             timeout,
             local_ann_with_timestamp_gte_filter,
         )
+        .with_test(
+            "ann_filter_by_non_pk_filtering_column",
+            timeout,
+            ann_filter_by_non_pk_filtering_column,
+        )
 }
 
 /// Test ANN search filtered by partition key equality.
@@ -1035,6 +1040,87 @@ async fn local_ann_with_timestamp_gte_filter(actors: TestActors) {
         2,
         "Expected two rows with created_at >= 2024-01-01"
     );
+
+    session
+        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
+        .await
+        .expect("failed to drop a keyspace");
+
+    info!("finished");
+}
+
+/// Test ANN search filtered by a non-primary-key CQL filtering column.
+///
+/// The index is created with `category` as a filtering column.  Rows have two
+/// category values (0 and 1).  Querying with `WHERE category = 0` must return
+/// only the rows whose category is 0.
+#[framed]
+async fn ann_filter_by_non_pk_filtering_column(actors: TestActors) {
+    info!("started");
+
+    let (session, clients) = prepare_connection(&actors).await;
+
+    let keyspace = create_keyspace(&session).await;
+    let table = create_table(
+        &session,
+        "pk INT PRIMARY KEY, category INT, v VECTOR<FLOAT, 3>",
+        None,
+    )
+    .await;
+
+    // Insert 6 rows: pk 0..5, alternating category 0 and 1.
+    for pk in 0..6_i32 {
+        session
+            .query_unpaged(
+                format!("INSERT INTO {table} (pk, category, v) VALUES (?, ?, ?)"),
+                (pk, pk % 2, &vec![pk as f32, 0.0, 0.0]),
+            )
+            .await
+            .expect("failed to insert data");
+    }
+
+    let index = create_index(
+        CreateIndexQuery::new(&session, &clients, &table, "v").filter_columns(["category"]),
+    )
+    .await;
+
+    for client in &clients {
+        let index_status = wait_for_index(client, &index).await;
+        assert_eq!(index_status.count, 6, "Expected 6 vectors to be indexed");
+    }
+
+    let result = wait_for_value(
+        || async {
+            let result = get_opt_query_results(
+                format!(
+                    "SELECT pk, category FROM {table} \
+                     WHERE category = 0 \
+                     ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10 \
+                     ALLOW FILTERING"
+                ),
+                &session,
+            )
+            .await;
+            result.filter(|r| r.rows_num() == 3)
+        },
+        "Waiting for category=0 filtered ANN query to return 3 rows",
+        DEFAULT_OPERATION_TIMEOUT,
+    )
+    .await;
+
+    let rows: Vec<(i32, i32)> = result
+        .rows::<(i32, i32)>()
+        .expect("failed to get rows")
+        .map(|row| row.expect("failed to get row"))
+        .collect();
+
+    assert_eq!(rows.len(), 3, "Expected exactly 3 rows with category=0");
+    for (pk, category) in &rows {
+        assert_eq!(
+            *category, 0,
+            "Expected all rows to have category=0, got pk={pk} category={category}"
+        );
+    }
 
     session
         .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())

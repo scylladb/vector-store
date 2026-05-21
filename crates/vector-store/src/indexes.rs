@@ -213,6 +213,8 @@ pub(crate) enum BestIndexState {
         primary_key_columns: Arc<Vec<ColumnName>>,
         table_columns: Arc<HashMap<ColumnName, NativeType>>,
         needs_filtering: NeedsFiltering,
+        /// Filtering columns for the selected index (includes primary key columns).
+        filtering_columns: Arc<Vec<ColumnName>>,
     },
 }
 
@@ -320,6 +322,7 @@ impl Indexes {
                     primary_key_columns: Arc::clone(&routed_entry.primary_key_columns),
                     table_columns: Arc::clone(&routed_entry.table_columns),
                     needs_filtering: needs_filtering.clone(),
+                    filtering_columns: Arc::clone(&routed_entry.filtering_columns),
                 }
             }
             None => BestIndexState::NotServing(requested_entry.progress),
