@@ -13,9 +13,89 @@ use itertools::Itertools;
 use secrecy::ExposeSecret;
 use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::SystemTime;
 use tokio::sync::watch;
+
+const TLS_FILE_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Tracks modification times of TLS certificate files to detect in-place changes.
+struct TlsFileMonitor {
+    cert_path: Option<PathBuf>,
+    key_path: Option<PathBuf>,
+    ca_cert_path: Option<PathBuf>,
+    last_cert_mtime: Option<SystemTime>,
+    last_key_mtime: Option<SystemTime>,
+    last_ca_cert_mtime: Option<SystemTime>,
+}
+
+impl TlsFileMonitor {
+    fn new(config: &Config) -> Self {
+        let cert_mtime = config
+            .tls_cert_path
+            .as_ref()
+            .and_then(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
+        let key_mtime = config
+            .tls_key_path
+            .as_ref()
+            .and_then(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
+        let ca_cert_mtime = config
+            .mtls_ca_cert_path
+            .as_ref()
+            .and_then(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
+        Self {
+            cert_path: config.tls_cert_path.clone(),
+            key_path: config.tls_key_path.clone(),
+            ca_cert_path: config.mtls_ca_cert_path.clone(),
+            last_cert_mtime: cert_mtime,
+            last_key_mtime: key_mtime,
+            last_ca_cert_mtime: ca_cert_mtime,
+        }
+    }
+
+    /// Update tracked paths and modification times from a new config.
+    fn update(&mut self, config: &Config) {
+        self.cert_path = config.tls_cert_path.clone();
+        self.key_path = config.tls_key_path.clone();
+        self.ca_cert_path = config.mtls_ca_cert_path.clone();
+        self.last_cert_mtime = self
+            .cert_path
+            .as_ref()
+            .and_then(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
+        self.last_key_mtime = self
+            .key_path
+            .as_ref()
+            .and_then(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
+        self.last_ca_cert_mtime = self
+            .ca_cert_path
+            .as_ref()
+            .and_then(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
+    }
+
+    /// Check if any TLS file has been modified since the last check.
+    fn has_changes(&self) -> bool {
+        let cert_changed = self.check_file_changed(&self.cert_path, &self.last_cert_mtime);
+        let key_changed = self.check_file_changed(&self.key_path, &self.last_key_mtime);
+        let ca_cert_changed = self.check_file_changed(&self.ca_cert_path, &self.last_ca_cert_mtime);
+        cert_changed || key_changed || ca_cert_changed
+    }
+
+    fn check_file_changed(&self, path: &Option<PathBuf>, last_mtime: &Option<SystemTime>) -> bool {
+        match (path, last_mtime) {
+            (Some(path), Some(last)) => std::fs::metadata(path)
+                .and_then(|m| m.modified())
+                .map(|current| current != *last)
+                .unwrap_or(false),
+            (Some(path), None) => {
+                // File didn't exist before but path is configured - check if it appeared
+                std::fs::metadata(path).is_ok()
+            }
+            _ => false,
+        }
+    }
+}
 
 #[derive(Clone, PartialEq)]
 pub struct HttpServerConfig {
@@ -239,6 +319,13 @@ impl ConfigManager {
         let mut check_interval = tokio::time::interval(Duration::from_secs(1));
         check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+        // Monitor TLS certificate files for in-place content changes
+        let mut tls_monitor = TlsFileMonitor::new(&self.config_tx.borrow());
+        let mut tls_check_interval = tokio::time::interval(TLS_FILE_CHECK_INTERVAL);
+        tls_check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Skip the first immediate tick
+        tls_check_interval.tick().await;
+
         loop {
             tokio::select! {
                 _ = sighup.recv() => {
@@ -256,6 +343,15 @@ impl ConfigManager {
                         Err(e) => {
                             tracing::error!("Failed to reload configuration: {}", e);
                         }
+                    }
+                    tls_monitor.update(&self.config_tx.borrow());
+                }
+                _ = tls_check_interval.tick() => {
+                    if tls_monitor.has_changes() {
+                        tracing::info!("TLS certificate file change detected, reloading...");
+                        let config = self.config_tx.borrow().as_ref().clone();
+                        self.send_config(config).await;
+                        tls_monitor.update(&self.config_tx.borrow());
                     }
                 }
                 _ = check_interval.tick() => {
@@ -799,5 +895,55 @@ mod tests {
         )]));
         let config = load_config(env).await.unwrap();
         assert_eq!(config.cql_connection_timeout, Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn tls_file_monitor_no_paths_no_changes() {
+        let config = Config::default();
+        let monitor = TlsFileMonitor::new(&config);
+        assert!(!monitor.has_changes());
+    }
+
+    #[test]
+    fn tls_file_monitor_detects_content_change() {
+        let mut cert_file = NamedTempFile::new().unwrap();
+        writeln!(cert_file, "old cert content").unwrap();
+
+        let config = Config {
+            tls_cert_path: Some(cert_file.path().to_path_buf()),
+            ..Default::default()
+        };
+
+        let monitor = TlsFileMonitor::new(&config);
+        assert!(!monitor.has_changes());
+
+        // Simulate cert rotation by writing new content
+        // Use a small sleep to ensure mtime differs
+        std::thread::sleep(Duration::from_millis(50));
+        std::fs::write(cert_file.path(), "new cert content").unwrap();
+
+        assert!(monitor.has_changes());
+    }
+
+    #[test]
+    fn tls_file_monitor_update_resets_state() {
+        let mut cert_file = NamedTempFile::new().unwrap();
+        writeln!(cert_file, "cert content").unwrap();
+
+        let config = Config {
+            tls_cert_path: Some(cert_file.path().to_path_buf()),
+            ..Default::default()
+        };
+
+        let mut monitor = TlsFileMonitor::new(&config);
+
+        // Modify the file
+        std::thread::sleep(Duration::from_millis(50));
+        std::fs::write(cert_file.path(), "new cert content").unwrap();
+        assert!(monitor.has_changes());
+
+        // Update should reset tracking
+        monitor.update(&config);
+        assert!(!monitor.has_changes());
     }
 }
