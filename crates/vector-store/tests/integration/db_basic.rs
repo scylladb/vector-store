@@ -21,7 +21,8 @@ use uuid::Uuid;
 use vector_store::AsyncInProgress;
 use vector_store::ColumnName;
 use vector_store::DbCustomIndex;
-use vector_store::DbEmbedding;
+use vector_store::DbIndexedRow;
+use vector_store::DbIndexedValue;
 use vector_store::Dimensions;
 use vector_store::IndexMetadata;
 use vector_store::IndexName;
@@ -38,8 +39,8 @@ use vector_store::db_index::DbIndex;
 use vector_store::node_state::Event;
 use vector_store::node_state::NodeState;
 
-pub(crate) type RxEmbeddings = mpsc::Receiver<(DbEmbedding, Option<AsyncInProgress>)>;
-pub(crate) type TxEmbeddings = mpsc::Sender<(DbEmbedding, Option<AsyncInProgress>)>;
+pub(crate) type RxEmbeddings = mpsc::Receiver<(DbIndexedRow, Option<AsyncInProgress>)>;
+pub(crate) type TxEmbeddings = mpsc::Sender<(DbIndexedRow, Option<AsyncInProgress>)>;
 pub(crate) type ScanFn = Box<dyn FnOnce(TxEmbeddings) -> BoxFuture<'static, ()> + Send + Sync>;
 
 pub(crate) fn scan_fn(
@@ -54,10 +55,12 @@ pub(crate) fn scan_fn(
             for (primary_key, embedding, timestamp) in items.iter().cloned() {
                 let _ = tx
                     .send((
-                        DbEmbedding {
+                        DbIndexedRow {
                             primary_key,
-                            embedding,
-                            timestamp,
+                            values: vec![Some(DbIndexedValue {
+                                embedding,
+                                timestamp,
+                            })],
                         },
                         Some(tx_in_progress.clone().into()),
                     ))
@@ -267,7 +270,7 @@ fn process_db(db: &DbBasic, msg: Db, node_state: Sender<NodeState>) {
                                 keyspace: keyspace_name.clone(),
                                 index: index_name.clone(),
                                 table: index.metadata.table_name.clone(),
-                                target_column: index.metadata.target_column.clone(),
+                                target_columns: index.metadata.target_columns.clone(),
                                 index_type: index.metadata.index_type.clone(),
                                 filtering_columns: index.metadata.filtering_columns.clone(),
                             })
