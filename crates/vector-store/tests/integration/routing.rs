@@ -522,16 +522,13 @@ async fn ann_routes_to_local_index_with_filter_columns_covering_restriction() {
         allow_filtering: true,
     };
 
-    // TODO: update this assertion to expect StatusCode::OK once filtering on
-    // non-primary-key columns is supported end-to-end. Currently the request
-    // is routed correctly but fails at the filter validation layer.
     let response = assert_ann_served_by(
         &client,
         &covering,
         post_ann_with_filter(&client, &non_covering, filter),
     )
     .await;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -597,16 +594,13 @@ async fn ann_routes_to_global_index_with_filter_columns_covering_restriction() {
         allow_filtering: true,
     };
 
-    // TODO: update this assertion to expect StatusCode::OK once filtering on
-    // non-primary-key columns is supported end-to-end. Currently the request
-    // is routed correctly but fails at the filter validation layer.
     let response = assert_ann_served_by(
         &client,
         &covering,
         post_ann_with_filter(&client, &non_covering, filter),
     )
     .await;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]

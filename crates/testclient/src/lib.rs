@@ -59,6 +59,7 @@ impl TestClient {
                 vector,
                 filter,
                 limit,
+                return_columns: vec![],
             })
             .await
     }

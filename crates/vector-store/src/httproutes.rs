@@ -526,61 +526,71 @@ async fn post_index_ann(
         let index_key = IndexKey::new(&keyspace, &index_name);
         let (equality_cols, range_cols) = restriction_columns(&request.filter);
         let allow_filtering = request.filter.as_ref().is_some_and(|f| f.allow_filtering);
-        let (routed_key, index, primary_key_columns, table_columns) = match state
-            .indexes
-            .read()
-            .unwrap()
-            .best_index(&index_key, &equality_cols, &range_cols)
-        {
-            indexes::BestIndexState::Serving {
-                key: routed_key,
-                index,
-                needs_filtering,
-                primary_key_columns,
-                table_columns,
-            } => {
-                if matches!(needs_filtering, indexes::NeedsFiltering::Yes(_)) && !allow_filtering {
+        let (routed_key, index, primary_key_columns, table_columns, index_filtering_columns) =
+            match state
+                .indexes
+                .read()
+                .unwrap()
+                .best_index(&index_key, &equality_cols, &range_cols)
+            {
+                indexes::BestIndexState::Serving {
+                    key: routed_key,
+                    index,
+                    needs_filtering,
+                    primary_key_columns,
+                    table_columns,
+                    filtering_columns,
+                } => {
+                    if matches!(needs_filtering, indexes::NeedsFiltering::Yes(_))
+                        && !allow_filtering
+                    {
+                        timer.observe_duration();
+
+                        let msg = format!(
+                            "Index {keyspace}.{index_name} requires ALLOW FILTERING for this query"
+                        );
+                        debug!("post_index_ann: {msg}");
+                        return (StatusCode::BAD_REQUEST, msg).into_response();
+                    }
+                    (
+                        routed_key,
+                        index,
+                        primary_key_columns,
+                        table_columns,
+                        filtering_columns,
+                    )
+                }
+                indexes::BestIndexState::NotServing(progress) => {
                     timer.observe_duration();
 
-                    let msg = format!(
-                        "Index {keyspace}.{index_name} requires ALLOW FILTERING for this query"
-                    );
-                    debug!("post_index_ann: {msg}");
-                    return (StatusCode::BAD_REQUEST, msg).into_response();
-                }
-                (routed_key, index, primary_key_columns, table_columns)
-            }
-            indexes::BestIndexState::NotServing(progress) => {
-                timer.observe_duration();
-
-                match progress {
-                    Progress::InProgress(percentage) => {
-                        let msg = format!(
-                            "Index {keyspace}.{index_name} is not available yet \
+                    match progress {
+                        Progress::InProgress(percentage) => {
+                            let msg = format!(
+                                "Index {keyspace}.{index_name} is not available yet \
                             as it is still being constructed, progress: {:.3}%",
-                            percentage.get()
-                        );
-                        debug!("post_index_ann: {msg}");
-                        return (StatusCode::SERVICE_UNAVAILABLE, msg).into_response();
-                    }
-                    Progress::Done => {
-                        let msg = format!(
-                            "Index {keyspace}.{index_name} is not serving, \
+                                percentage.get()
+                            );
+                            debug!("post_index_ann: {msg}");
+                            return (StatusCode::SERVICE_UNAVAILABLE, msg).into_response();
+                        }
+                        Progress::Done => {
+                            let msg = format!(
+                                "Index {keyspace}.{index_name} is not serving, \
                             but full scan did finish."
-                        );
-                        debug!("post_index_ann: {msg}");
-                        return (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response();
+                            );
+                            debug!("post_index_ann: {msg}");
+                            return (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response();
+                        }
                     }
                 }
-            }
-            indexes::BestIndexState::NotFound => {
-                timer.observe_duration();
+                indexes::BestIndexState::NotFound => {
+                    timer.observe_duration();
 
-                let msg = format!("missing index: {keyspace}.{index_name}");
-                debug!("post_index_ann: {msg}");
-                return (StatusCode::NOT_FOUND, msg).into_response();
-            }
-        };
+                    let msg = format!("missing index: {keyspace}.{index_name}");
+                    debug!("post_index_ann: {msg}");
+                    return (StatusCode::NOT_FOUND, msg).into_response();
+                }
+            };
 
         #[cfg(feature = "slow-test-hooks")]
         state
@@ -592,11 +602,19 @@ async fn post_index_ann(
             ))
             .await;
 
+        let return_columns: std::sync::Arc<[crate::ColumnName]> = request
+            .return_columns
+            .into_iter()
+            .map(crate::ColumnName::from)
+            .collect::<Vec<_>>()
+            .into();
         let search_result = if let Some(filter) = request.filter {
             let filter = match try_from_post_index_ann_filter(
                 filter,
                 &primary_key_columns,
                 &table_columns,
+                &index_filtering_columns,
+                keyspace.is_alternator(),
             ) {
                 Ok(filter) => filter,
                 Err(err) => {
@@ -610,11 +628,17 @@ async fn post_index_ann(
                     request.vector.into(),
                     filter,
                     request.limit.into(),
+                    std::sync::Arc::clone(&return_columns),
                 )
                 .await
         } else {
             index
-                .ann(routed_key, request.vector.into(), request.limit.into())
+                .ann(
+                    routed_key,
+                    request.vector.into(),
+                    request.limit.into(),
+                    std::sync::Arc::clone(&return_columns),
+                )
                 .await
         };
 
@@ -630,7 +654,7 @@ async fn post_index_ann(
                     (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
                 }
             },
-            Ok((primary_keys, distances)) => {
+            Ok((primary_keys, distances, column_values_per_row)) => {
                 if primary_keys.len() != distances.len() {
                     let msg = format!(
                         "wrong size of an ann response: \
@@ -682,15 +706,35 @@ async fn post_index_ann(
                             debug!("post_index_ann: {err}");
                             (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
                         }
-                        Ok(primary_keys) => (
-                            StatusCode::OK,
-                            response::Json(httpapi::PostIndexAnnResponse {
-                                primary_keys,
-                                distances: distances.into_iter().map(|d| d.into()).collect(),
-                                similarity_scores,
-                            }),
-                        )
-                            .into_response(),
+                        Ok(primary_keys) => {
+                            let column_values: HashMap<
+                                httpapi::ColumnName,
+                                Vec<Option<serde_json::Value>>,
+                            > = return_columns
+                                .iter()
+                                .map(|col_name| {
+                                    let values = column_values_per_row
+                                        .iter()
+                                        .map(|row_vals| {
+                                            row_vals
+                                                .get(col_name)
+                                                .and_then(|v| try_to_json(v.clone()).ok())
+                                        })
+                                        .collect();
+                                    (col_name.clone().into(), values)
+                                })
+                                .collect();
+                            (
+                                StatusCode::OK,
+                                response::Json(httpapi::PostIndexAnnResponse {
+                                    primary_keys,
+                                    distances: distances.into_iter().map(|d| d.into()).collect(),
+                                    similarity_scores,
+                                    column_values,
+                                }),
+                            )
+                                .into_response()
+                        }
                     }
                 }
             }
@@ -703,6 +747,8 @@ fn try_from_post_index_ann_filter(
     json_filter: httpapi::PostIndexAnnFilter,
     primary_key_columns: &[crate::ColumnName],
     table_columns: &HashMap<crate::ColumnName, NativeType>,
+    filtering_columns: &[crate::ColumnName],
+    is_alternator: bool,
 ) -> anyhow::Result<Filter> {
     let is_same_len = |columns: &[crate::ColumnName], values: &[Value]| -> anyhow::Result<()> {
         if columns.len() != values.len() {
@@ -715,14 +761,34 @@ fn try_from_post_index_ann_filter(
         Ok(())
     };
     let from_json = |column: &crate::ColumnName, value: Value| -> anyhow::Result<CqlValue> {
-        if !primary_key_columns.contains(column) {
-            bail!("Filtering on non primary key columns is not supported");
+        if !primary_key_columns.contains(column) && !filtering_columns.contains(column) {
+            bail!("Column '{column}' is not a primary key column or a filtering column");
         };
         let Some(native_type) = table_columns.get(column) else {
             bail!(
                 "Column '{column}' in filter restriction is not part of the table or is not a supported native type",
             )
         };
+        // Alternator non-key filtering columns are injected as NativeType::Blob (raw `:attrs`
+        // bytes with type-tag).  A JSON string filter value is an S-type comparison
+        // (CqlValue::Text) and a JSON number filter value is an N-type comparison
+        // (CqlValue::Decimal).  cql_cmp inspects the tag byte in the stored blob to enforce
+        // type-correct comparisons, so e.g. the string "1" will not match a numeric filter < 5.
+        // Gate this on is_alternator so that genuine CQL blob columns keep the normal
+        // hex-encoded-string → CqlValue::Blob conversion path.
+        if is_alternator
+            && !primary_key_columns.contains(column)
+            && matches!(native_type, NativeType::Blob)
+        {
+            return match value {
+                Value::String(s) => Ok(CqlValue::Text(s)),
+                Value::Number(_) => try_from_json(value, &NativeType::Decimal),
+                _ => bail!(
+                    "Column '{column}' is an Alternator attribute column; \
+                     only string (S-type) and number (N-type) filter values are supported"
+                ),
+            };
+        }
         try_from_json(value, native_type)
     };
     Ok(Filter {
@@ -911,7 +977,9 @@ fn try_to_json(value: CqlValue) -> anyhow::Result<Value> {
 
         CqlValue::Decimal(value) => Ok(Value::String(BigDecimal::from(value).to_string())),
 
-        _ => unimplemented!(),
+        CqlValue::Inet(value) => Ok(Value::String(value.to_string())),
+
+        other => bail!("unsupported CqlValue variant for JSON conversion: {other:?}"),
     }
 }
 
@@ -1189,6 +1257,8 @@ mod tests {
             .unwrap(),
             &primary_key_columns,
             &table_columns,
+            &[],
+            false,
         )
         .unwrap();
         assert!(filter.allow_filtering);
@@ -1267,7 +1337,9 @@ mod tests {
                 )
                 .unwrap(),
                 &primary_key_columns,
-                &table_columns
+                &table_columns,
+                &[],
+                false
             )
             .is_err()
         );
@@ -1285,7 +1357,9 @@ mod tests {
                 )
                 .unwrap(),
                 &primary_key_columns,
-                &table_columns
+                &table_columns,
+                &[],
+                false
             )
             .is_err()
         );
@@ -1301,7 +1375,9 @@ mod tests {
                 )
                 .unwrap(),
                 &primary_key_columns,
-                &table_columns
+                &table_columns,
+                &[],
+                false
             )
             .is_err()
         );
@@ -1317,7 +1393,9 @@ mod tests {
                 )
                 .unwrap(),
                 &primary_key_columns,
-                &table_columns
+                &table_columns,
+                &[],
+                false
             )
             .is_err()
         );
@@ -1333,7 +1411,9 @@ mod tests {
                 )
                 .unwrap(),
                 &primary_key_columns,
-                &table_columns
+                &table_columns,
+                &[],
+                false
             )
             .is_err()
         );
@@ -1351,7 +1431,9 @@ mod tests {
                 )
                 .unwrap(),
                 &primary_key_columns,
-                &[("pk".into(), NativeType::Int),].into_iter().collect()
+                &[("pk".into(), NativeType::Int),].into_iter().collect(),
+                &[],
+                false
             )
             .is_err()
         );
@@ -1369,7 +1451,9 @@ mod tests {
                 )
                 .unwrap(),
                 &primary_key_columns,
-                &table_columns
+                &table_columns,
+                &[],
+                false
             )
             .is_err()
         );
@@ -1387,7 +1471,9 @@ mod tests {
                 )
                 .unwrap(),
                 &primary_key_columns,
-                &table_columns
+                &table_columns,
+                &[],
+                false
             )
             .is_err()
         );
@@ -1405,7 +1491,9 @@ mod tests {
                 )
                 .unwrap(),
                 &primary_key_columns,
-                &table_columns
+                &table_columns,
+                &[],
+                false
             )
             .is_err()
         );
@@ -1423,7 +1511,9 @@ mod tests {
                 )
                 .unwrap(),
                 &primary_key_columns,
-                &table_columns
+                &table_columns,
+                &[],
+                false
             )
             .is_err()
         );
@@ -1441,7 +1531,9 @@ mod tests {
                 )
                 .unwrap(),
                 &primary_key_columns,
-                &table_columns
+                &table_columns,
+                &[],
+                false
             )
             .is_err()
         );
@@ -1817,6 +1909,22 @@ mod tests {
             .unwrap(),
             Value::String("-98765432109876543210.123456789".to_string())
         );
+
+        // Inet (IPv4 and IPv6)
+        assert_eq!(
+            try_to_json(CqlValue::Inet(
+                "192.168.1.1".parse::<std::net::IpAddr>().unwrap()
+            ))
+            .unwrap(),
+            Value::String("192.168.1.1".to_string())
+        );
+        assert_eq!(
+            try_to_json(CqlValue::Inet("::1".parse::<std::net::IpAddr>().unwrap())).unwrap(),
+            Value::String("::1".to_string())
+        );
+
+        // Unsupported variant returns an error instead of panicking.
+        assert!(try_to_json(CqlValue::Counter(scylla::value::Counter(0))).is_err());
     }
 
     #[test]
@@ -1856,6 +1964,146 @@ mod tests {
         assert_eq!(
             httpapi::IndexStatus::from(crate::node_state::IndexStatus::Serving),
             httpapi::IndexStatus::Serving
+        );
+    }
+
+    // Helpers shared by the filtering-column tests below.
+    fn filtering_table_columns() -> HashMap<crate::ColumnName, NativeType> {
+        [
+            ("pk".into(), NativeType::Int),
+            ("ck".into(), NativeType::Int),
+            // A plain CQL text filtering column
+            ("tag".into(), NativeType::Text),
+            // A blob column — used for Alternator non-key attributes
+            ("attr".into(), NativeType::Blob),
+        ]
+        .into_iter()
+        .collect()
+    }
+
+    #[test]
+    fn filter_on_non_pk_filtering_column_ok() {
+        // Filtering on a non-primary-key column that appears in filtering_columns succeeds.
+        let filter = try_from_post_index_ann_filter(
+            serde_json::from_str(
+                r#"{ "restrictions": [{ "type": "==", "lhs": "tag", "rhs": "hello" }],
+                    "allow_filtering": true }"#,
+            )
+            .unwrap(),
+            &["pk".into(), "ck".into()],
+            &filtering_table_columns(),
+            &["tag".into()],
+            false,
+        )
+        .unwrap();
+        assert!(
+            matches!(filter.restrictions.first(), Some(Restriction::Eq { lhs, rhs })
+                if *lhs == "tag".into() && *rhs == CqlValue::Text("hello".to_string()))
+        );
+    }
+
+    #[test]
+    fn filter_on_non_pk_column_not_in_filtering_columns_fails() {
+        // A non-primary-key column that is NOT listed in filtering_columns must be rejected.
+        assert!(
+            try_from_post_index_ann_filter(
+                serde_json::from_str(
+                    r#"{ "restrictions": [{ "type": "==", "lhs": "tag", "rhs": "hello" }],
+                        "allow_filtering": true }"#,
+                )
+                .unwrap(),
+                &["pk".into(), "ck".into()],
+                &filtering_table_columns(),
+                &[], // tag is not listed here
+                false,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn alternator_blob_column_string_maps_to_text() {
+        // For Alternator indexes, a JSON string value for a Blob filtering column
+        // must be converted to CqlValue::Text (S-type comparison).
+        let filter = try_from_post_index_ann_filter(
+            serde_json::from_str(
+                r#"{ "restrictions": [{ "type": "==", "lhs": "attr", "rhs": "hello" }],
+                    "allow_filtering": true }"#,
+            )
+            .unwrap(),
+            &["pk".into(), "ck".into()],
+            &filtering_table_columns(),
+            &["attr".into()],
+            true, // is_alternator
+        )
+        .unwrap();
+        assert!(
+            matches!(filter.restrictions.first(), Some(Restriction::Eq { lhs, rhs })
+                if *lhs == "attr".into() && *rhs == CqlValue::Text("hello".to_string()))
+        );
+    }
+
+    #[test]
+    fn alternator_blob_column_number_maps_to_decimal() {
+        // For Alternator indexes, a JSON number value for a Blob filtering column
+        // must be converted to CqlValue::Decimal (N-type comparison).
+        let filter = try_from_post_index_ann_filter(
+            serde_json::from_str(
+                r#"{ "restrictions": [{ "type": "<", "lhs": "attr", "rhs": 42 }],
+                    "allow_filtering": true }"#,
+            )
+            .unwrap(),
+            &["pk".into(), "ck".into()],
+            &filtering_table_columns(),
+            &["attr".into()],
+            true, // is_alternator
+        )
+        .unwrap();
+        assert!(
+            matches!(filter.restrictions.first(), Some(Restriction::Lt { lhs, rhs })
+                if *lhs == "attr".into() && matches!(rhs, CqlValue::Decimal(_)))
+        );
+    }
+
+    #[test]
+    fn alternator_blob_column_unsupported_type_fails() {
+        // A boolean value for an Alternator blob filtering column must be rejected.
+        assert!(
+            try_from_post_index_ann_filter(
+                serde_json::from_str(
+                    r#"{ "restrictions": [{ "type": "==", "lhs": "attr", "rhs": true }],
+                        "allow_filtering": true }"#,
+                )
+                .unwrap(),
+                &["pk".into(), "ck".into()],
+                &filtering_table_columns(),
+                &["attr".into()],
+                true, // is_alternator
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn non_alternator_blob_column_uses_hex_path() {
+        // For non-Alternator (plain CQL) indexes the Blob column must still accept
+        // a "0x"-prefixed hex string and produce CqlValue::Blob.
+        let filter = try_from_post_index_ann_filter(
+            serde_json::from_str(
+                r#"{ "restrictions": [{ "type": "==", "lhs": "attr", "rhs": "0xdeadbeef" }],
+                    "allow_filtering": true }"#,
+            )
+            .unwrap(),
+            &["pk".into(), "ck".into()],
+            &filtering_table_columns(),
+            &["attr".into()],
+            false, // is_alternator = false
+        )
+        .unwrap();
+        assert!(
+            matches!(filter.restrictions.first(), Some(Restriction::Eq { lhs, rhs })
+                if *lhs == "attr".into()
+                    && *rhs == CqlValue::Blob(vec![0xde, 0xad, 0xbe, 0xef]))
         );
     }
 }

@@ -88,6 +88,7 @@ impl HttpClient {
             vector,
             filter,
             limit,
+            return_columns: vec![],
         };
         self.post_ann_data(keyspace_name, index_name, &request)
             .await

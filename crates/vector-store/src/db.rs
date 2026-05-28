@@ -42,7 +42,6 @@ use rustls_pki_types::pem::PemObject;
 use scylla::client::session::Session;
 use scylla::client::session::TlsContext;
 use scylla::client::session_builder::SessionBuilder;
-use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::Table;
 use scylla::statement::prepared::PreparedStatement;
 use scylla::value::CqlTimeuuid;
@@ -751,7 +750,7 @@ impl Statements {
                             anyhow!("table {table_name} does not exist").context(InvalidMetadata)
                         })?;
                     Ok(options.remove("target").and_then(|target| {
-                        from_target_option(table, target)
+                        from_target_option(table, &KeyspaceName::from(keyspace_name.as_str()), target)
                             .map(
                                 |(index_type, target_column, filtering_columns)| DbCustomIndex {
                                     keyspace: keyspace_name.into(),
@@ -1015,6 +1014,7 @@ fn convert_legacy_target_option(
 
 fn from_target_option(
     table: &Table,
+    keyspace_name: &KeyspaceName,
     value: String,
 ) -> anyhow::Result<(DbIndexType, ColumnName, Vec<ColumnName>)> {
     let Some(target) = parse_target_option(table, &value)? else {
@@ -1023,13 +1023,7 @@ fn from_target_option(
     };
 
     let validate_target_type = |target_name: &str| -> anyhow::Result<()> {
-        let column = table.columns.get(target_name).ok_or_else(|| {
-            anyhow!("invalid target option: column {target_name} does not exist in a table")
-        })?;
-        if !matches!(column.typ, ColumnType::Vector { .. }) {
-            bail!("invalid target option: column {target_name} is not a vector column in a table");
-        }
-        Ok(())
+        db_index_backend::validate_target_type(table, keyspace_name, target_name)
     };
 
     validate_target_type(&target.target_column)?;
