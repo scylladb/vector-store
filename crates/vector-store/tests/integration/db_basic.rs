@@ -290,7 +290,7 @@ fn process_db(db: &DbBasic, msg: Db, node_state: Sender<NodeState>) {
                                 keyspace: keyspace_name.clone(),
                                 index: index_name.clone(),
                                 table: index.metadata.table_name.clone(),
-                                target_column: index.metadata.target_column.clone(),
+                                target_columns: index.metadata.target_columns.clone(),
                                 partitioning: index.metadata.partitioning.clone(),
                                 filtering_columns: index.metadata.filtering_columns.clone(),
                                 kind: match index.metadata.kind {

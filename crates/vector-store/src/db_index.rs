@@ -380,7 +380,7 @@ impl Statements {
         let query = db_index_backend::range_scan_query(
             &keyspace_identifier,
             &table_identifier,
-            &metadata.target_column,
+            metadata.target_columns.first(),
             &st_primary_key_list,
             &st_partition_key_list,
         );

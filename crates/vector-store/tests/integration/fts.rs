@@ -27,6 +27,7 @@ use vector_store::HttpServerExt;
 use vector_store::IndexKind;
 use vector_store::IndexMetadata;
 use vector_store::IndexOptionsFts;
+use vector_store::NonemptyArc;
 use vector_store::NonemptyIteratorExt;
 use vector_store::Timestamp;
 use vector_store::node_state::NodeState;
@@ -58,7 +59,7 @@ async fn setup_fts_store(
         keyspace_name: "fts_ks".into(),
         table_name: "documents".into(),
         index_name: "fts_idx".into(),
-        target_column: "content".into(),
+        target_columns: NonemptyArc::new(["content"]).unwrap(),
         partitioning: DbIndexPartitioning::Global,
         filtering_columns: columns.keys().cloned().collect(),
         version: Uuid::new_v4().into(),

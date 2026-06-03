@@ -56,6 +56,7 @@ use vector_store::HttpServerExt;
 use vector_store::IndexKind;
 use vector_store::IndexMetadata;
 use vector_store::IndexOptionsVs;
+use vector_store::NonemptyArc;
 use vector_store::NonemptyIteratorExt;
 use vector_store::PrimaryKey;
 use vector_store::Quantization;
@@ -116,7 +117,7 @@ fn default_index_metadata(dimensions: usize) -> IndexMetadata {
         keyspace_name: "vector".into(),
         table_name: "items".into(),
         index_name: "ann".into(),
-        target_column: "embedding".into(),
+        target_columns: NonemptyArc::new(["embedding"]).unwrap(),
         partitioning: DbIndexPartitioning::Global,
         filtering_columns: Arc::new([]),
         version: Uuid::new_v4().into(),
@@ -159,9 +160,12 @@ fn setup_table(
             primary_keys: primary_keys.into_iter().collect_nonempty_arc().unwrap(),
             partition_key_count,
             columns: Arc::new(columns.into_iter().collect()),
-            dimensions: [(index.target_column.clone(), index.vs().unwrap().dimensions)]
-                .into_iter()
-                .collect(),
+            dimensions: [(
+                index.target_columns.first().clone(),
+                index.vs().unwrap().dimensions,
+            )]
+            .into_iter()
+            .collect(),
         },
     )
     .unwrap();

@@ -19,6 +19,7 @@ use crate::IndexMetadata;
 use crate::IndexName;
 use crate::IndexVersion;
 use crate::KeyspaceName;
+use crate::NonemptyArc;
 use crate::NonemptyIteratorExt;
 use crate::Quantization;
 use crate::SpaceType;
@@ -761,14 +762,18 @@ impl Statements {
                                     keyspace: keyspace_name.into(),
                                     index: index_name.clone().into(),
                                     table: table_name.into(),
-                                    target_column,
+                                    target_columns: NonemptyArc::new([target_column])
+                                        .expect("target column should be non-empty"),
                                     partitioning,
                                     filtering_columns,
                                     kind,
                                 },
                             )
                             .inspect_err(|err| {
-                                warn!("Skipping index {index_name} due to invalid target option: {err}");
+                                warn!(
+                                    "Skipping index {index_name} \
+                                    due to invalid target option: {err}"
+                                );
                             })
                             .ok()
                     }))

@@ -65,7 +65,7 @@ fn make_index(
         keyspace_name: "vector".into(),
         table_name: "items".into(),
         index_name: name.into(),
-        target_column: column.into(),
+        target_columns: NonemptyArc::new([column]).unwrap(),
         partitioning,
         filtering_columns: filtering_columns
             .iter()

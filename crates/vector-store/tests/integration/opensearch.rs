@@ -36,7 +36,7 @@ async fn simple_create_search_delete_index() {
         keyspace_name: "vector".into(),
         table_name: "items".into(),
         index_name: "ann".into(),
-        target_column: "embedding".into(),
+        target_columns: NonemptyArc::new(["embedding"]).unwrap(),
         partitioning: DbIndexPartitioning::Global,
         filtering_columns: Arc::new([]),
         version: Uuid::new_v4().into(),
@@ -78,9 +78,12 @@ async fn simple_create_search_delete_index() {
                 .into_iter()
                 .collect(),
             ),
-            dimensions: [(index.target_column.clone(), index.vs().unwrap().dimensions)]
-                .into_iter()
-                .collect(),
+            dimensions: [(
+                index.target_columns.first().clone(),
+                index.vs().unwrap().dimensions,
+            )]
+            .into_iter()
+            .collect(),
         },
     )
     .unwrap();

@@ -56,7 +56,7 @@ async fn memory_limit_during_index_build() {
         keyspace_name: "ksp".into(),
         table_name: "tbl".into(),
         index_name: "idx".into(),
-        target_column: "v".into(),
+        target_columns: NonemptyArc::new(["v"]).unwrap(),
         partitioning: DbIndexPartitioning::Global,
         filtering_columns: Arc::new([]),
         version: Uuid::new_v4().into(),
@@ -77,9 +77,12 @@ async fn memory_limit_during_index_build() {
             primary_keys: NonemptyArc::new(["pk"]).unwrap(),
             partition_key_count: 1,
             columns: Arc::new([("pk".into(), NativeType::Int)].into_iter().collect()),
-            dimensions: [(index.target_column.clone(), index.vs().unwrap().dimensions)]
-                .into_iter()
-                .collect(),
+            dimensions: [(
+                index.target_columns.first().clone(),
+                index.vs().unwrap().dimensions,
+            )]
+            .into_iter()
+            .collect(),
         },
     )
     .unwrap();

@@ -203,7 +203,7 @@ async fn get_indexes(db: &Sender<Db>) -> anyhow::Result<HashSet<IndexMetadata>> 
             keyspace_name: idx.keyspace,
             index_name: idx.index,
             table_name: idx.table,
-            target_column: idx.target_column,
+            target_columns: idx.target_columns,
             partitioning: idx.partitioning,
             filtering_columns: idx.filtering_columns,
             version,
@@ -229,7 +229,7 @@ async fn build_vs_index_kind(
         .get_index_target_type(
             idx.keyspace.clone(),
             idx.table.clone(),
-            idx.target_column.clone(),
+            idx.target_columns.first().clone(),
             idx.index.clone(),
         )
         .await
@@ -376,6 +376,7 @@ mod tests {
     use crate::DbIndexPartitioning;
     use crate::IndexKey;
     use crate::IndexName;
+    use crate::NonemptyArc;
     use crate::db;
     use crate::db::LatestSchemaVersionR;
     use crate::db::tests::MockSimDb;
@@ -396,7 +397,7 @@ mod tests {
             keyspace_name: "ks".into(),
             index_name: name.into(),
             table_name: "tbl".into(),
-            target_column: "embedding".into(),
+            target_columns: NonemptyArc::new(["embedding"]).unwrap(),
             partitioning: DbIndexPartitioning::Global,
             filtering_columns: Arc::new([]),
             version: Uuid::new_v4().into(),
@@ -416,7 +417,7 @@ mod tests {
             keyspace_name: "ks".into(),
             index_name: name.into(),
             table_name: "tbl".into(),
-            target_column: "content".into(),
+            target_columns: NonemptyArc::new(["content"]).unwrap(),
             partitioning: DbIndexPartitioning::Global,
             filtering_columns: Arc::new([]),
             version: Uuid::new_v4().into(),
@@ -504,7 +505,7 @@ mod tests {
                 keyspace: "ks".to_string().into(),
                 index: name.to_string().into(),
                 table: "tbl".to_string().into(),
-                target_column: "embedding".to_string().into(),
+                target_columns: NonemptyArc::new(["embedding"]).unwrap(),
                 partitioning: DbIndexPartitioning::Global,
                 filtering_columns: Arc::new([]),
                 kind: DbIndexKind::VectorSearch,
@@ -563,7 +564,7 @@ mod tests {
                         keyspace: idx.keyspace.clone(),
                         index: idx.index.clone(),
                         table: idx.table.clone(),
-                        target_column: idx.target_column.clone(),
+                        target_columns: idx.target_columns.clone(),
                         partitioning: DbIndexPartitioning::Global,
                         filtering_columns: Arc::new([]),
                         kind: idx.kind,
@@ -758,7 +759,7 @@ mod tests {
                         keyspace: "ks".to_string().into(),
                         index: "idx".to_string().into(),
                         table: "tbl".to_string().into(),
-                        target_column: "embedding".to_string().into(),
+                        target_columns: NonemptyArc::new(["embedding"]).unwrap(),
                         partitioning: DbIndexPartitioning::Global,
                         filtering_columns: Arc::new([]),
                         kind: DbIndexKind::VectorSearch,
@@ -837,7 +838,7 @@ mod tests {
                         keyspace: "ks".to_string().into(),
                         index: "fts_idx".to_string().into(),
                         table: "tbl".to_string().into(),
-                        target_column: "content".to_string().into(),
+                        target_columns: NonemptyArc::new(["content"]).unwrap(),
                         partitioning: DbIndexPartitioning::Global,
                         filtering_columns: Arc::new([]),
                         kind: DbIndexKind::FullTextSearch,

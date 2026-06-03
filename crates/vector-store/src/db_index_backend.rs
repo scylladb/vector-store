@@ -10,6 +10,7 @@ use crate::IndexMetadata;
 use crate::IndexName;
 use crate::KeyspaceIdentifier;
 use crate::KeyspaceName;
+use crate::NonemptyArc;
 use crate::TableIdentifier;
 use crate::TableName;
 use crate::Vector;
@@ -23,6 +24,7 @@ use scylla_cdc::CqlIdentifier;
 use scylla_cdc::consumer::CDCRow;
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
+use std::sync::OnceLock;
 
 /// Alternator tables store all user attributes in a single map column `:attrs`.
 /// Because Alternator (DynamoDB-compatible) is schemaless, different items can
@@ -43,35 +45,45 @@ pub(crate) struct IndexLocation {
 }
 
 pub(crate) enum DbIndexBackend {
-    Cql { target_column: ColumnName },
-    Alternator { target_column: ColumnName },
+    Cql {
+        target_columns: NonemptyArc<ColumnName>,
+    },
+    Alternator {
+        target_columns: NonemptyArc<ColumnName>,
+    },
 }
 
 impl From<&IndexMetadata> for DbIndexBackend {
     fn from(metadata: &IndexMetadata) -> Self {
-        let target_column = metadata.target_column.clone();
+        let target_columns = metadata.target_columns.clone();
         if metadata.keyspace_name.is_alternator() {
-            Self::Alternator { target_column }
+            Self::Alternator { target_columns }
         } else {
-            Self::Cql { target_column }
+            Self::Cql { target_columns }
         }
     }
 }
 
 impl DbIndexBackend {
-    pub fn target_column_name(&self) -> &str {
+    pub fn target_column_names(&self) -> &NonemptyArc<ColumnName> {
         match self {
-            Self::Cql { target_column } => target_column.as_ref(),
-            Self::Alternator { .. } => ALTERNATOR_ATTRS_COLUMN,
+            Self::Cql { target_columns } => target_columns,
+            Self::Alternator { .. } => {
+                static ALTERNATOR_ATTRS_COLUMN_NAMES: OnceLock<NonemptyArc<ColumnName>> =
+                    OnceLock::new();
+                ALTERNATOR_ATTRS_COLUMN_NAMES.get_or_init(|| {
+                    NonemptyArc::new([ColumnName::from(ALTERNATOR_ATTRS_COLUMN)]).unwrap()
+                })
+            }
         }
     }
 
     pub fn extract_vector(&self, value: CqlValue) -> anyhow::Result<Option<Vector>> {
         match self {
             Self::Cql { .. } => Vector::try_from(value).map(Some),
-            Self::Alternator { target_column } => vector::AlternatorAttrs {
+            Self::Alternator { target_columns } => vector::AlternatorAttrs {
                 attrs: value,
-                target_column: target_column.as_ref(),
+                target_column: target_columns.first().as_ref(),
             }
             .try_into(),
         }
@@ -92,8 +104,8 @@ impl DbIndexBackend {
 
     pub fn take_cdc_value(&self, row: &mut CDCRow<'_>) -> CdcValueStatus {
         match self {
-            Self::Cql { target_column } => {
-                let column = target_column.as_ref();
+            Self::Cql { target_columns } => {
+                let column = target_columns.first().as_ref();
                 if row.is_value_deleted(column) {
                     return CdcValueStatus::Deleted;
                 }
@@ -102,7 +114,7 @@ impl DbIndexBackend {
                     None => CdcValueStatus::Skip,
                 }
             }
-            Self::Alternator { target_column } => {
+            Self::Alternator { target_columns } => {
                 // Check take_value before is_value_deleted.
                 // PutItem in Alternator deletes and re-adds :attrs in a single CDC event,
                 // so is_value_deleted can be true even when a new value is present.
@@ -113,7 +125,8 @@ impl DbIndexBackend {
                     None if row.is_value_deleted(column) => CdcValueStatus::Deleted,
                     None => {
                         let target_deleted = row.take_deleted_elements(column).iter().any(|el| {
-                            el.as_text().map(String::as_str) == Some(target_column.as_ref())
+                            el.as_text().map(String::as_str)
+                                == Some(target_columns.first().as_ref())
                         });
                         if target_deleted {
                             CdcValueStatus::Deleted

@@ -63,7 +63,7 @@ impl Ord for NeedsFiltering {
 pub(crate) struct RoutingGroupKey {
     keyspace: KeyspaceName,
     table: TableName,
-    column: ColumnName,
+    columns: NonemptyArc<ColumnName>,
 }
 
 impl From<&IndexMetadata> for RoutingGroupKey {
@@ -71,7 +71,7 @@ impl From<&IndexMetadata> for RoutingGroupKey {
         Self {
             keyspace: metadata.keyspace_name.clone(),
             table: metadata.table_name.clone(),
-            column: metadata.target_column.clone(),
+            columns: metadata.target_columns.clone(),
         }
     }
 }

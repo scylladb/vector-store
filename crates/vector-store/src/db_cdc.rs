@@ -460,7 +460,8 @@ impl Consumer for CdcConsumer {
         }
 
         let source = &self.0.backend;
-        let column = source.target_column_name();
+        // TODO: fix multi-target indexes
+        let column = source.target_column_names().first().as_ref();
         if !row.column_deletable(column) {
             bail!("CDC error: column {column} should be deletable");
         }
