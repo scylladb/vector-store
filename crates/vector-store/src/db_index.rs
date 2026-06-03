@@ -13,6 +13,7 @@ use crate::IndexMetadata;
 use crate::KeyspaceIdentifier;
 use crate::Metrics;
 use crate::NonemptyArc;
+use crate::NonemptyBox;
 use crate::NonemptyIteratorExt;
 use crate::Percentage;
 use crate::Progress;
@@ -28,6 +29,7 @@ use crate::node_state::Event;
 use crate::node_state::NodeState;
 use crate::node_state::NodeStateExt;
 use crate::perf;
+use crate::timestamp::Timestamped;
 use anyhow::Context;
 use anyhow::anyhow;
 use anyhow::bail;
@@ -639,8 +641,7 @@ impl Statements {
 
                 Some(DbIndexedRow {
                     primary_key,
-                    value,
-                    timestamp,
+                    values: NonemptyBox::new([Timestamped::new(timestamp, value)]).unwrap(),
                 })
             })
             .filter_map(|value| async move {
