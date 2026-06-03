@@ -13,12 +13,14 @@ use crate::IndexKind;
 use crate::IndexMetadata;
 use crate::Metrics;
 use crate::NonemptyArc;
+use crate::NonemptyBox;
 use crate::NonemptyIteratorExt;
 use crate::db_index_backend::CdcValueStatus;
 use crate::db_index_backend::DbIndexBackend;
 use crate::internals::Internals;
 use crate::internals::InternalsExt;
 use crate::perf;
+use crate::timestamp::Timestamped;
 use ::time::OffsetDateTime;
 use anyhow::Context;
 use anyhow::anyhow;
@@ -533,8 +535,7 @@ impl Consumer for CdcConsumer {
             .send((
                 DbIndexedRow {
                     primary_key,
-                    value,
-                    timestamp,
+                    values: NonemptyBox::new([Timestamped::new(timestamp, value)]).unwrap(),
                 },
                 AsyncInProgress::cdc(
                     self.0.metrics.indexing_lag.with_label_values(&[

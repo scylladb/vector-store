@@ -57,11 +57,13 @@ use vector_store::IndexKind;
 use vector_store::IndexMetadata;
 use vector_store::IndexOptionsVs;
 use vector_store::NonemptyArc;
+use vector_store::NonemptyBox;
 use vector_store::NonemptyIteratorExt;
 use vector_store::PrimaryKey;
 use vector_store::Quantization;
 use vector_store::SpaceType;
 use vector_store::Timestamp;
+use vector_store::Timestamped;
 use vector_store::Vector;
 use vector_store::db::Db;
 use vector_store::node_state::NodeState;
@@ -270,8 +272,11 @@ fn scan_fn_mpsc(
                     .send((
                         DbIndexedRow {
                             primary_key,
-                            value: embedding.map(DbIndexedValue::Vector),
-                            timestamp,
+                            values: NonemptyBox::new([Timestamped::new(
+                                timestamp,
+                                embedding.map(DbIndexedValue::Vector),
+                            )])
+                            .unwrap(),
                         },
                         in_progress,
                     ))
