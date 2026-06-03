@@ -16,9 +16,11 @@ use crate::DbIndexedRow;
 use crate::DbIndexedValue;
 use crate::IndexKey;
 use crate::NonemptyArc;
+use crate::NonemptyBox;
 use crate::PartitionKey;
 use crate::PrimaryKey;
 use crate::Restriction;
+use crate::Vector;
 use crate::primary_key::normalize;
 use crate::table::chunk_timestamps::ChunkTimestampsExclusive;
 use crate::timestamp::Timestamped;
@@ -166,9 +168,9 @@ impl Index {
     fn new_global(
         index_id: IndexId,
         primary_key_columns: NonemptyArc<ColumnName>,
+        column_targets_count: NonZeroUsize,
         filtering_columns: &[ColumnName],
     ) -> Self {
-        let chunk_size = NonZeroUsize::new(1).unwrap();
         Self {
             index_id,
             data: IndexData::Global,
@@ -177,16 +179,16 @@ impl Index {
                 .chain(filtering_columns.iter())
                 .cloned()
                 .collect(),
-            values_timestamps: ColumnVecChunks::new(ChunkTimestamps::new(chunk_size)),
+            values_timestamps: ColumnVecChunks::new(ChunkTimestamps::new(column_targets_count)),
         }
     }
 
     fn new_local(
         index_id: IndexId,
         key_columns: NonemptyArc<ColumnName>,
+        column_targets_count: NonZeroUsize,
         filtering_columns: &[ColumnName],
     ) -> Self {
-        let chunk_size = NonZeroUsize::new(1).unwrap();
         Self {
             index_id,
             _available_columns: key_columns
@@ -194,7 +196,7 @@ impl Index {
                 .chain(filtering_columns.iter())
                 .cloned()
                 .collect(),
-            values_timestamps: ColumnVecChunks::new(ChunkTimestamps::new(chunk_size)),
+            values_timestamps: ColumnVecChunks::new(ChunkTimestamps::new(column_targets_count)),
             data: IndexData::Local {
                 key_columns,
                 map: BTreeMap::new(),
@@ -349,6 +351,7 @@ impl Table {
         primary_key_columns: NonemptyArc<ColumnName>,
         partition_key_count: usize,
         partition_key_columns: Option<NonemptyArc<ColumnName>>,
+        column_targets_count: NonZeroUsize,
         filtering_columns: &[ColumnName],
         table_columns: Arc<HashMap<ColumnName, NativeType>>,
     ) -> anyhow::Result<Self> {
@@ -358,9 +361,19 @@ impl Table {
         let mut index_ids = BTreeMap::new();
         let index_id = index_id_generator.next(partition_key_columns.is_none())?;
         let index = if let Some(partition_key_columns) = partition_key_columns.as_ref() {
-            Index::new_local(index_id, partition_key_columns.clone(), filtering_columns)
+            Index::new_local(
+                index_id,
+                partition_key_columns.clone(),
+                column_targets_count,
+                filtering_columns,
+            )
         } else {
-            Index::new_global(index_id, primary_key_columns.clone(), filtering_columns)
+            Index::new_global(
+                index_id,
+                primary_key_columns.clone(),
+                column_targets_count,
+                filtering_columns,
+            )
         };
         indexes.insert(index_id, index);
         index_ids.insert(index_key, index_id);
@@ -502,36 +515,86 @@ struct CompareTimestamps {
 
 fn compare_timestamps(
     values_timestamps: &ChunkTimestampsExclusive,
-    db_row: &DbIndexedRow,
+    timestamps: &[Timestamped<()>],
 ) -> anyhow::Result<CompareTimestamps> {
-    if let Some(timestamped) = values_timestamps.timestamp(0) {
-        let is_cur_tombstone = timestamped.is_tombstone();
-        let is_new_tombstone = db_row.value.is_none();
-        let is_newer = timestamped.timestamp() < db_row.timestamp;
-        Ok(CompareTimestamps {
-            is_cur_tombstone,
-            is_new_tombstone,
-            is_newer,
+    timestamps
+        .iter()
+        .enumerate()
+        .map(|(idx, new)| {
+            values_timestamps
+                .timestamp(idx)
+                .ok_or_else(|| anyhow!("Failed to compare timestamp:  missing timestamped({idx})"))
+                .map(|cur| (cur, new))
         })
-    } else {
-        Err(anyhow!("Missing first timestamped for comparing"))
-    }
+        .fold_ok(
+            CompareTimestamps {
+                is_cur_tombstone: false,
+                is_new_tombstone: true,
+                is_newer: false,
+            },
+            |mut comparision, (cur, new)| {
+                if cur.is_tombstone() {
+                    comparision.is_cur_tombstone = true;
+                }
+                if new.is_valid() {
+                    comparision.is_new_tombstone = false;
+                }
+                if cur.timestamp() < new.timestamp() {
+                    comparision.is_newer = true;
+                }
+                comparision
+            },
+        )
 }
 
 fn update_timestamps(
     mut values_timestamps: ChunkTimestampsExclusive,
-    db_row: &DbIndexedRow,
+    timestamps: NonemptyBox<Timestamped<()>>,
 ) -> anyhow::Result<()> {
-    values_timestamps
-        .set_timestamp(
-            0,
-            if db_row.value.is_some() {
-                Timestamped::new_valid(db_row.timestamp)
-            } else {
-                Timestamped::new_tombstone(db_row.timestamp)
-            },
-        )
-        .ok_or_else(|| anyhow!("Missing first timestamped for updating"))
+    timestamps
+        .into_iter()
+        .enumerate()
+        .try_for_each(|(idx, timestamped)| {
+            values_timestamps
+                .set_timestamp(idx, timestamped)
+                .ok_or_else(|| anyhow!("Failed to update timestamp: missing timestamped({idx})"))
+        })
+}
+
+enum SplittingValues {
+    Vector(Vector),
+    Document(String),
+}
+
+struct SplitValuesFiltering {
+    values: Option<SplittingValues>,
+    timestamps: NonemptyBox<Timestamped<()>>,
+}
+
+fn split_values_filtering(db_row: DbIndexedRow) -> anyhow::Result<SplitValuesFiltering> {
+    let mut row_values = db_row.values.into_iter();
+
+    let (values, timestamps) = {
+        let Some(value) = row_values.next() else {
+            bail!("Expected vector or document value for first column, got None");
+        };
+
+        let timestamp = value.timestamp();
+        let timestamped = if value.is_valid() {
+            Timestamped::new_valid(timestamp)
+        } else {
+            Timestamped::new_tombstone(timestamp)
+        };
+        let timestamps = NonemptyBox::new([timestamped]).unwrap();
+
+        let values = value.into_value().map(|value| match value {
+            DbIndexedValue::Vector(vector) => SplittingValues::Vector(vector),
+            DbIndexedValue::Document(document) => SplittingValues::Document(document),
+        });
+        (values, timestamps)
+    };
+
+    Ok(SplitValuesFiltering { values, timestamps })
 }
 
 /// A trait that defines the add operation for the table.
@@ -579,18 +642,23 @@ impl TableAdd for Table {
                 for index_id {index_id:?} and primary_id {primary_id:?}"
             )
         };
+
+        let SplitValuesFiltering { values, timestamps } = split_values_filtering(db_row)?;
         let epoch = values_timestamps.epoch();
         let CompareTimestamps {
             is_cur_tombstone,
             is_new_tombstone,
             is_newer,
-        } = compare_timestamps(&values_timestamps, &db_row)?;
+        } = compare_timestamps(&values_timestamps, timestamps.as_slice())?;
         if !is_newer {
             return Ok(operations);
         }
 
         let primary_id = primary_id.new_epoch(epoch);
         if !is_new_tombstone {
+            let values = values.ok_or_else(|| {
+                anyhow!("Expected vector or document value for first column, got None")
+            })?;
             if !is_cur_tombstone {
                 operations.push(Operation::RemoveBeforeAddValue {
                     primary_id,
@@ -600,18 +668,28 @@ impl TableAdd for Table {
 
             let primary_id = primary_id.next_epoch();
             values_timestamps.set_epoch(primary_id.epoch());
-            update_timestamps(values_timestamps, &db_row)?;
+            update_timestamps(values_timestamps, timestamps)?;
 
-            operations.push(Operation::AddValue {
-                primary_id,
-                partition_id,
-                value: db_row.value.unwrap(),
-                is_update: !is_cur_tombstone,
-            });
+            let is_update = !is_cur_tombstone;
+            let operation = match values {
+                SplittingValues::Vector(vector) => Operation::AddVector {
+                    primary_id,
+                    partition_id,
+                    vector,
+                    is_update,
+                },
+                SplittingValues::Document(document) => Operation::AddDocument {
+                    primary_id,
+                    partition_id,
+                    document,
+                    is_update,
+                },
+            };
+            operations.push(operation);
         } else {
             let epoch = primary_id.epoch().next();
             values_timestamps.set_epoch(epoch);
-            update_timestamps(values_timestamps, &db_row)?;
+            update_timestamps(values_timestamps, timestamps)?;
 
             if !is_cur_tombstone {
                 operations.push(Operation::RemoveValue {
@@ -899,10 +977,16 @@ fn cql_cmp_tuple(
 
 #[derive(Clone, Debug)]
 pub(crate) enum Operation {
-    AddValue {
+    AddVector {
         primary_id: PrimaryId,
         partition_id: PartitionId,
-        value: DbIndexedValue,
+        vector: Vector,
+        is_update: bool,
+    },
+    AddDocument {
+        primary_id: PrimaryId,
+        partition_id: PartitionId,
+        document: String,
         is_update: bool,
     },
     RemoveBeforeAddValue {
@@ -933,6 +1017,7 @@ mod tests {
                 NonemptyArc::new(["pk", "ck"]).unwrap(),
                 1,
                 partition_key_columns.clone(),
+                NonZeroUsize::new(1).unwrap(),
                 &[],
                 Arc::new(
                     [
@@ -951,20 +1036,23 @@ mod tests {
                     &index_key,
                     DbIndexedRow {
                         primary_key: [CqlValue::Int(1), CqlValue::Int(1)].into(),
-                        value: Some(DbIndexedValue::Vector(vec![0.1, 0.2, 0.3].into())),
-                        timestamp: Timestamp::from_millis(100),
+                        values: NonemptyBox::new([Timestamped::new(
+                            Timestamp::from_millis(100),
+                            Some(DbIndexedValue::Vector(vec![0.1, 0.2, 0.3].into())),
+                        )])
+                        .unwrap(),
                     },
                 )
                 .unwrap();
             assert_eq!(operations.len(), 1);
             let (primary_id11, partition_id11) = match operations.first().unwrap() {
-                Operation::AddValue {
+                Operation::AddVector {
                     primary_id,
                     partition_id,
-                    value,
+                    vector,
                     is_update: false,
                 } => {
-                    assert_eq!(value, &DbIndexedValue::Vector(vec![0.1, 0.2, 0.3].into()));
+                    assert_eq!(vector, &vec![0.1, 0.2, 0.3].into());
                     (*primary_id, *partition_id)
                 }
                 _ => panic!("Expected AddValue operation"),
@@ -976,20 +1064,23 @@ mod tests {
                     &index_key,
                     DbIndexedRow {
                         primary_key: [CqlValue::Int(1), CqlValue::Int(2)].into(),
-                        value: Some(DbIndexedValue::Vector(vec![0.2, 0.2, 0.3].into())),
-                        timestamp: Timestamp::from_millis(100),
+                        values: NonemptyBox::new([Timestamped::new(
+                            Timestamp::from_millis(100),
+                            Some(DbIndexedValue::Vector(vec![0.2, 0.2, 0.3].into())),
+                        )])
+                        .unwrap(),
                     },
                 )
                 .unwrap();
             assert_eq!(operations.len(), 1);
             let (primary_id21, partition_id21) = match operations.first().unwrap() {
-                Operation::AddValue {
+                Operation::AddVector {
                     primary_id,
                     partition_id,
-                    value,
+                    vector,
                     is_update: false,
                 } => {
-                    assert_eq!(value, &DbIndexedValue::Vector(vec![0.2, 0.2, 0.3].into()));
+                    assert_eq!(vector, &vec![0.2, 0.2, 0.3].into());
                     (*primary_id, *partition_id)
                 }
                 _ => panic!("Expected AddValue operation"),
@@ -1003,20 +1094,23 @@ mod tests {
                     &index_key,
                     DbIndexedRow {
                         primary_key: [CqlValue::Int(1), CqlValue::Int(3)].into(),
-                        value: Some(DbIndexedValue::Vector(vec![0.3, 0.2, 0.3].into())),
-                        timestamp: Timestamp::from_millis(100),
+                        values: NonemptyBox::new([Timestamped::new(
+                            Timestamp::from_millis(100),
+                            Some(DbIndexedValue::Vector(vec![0.3, 0.2, 0.3].into())),
+                        )])
+                        .unwrap(),
                     },
                 )
                 .unwrap();
             assert_eq!(operations.len(), 1);
             let (primary_id31, partition_id31) = match operations.first().unwrap() {
-                Operation::AddValue {
+                Operation::AddVector {
                     primary_id,
                     partition_id,
-                    value,
+                    vector,
                     is_update: false,
                 } => {
-                    assert_eq!(value, &DbIndexedValue::Vector(vec![0.3, 0.2, 0.3].into()));
+                    assert_eq!(vector, &vec![0.3, 0.2, 0.3].into());
                     (*primary_id, *partition_id)
                 }
                 _ => panic!("Expected AddValue operation"),
@@ -1070,8 +1164,11 @@ mod tests {
                     &index_key,
                     DbIndexedRow {
                         primary_key: [CqlValue::Int(1), CqlValue::Int(2)].into(),
-                        value: Some(DbIndexedValue::Vector(vec![0.2, 0.2, 0.3].into())),
-                        timestamp: Timestamp::from_millis(50),
+                        values: NonemptyBox::new([Timestamped::new(
+                            Timestamp::from_millis(50),
+                            Some(DbIndexedValue::Vector(vec![0.2, 0.2, 0.3].into())),
+                        )])
+                        .unwrap(),
                     },
                 )
                 .unwrap();
@@ -1083,8 +1180,11 @@ mod tests {
                     &index_key,
                     DbIndexedRow {
                         primary_key: [CqlValue::Int(1), CqlValue::Int(2)].into(),
-                        value: Some(DbIndexedValue::Vector(vec![0.5, 0.5, 0.3].into())),
-                        timestamp: Timestamp::from_millis(150),
+                        values: NonemptyBox::new([Timestamped::new(
+                            Timestamp::from_millis(150),
+                            Some(DbIndexedValue::Vector(vec![0.5, 0.5, 0.3].into())),
+                        )])
+                        .unwrap(),
                     },
                 )
                 .unwrap();
@@ -1099,13 +1199,13 @@ mod tests {
             assert_eq!(primary_id22, primary_id21);
             assert_eq!(partition_id22, partition_id21);
             let (primary_id22, partition_id22) = match operations.get(1).unwrap() {
-                Operation::AddValue {
+                Operation::AddVector {
                     primary_id,
                     partition_id,
-                    value,
+                    vector,
                     is_update: true,
                 } => {
-                    assert_eq!(value, &DbIndexedValue::Vector(vec![0.5, 0.5, 0.3].into()));
+                    assert_eq!(vector, &vec![0.5, 0.5, 0.3].into());
                     (*primary_id, *partition_id)
                 }
                 _ => panic!("Expected AddValue operation"),
@@ -1125,8 +1225,11 @@ mod tests {
                     &index_key,
                     DbIndexedRow {
                         primary_key: [CqlValue::Int(1), CqlValue::Int(1)].into(),
-                        value: None,
-                        timestamp: Timestamp::from_millis(200),
+                        values: NonemptyBox::new([Timestamped::new(
+                            Timestamp::from_millis(200),
+                            None,
+                        )])
+                        .unwrap(),
                     },
                 )
                 .unwrap();
@@ -1148,8 +1251,11 @@ mod tests {
                     &index_key,
                     DbIndexedRow {
                         primary_key: [CqlValue::Int(1), CqlValue::Int(2)].into(),
-                        value: None,
-                        timestamp: Timestamp::from_millis(200),
+                        values: NonemptyBox::new([Timestamped::new(
+                            Timestamp::from_millis(200),
+                            None,
+                        )])
+                        .unwrap(),
                     },
                 )
                 .unwrap();
@@ -1171,8 +1277,11 @@ mod tests {
                     &index_key,
                     DbIndexedRow {
                         primary_key: [CqlValue::Int(1), CqlValue::Int(3)].into(),
-                        value: None,
-                        timestamp: Timestamp::from_millis(200),
+                        values: NonemptyBox::new([Timestamped::new(
+                            Timestamp::from_millis(200),
+                            None,
+                        )])
+                        .unwrap(),
                     },
                 )
                 .unwrap();

@@ -660,11 +660,10 @@ pub enum DbIndexedValue {
     Document(String),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DbIndexedRow {
     pub primary_key: PrimaryKey,
-    pub value: Option<DbIndexedValue>,
-    pub timestamp: Timestamp,
+    pub values: NonemptyBox<Timestamped<DbIndexedValue>>,
 }
 
 pub use async_in_progress::AsyncInProgress;

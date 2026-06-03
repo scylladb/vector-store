@@ -5,9 +5,9 @@
 
 use crate::AsyncInProgress;
 use crate::DbIndexedRow;
-use crate::DbIndexedValue;
 use crate::IndexKey;
 use crate::Metrics;
+use crate::Vector;
 use crate::fts_index::FtsIndex;
 use crate::fts_index::FtsIndexExt;
 use crate::metrics::OP_INSERT;
@@ -32,13 +32,29 @@ use tracing::error;
 use tracing::error_span;
 
 pub(crate) trait IndexDispatch {
-    fn add_value(
+    fn add_vector(
         &self,
-        partition_id: PartitionId,
-        primary_id: PrimaryId,
-        value: DbIndexedValue,
-        in_progress: AsyncInProgress,
-    ) -> impl Future<Output = ()> + Send;
+        _partition_id: PartitionId,
+        _primary_id: PrimaryId,
+        _vector: Vector,
+        _in_progress: AsyncInProgress,
+    ) -> impl Future<Output = ()> + Send {
+        async move {
+            error!("ignoring add vector for an index that does not support it");
+        }
+    }
+
+    fn add_document(
+        &self,
+        _partition_id: PartitionId,
+        _primary_id: PrimaryId,
+        _document: String,
+        _in_progress: AsyncInProgress,
+    ) -> impl Future<Output = ()> + Send {
+        async move {
+            error!("ignoring add document for an index that does not support it");
+        }
+    }
 
     fn remove_value(
         &self,
@@ -51,22 +67,14 @@ pub(crate) trait IndexDispatch {
 }
 
 impl IndexDispatch for mpsc::Sender<VsIndex> {
-    async fn add_value(
+    async fn add_vector(
         &self,
         partition_id: PartitionId,
         primary_id: PrimaryId,
-        value: DbIndexedValue,
+        vector: Vector,
         in_progress: AsyncInProgress,
     ) {
-        match value {
-            DbIndexedValue::Vector(vector) => {
-                self.add_vector(partition_id, primary_id, vector, in_progress)
-                    .await;
-            }
-            DbIndexedValue::Document(_) => {
-                error!("received document for vector-search index, ignoring");
-            }
-        }
+        VsIndexExt::add_vector(self, partition_id, primary_id, vector, in_progress).await;
     }
 
     async fn remove_value(
@@ -85,21 +93,14 @@ impl IndexDispatch for mpsc::Sender<VsIndex> {
 }
 
 impl IndexDispatch for mpsc::Sender<FtsIndex> {
-    async fn add_value(
+    async fn add_document(
         &self,
         _partition_id: PartitionId,
         primary_id: PrimaryId,
-        value: DbIndexedValue,
+        document: String,
         in_progress: AsyncInProgress,
     ) {
-        match value {
-            DbIndexedValue::Document(document) => {
-                self.add_document(primary_id, document, in_progress).await;
-            }
-            DbIndexedValue::Vector(_) => {
-                error!("received vector for full-text-search index, ignoring");
-            }
-        }
+        FtsIndexExt::add_document(self, primary_id, document, in_progress).await;
     }
 
     async fn remove_value(
@@ -174,15 +175,30 @@ async fn add<I: IndexDispatch>(
     let in_progress = &mut in_progress;
     for operation in operations.into_iter() {
         match operation {
-            Operation::AddValue {
+            Operation::AddVector {
                 primary_id,
                 partition_id,
-                value,
+                vector,
                 is_update,
             } => {
                 let op_label = if is_update { OP_UPDATE } else { OP_INSERT };
                 index
-                    .add_value(partition_id, primary_id, value, in_progress.take())
+                    .add_vector(partition_id, primary_id, vector, in_progress.take())
+                    .await;
+                metrics
+                    .modified
+                    .with_label_values(&[key.keyspace().as_ref(), key.index().as_ref(), op_label])
+                    .inc();
+            }
+            Operation::AddDocument {
+                primary_id,
+                partition_id,
+                document,
+                is_update,
+            } => {
+                let op_label = if is_update { OP_UPDATE } else { OP_INSERT };
+                index
+                    .add_document(partition_id, primary_id, document, in_progress.take())
                     .await;
                 metrics
                     .modified
@@ -222,7 +238,9 @@ async fn add<I: IndexDispatch>(
 mod tests {
     use super::*;
     use crate::DbIndexedValue;
+    use crate::NonemptyBox;
     use crate::Timestamp;
+    use crate::Timestamped;
     use crate::metrics::Metrics;
     use crate::table::MockTableAdd;
     use crate::vs_index::VsIndex;
@@ -281,8 +299,11 @@ mod tests {
 
         let embedding = DbIndexedRow {
             primary_key: [CqlValue::Int(1)].into(),
-            value: Some(DbIndexedValue::Vector(vec![1.].into())),
-            timestamp: Timestamp::from_millis(10),
+            values: NonemptyBox::new([Timestamped::new(
+                Timestamp::from_millis(10),
+                Some(DbIndexedValue::Vector(vec![1.].into())),
+            )])
+            .unwrap(),
         };
         table
             .write()
@@ -319,8 +340,11 @@ mod tests {
 
         let embedding = DbIndexedRow {
             primary_key: [CqlValue::Int(1)].into(),
-            value: Some(DbIndexedValue::Vector(vec![1.].into())),
-            timestamp: Timestamp::from_millis(10),
+            values: NonemptyBox::new([Timestamped::new(
+                Timestamp::from_millis(10),
+                Some(DbIndexedValue::Vector(vec![1.].into())),
+            )])
+            .unwrap(),
         };
         let (tx_progress, _rx_progress) = mpsc::channel(1);
         table
@@ -330,10 +354,10 @@ mod tests {
             .with(eq(index_key), eq(embedding.clone()))
             .once()
             .returning(|_, _| {
-                Ok(vec![Operation::AddValue {
+                Ok(vec![Operation::AddVector {
                     primary_id: 2.into(),
                     partition_id: 3.into(),
-                    value: DbIndexedValue::Vector(vec![4.].into()),
+                    vector: vec![4.].into(),
                     is_update: false,
                 }])
             });
@@ -384,8 +408,11 @@ mod tests {
 
         let embedding = DbIndexedRow {
             primary_key: [CqlValue::Int(1)].into(),
-            value: Some(DbIndexedValue::Vector(vec![1.].into())),
-            timestamp: Timestamp::from_millis(10),
+            values: NonemptyBox::new([Timestamped::new(
+                Timestamp::from_millis(10),
+                Some(DbIndexedValue::Vector(vec![1.].into())),
+            )])
+            .unwrap(),
         };
         table
             .write()
@@ -394,10 +421,10 @@ mod tests {
             .with(eq(index_key), eq(embedding.clone()))
             .once()
             .returning(|_, _| {
-                Ok(vec![Operation::AddValue {
+                Ok(vec![Operation::AddVector {
                     primary_id: 2.into(),
                     partition_id: 3.into(),
-                    value: DbIndexedValue::Vector(vec![4.].into()),
+                    vector: vec![4.].into(),
                     is_update: false,
                 }])
             });
@@ -454,8 +481,11 @@ mod tests {
 
         let embedding = DbIndexedRow {
             primary_key: [CqlValue::Int(1)].into(),
-            value: Some(DbIndexedValue::Vector(vec![1.].into())),
-            timestamp: Timestamp::from_millis(10),
+            values: NonemptyBox::new([Timestamped::new(
+                Timestamp::from_millis(10),
+                Some(DbIndexedValue::Vector(vec![1.].into())),
+            )])
+            .unwrap(),
         };
         table
             .write()
@@ -469,10 +499,10 @@ mod tests {
                         primary_id: 2.into(),
                         partition_id: 3.into(),
                     },
-                    Operation::AddValue {
+                    Operation::AddVector {
                         primary_id: 3.into(),
                         partition_id: 3.into(),
-                        value: DbIndexedValue::Vector(vec![4.].into()),
+                        vector: vec![4.].into(),
                         is_update: true,
                     },
                 ])
@@ -530,8 +560,11 @@ mod tests {
 
         let embedding = DbIndexedRow {
             primary_key: [CqlValue::Int(1)].into(),
-            value: Some(DbIndexedValue::Vector(vec![1.].into())),
-            timestamp: Timestamp::from_millis(10),
+            values: NonemptyBox::new([Timestamped::new(
+                Timestamp::from_millis(10),
+                Some(DbIndexedValue::Vector(vec![1.].into())),
+            )])
+            .unwrap(),
         };
         table
             .write()
@@ -542,10 +575,10 @@ mod tests {
             .returning(|_, _| {
                 Ok(vec![
                     // Plain insert
-                    Operation::AddValue {
+                    Operation::AddVector {
                         primary_id: 1.into(),
                         partition_id: 2.into(),
-                        value: DbIndexedValue::Vector(vec![10.].into()),
+                        vector: vec![10.].into(),
                         is_update: false,
                     },
                     // Update (remove + add)
@@ -553,10 +586,10 @@ mod tests {
                         primary_id: 3.into(),
                         partition_id: 4.into(),
                     },
-                    Operation::AddValue {
+                    Operation::AddVector {
                         primary_id: 5.into(),
                         partition_id: 4.into(),
-                        value: DbIndexedValue::Vector(vec![20.].into()),
+                        vector: vec![20.].into(),
                         is_update: true,
                     },
                 ])
@@ -630,8 +663,7 @@ mod tests {
 
         let embedding = DbIndexedRow {
             primary_key: [CqlValue::Int(1)].into(),
-            value: None,
-            timestamp: Timestamp::from_millis(10),
+            values: NonemptyBox::new([Timestamped::new(Timestamp::from_millis(10), None)]).unwrap(),
         };
         table
             .write()
@@ -685,8 +717,7 @@ mod tests {
 
         let embedding = DbIndexedRow {
             primary_key: [CqlValue::Int(1)].into(),
-            value: None,
-            timestamp: Timestamp::from_millis(10),
+            values: NonemptyBox::new([Timestamped::new(Timestamp::from_millis(10), None)]).unwrap(),
         };
         table
             .write()
