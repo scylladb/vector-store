@@ -117,7 +117,7 @@ fn default_index_metadata(dimensions: usize) -> IndexMetadata {
         index_name: "ann".into(),
         target_column: "embedding".into(),
         partitioning: DbIndexPartitioning::Global,
-        filtering_columns: Arc::new(vec![]),
+        filtering_columns: Arc::new([]),
         version: Uuid::new_v4().into(),
         kind: IndexKind::Vs(IndexOptionsVs {
             dimensions: NonZeroUsize::new(dimensions).unwrap().into(),

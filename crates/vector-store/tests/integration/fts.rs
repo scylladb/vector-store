@@ -59,7 +59,7 @@ async fn setup_fts_store(
         index_name: "fts_idx".into(),
         target_column: "content".into(),
         partitioning: DbIndexPartitioning::Global,
-        filtering_columns: Arc::new(columns.keys().cloned().collect()),
+        filtering_columns: columns.keys().cloned().collect(),
         version: Uuid::new_v4().into(),
         kind: IndexKind::Fts(IndexOptionsFts {}),
     };

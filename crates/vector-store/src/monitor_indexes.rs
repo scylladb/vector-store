@@ -398,7 +398,7 @@ mod tests {
             table_name: "tbl".into(),
             target_column: "embedding".into(),
             partitioning: DbIndexPartitioning::Global,
-            filtering_columns: Arc::new(Vec::new()),
+            filtering_columns: Arc::new([]),
             version: Uuid::new_v4().into(),
             kind: IndexKind::Vs(IndexOptionsVs {
                 dimensions: NonZeroUsize::new(3).unwrap().into(),
@@ -418,7 +418,7 @@ mod tests {
             table_name: "tbl".into(),
             target_column: "content".into(),
             partitioning: DbIndexPartitioning::Global,
-            filtering_columns: Arc::new(Vec::new()),
+            filtering_columns: Arc::new([]),
             version: Uuid::new_v4().into(),
             kind: IndexKind::Fts(IndexOptionsFts {}),
         }
@@ -506,7 +506,7 @@ mod tests {
                 table: "tbl".to_string().into(),
                 target_column: "embedding".to_string().into(),
                 partitioning: DbIndexPartitioning::Global,
-                filtering_columns: Arc::new(Vec::new()),
+                filtering_columns: Arc::new([]),
                 kind: DbIndexKind::VectorSearch,
             }
         }
@@ -565,7 +565,7 @@ mod tests {
                         table: idx.table.clone(),
                         target_column: idx.target_column.clone(),
                         partitioning: DbIndexPartitioning::Global,
-                        filtering_columns: Arc::new(Vec::new()),
+                        filtering_columns: Arc::new([]),
                         kind: idx.kind,
                     })
                     .collect()
@@ -760,7 +760,7 @@ mod tests {
                         table: "tbl".to_string().into(),
                         target_column: "embedding".to_string().into(),
                         partitioning: DbIndexPartitioning::Global,
-                        filtering_columns: Arc::new(Vec::new()),
+                        filtering_columns: Arc::new([]),
                         kind: DbIndexKind::VectorSearch,
                     };
                     tx.send(Ok(vec![index(), index(), index()])).unwrap();
@@ -839,7 +839,7 @@ mod tests {
                         table: "tbl".to_string().into(),
                         target_column: "content".to_string().into(),
                         partitioning: DbIndexPartitioning::Global,
-                        filtering_columns: Arc::new(Vec::new()),
+                        filtering_columns: Arc::new([]),
                         kind: DbIndexKind::FullTextSearch,
                     }]))
                     .unwrap();

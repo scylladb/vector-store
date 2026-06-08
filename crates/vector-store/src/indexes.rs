@@ -102,7 +102,7 @@ pub(crate) type FtsIndexEntry = IndexEntry<FtsIndex>;
 pub(crate) struct VsIndexData {
     routing_group: RoutingGroupKey,
     partitioning: DbIndexPartitioning,
-    filtering_columns: Arc<Vec<ColumnName>>,
+    filtering_columns: Arc<[ColumnName]>,
     table_columns: Arc<HashMap<ColumnName, NativeType>>,
     version: IndexVersion,
     options: crate::IndexOptionsVs,
@@ -153,14 +153,12 @@ impl VsIndexEntry {
             })?
             .clone();
         let primary_key_columns = db_index.get_primary_key_columns().await;
-        let filtering_columns: Arc<Vec<ColumnName>> = Arc::new(
-            metadata
-                .filtering_columns
-                .iter()
-                .chain(primary_key_columns.iter())
-                .cloned()
-                .collect(),
-        );
+        let filtering_columns = metadata
+            .filtering_columns
+            .iter()
+            .chain(primary_key_columns.iter())
+            .cloned()
+            .collect();
         let table_columns = db_index.get_table_columns().await;
         let progress = db_index.full_scan_progress().await;
         Ok(Self {

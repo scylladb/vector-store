@@ -65,12 +65,10 @@ fn make_index(
         index_name: name.into(),
         target_column: column.into(),
         partitioning,
-        filtering_columns: Arc::new(
-            filtering_columns
-                .iter()
-                .map(|s| ColumnName::from(*s))
-                .collect(),
-        ),
+        filtering_columns: filtering_columns
+            .iter()
+            .map(|s| ColumnName::from(*s))
+            .collect(),
         version: version.into(),
         kind: IndexKind::Vs(IndexOptionsVs {
             dimensions: NonZeroUsize::new(3).unwrap().into(),

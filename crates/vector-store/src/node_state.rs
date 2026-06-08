@@ -214,7 +214,7 @@ mod tests {
             table_name: TableName("test_table".to_string()),
             target_column: ColumnName("test_column".to_string()),
             partitioning: DbIndexPartitioning::Global,
-            filtering_columns: Arc::new(Vec::new()),
+            filtering_columns: Arc::new([]),
             version: Uuid::new_v4().into(),
             kind: IndexKind::Vs(IndexOptionsVs {
                 dimensions: Dimensions(NonZeroUsize::new(3).unwrap()),
@@ -231,7 +231,7 @@ mod tests {
             table_name: TableName("test_table".to_string()),
             target_column: ColumnName("test_column".to_string()),
             partitioning: DbIndexPartitioning::Global,
-            filtering_columns: Arc::new(Vec::new()),
+            filtering_columns: Arc::new([]),
             version: Uuid::new_v4().into(),
             kind: IndexKind::Vs(IndexOptionsVs {
                 dimensions: Dimensions(NonZeroUsize::new(3).unwrap()),
@@ -272,7 +272,7 @@ mod tests {
             table_name: TableName("test_table".to_string()),
             target_column: ColumnName("test_column".to_string()),
             partitioning: DbIndexPartitioning::Global,
-            filtering_columns: Arc::new(Vec::new()),
+            filtering_columns: Arc::new([]),
             version: Uuid::new_v4().into(),
             kind: IndexKind::Vs(IndexOptionsVs {
                 dimensions: Dimensions(NonZeroUsize::new(3).unwrap()),
@@ -363,7 +363,7 @@ mod tests {
             table_name: TableName("test_table".to_string()),
             target_column: ColumnName("test_column".to_string()),
             partitioning: DbIndexPartitioning::Global,
-            filtering_columns: Arc::new(Vec::new()),
+            filtering_columns: Arc::new([]),
             version: Uuid::new_v4().into(),
             kind: IndexKind::Vs(IndexOptionsVs {
                 dimensions: Dimensions(NonZeroUsize::new(3).unwrap()),

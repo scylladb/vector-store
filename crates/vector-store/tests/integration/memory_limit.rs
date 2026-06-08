@@ -57,7 +57,7 @@ async fn memory_limit_during_index_build() {
         index_name: "idx".into(),
         target_column: "v".into(),
         partitioning: DbIndexPartitioning::Global,
-        filtering_columns: Arc::new(Vec::new()),
+        filtering_columns: Arc::new([]),
         version: Uuid::new_v4().into(),
         kind: IndexKind::Vs(IndexOptionsVs {
             dimensions: NonZeroUsize::new(3).unwrap().into(),

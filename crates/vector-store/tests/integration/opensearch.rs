@@ -37,7 +37,7 @@ async fn simple_create_search_delete_index() {
         index_name: "ann".into(),
         target_column: "embedding".into(),
         partitioning: DbIndexPartitioning::Global,
-        filtering_columns: Arc::new(Vec::new()),
+        filtering_columns: Arc::new([]),
         version: Uuid::new_v4().into(),
         kind: IndexKind::Vs(IndexOptionsVs {
             dimensions: NonZeroUsize::new(3).unwrap().into(),

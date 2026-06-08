@@ -108,7 +108,7 @@ pub(crate) async fn setup_store_with_quantization(
         index_name: "ann".into(),
         target_column: "embedding".into(),
         partitioning,
-        filtering_columns: Arc::new(columns.keys().cloned().collect()),
+        filtering_columns: columns.keys().cloned().collect(),
         version: Uuid::new_v4().into(),
         kind: IndexKind::Vs(IndexOptionsVs {
             dimensions: dimension,
@@ -297,7 +297,7 @@ async fn failed_db_index_create() {
         index_name: "ann".into(),
         target_column: "embedding".into(),
         partitioning: DbIndexPartitioning::Global,
-        filtering_columns: Arc::new(Vec::new()),
+        filtering_columns: Arc::new([]),
         version: Uuid::new_v4().into(),
         kind: IndexKind::Vs(IndexOptionsVs {
             dimensions: NonZeroUsize::new(3).unwrap().into(),
@@ -1560,7 +1560,7 @@ async fn similarity_scores_are_decreasing_and_correctly_converted() {
         index_name: "ann".into(),
         target_column: "embedding".into(),
         partitioning: DbIndexPartitioning::Global,
-        filtering_columns: Arc::new(Vec::new()),
+        filtering_columns: Arc::new([]),
         version: Uuid::new_v4().into(),
         kind: IndexKind::Vs(IndexOptionsVs {
             dimensions: NonZeroUsize::new(1).unwrap().into(),

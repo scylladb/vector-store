@@ -597,7 +597,7 @@ pub struct IndexMetadata {
     pub table_name: TableName,
     pub target_column: ColumnName,
     pub partitioning: DbIndexPartitioning,
-    pub filtering_columns: Arc<Vec<ColumnName>>,
+    pub filtering_columns: Arc<[ColumnName]>,
     pub version: IndexVersion,
     pub kind: IndexKind,
 }
@@ -638,7 +638,7 @@ pub struct DbCustomIndex {
     pub table: TableName,
     pub target_column: ColumnName,
     pub partitioning: DbIndexPartitioning,
-    pub filtering_columns: Arc<Vec<ColumnName>>,
+    pub filtering_columns: Arc<[ColumnName]>,
     pub kind: DbIndexKind,
 }
 
