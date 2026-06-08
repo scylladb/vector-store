@@ -25,6 +25,7 @@ mod metrics;
 mod monitor_indexes;
 mod monitor_items;
 pub mod node_state;
+mod nonempty;
 mod partition_key;
 mod perf;
 mod primary_key;
