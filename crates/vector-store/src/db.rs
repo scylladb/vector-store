@@ -19,6 +19,7 @@ use crate::IndexMetadata;
 use crate::IndexName;
 use crate::IndexVersion;
 use crate::KeyspaceName;
+use crate::NonemptyIteratorExt;
 use crate::Quantization;
 use crate::SpaceType;
 use crate::TableName;
@@ -1050,13 +1051,16 @@ fn from_target_option(
         {
             bail!("invalid target option: pk column {invalid} is not in the table's partition key");
         }
-        DbIndexPartitioning::Local(Arc::new(
+        DbIndexPartitioning::Local(
             target
                 .partition_key_columns
                 .into_iter()
                 .map(ColumnName::from)
-                .collect(),
-        ))
+                .collect_nonempty_arc()
+                .ok_or_else(|| {
+                    anyhow!("invalid target option: failed to parse partition key columns")
+                })?,
+        )
     };
 
     Ok((

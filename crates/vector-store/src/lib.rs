@@ -50,6 +50,9 @@ pub use crate::info::Info;
 use crate::internals::Internals;
 use crate::metrics::Metrics;
 use crate::node_state::NodeState;
+pub use crate::nonempty::NonemptyArc;
+pub use crate::nonempty::NonemptyBox;
+pub use crate::nonempty::NonemptyIteratorExt;
 pub use crate::partition_key::PartitionKey;
 pub use crate::primary_key::PrimaryKey;
 pub use crate::similarity::SimilarityScore;
@@ -622,7 +625,7 @@ impl IndexMetadata {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum DbIndexPartitioning {
     Global,
-    Local(Arc<Vec<ColumnName>>),
+    Local(NonemptyArc<ColumnName>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

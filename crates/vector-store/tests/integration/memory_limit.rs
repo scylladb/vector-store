@@ -30,6 +30,7 @@ use vector_store::HttpServerExt;
 use vector_store::IndexKind;
 use vector_store::IndexMetadata;
 use vector_store::IndexOptionsVs;
+use vector_store::NonemptyArc;
 use vector_store::Quantization;
 use vector_store::SpaceType;
 use vector_store::Timestamp;
@@ -73,7 +74,7 @@ async fn memory_limit_during_index_build() {
         index.keyspace_name.clone(),
         index.table_name.clone(),
         Table {
-            primary_keys: Arc::new(vec!["pk".into()]),
+            primary_keys: NonemptyArc::new(["pk"]).unwrap(),
             partition_key_count: 1,
             columns: Arc::new([("pk".into(), NativeType::Int)].into_iter().collect()),
             dimensions: [(index.target_column.clone(), index.vs().unwrap().dimensions)]

@@ -9,6 +9,7 @@ use crate::IndexKey;
 use crate::IndexMetadata;
 use crate::IndexVersion;
 use crate::KeyspaceName;
+use crate::NonemptyArc;
 use crate::Progress;
 use crate::TableName;
 use crate::db_index::DbIndex;
@@ -81,7 +82,7 @@ pub(crate) struct IndexEntry<I, D = ()> {
     db_index: mpsc::Sender<DbIndex>,
     status: IndexStatus,
     progress: Progress,
-    primary_key_columns: Arc<Vec<ColumnName>>,
+    primary_key_columns: NonemptyArc<ColumnName>,
     data: D,
 }
 
@@ -133,7 +134,7 @@ impl<I, D> IndexEntry<I, D> {
         self.status = status;
     }
 
-    pub(crate) fn primary_key_columns(&self) -> &Arc<Vec<ColumnName>> {
+    pub(crate) fn primary_key_columns(&self) -> &NonemptyArc<ColumnName> {
         &self.primary_key_columns
     }
 }
@@ -218,7 +219,8 @@ impl VsIndexEntry {
                 if !pk_columns.iter().all(|col| equality_columns.contains(col)) {
                     return None;
                 }
-                let uncovered = equality_columns.len() - pk_columns.len() + range_columns.len();
+                let uncovered =
+                    equality_columns.len() - pk_columns.len().get() + range_columns.len();
                 Some(if uncovered == 0 {
                     NeedsFiltering::No
                 } else {
@@ -262,7 +264,7 @@ pub(crate) enum BestIndexState {
     Serving {
         key: IndexKey,
         index: mpsc::Sender<VsIndex>,
-        primary_key_columns: Arc<Vec<ColumnName>>,
+        primary_key_columns: NonemptyArc<ColumnName>,
         table_columns: Arc<HashMap<ColumnName, NativeType>>,
         needs_filtering: NeedsFiltering,
     },
@@ -390,7 +392,7 @@ impl Indexes {
                 BestIndexState::Serving {
                     key: routed_key.clone(),
                     index: routed_entry.index.clone(),
-                    primary_key_columns: Arc::clone(&routed_entry.primary_key_columns),
+                    primary_key_columns: routed_entry.primary_key_columns.clone(),
                     table_columns: Arc::clone(&routed_entry.data.table_columns),
                     needs_filtering: needs_filtering.clone(),
                 }

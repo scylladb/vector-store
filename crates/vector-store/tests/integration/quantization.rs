@@ -137,7 +137,7 @@ async fn quantization_is_returned_as_index_data_type() {
         let (run, index, _db, _node_state) = setup_store_with_quantization(
             test_config(),
             DbIndexPartitioning::Global,
-            [],
+            ["pk".into()],
             0,
             [],
             None,

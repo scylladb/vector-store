@@ -27,6 +27,7 @@ use vector_store::HttpServerExt;
 use vector_store::IndexKind;
 use vector_store::IndexMetadata;
 use vector_store::IndexOptionsFts;
+use vector_store::NonemptyIteratorExt;
 use vector_store::Timestamp;
 use vector_store::node_state::NodeState;
 
@@ -68,7 +69,7 @@ async fn setup_fts_store(
         index.keyspace_name.clone(),
         index.table_name.clone(),
         Table {
-            primary_keys: Arc::new(primary_keys.into_iter().collect()),
+            primary_keys: primary_keys.into_iter().collect_nonempty_arc().unwrap(),
             partition_key_count,
             columns,
             dimensions: HashMap::new(),

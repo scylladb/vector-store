@@ -38,6 +38,8 @@ use vector_store::HttpServerExt;
 use vector_store::IndexKind;
 use vector_store::IndexMetadata;
 use vector_store::IndexOptionsVs;
+use vector_store::NonemptyArc;
+use vector_store::NonemptyIteratorExt;
 use vector_store::Percentage;
 use vector_store::Quantization;
 use vector_store::SpaceType;
@@ -124,7 +126,7 @@ pub(crate) async fn setup_store_with_quantization(
         index.keyspace_name.clone(),
         index.table_name.clone(),
         Table {
-            primary_keys: Arc::new(primary_keys.into_iter().collect()),
+            primary_keys: primary_keys.into_iter().collect_nonempty_arc().unwrap(),
             partition_key_count,
             columns,
             dimensions: [(index.target_column.clone(), index.vs().unwrap().dimensions)]
@@ -327,7 +329,7 @@ async fn failed_db_index_create() {
         index.keyspace_name.clone(),
         index.table_name.clone(),
         Table {
-            primary_keys: Arc::new(vec!["pk".into(), "ck".into()]),
+            primary_keys: NonemptyArc::new(["pk", "ck"]).unwrap(),
             partition_key_count: 1,
             columns: Arc::new(
                 [
@@ -1576,7 +1578,7 @@ async fn similarity_scores_are_decreasing_and_correctly_converted() {
         index.keyspace_name.clone(),
         index.table_name.clone(),
         Table {
-            primary_keys: Arc::new(vec!["pk".into()]),
+            primary_keys: NonemptyArc::new(["pk"]).unwrap(),
             partition_key_count: 1,
             columns: Arc::new([("pk".into(), NativeType::Int)].into_iter().collect()),
             dimensions: [(index.target_column.clone(), index.vs().unwrap().dimensions)]

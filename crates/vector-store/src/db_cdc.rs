@@ -10,6 +10,8 @@ use crate::DbIndexedRow;
 use crate::DbIndexedValue;
 use crate::IndexKind;
 use crate::IndexMetadata;
+use crate::NonemptyArc;
+use crate::NonemptyIteratorExt;
 use crate::db_index_backend::CdcValueStatus;
 use crate::db_index_backend::DbIndexBackend;
 use crate::internals::Internals;
@@ -440,7 +442,7 @@ fn extract_indexed_value(
 }
 
 struct CdcConsumerData {
-    primary_key_columns: Vec<ColumnName>,
+    primary_key_columns: NonemptyArc<ColumnName>,
     backend: DbIndexBackend,
     kind: IndexKind,
     tx: mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
@@ -554,7 +556,8 @@ impl CdcConsumerFactory {
             .chain(table.clustering_key.iter())
             .cloned()
             .map(ColumnName::from)
-            .collect();
+            .collect_nonempty_arc()
+            .ok_or_else(|| anyhow!("primary key must have at least one column"))?;
 
         let gregorian_epoch = PrimitiveDateTime::new(
             Date::from_calendar_date(1582, Month::October, 15)?,

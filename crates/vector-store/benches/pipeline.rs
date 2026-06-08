@@ -56,6 +56,7 @@ use vector_store::HttpServerExt;
 use vector_store::IndexKind;
 use vector_store::IndexMetadata;
 use vector_store::IndexOptionsVs;
+use vector_store::NonemptyIteratorExt;
 use vector_store::PrimaryKey;
 use vector_store::Quantization;
 use vector_store::SpaceType;
@@ -155,7 +156,7 @@ fn setup_table(
         index.keyspace_name.clone(),
         index.table_name.clone(),
         Table {
-            primary_keys: Arc::new(primary_keys.into_iter().collect()),
+            primary_keys: primary_keys.into_iter().collect_nonempty_arc().unwrap(),
             partition_key_count,
             columns: Arc::new(columns.into_iter().collect()),
             dimensions: [(index.target_column.clone(), index.vs().unwrap().dimensions)]

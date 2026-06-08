@@ -27,6 +27,8 @@ use vector_store::HttpServerExt;
 use vector_store::IndexKind;
 use vector_store::IndexMetadata;
 use vector_store::IndexOptionsVs;
+use vector_store::NonemptyArc;
+use vector_store::NonemptyIteratorExt;
 use vector_store::Timestamp;
 
 const ANN_LIMIT: usize = 5;
@@ -106,7 +108,7 @@ fn add_table(
         "vector".into(),
         "items".into(),
         Table {
-            primary_keys: Arc::new(primary_keys.into_iter().collect()),
+            primary_keys: primary_keys.into_iter().collect_nonempty_arc().unwrap(),
             partition_key_count,
             columns: Arc::new(columns.into_iter().collect()),
             dimensions: vector_columns
@@ -337,7 +339,7 @@ async fn ann_routes_to_newest_local_index_with_same_score() {
     let older_local = make_index(
         "older",
         "embedding",
-        DbIndexPartitioning::Local(Arc::new(vec!["pk".into()])),
+        DbIndexPartitioning::Local(NonemptyArc::new(["pk"]).unwrap()),
         &[],
         ordered_timeuuid(1),
     );
@@ -352,7 +354,7 @@ async fn ann_routes_to_newest_local_index_with_same_score() {
     let newer_local = make_index(
         "newer",
         "embedding",
-        DbIndexPartitioning::Local(Arc::new(vec!["pk".into()])),
+        DbIndexPartitioning::Local(NonemptyArc::new(["pk"]).unwrap()),
         &[],
         ordered_timeuuid(2),
     );
@@ -403,7 +405,7 @@ async fn ann_routes_to_local_index_with_more_matching_partition_key_columns() {
     let less_precise = make_index(
         "less_precise",
         "embedding",
-        DbIndexPartitioning::Local(Arc::new(vec!["pk1".into()])),
+        DbIndexPartitioning::Local(NonemptyArc::new(["pk1"]).unwrap()),
         &[],
         ordered_timeuuid(1),
     );
@@ -422,7 +424,7 @@ async fn ann_routes_to_local_index_with_more_matching_partition_key_columns() {
     let more_precise = make_index(
         "more_precise",
         "embedding",
-        DbIndexPartitioning::Local(Arc::new(vec!["pk1".into(), "pk2".into()])),
+        DbIndexPartitioning::Local(NonemptyArc::new(["pk1", "pk2"]).unwrap()),
         &[],
         ordered_timeuuid(2),
     );
@@ -483,7 +485,7 @@ async fn ann_routes_to_local_index_with_filter_columns_covering_restriction() {
     let covering = make_index(
         "covering",
         "embedding",
-        DbIndexPartitioning::Local(Arc::new(vec!["pk".into()])),
+        DbIndexPartitioning::Local(NonemptyArc::new(["pk"]).unwrap()),
         &["f"],
         ordered_timeuuid(1),
     );
@@ -498,7 +500,7 @@ async fn ann_routes_to_local_index_with_filter_columns_covering_restriction() {
     let non_covering = make_index(
         "non_covering",
         "embedding",
-        DbIndexPartitioning::Local(Arc::new(vec!["pk".into()])),
+        DbIndexPartitioning::Local(NonemptyArc::new(["pk"]).unwrap()),
         &[],
         ordered_timeuuid(2),
     );
@@ -632,7 +634,7 @@ async fn ann_routes_to_local_index_when_pk_restrictions_match() {
     let local_index = make_index(
         "local_idx",
         "embedding",
-        DbIndexPartitioning::Local(Arc::new(vec!["pk".into()])),
+        DbIndexPartitioning::Local(NonemptyArc::new(["pk"]).unwrap()),
         &[],
         ordered_timeuuid(1),
     );
@@ -697,7 +699,7 @@ async fn ann_routes_to_global_index_without_pk_restrictions() {
     let local_index = make_index(
         "local_idx",
         "embedding",
-        DbIndexPartitioning::Local(Arc::new(vec!["pk".into()])),
+        DbIndexPartitioning::Local(NonemptyArc::new(["pk"]).unwrap()),
         &[],
         ordered_timeuuid(1),
     );

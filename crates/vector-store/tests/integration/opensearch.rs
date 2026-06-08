@@ -22,6 +22,7 @@ use vector_store::HttpServerExt;
 use vector_store::IndexKind;
 use vector_store::IndexMetadata;
 use vector_store::IndexOptionsVs;
+use vector_store::NonemptyArc;
 use vector_store::Timestamp;
 
 #[tokio::test]
@@ -67,7 +68,7 @@ async fn simple_create_search_delete_index() {
         index.keyspace_name.clone(),
         index.table_name.clone(),
         Table {
-            primary_keys: Arc::new(vec!["pk".into(), "ck".into()]),
+            primary_keys: NonemptyArc::new(["pk", "ck"]).unwrap(),
             partition_key_count: 1,
             columns: Arc::new(
                 [
