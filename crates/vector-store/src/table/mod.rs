@@ -5,6 +5,7 @@
 
 mod column;
 mod column_vec;
+mod column_vec_chunks;
 mod partition_id;
 mod primary_id;
 mod vec_chunks;
@@ -45,6 +46,8 @@ use std::mem;
 use std::sync::Arc;
 use tap::Pipe;
 use tracing::warn;
+use vec_chunks::Chunk;
+use vec_chunks::VecChunks;
 
 /// Idx is a trait for types that can be used as an index in the column vectors.
 trait Idx {
