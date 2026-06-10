@@ -7,6 +7,7 @@ mod column;
 mod column_vec;
 mod partition_id;
 mod primary_id;
+mod vec_chunks;
 
 use crate::ColumnName;
 use crate::DbIndexedRow;
