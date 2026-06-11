@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+mod chunk_timestamps;
 mod column;
 mod column_vec;
 mod column_vec_chunks;

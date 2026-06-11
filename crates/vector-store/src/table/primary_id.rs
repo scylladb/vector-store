@@ -76,7 +76,7 @@ impl Epoch {
     const MIN: u16 = 0;
     const MAX: u16 = u16::MAX;
 
-    pub(super) fn new() -> Self {
+    pub(super) const fn new() -> Self {
         Self(Self::MIN)
     }
 
@@ -87,5 +87,13 @@ impl Epoch {
         } else {
             Self(self.0 + 1)
         }
+    }
+
+    pub(super) const fn to_ne_bytes(self) -> [u8; 2] {
+        self.0.to_ne_bytes()
+    }
+
+    pub(super) const fn from_ne_bytes(bytes: [u8; 2]) -> Self {
+        Self(u16::from_ne_bytes(bytes))
     }
 }
