@@ -21,11 +21,14 @@ use crate::PrimaryKey;
 use crate::Restriction;
 use crate::Timestamp;
 use crate::primary_key::normalize;
+use crate::timestamp::Timestamped;
 use anyhow::anyhow;
 use anyhow::bail;
 use bigdecimal::BigDecimal;
+use chunk_timestamps::ChunkTimestamps;
 use column::Column;
 use column_vec::ColumnVec;
+use column_vec_chunks::ColumnVecChunks;
 use itertools::Itertools;
 use num_bigint::BigInt;
 pub(crate) use partition_id::IndexId;
@@ -43,7 +46,7 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::collections::btree_map::Entry;
-use std::mem;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tap::Pipe;
 use tracing::warn;
@@ -58,30 +61,6 @@ trait Idx {
 /// A newtype for partition size
 #[derive(Clone, Copy, Debug, derive_more::From, derive_more::Into, derive_more::AsRef)]
 struct PartitionSize(usize);
-
-/// An enum that can store Epoch, Timestamp and optionally a value
-#[derive(Debug)]
-enum ETValue<T> {
-    None(Epoch, Timestamp),
-    Some(Epoch, Timestamp, T),
-}
-
-const _: () = assert!(
-    mem::size_of::<ETValue<()>>() <= 2 * mem::size_of::<u64>(),
-    "The impact of Epoch, Timestamp and enum in ColumnValue shouldn't be larger that 2 * u64"
-);
-
-impl<T> ETValue<T> {
-    fn update_epoch_timestamp(&mut self, epoch: Epoch, timestamp: Timestamp) {
-        match self {
-            Self::None(value_epoch, value_timestamp)
-            | Self::Some(value_epoch, value_timestamp, _) => {
-                *value_epoch = epoch;
-                *value_timestamp = timestamp;
-            }
-        }
-    }
-}
 
 /// An enum that can store Timestamp and optionally a value
 #[derive(Debug)]
@@ -196,7 +175,7 @@ struct Index {
     _available_columns: BTreeSet<ColumnName>,
 
     /// Timestamps of the last vector update
-    vector_timestamps: ColumnVec<PrimaryId, ETValue<()>>,
+    values_timestamps: ColumnVecChunks<PrimaryId, ChunkTimestamps>,
 }
 
 impl Index {
@@ -207,6 +186,7 @@ impl Index {
         primary_key_columns: NonemptyArc<ColumnName>,
         filtering_columns: &[ColumnName],
     ) -> Self {
+        let chunk_size = NonZeroUsize::new(1).unwrap();
         Self {
             index_id,
             data: IndexData::Global,
@@ -215,7 +195,7 @@ impl Index {
                 .chain(filtering_columns.iter())
                 .cloned()
                 .collect(),
-            vector_timestamps: ColumnVec::new(),
+            values_timestamps: ColumnVecChunks::new(ChunkTimestamps::new(chunk_size)),
         }
     }
 
@@ -224,6 +204,7 @@ impl Index {
         key_columns: NonemptyArc<ColumnName>,
         filtering_columns: &[ColumnName],
     ) -> Self {
+        let chunk_size = NonZeroUsize::new(1).unwrap();
         Self {
             index_id,
             _available_columns: key_columns
@@ -231,7 +212,7 @@ impl Index {
                 .chain(filtering_columns.iter())
                 .cloned()
                 .collect(),
-            vector_timestamps: ColumnVec::new(),
+            values_timestamps: ColumnVecChunks::new(ChunkTimestamps::new(chunk_size)),
             data: IndexData::Local {
                 key_columns,
                 map: BTreeMap::new(),
@@ -248,8 +229,7 @@ impl Index {
             IndexData::Global => {}
             IndexData::Local { ids, .. } => ids.resize_with(new_size, || None),
         }
-        self.vector_timestamps
-            .resize_with(new_size, || ETValue::None(Epoch::new(), Timestamp::MIN));
+        self.values_timestamps.resize(new_size);
     }
 
     fn resize_partition_ids(&mut self) -> anyhow::Result<()> {
@@ -507,10 +487,7 @@ impl Table {
     fn is_valid_primary_id(&self, partition_id: PartitionId, primary_id: PrimaryId) -> bool {
         self.indexes
             .get(&partition_id.index_id())
-            .and_then(|index| match index.vector_timestamps.get(primary_id)? {
-                ETValue::Some(epoch, _, _) => Some(*epoch),
-                ETValue::None(_, _) => None,
-            })
+            .and_then(|index| index.values_timestamps.get(primary_id).map(|v| v.epoch()))
             .is_some_and(|epoch| epoch == primary_id.epoch())
     }
 }
@@ -544,29 +521,31 @@ impl TableAdd for Table {
             Entry::Occupied(entry) => {
                 let primary_id = *entry.get();
                 self.indexes.iter_mut().try_for_each(|(index_id, index)| {
-                    let (epoch, timestamp, vector_already_exists) = match index
-                        .vector_timestamps
-                        .get(primary_id)
-                    {
-                        Some(ETValue::Some(epoch, timestamp, _)) => (*epoch, timestamp, true),
-                        Some(ETValue::None(epoch, timestamp)) => (*epoch, timestamp, false),
-                        None => {
-                            bail!(
-                                "Failed to update vector: \
-                                missing vector timestamp for index_id {index_id:?} and primary_id {primary_id:?}"
-                            );
-                        }
-                    };
-                    if *timestamp >= db_row.timestamp {
-                        return Ok(());
-                    }
-                    let primary_id = primary_id.new_epoch(epoch);
                     let partition_id = index.partition_id(primary_id).ok_or_else(|| {
                         anyhow!(
-                            "Failed to update vector: \
-                            missing partition id for index_id {index_id:?} and primary_id {primary_id:?}"
+                            "Failed to update value: missing partition_id \
+                            for index_id {index_id:?}  and primary_id {primary_id:?}"
                         )
                     })?;
+                    let Some(mut values_timestamps) = index.values_timestamps.get_mut(primary_id)
+                    else {
+                        bail!(
+                            "Failed to update value: missing value timestamp \
+                            for index_id {index_id:?} and primary_id {primary_id:?}"
+                        )
+                    };
+                    let epoch = values_timestamps.epoch();
+                    let Some(timestamped) = values_timestamps.timestamp(0) else {
+                        bail!(
+                            "Failed to update value:  missing first timestamped \
+                            for index_id {index_id:?} and primary_id {primary_id:?}"
+                        )
+                    };
+                    if timestamped.timestamp() >= db_row.timestamp {
+                        return Ok(());
+                    }
+                    let vector_already_exists = timestamped.is_valid();
+                    let primary_id = primary_id.new_epoch(epoch);
                     if let Some(value) = &value {
                         if vector_already_exists {
                             operations.push(Operation::RemoveBeforeAddValue {
@@ -576,21 +555,34 @@ impl TableAdd for Table {
                         }
 
                         let primary_id = primary_id.next_epoch();
-                        let timestamp = db_row.timestamp;
                         operations.push(Operation::AddValue {
                             primary_id,
                             partition_id,
                             value: value.clone(),
                             is_update: vector_already_exists,
                         });
-                        index
-                            .vector_timestamps
-                            .update_epoch_timestamp(primary_id, timestamp)?;
+                        values_timestamps.set_epoch(primary_id.epoch());
+                        if values_timestamps
+                            .set_timestamp(0, Timestamped::new_valid(db_row.timestamp))
+                            .is_none()
+                        {
+                            bail!(
+                                "Failed to update value: unable to set first valid timestamped \
+                                for index_id {index_id:?} and primary_id {primary_id:?}"
+                            );
+                        }
                     } else {
                         let epoch = primary_id.epoch().next();
-                        index
-                            .vector_timestamps
-                            .update(primary_id, ETValue::None(epoch, *timestamp))?;
+                        values_timestamps.set_epoch(epoch);
+                        if values_timestamps
+                            .set_timestamp(0, Timestamped::new_tombstone(db_row.timestamp))
+                            .is_none()
+                        {
+                            bail!(
+                                "Failed to update value: unable to set first tombstone timestamped \
+                                for index_id {index_id:?} and primary_id {primary_id:?}"
+                            );
+                        }
                         if vector_already_exists {
                             operations.push(Operation::RemoveValue {
                                 primary_id,
@@ -628,10 +620,24 @@ impl TableAdd for Table {
                                     index.add(primary_id, partition_key)?
                                 }
                             };
-                            index.vector_timestamps.update(
-                                primary_id,
-                                ETValue::Some(primary_id.epoch(), db_row.timestamp, ()),
-                            )?;
+                            let Some(mut values_timestamps) =
+                                index.values_timestamps.get_mut(primary_id)
+                            else {
+                                bail!(
+                                    "Failed to add value:  missing value timestamp \
+                                    for index_id {index_id:?} and primary_id {primary_id:?}"
+                                )
+                            };
+                            values_timestamps.set_epoch(primary_id.epoch());
+                            if values_timestamps
+                                .set_timestamp(0, Timestamped::new_valid(db_row.timestamp))
+                                .is_none()
+                            {
+                                bail!(
+                                    "Failed to add value: unable to add first value timestamped \
+                                    for index_id {index_id:?} and primary_id {primary_id:?}"
+                                )
+                            }
                             operations.push(Operation::AddValue {
                                 primary_id,
                                 partition_id,

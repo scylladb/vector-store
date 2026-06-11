@@ -3,10 +3,7 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
-use crate::Timestamp;
-use crate::table::ETValue;
 use crate::table::Idx;
-use crate::table::PrimaryId;
 use anyhow::anyhow;
 
 /// ColumnVec is a wrapper around Vec and generic index type. It is used to safely access columns by specific index types.
@@ -41,19 +38,5 @@ impl<I: Idx, T> ColumnVec<I, T> {
             .get_mut(idx)
             .ok_or_else(|| anyhow!("Index out of ColumnVec bounds"))? = value;
         Ok(())
-    }
-}
-
-impl<T> ColumnVec<PrimaryId, ETValue<T>> {
-    pub(super) fn update_epoch_timestamp(
-        &mut self,
-        primary_id: PrimaryId,
-        timestamp: Timestamp,
-    ) -> anyhow::Result<()> {
-        self.get_mut(primary_id)
-            .map(|value| {
-                value.update_epoch_timestamp(primary_id.epoch(), timestamp);
-            })
-            .ok_or_else(|| anyhow!("Index out of ColumnVec bounds"))
     }
 }
