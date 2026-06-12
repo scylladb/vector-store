@@ -47,7 +47,7 @@ async fn quantization_is_effectively_applied() {
         let values = [(
             [CqlValue::Int(1)].into(),
             Some(add_vector.into()),
-            Timestamp::from_unix_timestamp(10),
+            Timestamp::from_millis(10),
         )];
         let values_len = values.len();
         let (run, index, _db, _node_state) = setup_store_with_quantization(
@@ -179,7 +179,7 @@ async fn search_with_quantization(quantization: Quantization, filter: Option<Pos
     let vectors = vec![(
         [CqlValue::Int(pk_value)].into(),
         Some(vector.clone().into()),
-        Timestamp::from_unix_timestamp(10),
+        Timestamp::from_millis(10),
     )];
 
     let (run, index, _db, _node_state) = setup_store_with_quantization(
@@ -298,7 +298,7 @@ async fn binary_quantization_with_non_divisible_by_8_dimensions() {
     let vectors = vec![(
         [CqlValue::Int(pk_value)].into(),
         Some(vector.clone().into()),
-        Timestamp::from_unix_timestamp(10),
+        Timestamp::from_millis(10),
     )];
 
     let (run, index, _db, _node_state) = setup_store_with_quantization(

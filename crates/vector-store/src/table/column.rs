@@ -75,7 +75,7 @@ impl Column {
     }
 
     pub(super) fn resize_with(&mut self, size: usize) {
-        let timestamp = Timestamp::UNIX_EPOCH;
+        let timestamp = Timestamp::MIN;
         match self {
             Self::Ascii(vec) => vec.resize_with(size, || TValue::None(timestamp)),
             Self::BigInt(vec) => vec.resize_with(size, || TValue::None(timestamp)),

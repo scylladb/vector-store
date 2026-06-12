@@ -247,9 +247,8 @@ impl Index {
             IndexData::Global => {}
             IndexData::Local { ids, .. } => ids.resize_with(new_size, || None),
         }
-        self.vector_timestamps.resize_with(new_size, || {
-            ETValue::None(Epoch::new(), Timestamp::UNIX_EPOCH)
-        });
+        self.vector_timestamps
+            .resize_with(new_size, || ETValue::None(Epoch::new(), Timestamp::MIN));
     }
 
     fn resize_partition_ids(&mut self) -> anyhow::Result<()> {
@@ -974,7 +973,7 @@ mod tests {
                     DbIndexedRow {
                         primary_key: [CqlValue::Int(1), CqlValue::Int(1)].into(),
                         value: Some(DbIndexedValue::Vector(vec![0.1, 0.2, 0.3].into())),
-                        timestamp: Timestamp::from_unix_timestamp(100),
+                        timestamp: Timestamp::from_millis(100),
                     },
                 )
                 .unwrap();
@@ -999,7 +998,7 @@ mod tests {
                     DbIndexedRow {
                         primary_key: [CqlValue::Int(1), CqlValue::Int(2)].into(),
                         value: Some(DbIndexedValue::Vector(vec![0.2, 0.2, 0.3].into())),
-                        timestamp: Timestamp::from_unix_timestamp(100),
+                        timestamp: Timestamp::from_millis(100),
                     },
                 )
                 .unwrap();
@@ -1026,7 +1025,7 @@ mod tests {
                     DbIndexedRow {
                         primary_key: [CqlValue::Int(1), CqlValue::Int(3)].into(),
                         value: Some(DbIndexedValue::Vector(vec![0.3, 0.2, 0.3].into())),
-                        timestamp: Timestamp::from_unix_timestamp(100),
+                        timestamp: Timestamp::from_millis(100),
                     },
                 )
                 .unwrap();
@@ -1093,7 +1092,7 @@ mod tests {
                     DbIndexedRow {
                         primary_key: [CqlValue::Int(1), CqlValue::Int(2)].into(),
                         value: Some(DbIndexedValue::Vector(vec![0.2, 0.2, 0.3].into())),
-                        timestamp: Timestamp::from_unix_timestamp(50),
+                        timestamp: Timestamp::from_millis(50),
                     },
                 )
                 .unwrap();
@@ -1106,7 +1105,7 @@ mod tests {
                     DbIndexedRow {
                         primary_key: [CqlValue::Int(1), CqlValue::Int(2)].into(),
                         value: Some(DbIndexedValue::Vector(vec![0.5, 0.5, 0.3].into())),
-                        timestamp: Timestamp::from_unix_timestamp(150),
+                        timestamp: Timestamp::from_millis(150),
                     },
                 )
                 .unwrap();
@@ -1148,7 +1147,7 @@ mod tests {
                     DbIndexedRow {
                         primary_key: [CqlValue::Int(1), CqlValue::Int(1)].into(),
                         value: None,
-                        timestamp: Timestamp::from_unix_timestamp(200),
+                        timestamp: Timestamp::from_millis(200),
                     },
                 )
                 .unwrap();
@@ -1171,7 +1170,7 @@ mod tests {
                     DbIndexedRow {
                         primary_key: [CqlValue::Int(1), CqlValue::Int(2)].into(),
                         value: None,
-                        timestamp: Timestamp::from_unix_timestamp(200),
+                        timestamp: Timestamp::from_millis(200),
                     },
                 )
                 .unwrap();
@@ -1194,7 +1193,7 @@ mod tests {
                     DbIndexedRow {
                         primary_key: [CqlValue::Int(1), CqlValue::Int(3)].into(),
                         value: None,
-                        timestamp: Timestamp::from_unix_timestamp(200),
+                        timestamp: Timestamp::from_millis(200),
                     },
                 )
                 .unwrap();

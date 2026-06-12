@@ -59,6 +59,7 @@ pub use crate::similarity::SimilarityScore;
 pub use crate::table::PartitionId;
 pub use crate::table::PrimaryId;
 pub use crate::timestamp::Timestamp;
+pub use crate::timestamp::Timestamped;
 use db::Db;
 use scylla::cluster::metadata::ColumnType;
 use scylla::serialize::SerializationError;
