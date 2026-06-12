@@ -101,7 +101,7 @@ async fn memory_limit_during_index_build() {
                             DbIndexedRow {
                                 primary_key: [CqlValue::Int(pk)].into(),
                                 value: Some(DbIndexedValue::Vector(item)),
-                                timestamp: Timestamp::from_unix_timestamp(10),
+                                timestamp: Timestamp::from_millis(10),
                             },
                             AsyncInProgress::Fullscan(tx_in_progress.clone()),
                         ))
