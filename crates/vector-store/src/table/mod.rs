@@ -19,7 +19,6 @@ use crate::NonemptyArc;
 use crate::PartitionKey;
 use crate::PrimaryKey;
 use crate::Restriction;
-use crate::Timestamp;
 use crate::primary_key::normalize;
 use crate::timestamp::Timestamped;
 use anyhow::anyhow;
@@ -61,23 +60,6 @@ trait Idx {
 /// A newtype for partition size
 #[derive(Clone, Copy, Debug, derive_more::From, derive_more::Into, derive_more::AsRef)]
 struct PartitionSize(usize);
-
-/// An enum that can store Timestamp and optionally a value
-#[derive(Debug)]
-enum TValue<T> {
-    #[allow(dead_code)]
-    None(Timestamp),
-    #[allow(dead_code)]
-    Some(Timestamp, T),
-}
-impl<T> TValue<T> {
-    fn get(&self) -> Option<&T> {
-        match self {
-            Self::None(_) => None,
-            Self::Some(_, value) => Some(value),
-        }
-    }
-}
 
 /// A struct that stores free PrimaryIds. It is used to efficiently use ids of preallocated or
 /// deleted rows.
@@ -950,6 +932,7 @@ pub(crate) enum Operation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Timestamp;
     use scylla::value::CqlDecimal;
 
     #[test]
