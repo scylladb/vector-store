@@ -48,7 +48,6 @@ use std::collections::btree_map::Entry;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tap::Pipe;
-use tracing::warn;
 use vec_chunks::Chunk;
 use vec_chunks::VecChunks;
 
@@ -243,82 +242,85 @@ impl Index {
         Ok(())
     }
 
-    fn partition_id(&self, primary_id: PrimaryId) -> Option<PartitionId> {
-        match &self.data {
-            IndexData::Global => Some(PartitionId::global(self.index_id)),
-            IndexData::Local { ids, .. } => ids.get(primary_id).copied().flatten(),
-        }
-    }
-
-    fn partition_key(
-        &self,
-        primary_key_columns: &[ColumnName],
-        primary_key: &PrimaryKey,
-    ) -> Option<PartitionKey> {
-        match &self.data {
-            IndexData::Global => None,
-            IndexData::Local { key_columns, .. } => key_columns
-                .iter()
-                .map(|name| {
-                    primary_key_columns
-                        .iter()
-                        .position(|col_name| col_name == name)
-                        .and_then(|idx| primary_key.get(idx))
-                })
-                .collect::<Option<PartitionKey>>(),
-        }
-    }
-
-    fn add(
+    fn add_partition_key(
         &mut self,
+        index_id: IndexId,
         primary_id: PrimaryId,
-        partition_key: PartitionKey,
+        primary_key: &PrimaryKey,
+        primary_key_columns: &[ColumnName],
     ) -> anyhow::Result<PartitionId> {
         match &mut self.data {
-            IndexData::Global => bail!("Cannot add partition key to global index"),
+            IndexData::Global => Ok(PartitionId::global(index_id)),
             IndexData::Local {
                 map,
                 free_ids,
                 keys,
                 ids,
                 sizes,
-                ..
-            } => match map.entry(partition_key.clone()) {
-                Entry::Occupied(entry) => {
-                    let partition_id = *entry.get();
-                    let id = ids
-                        .get_mut(primary_id)
-                        .ok_or_else(|| anyhow!("PrimaryId index out of partition ids bounds"))?;
-                    if let Some(current_id) = &id {
-                        bail!(
-                            "Partition key {partition_key:?} already exists for primary id {current_id:?}",
-                        );
+                key_columns,
+            } => {
+                let partition_id_storage = ids
+                    .get_mut(primary_id)
+                    .ok_or_else(|| anyhow!("PrimaryId index out of partition ids bounds"))?;
+                if let Some(partition_id) = &partition_id_storage {
+                    return Ok(*partition_id);
+                }
+                let partition_key =
+                    partition_key(primary_key, primary_key_columns, key_columns.as_slice())?;
+                match map.entry(partition_key.clone()) {
+                    Entry::Occupied(entry) => {
+                        let partition_id = *entry.get();
+                        partition_id_storage.replace(partition_id);
+                        sizes
+                            .get_mut(partition_id)
+                            .ok_or_else(|| {
+                                anyhow!("PartitionId index out of partition sizes bounds")
+                            })?
+                            .0 += 1;
+                        Ok(partition_id)
                     }
-                    id.replace(partition_id);
-                    sizes
-                        .get_mut(partition_id)
-                        .ok_or_else(|| anyhow!("PartitionId index out of partition sizes bounds"))?
-                        .0 += 1;
-                    Ok(partition_id)
+                    Entry::Vacant(entry) => {
+                        let partition_id = free_ids.take_id()?;
+                        entry.insert(partition_id);
+                        keys.get_mut(partition_id)
+                            .ok_or_else(|| {
+                                anyhow!("PartitionId index out of partition keys bounds")
+                            })?
+                            .replace(partition_key);
+                        partition_id_storage.replace(partition_id);
+                        sizes
+                            .get_mut(partition_id)
+                            .ok_or_else(|| {
+                                anyhow!("PartitionId index out of partition sizes bounds")
+                            })?
+                            .0 = 1;
+                        Ok(partition_id)
+                    }
                 }
-                Entry::Vacant(entry) => {
-                    let partition_id = free_ids.take_id()?;
-                    entry.insert(partition_id);
-                    keys.get_mut(partition_id)
-                        .ok_or_else(|| anyhow!("PartitionId index out of partition keys bounds"))?
-                        .replace(partition_key);
-                    ids.get_mut(primary_id)
-                        .ok_or_else(|| anyhow!("PrimaryId index out of partition ids bounds"))?
-                        .replace(partition_id);
-                    sizes
-                        .get_mut(partition_id)
-                        .ok_or_else(|| anyhow!("PartitionId index out of partition sizes bounds"))?
-                        .0 = 1;
-                    Ok(partition_id)
-                }
-            },
+            }
         }
     }
+}
+
+fn partition_key(
+    primary_key: &PrimaryKey,
+    primary_key_columns: &[ColumnName],
+    partition_key_columns: &[ColumnName],
+) -> anyhow::Result<PartitionKey> {
+    partition_key_columns
+        .iter()
+        .map(|name| {
+            primary_key_columns
+                .iter()
+                .position(|col_name| col_name == name)
+                .and_then(|idx| primary_key.get(idx))
+        })
+        .collect::<Option<PartitionKey>>()
+        .ok_or_else(|| {
+            anyhow!(
+                "Failed to construct partition key: missing partition key column in primary key"
+            )
+        })
 }
 
 /// A struct that represents a table in the database.
@@ -472,6 +474,23 @@ impl Table {
             .and_then(|index| index.values_timestamps.get(primary_id).map(|v| v.epoch()))
             .is_some_and(|epoch| epoch == primary_id.epoch())
     }
+
+    fn add_primary_key(&mut self, primary_key: &PrimaryKey) -> anyhow::Result<PrimaryId> {
+        let normalized_key = self.normalize_primary_key(primary_key);
+
+        match self.primary_ids.entry(normalized_key) {
+            Entry::Occupied(entry) => Ok(*entry.get()),
+            Entry::Vacant(entry) => {
+                let primary_id = self.free_primary_ids.take_id()?;
+                entry.insert(primary_id);
+                self.primary_keys
+                    .get_mut(primary_id)
+                    .ok_or_else(|| anyhow!("PrimaryId index out of primary keys bounds"))?
+                    .replace(primary_key.clone());
+                Ok(primary_id)
+            }
+        }
+    }
 }
 
 /// A trait that defines the add operation for the table.
@@ -485,7 +504,7 @@ impl TableAdd for Table {
     #[hotpath::measure]
     fn add(
         &mut self,
-        _index_key: &IndexKey,
+        index_key: &IndexKey,
         db_row: DbIndexedRow,
     ) -> anyhow::Result<Vec<Operation>> {
         self.reserve_primary_ids()?;
@@ -493,148 +512,95 @@ impl TableAdd for Table {
 
         let mut operations = vec![];
 
-        let primary_key = db_row.primary_key;
+        let index_id = self
+            .index_ids
+            .get(index_key)
+            .copied()
+            .ok_or_else(|| anyhow!("Index key {index_key:?} not found"))?;
+
+        let primary_id = self.add_primary_key(&db_row.primary_key)?;
+
+        let index = self
+            .indexes
+            .get_mut(&index_id)
+            .ok_or_else(|| anyhow!("Index id {index_id:?} not found"))?;
+
+        let partition_id = index.add_partition_key(
+            index_id,
+            primary_id,
+            &db_row.primary_key,
+            self.primary_key_columns.as_slice(),
+        )?;
+
         let value = db_row.value;
 
-        let normalized_key = self.normalize_primary_key(&primary_key);
-        let row_map = &mut self.primary_ids;
+        let Some(mut values_timestamps) = index.values_timestamps.get_mut(primary_id) else {
+            bail!(
+                "Failed to update value: missing value timestamp \
+                for index_id {index_id:?} and primary_id {primary_id:?}"
+            )
+        };
+        let epoch = values_timestamps.epoch();
+        let Some(timestamped) = values_timestamps.timestamp(0) else {
+            bail!(
+                "Failed to update value: missing first timestamped \
+                for index_id {index_id:?} and primary_id {primary_id:?}"
+            )
+        };
+        if timestamped.timestamp() >= db_row.timestamp {
+            return Ok(operations);
+        }
 
-        match row_map.entry(normalized_key) {
-            Entry::Occupied(entry) => {
-                let primary_id = *entry.get();
-                self.indexes.iter_mut().try_for_each(|(index_id, index)| {
-                    let partition_id = index.partition_id(primary_id).ok_or_else(|| {
-                        anyhow!(
-                            "Failed to update value: missing partition_id \
-                            for index_id {index_id:?}  and primary_id {primary_id:?}"
-                        )
-                    })?;
-                    let Some(mut values_timestamps) = index.values_timestamps.get_mut(primary_id)
-                    else {
-                        bail!(
-                            "Failed to update value: missing value timestamp \
-                            for index_id {index_id:?} and primary_id {primary_id:?}"
-                        )
-                    };
-                    let epoch = values_timestamps.epoch();
-                    let Some(timestamped) = values_timestamps.timestamp(0) else {
-                        bail!(
-                            "Failed to update value:  missing first timestamped \
-                            for index_id {index_id:?} and primary_id {primary_id:?}"
-                        )
-                    };
-                    if timestamped.timestamp() >= db_row.timestamp {
-                        return Ok(());
-                    }
-                    let vector_already_exists = timestamped.is_valid();
-                    let primary_id = primary_id.new_epoch(epoch);
-                    if let Some(value) = &value {
-                        if vector_already_exists {
-                            operations.push(Operation::RemoveBeforeAddValue {
-                                primary_id,
-                                partition_id,
-                            });
-                        }
-
-                        let primary_id = primary_id.next_epoch();
-                        operations.push(Operation::AddValue {
-                            primary_id,
-                            partition_id,
-                            value: value.clone(),
-                            is_update: vector_already_exists,
-                        });
-                        values_timestamps.set_epoch(primary_id.epoch());
-                        if values_timestamps
-                            .set_timestamp(0, Timestamped::new_valid(db_row.timestamp))
-                            .is_none()
-                        {
-                            bail!(
-                                "Failed to update value: unable to set first valid timestamped \
-                                for index_id {index_id:?} and primary_id {primary_id:?}"
-                            );
-                        }
-                    } else {
-                        let epoch = primary_id.epoch().next();
-                        values_timestamps.set_epoch(epoch);
-                        if values_timestamps
-                            .set_timestamp(0, Timestamped::new_tombstone(db_row.timestamp))
-                            .is_none()
-                        {
-                            bail!(
-                                "Failed to update value: unable to set first tombstone timestamped \
-                                for index_id {index_id:?} and primary_id {primary_id:?}"
-                            );
-                        }
-                        if vector_already_exists {
-                            operations.push(Operation::RemoveValue {
-                                primary_id,
-                                partition_id,
-                            });
-                            if index.data.remove_row(primary_id) {
-                                operations.push(Operation::RemovePartition { partition_id });
-                            }
-                        }
-                    }
-                    Ok(())
-                })?;
-                Ok(operations)
+        let vector_already_exists = timestamped.is_valid();
+        let primary_id = primary_id.new_epoch(epoch);
+        if let Some(value) = &value {
+            if vector_already_exists {
+                operations.push(Operation::RemoveBeforeAddValue {
+                    primary_id,
+                    partition_id,
+                });
             }
 
-            Entry::Vacant(entry) => {
-                if let Some(value) = &value {
-                    let primary_id = self.free_primary_ids.take_id()?;
-                    entry.insert(primary_id);
-                    self.primary_keys
-                        .get_mut(primary_id)
-                        .ok_or_else(|| anyhow!("PrimaryId index out of primary keys bounds"))?
-                        .replace(primary_key.clone());
-                    self.indexes.iter_mut().try_for_each(
-                        |(index_id, index)| -> anyhow::Result<()> {
-                            let partition_id = match index.data {
-                                IndexData::Global => PartitionId::global(*index_id),
-                                IndexData::Local { .. } => {
-                                    let Some(partition_key) = index.partition_key(
-                                        self.primary_key_columns.as_slice(),
-                                        &primary_key,
-                                    ) else {
-                                        return Ok(());
-                                    };
-                                    index.add(primary_id, partition_key)?
-                                }
-                            };
-                            let Some(mut values_timestamps) =
-                                index.values_timestamps.get_mut(primary_id)
-                            else {
-                                bail!(
-                                    "Failed to add value:  missing value timestamp \
-                                    for index_id {index_id:?} and primary_id {primary_id:?}"
-                                )
-                            };
-                            values_timestamps.set_epoch(primary_id.epoch());
-                            if values_timestamps
-                                .set_timestamp(0, Timestamped::new_valid(db_row.timestamp))
-                                .is_none()
-                            {
-                                bail!(
-                                    "Failed to add value: unable to add first value timestamped \
-                                    for index_id {index_id:?} and primary_id {primary_id:?}"
-                                )
-                            }
-                            operations.push(Operation::AddValue {
-                                primary_id,
-                                partition_id,
-                                value: value.clone(),
-                                is_update: false,
-                            });
-                            Ok(())
-                        },
-                    )?;
-                } else {
-                    warn!("Added row with no vector, skipping vector addition");
+            let primary_id = primary_id.next_epoch();
+            operations.push(Operation::AddValue {
+                primary_id,
+                partition_id,
+                value: value.clone(),
+                is_update: vector_already_exists,
+            });
+            values_timestamps.set_epoch(primary_id.epoch());
+            if values_timestamps
+                .set_timestamp(0, Timestamped::new_valid(db_row.timestamp))
+                .is_none()
+            {
+                bail!(
+                    "Failed to update value: unable to set first valid timestamped \
+                    for index_id {index_id:?} and primary_id {primary_id:?}"
+                );
+            }
+        } else {
+            let epoch = primary_id.epoch().next();
+            values_timestamps.set_epoch(epoch);
+            if values_timestamps
+                .set_timestamp(0, Timestamped::new_tombstone(db_row.timestamp))
+                .is_none()
+            {
+                bail!(
+                    "Failed to update value:  unable to set first tombstone timestamped \
+                    for index_id {index_id:?} and primary_id {primary_id:?}"
+                );
+            }
+            if vector_already_exists {
+                operations.push(Operation::RemoveValue {
+                    primary_id,
+                    partition_id,
+                });
+                if index.data.remove_row(primary_id) {
+                    operations.push(Operation::RemovePartition { partition_id });
                 }
-                Ok(operations)
             }
         }
+        Ok(operations)
     }
 }
 
