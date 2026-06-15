@@ -20,6 +20,7 @@ use crate::PartitionKey;
 use crate::PrimaryKey;
 use crate::Restriction;
 use crate::primary_key::normalize;
+use crate::table::chunk_timestamps::ChunkTimestampsExclusive;
 use crate::timestamp::Timestamped;
 use anyhow::anyhow;
 use anyhow::bail;
@@ -493,6 +494,29 @@ impl Table {
     }
 }
 
+fn compare_timestamps(
+    values_timestamps: &ChunkTimestampsExclusive,
+    db_row: &DbIndexedRow,
+) -> anyhow::Result<(bool, bool, bool)> {
+    if let Some(timestamped) = values_timestamps.timestamp(0) {
+        let is_cur_tombstone = timestamped.is_tombstone();
+        let is_new_tombstone = db_row.value.is_none();
+        let is_newer = timestamped.timestamp() < db_row.timestamp;
+        Ok((is_cur_tombstone, is_new_tombstone, is_newer))
+    } else {
+        Err(anyhow!("Missing first timestamped for comparing"))
+    }
+}
+
+fn update_timestamps(
+    mut values_timestamps: ChunkTimestampsExclusive,
+    db_row: &DbIndexedRow,
+) -> anyhow::Result<()> {
+    values_timestamps
+        .set_timestamp(0, Timestamped::new_valid(db_row.timestamp))
+        .ok_or_else(|| anyhow!("Missing first timestamped for updating"))
+}
+
 /// A trait that defines the add operation for the table.
 #[cfg_attr(test, mockall::automock)]
 pub(crate) trait TableAdd {
@@ -532,8 +556,6 @@ impl TableAdd for Table {
             self.primary_key_columns.as_slice(),
         )?;
 
-        let value = db_row.value;
-
         let Some(mut values_timestamps) = index.values_timestamps.get_mut(primary_id) else {
             bail!(
                 "Failed to update value: missing value timestamp \
@@ -541,20 +563,15 @@ impl TableAdd for Table {
             )
         };
         let epoch = values_timestamps.epoch();
-        let Some(timestamped) = values_timestamps.timestamp(0) else {
-            bail!(
-                "Failed to update value: missing first timestamped \
-                for index_id {index_id:?} and primary_id {primary_id:?}"
-            )
-        };
-        if timestamped.timestamp() >= db_row.timestamp {
+        let (is_cur_tombstone, is_new_tombstone, is_newer) =
+            compare_timestamps(&values_timestamps, &db_row)?;
+        if !is_newer {
             return Ok(operations);
         }
 
-        let vector_already_exists = timestamped.is_valid();
         let primary_id = primary_id.new_epoch(epoch);
-        if let Some(value) = &value {
-            if vector_already_exists {
+        if !is_new_tombstone {
+            if !is_cur_tombstone {
                 operations.push(Operation::RemoveBeforeAddValue {
                     primary_id,
                     partition_id,
@@ -562,35 +579,21 @@ impl TableAdd for Table {
             }
 
             let primary_id = primary_id.next_epoch();
+            values_timestamps.set_epoch(primary_id.epoch());
+            update_timestamps(values_timestamps, &db_row)?;
+
             operations.push(Operation::AddValue {
                 primary_id,
                 partition_id,
-                value: value.clone(),
-                is_update: vector_already_exists,
+                value: db_row.value.unwrap(),
+                is_update: !is_cur_tombstone,
             });
-            values_timestamps.set_epoch(primary_id.epoch());
-            if values_timestamps
-                .set_timestamp(0, Timestamped::new_valid(db_row.timestamp))
-                .is_none()
-            {
-                bail!(
-                    "Failed to update value: unable to set first valid timestamped \
-                    for index_id {index_id:?} and primary_id {primary_id:?}"
-                );
-            }
         } else {
             let epoch = primary_id.epoch().next();
             values_timestamps.set_epoch(epoch);
-            if values_timestamps
-                .set_timestamp(0, Timestamped::new_tombstone(db_row.timestamp))
-                .is_none()
-            {
-                bail!(
-                    "Failed to update value:  unable to set first tombstone timestamped \
-                    for index_id {index_id:?} and primary_id {primary_id:?}"
-                );
-            }
-            if vector_already_exists {
+            update_timestamps(values_timestamps, &db_row)?;
+
+            if !is_cur_tombstone {
                 operations.push(Operation::RemoveValue {
                     primary_id,
                     partition_id,
