@@ -71,5 +71,6 @@ docker_arch_tags=()
 for arch in $archs ; do
     docker_arch_tags+=("scylladb/vector-store:$vector_store_version-$arch")
 done
-docker manifest create $docker_manifest "${docker_arch_tags[@]}"
+docker buildx imagetools create -t "$docker_manifest" "${docker_arch_tags[@]}"
+docker buildx imagetools inspect "$docker_manifest"
 echo "Docker manifest: $docker_manifest"
