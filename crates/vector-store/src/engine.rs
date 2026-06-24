@@ -253,7 +253,7 @@ async fn add_index(
         partition_key_count,
         partition_key_columns,
         metadata.target_columns.len(),
-        &metadata.filtering_columns,
+        Arc::clone(&metadata.filtering_columns),
         table_columns,
     ) {
         Ok(table) => Arc::new(RwLock::new(table)),

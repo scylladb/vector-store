@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+use crate::Timestamped;
 use crate::table::Idx;
 use anyhow::anyhow;
 
@@ -32,11 +33,16 @@ impl<I: Idx, T> ColumnVec<I, T> {
     pub(super) fn get_mut(&mut self, idx: I) -> Option<&mut T> {
         self.vec.get_mut(idx.idx())
     }
+}
 
-    pub(super) fn update(&mut self, idx: I, value: T) -> anyhow::Result<()> {
-        *self
+impl<I: Idx, T> ColumnVec<I, Timestamped<T>> {
+    pub(super) fn update(&mut self, idx: I, value: Timestamped<T>) -> anyhow::Result<()> {
+        let it = self
             .get_mut(idx)
-            .ok_or_else(|| anyhow!("Index out of ColumnVec bounds"))? = value;
+            .ok_or_else(|| anyhow!("Index out of ColumnVec bounds"))?;
+        if value.timestamp() > it.timestamp() {
+            *it = value;
+        }
         Ok(())
     }
 }

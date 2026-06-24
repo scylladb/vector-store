@@ -20,6 +20,7 @@ use crate::NonemptyBox;
 use crate::PartitionKey;
 use crate::PrimaryKey;
 use crate::Restriction;
+use crate::Timestamp;
 use crate::Vector;
 use crate::primary_key::normalize;
 use crate::table::chunk_timestamps::ChunkTimestampsExclusive;
@@ -155,6 +156,8 @@ struct Index {
 
     data: IndexData,
 
+    filtering_columns: Arc<[ColumnName]>,
+
     /// All column names that are used in this index (key columns + filtering columns)
     _available_columns: BTreeSet<ColumnName>,
 
@@ -169,7 +172,7 @@ impl Index {
         index_id: IndexId,
         primary_key_columns: NonemptyArc<ColumnName>,
         column_targets_count: NonZeroUsize,
-        filtering_columns: &[ColumnName],
+        filtering_columns: Arc<[ColumnName]>,
     ) -> Self {
         Self {
             index_id,
@@ -179,6 +182,7 @@ impl Index {
                 .chain(filtering_columns.iter())
                 .cloned()
                 .collect(),
+            filtering_columns,
             values_timestamps: ColumnVecChunks::new(ChunkTimestamps::new(column_targets_count)),
         }
     }
@@ -187,7 +191,7 @@ impl Index {
         index_id: IndexId,
         key_columns: NonemptyArc<ColumnName>,
         column_targets_count: NonZeroUsize,
-        filtering_columns: &[ColumnName],
+        filtering_columns: Arc<[ColumnName]>,
     ) -> Self {
         Self {
             index_id,
@@ -196,6 +200,7 @@ impl Index {
                 .chain(filtering_columns.iter())
                 .cloned()
                 .collect(),
+            filtering_columns,
             values_timestamps: ColumnVecChunks::new(ChunkTimestamps::new(column_targets_count)),
             data: IndexData::Local {
                 key_columns,
@@ -352,7 +357,7 @@ impl Table {
         partition_primary_key_count: usize,
         partition_key_columns: Option<NonemptyArc<ColumnName>>,
         column_targets_count: NonZeroUsize,
-        filtering_columns: &[ColumnName],
+        filtering_columns: Arc<[ColumnName]>,
         table_columns: Arc<HashMap<ColumnName, NativeType>>,
     ) -> anyhow::Result<Self> {
         let partition_primary_key_count =
@@ -366,14 +371,14 @@ impl Table {
                 index_id,
                 partition_key_columns.clone(),
                 column_targets_count,
-                filtering_columns,
+                Arc::clone(&filtering_columns),
             )
         } else {
             Index::new_global(
                 index_id,
                 primary_key_columns.clone(),
                 column_targets_count,
-                filtering_columns,
+                Arc::clone(&filtering_columns),
             )
         };
         indexes.insert(index_id, index);
@@ -562,6 +567,27 @@ fn update_timestamps(
         })
 }
 
+fn update_filtering_columns(
+    columns: &mut BTreeMap<ColumnName, Column>,
+    primary_id: PrimaryId,
+    filtering_columns: &[ColumnName],
+    filtering: Box<[(Timestamp, Option<CqlValue>)]>,
+) -> anyhow::Result<()> {
+    filtering
+        .into_iter()
+        .zip(filtering_columns.iter())
+        .try_for_each(|((timestamp, value), column_name)| {
+            let column = columns
+                .get_mut(column_name)
+                .ok_or_else(|| anyhow!("Column {column_name} not found in table columns"))?;
+            if let Some(value) = value {
+                column.insert(primary_id, timestamp, value)
+            } else {
+                column.remove(primary_id, timestamp)
+            }
+        })
+}
+
 enum SplittingValues {
     Vector(Vector),
     Document(String),
@@ -570,6 +596,7 @@ enum SplittingValues {
 struct SplitValuesFiltering {
     values: Option<SplittingValues>,
     timestamps: NonemptyBox<Timestamped<()>>,
+    filtering: Box<[(Timestamp, Option<CqlValue>)]>,
 }
 
 fn split_values_filtering(db_row: DbIndexedRow) -> anyhow::Result<SplitValuesFiltering> {
@@ -588,14 +615,35 @@ fn split_values_filtering(db_row: DbIndexedRow) -> anyhow::Result<SplitValuesFil
         };
         let timestamps = NonemptyBox::new([timestamped]).unwrap();
 
-        let values = value.into_value().map(|value| match value {
+        let values = value.into_value().map(|value| Ok(match value {
             DbIndexedValue::Vector(vector) => SplittingValues::Vector(vector),
             DbIndexedValue::Document(document) => SplittingValues::Document(document),
-        });
+            DbIndexedValue::Filtering(_) => {
+                bail!("Expected vector or document value for first column, got filtering value")
+            }
+        })).transpose()?;
         (values, timestamps)
     };
 
-    Ok(SplitValuesFiltering { values, timestamps })
+    let filtering = row_values
+        .map(|value| (value.timestamp(), value.into_value()))
+        .map(|(timestamp, value)| {
+            let filtering_value = match value {
+                Some(DbIndexedValue::Filtering(filtering_value)) => Some(filtering_value),
+                Some(DbIndexedValue::Vector(_)) | Some(DbIndexedValue::Document(_)) => {
+                    bail!("Expected filtering value for column, got vector or document value");
+                }
+                None => None,
+            };
+            Ok((timestamp, filtering_value))
+        })
+        .collect::<Result<Box<_>, _>>()?;
+
+    Ok(SplitValuesFiltering {
+        values,
+        timestamps,
+        filtering,
+    })
 }
 
 /// A trait that defines the add operation for the table.
@@ -644,7 +692,14 @@ impl TableAdd for Table {
             )
         };
 
-        let SplitValuesFiltering { values, timestamps } = split_values_filtering(db_row)?;
+        let SplitValuesFiltering {
+            values,
+            timestamps,
+            filtering,
+        } = split_values_filtering(db_row)?;
+
+        let filtering_columns = Arc::clone(&index.filtering_columns);
+        update_filtering_columns(&mut self.columns, primary_id, &filtering_columns, filtering)?;
         let epoch = values_timestamps.epoch();
         let CompareTimestamps {
             is_cur_tombstone,
@@ -1019,7 +1074,7 @@ mod tests {
                 1,
                 partition_key_columns.clone(),
                 NonZeroUsize::new(1).unwrap(),
-                &[],
+                Arc::new([]),
                 Arc::new(
                     [
                         ("pk".into(), NativeType::Int),
@@ -1336,7 +1391,7 @@ mod tests {
             1,
             None,
             NonZeroUsize::new(1).unwrap(),
-            &[],
+            Arc::new([]),
             Arc::new([("p".into(), NativeType::Int)].into_iter().collect()),
         )
         .unwrap();
