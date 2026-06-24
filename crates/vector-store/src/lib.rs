@@ -658,6 +658,7 @@ impl DbCustomIndex {
 pub enum DbIndexedValue {
     Vector(Vector),
     Document(String),
+    Filtering(CqlValue),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

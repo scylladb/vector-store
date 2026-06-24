@@ -99,8 +99,7 @@ impl Column {
         }
     }
 
-    #[allow(dead_code)]
-    fn insert_cqlvalue(
+    pub(super) fn insert(
         &mut self,
         primary_id: PrimaryId,
         timestamp: Timestamp,
@@ -216,6 +215,34 @@ impl Column {
                 vec.update(primary_id, Timestamped::new(timestamp, Some(value)))
             }
             Self::PrimaryKey(_) => bail!("Cannot insert value into PrimaryKey column"),
+        }
+    }
+
+    pub(super) fn remove(
+        &mut self,
+        primary_id: PrimaryId,
+        timestamp: Timestamp,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::Ascii(vec) => vec.update(primary_id, Timestamped::new(timestamp, None)),
+            Self::BigInt(vec) => vec.update(primary_id, Timestamped::new(timestamp, None)),
+            Self::Blob(vec) => vec.update(primary_id, Timestamped::new(timestamp, None)),
+            Self::Boolean(vec) => vec.update(primary_id, Timestamped::new(timestamp, None)),
+            Self::Date(vec) => vec.update(primary_id, Timestamped::new(timestamp, None)),
+            Self::Decimal(vec) => vec.update(primary_id, Timestamped::new(timestamp, None)),
+            Self::Double(vec) => vec.update(primary_id, Timestamped::new(timestamp, None)),
+            Self::Float(vec) => vec.update(primary_id, Timestamped::new(timestamp, None)),
+            Self::Inet(vec) => vec.update(primary_id, Timestamped::new(timestamp, None)),
+            Self::Int(vec) => vec.update(primary_id, Timestamped::new(timestamp, None)),
+            Self::SmallInt(vec) => vec.update(primary_id, Timestamped::new(timestamp, None)),
+            Self::Text(vec) => vec.update(primary_id, Timestamped::new(timestamp, None)),
+            Self::Time(vec) => vec.update(primary_id, Timestamped::new(timestamp, None)),
+            Self::Timestamp(vec) => vec.update(primary_id, Timestamped::new(timestamp, None)),
+            Self::Timeuuid(vec) => vec.update(primary_id, Timestamped::new(timestamp, None)),
+            Self::TinyInt(vec) => vec.update(primary_id, Timestamped::new(timestamp, None)),
+            Self::Uuid(vec) => vec.update(primary_id, Timestamped::new(timestamp, None)),
+            Self::Varint(vec) => vec.update(primary_id, Timestamped::new(timestamp, None)),
+            Self::PrimaryKey(_) => bail!("Cannot remove value from PrimaryKey column"),
         }
     }
 
