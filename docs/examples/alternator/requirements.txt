@@ -1,0 +1,3 @@
+# Vector search support is only available on the alternator-client main branch
+# for now; the 1.0.0 PyPI release does not include it yet.
+alternator-client @ git+https://github.com/scylladb/alternator-client-python.git@main
