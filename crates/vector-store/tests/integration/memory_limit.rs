@@ -18,6 +18,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::info;
 use uuid::Uuid;
+use vector_store::AsyncInProgress;
 use vector_store::Config;
 use vector_store::Connectivity;
 use vector_store::DbIndexPartitioning;
@@ -98,7 +99,7 @@ async fn memory_limit_during_index_build() {
                                 value: Some(DbIndexedValue::Vector(item)),
                                 timestamp: Timestamp::from_unix_timestamp(10),
                             },
-                            Some(tx_in_progress.clone().into()),
+                            AsyncInProgress::Fullscan(tx_in_progress.clone()),
                         ))
                         .await
                         .unwrap();

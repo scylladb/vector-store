@@ -154,7 +154,7 @@ pub(crate) async fn new(
     cdc_error_notify: Arc<Notify>,
 ) -> anyhow::Result<(
     mpsc::Sender<DbIndex>,
-    mpsc::Receiver<(DbIndexedRow, Option<AsyncInProgress>)>,
+    mpsc::Receiver<(DbIndexedRow, AsyncInProgress)>,
 )> {
     let key = metadata.key();
 
@@ -438,7 +438,7 @@ impl Statements {
     /// to send read embeddings into the pipeline.
     async fn initial_scan(
         &self,
-        tx: mpsc::Sender<(DbIndexedRow, Option<AsyncInProgress>)>,
+        tx: mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
         completed_scan_length: Arc<AtomicU64>,
     ) {
         let semaphore_capacity = self.nr_parallel_queries().get();
@@ -459,7 +459,7 @@ impl Statements {
                             let tx_in_progress = tx_in_progress.clone();
                             async move {
                                 _ = tx
-                                    .send((embedding, Some(AsyncInProgress(tx_in_progress))))
+                                    .send((embedding, AsyncInProgress::Fullscan(tx_in_progress)))
                                     .await;
                             }
                         })

@@ -347,6 +347,7 @@ pub(crate) fn new(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::AsyncInProgress;
     use crate::IndexKey;
     use crate::PrimaryKey;
     use crate::table::IndexIdGenerator;
@@ -400,7 +401,11 @@ mod tests {
     async fn add_doc(sender: &mpsc::Sender<FtsIndex>, primary: u64, content: &str) {
         let (tx, mut rx) = mpsc::channel(1);
         sender
-            .add_document(primary.into(), content.into(), Some(tx.into()))
+            .add_document(
+                primary.into(),
+                content.into(),
+                AsyncInProgress::Fullscan(tx),
+            )
             .await;
         rx.recv().await;
     }
@@ -408,7 +413,7 @@ mod tests {
     async fn rm_doc(sender: &mpsc::Sender<FtsIndex>, primary: u64) {
         let (tx, mut rx) = mpsc::channel(1);
         sender
-            .remove_document(primary.into(), Some(tx.into()))
+            .remove_document(primary.into(), AsyncInProgress::Fullscan(tx))
             .await;
         rx.recv().await;
     }

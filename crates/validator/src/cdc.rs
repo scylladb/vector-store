@@ -1027,3 +1027,83 @@ async fn reader_retries_after_error(actors: Arc<TestActors>) {
 
     info!("finished");
 }
+
+#[e2etest::test(group = cdc_direct)]
+async fn cdc_indexing_lag_metric_exported(actors: Arc<TestActors>) {
+    info!("started");
+
+    let (session, clients) = prepare_connection_single_vs(&actors).await;
+    let client = clients.first().unwrap();
+    let keyspace = create_keyspace(&session).await;
+    let table = create_table(&session, "pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None).await;
+    let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
+
+    let status = wait_for_index(client, &index).await;
+    assert_eq!(status.count, 0, "Index should start empty");
+
+    // Insert after index creation - picked up by the CDC reader, which should
+    // record an indexing_lag_seconds observation.
+    session
+        .query_unpaged(
+            format!("INSERT INTO {table} (pk, v) VALUES (1, [1.0, 2.0, 3.0])"),
+            (),
+        )
+        .await
+        .expect("failed to insert data");
+
+    // Wait for the vector to be indexed (proves the CDC pipeline ran).
+    wait_for_value(
+        || async {
+            let result = get_opt_query_results(
+                format!("SELECT pk FROM {table} ORDER BY v ANN OF [1.0, 2.0, 3.0] LIMIT 1"),
+                &session,
+            )
+            .await?;
+            let mut rows = result.rows::<(i32,)>().ok()?;
+            let pk = rows.next()?.ok()?.0;
+            (pk == 1).then_some(pk)
+        },
+        "Waiting for ANN query after CDC insert",
+        FINE_GRAINED_CDC_MAX_LATENCY,
+    )
+    .await;
+
+    // Scrape the /metrics endpoint and verify indexing_lag_seconds is present
+    // with the expected labels and at least one observation.
+    let metrics_output = wait_for_value(
+        || async {
+            let output = client.get_metrics_text().await;
+            output
+                .contains("# TYPE indexing_lag_seconds histogram")
+                .then_some(output)
+        },
+        "Waiting for indexing_lag_seconds histogram in /metrics output",
+        FINE_GRAINED_CDC_MAX_LATENCY,
+    )
+    .await;
+    assert!(
+        metrics_output.contains(&format!(r#"keyspace="{}""#, keyspace.as_ref())),
+        "expected keyspace label in indexing_lag_seconds metric:\n{metrics_output}"
+    );
+    assert!(
+        metrics_output.contains(&format!(r#"index_name="{}""#, index.index.as_ref())),
+        "expected index_name label in indexing_lag_seconds metric:\n{metrics_output}"
+    );
+    // The _count suffix confirms at least one observation was recorded.
+    let expected_count_line = format!(
+        r#"indexing_lag_seconds_count{{index_name="{}",keyspace="{}"}}"#,
+        index.index.as_ref(),
+        keyspace.as_ref()
+    );
+    assert!(
+        metrics_output.contains(&expected_count_line),
+        "expected indexing_lag_seconds_count with labels in /metrics output:\n{metrics_output}"
+    );
+
+    session
+        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
+        .await
+        .expect("failed to drop keyspace");
+
+    info!("finished");
+}

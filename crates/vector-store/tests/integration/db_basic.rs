@@ -40,8 +40,8 @@ use vector_store::db_index::DbIndex;
 use vector_store::node_state::Event;
 use vector_store::node_state::NodeState;
 
-pub(crate) type RxIndexedRow = mpsc::Receiver<(DbIndexedRow, Option<AsyncInProgress>)>;
-pub(crate) type TxIndexedRow = mpsc::Sender<(DbIndexedRow, Option<AsyncInProgress>)>;
+pub(crate) type RxIndexedRow = mpsc::Receiver<(DbIndexedRow, AsyncInProgress)>;
+pub(crate) type TxIndexedRow = mpsc::Sender<(DbIndexedRow, AsyncInProgress)>;
 pub(crate) type ScanFn = Box<dyn FnOnce(TxIndexedRow) -> BoxFuture<'static, ()> + Send + Sync>;
 
 fn make_scan_fn(rows: impl Iterator<Item = DbIndexedRow> + Send + Sync + 'static) -> ScanFn {
@@ -50,7 +50,9 @@ fn make_scan_fn(rows: impl Iterator<Item = DbIndexedRow> + Send + Sync + 'static
             let (tx_in_progress, mut rx_in_progress) = mpsc::channel(1);
 
             for row in rows {
-                let _ = tx.send((row, Some(tx_in_progress.clone().into()))).await;
+                let _ = tx
+                    .send((row, AsyncInProgress::Fullscan(tx_in_progress.clone())))
+                    .await;
             }
 
             drop(tx_in_progress);

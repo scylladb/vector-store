@@ -1199,6 +1199,7 @@ fn f32_to_b1x8(f32_vec: &[f32]) -> Vec<b1x8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::AsyncInProgress;
     use crate::Config;
     use crate::IndexKey;
     use crate::memory;
@@ -1233,7 +1234,7 @@ mod tests {
                             partition_id,
                             id.into(),
                             vec![0.0f32; dimensions.get()].into(),
-                            None,
+                            AsyncInProgress::None,
                         )
                         .await;
                 }
@@ -1295,13 +1296,28 @@ mod tests {
         let index_id = IndexIdGenerator::new().next(true).unwrap();
         let partition_id = PartitionId::global(index_id);
         actor
-            .add_vector(partition_id, 1.into(), vec![1., 1., 1.].into(), None)
+            .add_vector(
+                partition_id,
+                1.into(),
+                vec![1., 1., 1.].into(),
+                AsyncInProgress::None,
+            )
             .await;
         actor
-            .add_vector(partition_id, 2.into(), vec![2., -2., 2.].into(), None)
+            .add_vector(
+                partition_id,
+                2.into(),
+                vec![2., -2., 2.].into(),
+                AsyncInProgress::None,
+            )
             .await;
         actor
-            .add_vector(partition_id, 3.into(), vec![3., 3., 3.].into(), None)
+            .add_vector(
+                partition_id,
+                3.into(),
+                vec![3., 3., 3.].into(),
+                AsyncInProgress::None,
+            )
             .await;
 
         table
@@ -1347,9 +1363,16 @@ mod tests {
         assert_eq!(distances.len(), 1);
         assert_eq!(primary_keys.first().unwrap(), &[CqlValue::Int(2)].into());
 
-        actor.remove_vector(partition_id, 3.into(), None).await;
         actor
-            .add_vector(partition_id, 3.into(), vec![2.1, -2.1, 2.1].into(), None)
+            .remove_vector(partition_id, 3.into(), AsyncInProgress::None)
+            .await;
+        actor
+            .add_vector(
+                partition_id,
+                3.into(),
+                vec![2.1, -2.1, 2.1].into(),
+                AsyncInProgress::None,
+            )
             .await;
 
         table
@@ -1380,7 +1403,9 @@ mod tests {
         .await
         .unwrap();
 
-        actor.remove_vector(partition_id, 3.into(), None).await;
+        actor
+            .remove_vector(partition_id, 3.into(), AsyncInProgress::None)
+            .await;
 
         time::timeout(Duration::from_secs(10), async {
             while actor.count(index_key.clone()).await.unwrap() != 2 {
@@ -1444,7 +1469,12 @@ mod tests {
         let index_id = IndexIdGenerator::new().next(true).unwrap();
         let partition_id = PartitionId::global(index_id);
         actor
-            .add_vector(partition_id, 1.into(), vec![1., 1., 1.].into(), None)
+            .add_vector(
+                partition_id,
+                1.into(),
+                vec![1., 1., 1.].into(),
+                AsyncInProgress::None,
+            )
             .await;
 
         table
@@ -1458,7 +1488,12 @@ mod tests {
 
         allocate_tx.send(Allocate::Can).unwrap();
         actor
-            .add_vector(partition_id, 1.into(), vec![1., 1., 1.].into(), None)
+            .add_vector(
+                partition_id,
+                1.into(),
+                vec![1., 1., 1.].into(),
+                AsyncInProgress::None,
+            )
             .await;
 
         // Wait for the add operation to complete, as it runs in a separate task.

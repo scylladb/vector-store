@@ -37,14 +37,14 @@ pub(crate) trait IndexDispatch {
         partition_id: PartitionId,
         primary_id: PrimaryId,
         value: DbIndexedValue,
-        in_progress: Option<AsyncInProgress>,
+        in_progress: AsyncInProgress,
     ) -> impl Future<Output = ()> + Send;
 
     fn remove_value(
         &self,
         partition_id: PartitionId,
         primary_id: PrimaryId,
-        in_progress: Option<AsyncInProgress>,
+        in_progress: AsyncInProgress,
     ) -> impl Future<Output = ()> + Send;
 
     fn remove_partition(&self, partition_id: PartitionId) -> impl Future<Output = ()> + Send;
@@ -56,7 +56,7 @@ impl IndexDispatch for mpsc::Sender<VsIndex> {
         partition_id: PartitionId,
         primary_id: PrimaryId,
         value: DbIndexedValue,
-        in_progress: Option<AsyncInProgress>,
+        in_progress: AsyncInProgress,
     ) {
         match value {
             DbIndexedValue::Vector(vector) => {
@@ -73,7 +73,7 @@ impl IndexDispatch for mpsc::Sender<VsIndex> {
         &self,
         partition_id: PartitionId,
         primary_id: PrimaryId,
-        in_progress: Option<AsyncInProgress>,
+        in_progress: AsyncInProgress,
     ) {
         self.remove_vector(partition_id, primary_id, in_progress)
             .await;
@@ -90,7 +90,7 @@ impl IndexDispatch for mpsc::Sender<FtsIndex> {
         _partition_id: PartitionId,
         primary_id: PrimaryId,
         value: DbIndexedValue,
-        in_progress: Option<AsyncInProgress>,
+        in_progress: AsyncInProgress,
     ) {
         match value {
             DbIndexedValue::Document(document) => {
@@ -106,7 +106,7 @@ impl IndexDispatch for mpsc::Sender<FtsIndex> {
         &self,
         _partition_id: PartitionId,
         primary_id: PrimaryId,
-        in_progress: Option<AsyncInProgress>,
+        in_progress: AsyncInProgress,
     ) {
         self.remove_document(primary_id, in_progress).await;
     }
@@ -119,7 +119,7 @@ pub(crate) enum MonitorItems {}
 pub(crate) async fn new<T>(
     key: IndexKey,
     table: Arc<RwLock<impl TableAdd + Send + Sync + 'static>>,
-    mut embeddings: Receiver<(DbIndexedRow, Option<AsyncInProgress>)>,
+    mut embeddings: Receiver<(DbIndexedRow, AsyncInProgress)>,
     index: mpsc::Sender<T>,
     metrics: Arc<Metrics>,
 ) -> anyhow::Result<Sender<MonitorItems>>
@@ -157,10 +157,22 @@ async fn add<I: IndexDispatch>(
     table: &Arc<RwLock<impl TableAdd>>,
     index: &I,
     embedding: DbIndexedRow,
-    mut in_progress: Option<AsyncInProgress>,
+    mut in_progress: AsyncInProgress,
     metrics: &Metrics,
     key: &IndexKey,
 ) {
+    // Rows arriving without a progress marker come from CDC. Wrap them in a
+    // Cdc marker so that the indexing-lag metric is observed when the marker
+    // is dropped (i.e. when the index actor finishes processing the row).
+    if matches!(in_progress, AsyncInProgress::None) {
+        in_progress = AsyncInProgress::cdc(
+            metrics
+                .indexing_lag
+                .with_label_values(&[key.keyspace().as_ref(), key.index().as_ref()]),
+            embedding.timestamp,
+        );
+    }
+
     let Ok(operations) = table
         .write()
         .unwrap()
@@ -193,7 +205,9 @@ async fn add<I: IndexDispatch>(
                 primary_id,
                 partition_id,
             } => {
-                index.remove_value(partition_id, primary_id, None).await;
+                index
+                    .remove_value(partition_id, primary_id, AsyncInProgress::None)
+                    .await;
             }
             Operation::RemoveValue {
                 primary_id,
@@ -253,6 +267,13 @@ mod tests {
         );
     }
 
+    fn indexing_lag_sample_count(metrics: &Metrics) -> u64 {
+        metrics
+            .indexing_lag
+            .with_label_values(&["vector", "store"])
+            .get_sample_count()
+    }
+
     #[tokio::test]
     async fn do_nothing_on_error() {
         let (tx_embeddings, rx_embeddings) = mpsc::channel(10);
@@ -282,7 +303,10 @@ mod tests {
             .with(eq(index_key), eq(embedding.clone()))
             .once()
             .returning(|_, _| Err(anyhow!("some error")));
-        tx_embeddings.send((embedding, None)).await.unwrap();
+        tx_embeddings
+            .send((embedding, AsyncInProgress::None))
+            .await
+            .unwrap();
 
         drop(tx_embeddings);
         assert!(rx_index.recv().await.is_none());
@@ -326,7 +350,7 @@ mod tests {
                 }])
             });
         tx_embeddings
-            .send((embedding, Some(AsyncInProgress(tx_progress))))
+            .send((embedding, AsyncInProgress::Fullscan(tx_progress)))
             .await
             .unwrap();
         let VsIndex::AddVector {
@@ -341,11 +365,16 @@ mod tests {
         assert_eq!(primary_id, 2.into());
         assert_eq!(partition_id, 3.into());
         assert_eq!(embedding, vec![4.].into());
-        assert!(in_progress.is_some());
+        assert!(matches!(in_progress, AsyncInProgress::Fullscan(_)));
 
         drop(tx_embeddings);
         assert!(rx_index.recv().await.is_none());
         assert_modified_metric_counts(&metrics, 1., 0., 0.);
+        assert_eq!(
+            indexing_lag_sample_count(&metrics),
+            0,
+            "full-scan rows must not record indexing lag"
+        );
     }
 
     #[tokio::test]
@@ -384,7 +413,10 @@ mod tests {
                     is_update: false,
                 }])
             });
-        tx_embeddings.send((embedding, None)).await.unwrap();
+        tx_embeddings
+            .send((embedding, AsyncInProgress::None))
+            .await
+            .unwrap();
         let Some(VsIndex::AddVector {
             partition_id,
             primary_id,
@@ -397,11 +429,17 @@ mod tests {
         assert_eq!(primary_id, 2.into());
         assert_eq!(partition_id, 3.into());
         assert_eq!(embedding, vec![4.].into());
-        assert!(in_progress.is_none());
+        assert!(matches!(in_progress, AsyncInProgress::Cdc(_)));
+        drop(in_progress);
 
         drop(tx_embeddings);
         assert!(rx_index.recv().await.is_none());
         assert_modified_metric_counts(&metrics, 1., 0., 0.);
+        assert_eq!(
+            indexing_lag_sample_count(&metrics),
+            1,
+            "CDC rows must record indexing lag"
+        );
     }
 
     #[tokio::test]
@@ -446,12 +484,15 @@ mod tests {
                     },
                 ])
             });
-        tx_embeddings.send((embedding, None)).await.unwrap();
+        tx_embeddings
+            .send((embedding, AsyncInProgress::None))
+            .await
+            .unwrap();
 
         let Some(VsIndex::RemoveVector {
             partition_id,
             primary_id,
-            in_progress: None,
+            in_progress: AsyncInProgress::None,
         }) = rx_index.recv().await
         else {
             unreachable!();
@@ -463,7 +504,7 @@ mod tests {
             partition_id,
             primary_id,
             embedding,
-            in_progress: None,
+            in_progress,
         }) = rx_index.recv().await
         else {
             unreachable!();
@@ -471,6 +512,7 @@ mod tests {
         assert_eq!(primary_id, 3.into());
         assert_eq!(partition_id, 3.into());
         assert_eq!(embedding, vec![4.].into());
+        assert!(matches!(in_progress, AsyncInProgress::Cdc(_)));
 
         drop(tx_embeddings);
         assert!(rx_index.recv().await.is_none());
@@ -527,7 +569,10 @@ mod tests {
                     },
                 ])
             });
-        tx_embeddings.send((embedding, None)).await.unwrap();
+        tx_embeddings
+            .send((embedding, AsyncInProgress::None))
+            .await
+            .unwrap();
 
         // First: plain insert
         let Some(VsIndex::AddVector {
@@ -542,13 +587,13 @@ mod tests {
         assert_eq!(primary_id, 1.into());
         assert_eq!(partition_id, 2.into());
         assert_eq!(embedding, vec![10.].into());
-        assert!(in_progress.is_none());
+        assert!(matches!(in_progress, AsyncInProgress::Cdc(_)));
 
         // Second: remove half of the update
         let Some(VsIndex::RemoveVector {
             partition_id,
             primary_id,
-            in_progress: None,
+            in_progress: AsyncInProgress::None,
         }) = rx_index.recv().await
         else {
             unreachable!();
@@ -561,7 +606,7 @@ mod tests {
             partition_id,
             primary_id,
             embedding,
-            in_progress: None,
+            in_progress: AsyncInProgress::None,
         }) = rx_index.recv().await
         else {
             unreachable!();
@@ -609,18 +654,22 @@ mod tests {
                     partition_id: 6.into(),
                 }])
             });
-        tx_embeddings.send((embedding, None)).await.unwrap();
+        tx_embeddings
+            .send((embedding, AsyncInProgress::None))
+            .await
+            .unwrap();
 
         let Some(VsIndex::RemoveVector {
             partition_id,
             primary_id,
-            in_progress: None,
+            in_progress,
         }) = rx_index.recv().await
         else {
             unreachable!();
         };
         assert_eq!(primary_id, 5.into());
         assert_eq!(partition_id, 6.into());
+        assert!(matches!(in_progress, AsyncInProgress::Cdc(_)));
 
         drop(tx_embeddings);
         assert!(rx_index.recv().await.is_none());
@@ -660,7 +709,10 @@ mod tests {
                     partition_id: 6.into(),
                 }])
             });
-        tx_embeddings.send((embedding, None)).await.unwrap();
+        tx_embeddings
+            .send((embedding, AsyncInProgress::None))
+            .await
+            .unwrap();
 
         let Some(VsIndex::RemovePartition { partition_id }) = rx_index.recv().await else {
             unreachable!();

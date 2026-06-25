@@ -19,11 +19,11 @@ pub(crate) enum FtsIndex {
     AddDocument {
         primary_id: PrimaryId,
         document: String,
-        in_progress: Option<AsyncInProgress>,
+        in_progress: AsyncInProgress,
     },
     RemoveDocument {
         primary_id: PrimaryId,
-        in_progress: Option<AsyncInProgress>,
+        in_progress: AsyncInProgress,
     },
     Count {
         index_key: IndexKey,
@@ -43,9 +43,9 @@ pub(crate) trait FtsIndexExt {
         &self,
         primary_id: PrimaryId,
         document: String,
-        in_progress: Option<AsyncInProgress>,
+        in_progress: AsyncInProgress,
     );
-    async fn remove_document(&self, primary_id: PrimaryId, in_progress: Option<AsyncInProgress>);
+    async fn remove_document(&self, primary_id: PrimaryId, in_progress: AsyncInProgress);
     async fn count(&self, index_key: IndexKey) -> CountR;
     async fn search(&self, index_key: IndexKey, query: String, limit: Limit) -> FtsSearchR;
 }
@@ -55,7 +55,7 @@ impl FtsIndexExt for mpsc::Sender<FtsIndex> {
         &self,
         primary_id: PrimaryId,
         document: String,
-        in_progress: Option<AsyncInProgress>,
+        in_progress: AsyncInProgress,
     ) {
         self.send(FtsIndex::AddDocument {
             primary_id,
@@ -66,7 +66,7 @@ impl FtsIndexExt for mpsc::Sender<FtsIndex> {
         .expect("internal actor should receive request");
     }
 
-    async fn remove_document(&self, primary_id: PrimaryId, in_progress: Option<AsyncInProgress>) {
+    async fn remove_document(&self, primary_id: PrimaryId, in_progress: AsyncInProgress) {
         self.send(FtsIndex::RemoveDocument {
             primary_id,
             in_progress,

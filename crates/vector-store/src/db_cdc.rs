@@ -118,7 +118,7 @@ pub(crate) fn new(
     mut session_rx: watch::Receiver<Option<Arc<Session>>>,
     metadata: IndexMetadata,
     internals: Sender<Internals>,
-    tx_embeddings: mpsc::Sender<(DbIndexedRow, Option<AsyncInProgress>)>,
+    tx_embeddings: mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
     config: CdcReaderConfig,
 ) -> mpsc::Sender<DbCdc> {
     let (tx, mut rx) = mpsc::channel::<DbCdc>(perf::channel_size().into());
@@ -234,7 +234,7 @@ impl CdcReaderState {
         params: CdcReaderParams,
         session: &Arc<Session>,
         metadata: &IndexMetadata,
-        tx_embeddings: &mpsc::Sender<(DbIndexedRow, Option<AsyncInProgress>)>,
+        tx_embeddings: &mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
         internals: &Sender<Internals>,
     ) {
         self.stop().await;
@@ -282,7 +282,7 @@ impl CdcReaderState {
         session: Option<Arc<Session>>,
         config_rx: &watch::Receiver<Arc<Config>>,
         metadata: &IndexMetadata,
-        tx_embeddings: &mpsc::Sender<(DbIndexedRow, Option<AsyncInProgress>)>,
+        tx_embeddings: &mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
         internals: &Sender<Internals>,
     ) {
         match session {
@@ -318,7 +318,7 @@ impl CdcReaderState {
         session_rx: &watch::Receiver<Option<Arc<Session>>>,
         config_rx: &watch::Receiver<Arc<Config>>,
         metadata: &IndexMetadata,
-        tx_embeddings: &mpsc::Sender<(DbIndexedRow, Option<AsyncInProgress>)>,
+        tx_embeddings: &mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
         internals: &Sender<Internals>,
     ) {
         let session = session_rx.borrow().clone();
@@ -357,7 +357,7 @@ async fn create_cdc_reader(
     params: CdcReaderParams,
     session: Arc<Session>,
     metadata: IndexMetadata,
-    tx_embeddings: mpsc::Sender<(DbIndexedRow, Option<AsyncInProgress>)>,
+    tx_embeddings: mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
     reader_name: &str,
 ) -> anyhow::Result<(
     scylla_cdc::log_reader::CDCLogReader,
@@ -442,7 +442,7 @@ struct CdcConsumerData {
     primary_key_columns: Vec<ColumnName>,
     backend: DbIndexBackend,
     kind: IndexKind,
-    tx: mpsc::Sender<(DbIndexedRow, Option<AsyncInProgress>)>,
+    tx: mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
     gregorian_epoch: PrimitiveDateTime,
 }
 
@@ -519,7 +519,7 @@ impl Consumer for CdcConsumer {
                     value,
                     timestamp,
                 },
-                None,
+                AsyncInProgress::None,
             ))
             .await;
         Ok(())
@@ -539,7 +539,7 @@ impl CdcConsumerFactory {
     fn new(
         session: Arc<Session>,
         metadata: &IndexMetadata,
-        tx: mpsc::Sender<(DbIndexedRow, Option<AsyncInProgress>)>,
+        tx: mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
     ) -> anyhow::Result<Self> {
         let cluster_state = session.get_cluster_state();
         let table = cluster_state

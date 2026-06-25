@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+mod async_in_progress;
 mod config_manager;
 pub mod db;
 mod db_cdc;
@@ -72,7 +73,6 @@ use std::sync::RwLock;
 use std::time::Duration;
 use tokio::runtime::Builder;
 use tokio::signal;
-use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::watch;
 use utoipa::openapi::OpenApi;
@@ -662,10 +662,7 @@ pub struct DbIndexedRow {
     pub timestamp: Timestamp,
 }
 
-#[derive(Clone, derive_more::From)]
-/// Marker struct to indicate that an async operation is in progress.
-#[allow(dead_code)]
-pub struct AsyncInProgress(mpsc::Sender<()>);
+pub use async_in_progress::AsyncInProgress;
 
 pub fn block_on<Output>(threads: Option<usize>, f: impl AsyncFnOnce() -> Output) -> Output {
     let mut builder = match threads {

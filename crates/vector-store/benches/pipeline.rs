@@ -256,12 +256,7 @@ fn wait_until_all_tasks_finished(runtime: &Runtime) {
 }
 
 fn scan_fn_mpsc(
-    mut items: mpsc::Receiver<(
-        PrimaryKey,
-        Option<Vector>,
-        Timestamp,
-        Option<AsyncInProgress>,
-    )>,
+    mut items: mpsc::Receiver<(PrimaryKey, Option<Vector>, Timestamp, AsyncInProgress)>,
 ) -> ScanFn {
     Box::new(move |tx| {
         async move {
@@ -347,7 +342,7 @@ fn fullscan_add(c: &mut Criterion) {
                                 [(CqlValue::BigInt(pk))].into_iter().collect(),
                                 Some(vec![it as f32; DIMENSIONS].into()),
                                 Timestamp::from_unix_timestamp(0),
-                                Some(tx_in_progress.into()),
+                                AsyncInProgress::Fullscan(tx_in_progress),
                             );
                             let start = Instant::now();
                             tx.send(request).await.unwrap();
@@ -417,7 +412,7 @@ fn search(c: &mut Criterion) {
                         [(CqlValue::BigInt(it))].into_iter().collect(),
                         Some(vec![it as f32; DIMENSIONS].into()),
                         Timestamp::from_unix_timestamp(0),
-                        Some(tx_in_progress.clone().into()),
+                        AsyncInProgress::Fullscan(tx_in_progress.clone()),
                     ))
                     .await
                     .unwrap();
@@ -552,7 +547,7 @@ fn cdc_add(c: &mut Criterion) {
                                 [(CqlValue::BigInt(pk))].into_iter().collect(),
                                 Some(vec![it as f32; DIMENSIONS].into()),
                                 Timestamp::from_unix_timestamp(0),
-                                Some(tx_in_progress.into()),
+                                AsyncInProgress::Fullscan(tx_in_progress),
                             );
                             let start = Instant::now();
                             tx.send(request).await.unwrap();
@@ -629,7 +624,7 @@ fn cdc_update(c: &mut Criterion) {
                             [(CqlValue::BigInt(it as i64))].into_iter().collect(),
                             Some(vec![it as f32; DIMENSIONS].into()),
                             Timestamp::from_unix_timestamp(0),
-                            Some(tx_in_progress.clone().into()),
+                            AsyncInProgress::Fullscan(tx_in_progress.clone()),
                         ))
                         .await
                         .unwrap();
@@ -677,7 +672,7 @@ fn cdc_update(c: &mut Criterion) {
                                     [(CqlValue::BigInt(id))].into_iter().collect(),
                                     Some(vector),
                                     Timestamp::from_unix_timestamp(timestamp),
-                                    Some(tx_in_progress.clone().into()),
+                                    AsyncInProgress::Fullscan(tx_in_progress.clone()),
                                 ))
                                 .await
                                 .unwrap();
@@ -780,7 +775,7 @@ fn search_while_updating(c: &mut Criterion) {
                             [(CqlValue::BigInt(it as i64))].into_iter().collect(),
                             Some(vec![it as f32; DIMENSIONS].into()),
                             Timestamp::from_unix_timestamp(0),
-                            Some(tx_in_progress.clone().into()),
+                            AsyncInProgress::Fullscan(tx_in_progress.clone()),
                         ))
                         .await
                         .unwrap();
@@ -789,7 +784,7 @@ fn search_while_updating(c: &mut Criterion) {
                             [(CqlValue::BigInt(it as i64))].into_iter().collect(),
                             Some(vec![it as f32; DIMENSIONS].into()),
                             Timestamp::from_unix_timestamp(0),
-                            Some(tx_in_progress.clone().into()),
+                            AsyncInProgress::Fullscan(tx_in_progress.clone()),
                         ))
                         .await
                         .unwrap();
@@ -822,7 +817,7 @@ fn search_while_updating(c: &mut Criterion) {
                                 [(CqlValue::BigInt(id))].into_iter().collect(),
                                 Some(vector),
                                 Timestamp::from_unix_timestamp(timestamp),
-                                Some(tx_in_progress.clone().into()),
+                                AsyncInProgress::Fullscan(tx_in_progress.clone()),
                             ))
                             .await
                             .is_err()
@@ -850,7 +845,7 @@ fn search_while_updating(c: &mut Criterion) {
                                     [(CqlValue::BigInt(id))].into_iter().collect(),
                                     Some(vector),
                                     Timestamp::from_unix_timestamp(timestamp),
-                                    Some(tx_in_progress.clone().into()),
+                                    AsyncInProgress::Fullscan(tx_in_progress.clone()),
                                 ))
                                 .await
                                 .is_err()
@@ -1012,7 +1007,7 @@ fn search_while_inserting(c: &mut Criterion) {
                                 [(CqlValue::BigInt(pk))].into_iter().collect(),
                                 Some(vector),
                                 timestamp,
-                                Some(tx_in_progress.clone().into()),
+                                AsyncInProgress::Fullscan(tx_in_progress.clone()),
                             ))
                             .await
                             .is_err()
@@ -1039,7 +1034,7 @@ fn search_while_inserting(c: &mut Criterion) {
                                     [(CqlValue::BigInt(pk))].into_iter().collect(),
                                     Some(vector),
                                     timestamp,
-                                    Some(tx_in_progress.clone().into()),
+                                    AsyncInProgress::Fullscan(tx_in_progress.clone()),
                                 ))
                                 .await
                                 .is_err()

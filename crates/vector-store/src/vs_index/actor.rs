@@ -22,12 +22,12 @@ pub enum VsIndex {
         partition_id: PartitionId,
         primary_id: PrimaryId,
         embedding: Vector,
-        in_progress: Option<AsyncInProgress>,
+        in_progress: AsyncInProgress,
     },
     RemoveVector {
         partition_id: PartitionId,
         primary_id: PrimaryId,
-        in_progress: Option<AsyncInProgress>,
+        in_progress: AsyncInProgress,
     },
     RemovePartition {
         partition_id: PartitionId,
@@ -57,13 +57,13 @@ pub(crate) trait VsIndexExt {
         partition_id: PartitionId,
         primary_id: PrimaryId,
         embedding: Vector,
-        in_progress: Option<AsyncInProgress>,
+        in_progress: AsyncInProgress,
     );
     async fn remove_vector(
         &self,
         partition_id: PartitionId,
         primary_id: PrimaryId,
-        in_progress: Option<AsyncInProgress>,
+        in_progress: AsyncInProgress,
     );
     async fn remove_partition(&self, partition_id: PartitionId);
     async fn ann(&self, index_key: IndexKey, embedding: Vector, limit: Limit) -> AnnR;
@@ -84,7 +84,7 @@ impl VsIndexExt for mpsc::Sender<VsIndex> {
         partition_id: PartitionId,
         primary_id: PrimaryId,
         embedding: Vector,
-        in_progress: Option<AsyncInProgress>,
+        in_progress: AsyncInProgress,
     ) {
         self.send(VsIndex::AddVector {
             partition_id,
@@ -101,7 +101,7 @@ impl VsIndexExt for mpsc::Sender<VsIndex> {
         &self,
         partition_id: PartitionId,
         primary_id: PrimaryId,
-        in_progress: Option<AsyncInProgress>,
+        in_progress: AsyncInProgress,
     ) {
         self.send(VsIndex::RemoveVector {
             partition_id,

@@ -69,7 +69,7 @@ use uuid::Uuid;
 
 type GetDbIndexR = anyhow::Result<(
     mpsc::Sender<DbIndex>,
-    mpsc::Receiver<(DbIndexedRow, Option<AsyncInProgress>)>,
+    mpsc::Receiver<(DbIndexedRow, AsyncInProgress)>,
 )>;
 pub(crate) type LatestSchemaVersionR = anyhow::Result<Option<CqlTimeuuid>>;
 type GetIndexesR = anyhow::Result<Vec<DbCustomIndex>>;
