@@ -56,6 +56,16 @@ pub enum DataType {
     B1,
 }
 
+#[derive(Debug, PartialEq, serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
+#[serde(tag = "type", rename_all = "lowercase")]
+/// Type of index, distinguishing between vector search and fulltext search indexes.
+pub enum IndexType {
+    /// Vector search index with its associated data type.
+    Vector { data_type: DataType },
+    /// Fulltext search index.
+    Fulltext,
+}
+
 #[derive(
     Copy,
     Clone,
@@ -82,11 +92,12 @@ impl Serialize for Distance {
 }
 
 #[derive(Debug, PartialEq, serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
-/// Information about a vector index, such as keyspace, name and data type.
+/// Information about an index, such as keyspace, name and type.
 pub struct IndexInfo {
     pub keyspace: KeyspaceName,
     pub index: IndexName,
-    pub data_type: DataType,
+    #[serde(flatten)]
+    pub index_type: IndexType,
 }
 
 impl IndexInfo {
@@ -94,7 +105,9 @@ impl IndexInfo {
         IndexInfo {
             keyspace: String::from(keyspace).into(),
             index: String::from(index).into(),
-            data_type: DataType::F32,
+            index_type: IndexType::Vector {
+                data_type: DataType::F32,
+            },
         }
     }
 }

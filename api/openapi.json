@@ -6,7 +6,7 @@
     "license": {
       "name": "LicenseRef-ScyllaDB-Source-Available-1.0"
     },
-    "version": "1.5.0"
+    "version": "2.0.0"
   },
   "paths": {
     "/api/v1/indexes": {
@@ -14,7 +14,7 @@
         "tags": [
           "scylla-vector-store-index"
         ],
-        "description": "Returns the list of indexes managed by the Vector Store indexing service. The list includes indexes in any state (initializing, available/built, destroying). Due to synchronization delays, it may temporarily differ from the list of vector indexes inside ScyllaDB.",
+        "description": "Returns the list of indexes managed by the Vector Store indexing service. The list includes both vector and fulltext indexes in any state (initializing, available/built, destroying). Due to synchronization delays, it may temporarily differ from the list of indexes inside ScyllaDB.",
         "operationId": "get_indexes",
         "responses": {
           "200": {
@@ -370,24 +370,27 @@
         "description": "A human-readable description of the error that occurred."
       },
       "IndexInfo": {
-        "type": "object",
-        "description": "Information about a vector index, such as keyspace, name and data type.",
-        "required": [
-          "keyspace",
-          "index",
-          "data_type"
-        ],
-        "properties": {
-          "data_type": {
-            "$ref": "#/components/schemas/DataType"
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/IndexType"
           },
-          "index": {
-            "$ref": "#/components/schemas/IndexName"
-          },
-          "keyspace": {
-            "$ref": "#/components/schemas/KeyspaceName"
+          {
+            "type": "object",
+            "required": [
+              "keyspace",
+              "index"
+            ],
+            "properties": {
+              "index": {
+                "$ref": "#/components/schemas/IndexName"
+              },
+              "keyspace": {
+                "$ref": "#/components/schemas/KeyspaceName"
+              }
+            }
           }
-        }
+        ],
+        "description": "Information about an index, such as keyspace, name and type."
       },
       "IndexName": {
         "type": "string",
@@ -422,6 +425,45 @@
             "$ref": "#/components/schemas/IndexStatus"
           }
         }
+      },
+      "IndexType": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Vector search index with its associated data type.",
+            "required": [
+              "data_type",
+              "type"
+            ],
+            "properties": {
+              "data_type": {
+                "$ref": "#/components/schemas/DataType"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "vector"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Fulltext search index.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "fulltext"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Type of index, distinguishing between vector search and fulltext search indexes."
       },
       "InfoResponse": {
         "type": "object",
