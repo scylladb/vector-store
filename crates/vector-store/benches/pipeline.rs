@@ -47,6 +47,7 @@ use vector_store::Config;
 use vector_store::ConfigReceivers;
 use vector_store::Connectivity;
 use vector_store::DbIndexPartitioning;
+use vector_store::DbIndexedOperation;
 use vector_store::DbIndexedRow;
 use vector_store::DbIndexedValue;
 use vector_store::ExpansionAdd;
@@ -272,11 +273,13 @@ fn scan_fn_mpsc(
                     .send((
                         DbIndexedRow {
                             primary_key,
-                            values: NonemptyBox::new([Timestamped::new(
-                                timestamp,
-                                embedding.map(DbIndexedValue::Vector),
-                            )])
-                            .unwrap(),
+                            operation: DbIndexedOperation::Upsert(
+                                NonemptyBox::new([Timestamped::new(
+                                    timestamp,
+                                    embedding.map(DbIndexedValue::Vector),
+                                )])
+                                .unwrap(),
+                            ),
                         },
                         in_progress,
                     ))

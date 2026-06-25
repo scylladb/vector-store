@@ -6,6 +6,7 @@
 use crate::AsyncInProgress;
 use crate::ColumnName;
 use crate::Config;
+use crate::DbIndexedOperation;
 use crate::DbIndexedRow;
 use crate::DbIndexedValue;
 use crate::IndexKind;
@@ -641,7 +642,9 @@ impl Statements {
 
                 Some(DbIndexedRow {
                     primary_key,
-                    values: NonemptyBox::new([Timestamped::new(timestamp, value)]).unwrap(),
+                    operation: DbIndexedOperation::Upsert(
+                        NonemptyBox::new([Timestamped::new(timestamp, value)]).unwrap(),
+                    ),
                 })
             })
             .filter_map(|value| async move {

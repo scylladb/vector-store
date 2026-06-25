@@ -6,6 +6,7 @@
 use crate::AsyncInProgress;
 use crate::ColumnName;
 use crate::Config;
+use crate::DbIndexedOperation;
 use crate::DbIndexedRow;
 use crate::DbIndexedValue;
 use crate::IndexKey;
@@ -490,17 +491,27 @@ impl Consumer for CdcConsumer {
             bail!("CDC error: column {column} should be deletable");
         }
 
-        let value = match row.operation {
-            OperationType::PartitionDelete | OperationType::RowDelete => None,
+        let timestamp = row
+            .time
+            .try_into()
+            .map_err(|err| anyhow!("CDC error: converting row.time: {err}"))?;
+
+        let operation = match row.operation {
+            OperationType::PartitionDelete | OperationType::RowDelete => {
+                DbIndexedOperation::Delete(timestamp)
+            }
 
             OperationType::RowUpdate | OperationType::RowInsert | OperationType::PostImage => {
-                match source.take_cdc_value(&mut row) {
+                let value = match source.take_cdc_value(&mut row) {
                     CdcValueStatus::Deleted => None,
                     CdcValueStatus::Skip => return Ok(()),
                     CdcValueStatus::NewValue(value) => {
                         extract_indexed_value(source, value, &self.0.kind)?
                     }
-                }
+                };
+                DbIndexedOperation::Upsert(
+                    NonemptyBox::new([Timestamped::new(timestamp, value)]).unwrap(),
+                )
             }
 
             OperationType::PreImage
@@ -524,18 +535,13 @@ impl Consumer for CdcConsumer {
             return Ok(());
         };
 
-        let timestamp = row
-            .time
-            .try_into()
-            .map_err(|err| anyhow!("CDC error: converting row.time: {err}"))?;
-
         _ = self
             .0
             .tx
             .send((
                 DbIndexedRow {
                     primary_key,
-                    values: NonemptyBox::new([Timestamped::new(timestamp, value)]).unwrap(),
+                    operation,
                 },
                 AsyncInProgress::cdc(
                     self.0.metrics.indexing_lag.with_label_values(&[

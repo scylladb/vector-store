@@ -21,6 +21,7 @@ use vector_store::AsyncInProgress;
 use vector_store::ColumnName;
 use vector_store::DbCustomIndex;
 use vector_store::DbIndexKind;
+use vector_store::DbIndexedOperation;
 use vector_store::DbIndexedRow;
 use vector_store::DbIndexedValue;
 use vector_store::Dimensions;
@@ -75,11 +76,13 @@ where
             .into_iter()
             .map(|(primary_key, embedding, timestamp)| DbIndexedRow {
                 primary_key,
-                values: NonemptyBox::new([Timestamped::new(
-                    timestamp,
-                    embedding.map(DbIndexedValue::Vector),
-                )])
-                .unwrap(),
+                operation: DbIndexedOperation::Upsert(
+                    NonemptyBox::new([Timestamped::new(
+                        timestamp,
+                        embedding.map(DbIndexedValue::Vector),
+                    )])
+                    .unwrap(),
+                ),
             }),
     )
 }
@@ -92,11 +95,13 @@ where
     make_scan_fn(items.into_iter().map(|(primary_key, document, timestamp)| {
         DbIndexedRow {
             primary_key,
-            values: NonemptyBox::new([Timestamped::new(
-                timestamp,
-                document.map(DbIndexedValue::Document),
-            )])
-            .unwrap(),
+            operation: DbIndexedOperation::Upsert(
+                NonemptyBox::new([Timestamped::new(
+                    timestamp,
+                    document.map(DbIndexedValue::Document),
+                )])
+                .unwrap(),
+            ),
         }
     }))
 }
