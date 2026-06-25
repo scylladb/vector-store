@@ -1018,11 +1018,11 @@ fn convert_legacy_target_option(
 }
 
 fn db_index_kind_from_options(options: &mut BTreeMap<String, String>) -> Option<DbIndexKind> {
-    match options.remove("kind").as_deref() {
+    match options.remove("class_name").as_deref() {
         Some("vector_index") | None => Some(DbIndexKind::VectorSearch),
         Some("fulltext_index") => Some(DbIndexKind::FullTextSearch),
         Some(unknown) => {
-            debug!("unrecognized index kind: {unknown:?}, skipping index");
+            debug!("unrecognized index class_name: {unknown:?}, skipping index");
             None
         }
     }
@@ -1245,22 +1245,23 @@ pub(crate) mod tests {
 
     #[test]
     fn db_index_kind_from_options_vector() {
-        let mut options = BTreeMap::from([("kind".to_string(), "vector_index".to_string())]);
+        let mut options = BTreeMap::from([("class_name".to_string(), "vector_index".to_string())]);
         assert_eq!(
             db_index_kind_from_options(&mut options),
             Some(DbIndexKind::VectorSearch)
         );
-        assert!(!options.contains_key("kind"));
+        assert!(!options.contains_key("class_name"));
     }
 
     #[test]
     fn db_index_kind_from_options_fts() {
-        let mut options = BTreeMap::from([("kind".to_string(), "fulltext_index".to_string())]);
+        let mut options =
+            BTreeMap::from([("class_name".to_string(), "fulltext_index".to_string())]);
         assert_eq!(
             db_index_kind_from_options(&mut options),
             Some(DbIndexKind::FullTextSearch)
         );
-        assert!(!options.contains_key("kind"));
+        assert!(!options.contains_key("class_name"));
     }
 
     #[test]
@@ -1274,7 +1275,7 @@ pub(crate) mod tests {
 
     #[test]
     fn db_index_kind_from_options_unknown_returns_none() {
-        let mut options = BTreeMap::from([("kind".to_string(), "unknown_kind".to_string())]);
+        let mut options = BTreeMap::from([("class_name".to_string(), "unknown_kind".to_string())]);
         assert_eq!(db_index_kind_from_options(&mut options), None);
     }
 
