@@ -22,6 +22,7 @@ use vector_store::AsyncInProgress;
 use vector_store::Config;
 use vector_store::Connectivity;
 use vector_store::DbIndexPartitioning;
+use vector_store::DbIndexedOperation;
 use vector_store::DbIndexedRow;
 use vector_store::DbIndexedValue;
 use vector_store::ExpansionAdd;
@@ -102,11 +103,13 @@ async fn memory_limit_during_index_build() {
                         .send((
                             DbIndexedRow {
                                 primary_key: [CqlValue::Int(pk)].into(),
-                                values: NonemptyBox::new([Timestamped::new(
-                                    Timestamp::from_millis(10),
-                                    Some(DbIndexedValue::Vector(item)),
-                                )])
-                                .unwrap(),
+                                operation: DbIndexedOperation::Upsert(
+                                    NonemptyBox::new([Timestamped::new(
+                                        Timestamp::from_millis(10),
+                                        Some(DbIndexedValue::Vector(item)),
+                                    )])
+                                    .unwrap(),
+                                ),
                             },
                             AsyncInProgress::Fullscan(tx_in_progress.clone()),
                         ))
