@@ -195,7 +195,7 @@ impl Default for Config {
             credentials: None,
             usearch_simulator: None,
             alter_index_simulator: false,
-            fulltext_indexes: false,
+            fulltext_indexes: true,
             disable_colors: false,
             tls_cert_path: None,
             tls_key_path: None,
