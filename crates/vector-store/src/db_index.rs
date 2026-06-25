@@ -181,6 +181,8 @@ pub(crate) async fn new(
 
     let statements = Arc::new(Statements::new(statements_session_rx, metadata.clone()).await?);
 
+    let semaphore = Arc::new(Semaphore::new(concurrency_limit()));
+
     // Create wide-framed CDC actor
     let cdc_wide = db_cdc::new(
         config_rx.clone(),
@@ -189,6 +191,7 @@ pub(crate) async fn new(
         internals.clone(),
         metrics.clone(),
         tx_embeddings.clone(),
+        Arc::clone(&semaphore),
         CdcReaderConfig::Wide,
     );
 
@@ -200,6 +203,7 @@ pub(crate) async fn new(
         internals,
         metrics,
         tx_embeddings.clone(),
+        semaphore,
         CdcReaderConfig::Fine,
     );
 
@@ -741,6 +745,11 @@ fn parse_indexed_value(value: CqlValue, kind: &IndexKind) -> anyhow::Result<DbIn
             }
         },
     }
+}
+
+fn concurrency_limit() -> usize {
+    const RATIO: usize = 3;
+    perf::num_workers().get() * RATIO
 }
 
 #[cfg(test)]
