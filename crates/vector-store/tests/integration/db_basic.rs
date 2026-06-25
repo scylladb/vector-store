@@ -259,7 +259,7 @@ impl DbBasic {
 
 fn process_db(db: &DbBasic, msg: Db, node_state: Sender<NodeState>) {
     match msg {
-        Db::GetDbIndex { metadata, tx } => tx
+        Db::GetDbIndex { metadata, tx, .. } => tx
             .send(new_db_index(db.clone(), metadata, node_state.clone()))
             .map_err(|_| anyhow!("Db::GetDbIndex: unable to send response"))
             .unwrap(),

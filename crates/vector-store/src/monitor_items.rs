@@ -161,18 +161,6 @@ async fn add<I: IndexDispatch>(
     metrics: &Metrics,
     key: &IndexKey,
 ) {
-    // Rows arriving without a progress marker come from CDC. Wrap them in a
-    // Cdc marker so that the indexing-lag metric is observed when the marker
-    // is dropped (i.e. when the index actor finishes processing the row).
-    if matches!(in_progress, AsyncInProgress::None) {
-        in_progress = AsyncInProgress::cdc(
-            metrics
-                .indexing_lag
-                .with_label_values(&[key.keyspace().as_ref(), key.index().as_ref()]),
-            embedding.timestamp,
-        );
-    }
-
     let Ok(operations) = table
         .write()
         .unwrap()
@@ -414,7 +402,13 @@ mod tests {
                 }])
             });
         tx_embeddings
-            .send((embedding, AsyncInProgress::None))
+            .send((
+                embedding,
+                AsyncInProgress::cdc(
+                    metrics.indexing_lag.with_label_values(&["vector", "store"]),
+                    Timestamp::now(),
+                ),
+            ))
             .await
             .unwrap();
         let Some(VsIndex::AddVector {
@@ -429,7 +423,6 @@ mod tests {
         assert_eq!(primary_id, 2.into());
         assert_eq!(partition_id, 3.into());
         assert_eq!(embedding, vec![4.].into());
-        assert!(matches!(in_progress, AsyncInProgress::Cdc(_)));
         drop(in_progress);
 
         drop(tx_embeddings);
@@ -504,7 +497,7 @@ mod tests {
             partition_id,
             primary_id,
             embedding,
-            in_progress,
+            ..
         }) = rx_index.recv().await
         else {
             unreachable!();
@@ -512,7 +505,6 @@ mod tests {
         assert_eq!(primary_id, 3.into());
         assert_eq!(partition_id, 3.into());
         assert_eq!(embedding, vec![4.].into());
-        assert!(matches!(in_progress, AsyncInProgress::Cdc(_)));
 
         drop(tx_embeddings);
         assert!(rx_index.recv().await.is_none());
@@ -579,7 +571,7 @@ mod tests {
             partition_id,
             primary_id,
             embedding,
-            in_progress,
+            ..
         }) = rx_index.recv().await
         else {
             unreachable!();
@@ -587,7 +579,6 @@ mod tests {
         assert_eq!(primary_id, 1.into());
         assert_eq!(partition_id, 2.into());
         assert_eq!(embedding, vec![10.].into());
-        assert!(matches!(in_progress, AsyncInProgress::Cdc(_)));
 
         // Second: remove half of the update
         let Some(VsIndex::RemoveVector {
@@ -662,14 +653,13 @@ mod tests {
         let Some(VsIndex::RemoveVector {
             partition_id,
             primary_id,
-            in_progress,
+            ..
         }) = rx_index.recv().await
         else {
             unreachable!();
         };
         assert_eq!(primary_id, 5.into());
         assert_eq!(partition_id, 6.into());
-        assert!(matches!(in_progress, AsyncInProgress::Cdc(_)));
 
         drop(tx_embeddings);
         assert!(rx_index.recv().await.is_none());

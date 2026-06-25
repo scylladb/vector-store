@@ -11,6 +11,7 @@ use crate::DbIndexedValue;
 use crate::IndexKind;
 use crate::IndexMetadata;
 use crate::KeyspaceIdentifier;
+use crate::Metrics;
 use crate::NonemptyArc;
 use crate::NonemptyIteratorExt;
 use crate::Percentage;
@@ -151,6 +152,7 @@ pub(crate) async fn new(
     config_rx: watch::Receiver<Arc<Config>>,
     session_rx: watch::Receiver<Option<Arc<Session>>>,
     metadata: IndexMetadata,
+    metrics: Arc<Metrics>,
     node_state: Sender<NodeState>,
     internals: Sender<Internals>,
     cdc_error_notify: Arc<Notify>,
@@ -180,6 +182,7 @@ pub(crate) async fn new(
         config_rx.clone(),
         session_rx.clone(),
         metadata.clone(),
+        Arc::clone(&metrics),
         internals.clone(),
         tx_embeddings.clone(),
         CdcReaderConfig::Wide,
@@ -190,6 +193,7 @@ pub(crate) async fn new(
         config_rx,
         session_rx.clone(),
         metadata.clone(),
+        metrics,
         internals,
         tx_embeddings.clone(),
         CdcReaderConfig::Fine,
