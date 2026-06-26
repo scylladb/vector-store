@@ -159,39 +159,44 @@ fn take_alternator_attr(attrs: CqlValue, target: &str) -> anyhow::Result<Option<
 ///
 /// For CQL-native tables, selects the vector column directly.
 /// For Alternator tables, selects from the `:attrs` map column.
-pub(crate) fn range_scan_query(
+pub(crate) fn range_scan_query<'a>(
     keyspace: &KeyspaceIdentifier,
     table: &TableIdentifier,
-    target_column: &ColumnName,
+    columns: impl IntoIterator<Item = &'a ColumnName>,
     primary_key_list: &str,
     partition_key_list: &str,
 ) -> String {
-    if keyspace.is_alternator() {
+    let columns = if keyspace.is_alternator() {
         let attributes = CqlIdentifier::new(ALTERNATOR_ATTRS_COLUMN);
-        let vector = CqlLiteral::new(target_column.as_ref());
-        format!(
-            "
-            SELECT {primary_key_list}, {attributes}[{vector}], writetime({attributes}[{vector}])
-            FROM {keyspace}.{table}
-            WHERE
-                token({partition_key_list}) >= ?
-                AND token({partition_key_list}) <= ?
-            BYPASS CACHE
-            "
+        itertools::join(
+            columns.into_iter().map(CqlLiteral::new).flat_map(|column| {
+                [
+                    format!("{attributes}[{column}]"),
+                    format!("writetime({attributes}[{column}])"),
+                ]
+            }),
+            ", ",
         )
     } else {
-        let vector = CqlIdentifier::new(target_column.as_ref());
-        format!(
-            "
-            SELECT {primary_key_list}, {vector}, writetime({vector})
-            FROM {keyspace}.{table}
-            WHERE
-                token({partition_key_list}) >= ?
-                AND token({partition_key_list}) <= ?
-            BYPASS CACHE
-            "
+        itertools::join(
+            columns
+                .into_iter()
+                .map(AsRef::as_ref)
+                .map(CqlIdentifier::new)
+                .flat_map(|column| [format!("{column}"), format!("writetime({column})")]),
+            ", ",
         )
-    }
+    };
+    format!(
+        "
+        SELECT {primary_key_list}, {columns}
+        FROM {keyspace}.{table}
+        WHERE
+            token({partition_key_list}) >= ?
+            AND token({partition_key_list}) <= ?
+        BYPASS CACHE
+        "
+    )
 }
 
 /// Retrieves the vector dimensions for the given index, dispatching to the
@@ -283,7 +288,7 @@ mod tests {
         let query = range_scan_query(
             &KeyspaceIdentifier::from("ks"),
             &TableIdentifier::from("tbl"),
-            &ColumnName::from("embedding"),
+            &[ColumnName::from("embedding")],
             &CqlIdentifier::new("id").to_string(),
             &CqlIdentifier::new("id").to_string(),
         );
@@ -303,7 +308,7 @@ mod tests {
         let query = range_scan_query(
             &KeyspaceIdentifier::from("MyKeyspace"),
             &TableIdentifier::from("MyTable"),
-            &ColumnName::from("EmbeddingCol"),
+            &[ColumnName::from("EmbeddingCol")],
             &pk_list,
             &CqlIdentifier::new("UserId").to_string(),
         );
@@ -326,7 +331,7 @@ mod tests {
         let query = range_scan_query(
             &KeyspaceIdentifier::from("UPPER_KS"),
             &TableIdentifier::from("UPPER_TBL"),
-            &ColumnName::from("VEC"),
+            &[ColumnName::from("VEC")],
             &CqlIdentifier::new("ID").to_string(),
             &CqlIdentifier::new("ID").to_string(),
         );
@@ -348,7 +353,7 @@ mod tests {
         let query = range_scan_query(
             &KeyspaceIdentifier::from("my-app"),
             &TableIdentifier::from("my-table:v1"),
-            &ColumnName::from("my-vector"),
+            &[ColumnName::from("my-vector")],
             &pk_list,
             &CqlIdentifier::new(":pk").to_string(),
         );
@@ -374,7 +379,7 @@ mod tests {
         let query = range_scan_query(
             &KeyspaceIdentifier::from("alternator_my-app"),
             &TableIdentifier::from("my-table"),
-            &ColumnName::from("v"),
+            &[ColumnName::from("v")],
             &pk_list,
             &CqlIdentifier::new(":pk").to_string(),
         );
@@ -402,7 +407,7 @@ mod tests {
         let query = range_scan_query(
             &KeyspaceIdentifier::from("alternator_ks"),
             &TableIdentifier::from("tbl"),
-            &ColumnName::from("my-vector:v1"),
+            &[ColumnName::from("my-vector:v1")],
             &pk_list,
             &pk_list,
         );
@@ -422,7 +427,7 @@ mod tests {
         let query = range_scan_query(
             &KeyspaceIdentifier::from("alternator_Ks"),
             &TableIdentifier::from("Tbl"),
-            &ColumnName::from("EmbeddingCol"),
+            &[ColumnName::from("EmbeddingCol")],
             &pk_list,
             &pk_list,
         );
@@ -442,7 +447,7 @@ mod tests {
         let query = range_scan_query(
             &KeyspaceIdentifier::from("alternator_ks"),
             &TableIdentifier::from("tbl"),
-            &ColumnName::from("it's a \"test\""),
+            &[ColumnName::from("it's a \"test\"")],
             &pk_list,
             &pk_list,
         );

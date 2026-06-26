@@ -17,6 +17,7 @@ use crate::NonemptyArc;
 use crate::NonemptyBox;
 use crate::NonemptyIteratorExt;
 use crate::Percentage;
+use crate::PrimaryKey;
 use crate::Progress;
 use crate::TableIdentifier;
 use crate::Timestamp;
@@ -311,6 +312,8 @@ struct Statements {
     session_rx: tokio::sync::watch::Receiver<Option<Arc<Session>>>,
     primary_key_columns: NonemptyArc<ColumnName>,
     partition_key_count: usize,
+    target_columns: NonemptyArc<ColumnName>,
+    filtering_columns: Arc<[ColumnName]>,
     table_columns: GetTableColumnsR,
     st_range_scan: PreparedStatement,
     kind: IndexKind,
@@ -360,6 +363,14 @@ impl Statements {
             InvariantKey::MAX_COLUMNS,
         );
 
+        let target_columns = metadata.target_columns.clone();
+        let filtering_columns: Arc<[_]> = metadata
+            .filtering_columns
+            .iter()
+            .filter(|column| !primary_key_columns.contains(column))
+            .cloned()
+            .collect();
+
         let table_columns = Arc::new(
             table
                 .columns
@@ -387,7 +398,7 @@ impl Statements {
         let query = db_index_backend::range_scan_query(
             &keyspace_identifier,
             &table_identifier,
-            metadata.target_columns.first(),
+            target_columns.iter().chain(filtering_columns.iter()),
             &st_primary_key_list,
             &st_partition_key_list,
         );
@@ -403,6 +414,8 @@ impl Statements {
         Ok(Self {
             primary_key_columns,
             partition_key_count,
+            target_columns,
+            filtering_columns,
             table_columns,
             st_range_scan,
             session_rx,
@@ -579,8 +592,11 @@ impl Statements {
         begin: Token,
         end: Token,
     ) -> anyhow::Result<BoxStream<'static, DbIndexedRow>> {
-        // last two columns are embedding and writetime
-        let columns_len_expected = self.primary_key_columns.len().get() + 2;
+        // last values columns are value and writetime
+        let columns_len_expected = self.primary_key_columns.len().get()
+            + (self.target_columns.len().get() + self.filtering_columns.len()) * 2;
+        let target_columns_offset = self.primary_key_columns.len().get();
+        let target_columns_len = self.target_columns.len();
         let kind = self.kind.clone();
 
         // wait for an active session
@@ -612,39 +628,20 @@ impl Statements {
                     return None;
                 }
 
-                let Some(CqlValue::BigInt(timestamp)) = row.columns.pop().unwrap() else {
-                    debug!("range_scan_stream: bad type of a writetime");
-                    return None;
-                };
-                let timestamp = Timestamp::from_micros(timestamp as u64);
+                let values = parse_values(
+                    row.columns.drain(target_columns_offset..),
+                    None,
+                    target_columns_len,
+                    &kind,
+                )
+                .inspect_err(|err| error!("Error while parsing values: {err}"))
+                .ok()?;
 
-                let Some(column_value) = row.columns.pop().unwrap() else {
-                    debug!("range_scan_stream: missing target column");
-                    return None;
-                };
-
-                let value = parse_indexed_value(column_value, &kind)?;
-
-                let Ok(primary_key) = row
-                    .columns
-                    .into_iter()
-                    .map(|value| {
-                        let Some(value) = value else {
-                            bail!("range_scan_stream: missing a primary key column");
-                        };
-                        Ok(value)
-                    })
-                    .collect::<anyhow::Result<_>>()
-                    .inspect_err(|err| debug!("range_scan_stream: {err}"))
-                else {
-                    return None;
-                };
+                let primary_key = parse_primary_key(row.columns)?;
 
                 Some(DbIndexedRow {
                     primary_key,
-                    operation: DbIndexedOperation::Upsert(
-                        NonemptyBox::new([Timestamped::new(timestamp, value)]).unwrap(),
-                    ),
+                    operation: DbIndexedOperation::Upsert(values),
                 })
             })
             .filter_map(|value| async move {
@@ -657,22 +654,90 @@ impl Statements {
     }
 }
 
-fn parse_indexed_value(value: CqlValue, kind: &IndexKind) -> Option<Option<DbIndexedValue>> {
-    match kind {
-        IndexKind::Vs(_) => {
-            let Ok(vector) =
-                Vector::try_from(value).inspect_err(|err| debug!("range_scan_stream: {err}"))
-            else {
-                return None;
+pub(crate) fn parse_values(
+    columns: impl IntoIterator<Item = Option<CqlValue>>,
+    default_timestamp: Option<Timestamp>,
+    target_columns_len: NonZeroUsize,
+    kind: &IndexKind,
+) -> anyhow::Result<NonemptyBox<Timestamped<DbIndexedValue>>> {
+    let values = columns
+        .into_iter()
+        .chunks(2)
+        .into_iter()
+        .enumerate()
+        .map(|(idx, mut chunk)| {
+            let value = chunk.next().ok_or(anyhow!(
+                "parse_values: unable to get column value from chunk"
+            ))?;
+            let value = if idx < target_columns_len.get() {
+                // target columns
+                if let Some(value) = value {
+                    Some(parse_indexed_value(value, kind)?)
+                } else {
+                    None
+                }
+            } else {
+                // filtering columns
+                value.map(DbIndexedValue::Filtering)
             };
-            Some(Some(DbIndexedValue::Vector(vector)))
-        }
+
+            let timestamp = chunk
+                .next()
+                .ok_or(anyhow!(
+                    "parse_values: unable to get timestamp value from chunk"
+                ))?
+                .map(|timestamp| {
+                    if let CqlValue::BigInt(timestamp) = timestamp {
+                        Ok(Timestamp::from_micros(timestamp as u64))
+                    } else {
+                        bail!("parse_values: bad type of a writetime")
+                    }
+                })
+                .transpose()?
+                .or(default_timestamp);
+
+            Ok((timestamp, value))
+        })
+        .filter_map(|timestamp_value| {
+            timestamp_value
+                .and_then(|(timestamp, value)| match (timestamp, value) {
+                    (Some(timestamp), value) => Ok(Some((timestamp, value))),
+                    (None, _) => bail!("parse_values: missing timestamp for value"),
+                })
+                .transpose()
+        })
+        .map_ok(|(timestamp, value)| Timestamped::new(timestamp, value))
+        .collect::<anyhow::Result<Box<_>>>()?;
+    if target_columns_len.get() > values.len() {
+        bail!(
+            "parse_values: target len ({target_columns_len}) is greater than values len ({values_len})",
+            values_len = values.len()
+        );
+    }
+    Ok(NonemptyBox::try_from(values).unwrap())
+}
+
+fn parse_primary_key(columns: impl IntoIterator<Item = Option<CqlValue>>) -> Option<PrimaryKey> {
+    columns
+        .into_iter()
+        .inspect(|value| {
+            if value.is_none() {
+                debug!("parse_primary_key: missing a primary key column");
+            };
+        })
+        .collect::<Option<_>>()
+}
+
+fn parse_indexed_value(value: CqlValue, kind: &IndexKind) -> anyhow::Result<DbIndexedValue> {
+    match kind {
+        IndexKind::Vs(_) => Vector::try_from(value)
+            .map_err(|err| anyhow!("parse_indexed_value: {err}"))
+            .map(DbIndexedValue::Vector),
         IndexKind::Fts(_) => match value {
-            CqlValue::Text(s) => Some(Some(DbIndexedValue::Document(s))),
-            CqlValue::Ascii(s) => Some(Some(DbIndexedValue::Document(s))),
+            CqlValue::Text(s) => Ok(DbIndexedValue::Document(s)),
+            CqlValue::Ascii(s) => Ok(DbIndexedValue::Document(s)),
             other => {
-                debug!("range_scan_stream: expected text column, got {:?}", other);
-                None
+                bail!("parse_indexed_value: expected text column, got {:?}", other);
             }
         },
     }
@@ -690,6 +755,7 @@ mod tests {
     use crate::IndexOptionsVs;
     use crate::Quantization;
     use crate::SpaceType;
+    use std::assert_matches;
 
     fn vs_kind() -> IndexKind {
         IndexKind::Vs(IndexOptionsVs {
@@ -735,10 +801,8 @@ mod tests {
         ]);
         let result = parse_indexed_value(cql, &vs_kind());
         assert_eq!(
-            result,
-            Some(Some(DbIndexedValue::Vector(Vector::from(vec![
-                1.0, 2.0, 3.0
-            ]))))
+            result.unwrap(),
+            DbIndexedValue::Vector(Vector::from(vec![1.0, 2.0, 3.0]))
         );
     }
 
@@ -746,7 +810,7 @@ mod tests {
     fn parse_indexed_value_vector_rejects_invalid_type() {
         let cql = CqlValue::Text("not a vector".to_string());
         let result = parse_indexed_value(cql, &vs_kind());
-        assert_eq!(result, None);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -754,8 +818,8 @@ mod tests {
         let cql = CqlValue::Text("hello world".to_string());
         let result = parse_indexed_value(cql, &fts_kind());
         assert_eq!(
-            result,
-            Some(Some(DbIndexedValue::Document("hello world".to_string())))
+            result.unwrap(),
+            DbIndexedValue::Document("hello world".to_string())
         );
     }
 
@@ -764,8 +828,8 @@ mod tests {
         let cql = CqlValue::Ascii("ascii doc".to_string());
         let result = parse_indexed_value(cql, &fts_kind());
         assert_eq!(
-            result,
-            Some(Some(DbIndexedValue::Document("ascii doc".to_string())))
+            result.unwrap(),
+            DbIndexedValue::Document("ascii doc".to_string())
         );
     }
 
@@ -773,6 +837,118 @@ mod tests {
     fn parse_indexed_value_fts_rejects_invalid_type() {
         let cql = CqlValue::Int(42);
         let result = parse_indexed_value(cql, &fts_kind());
-        assert_eq!(result, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_values_with_missing_timestamp() {
+        let columns = vec![
+            Some(CqlValue::Vector(vec![CqlValue::Float(1.0)])),
+            Some(CqlValue::BigInt(1234567890)),
+            Some(CqlValue::Vector(vec![CqlValue::Float(2.0)])),
+            None, // missing timestamp
+        ];
+
+        let result = parse_values(
+            columns.clone(),
+            None,
+            NonZeroUsize::new(1).unwrap(),
+            &vs_kind(),
+        );
+        assert!(result.is_err());
+        assert_matches!(
+            result
+                .unwrap_err()
+                .to_string(),
+                err if err.contains("missing timestamp for value")
+        );
+
+        let result = parse_values(
+            columns,
+            Some(Timestamp::from_millis(1)),
+            NonZeroUsize::new(1).unwrap(),
+            &vs_kind(),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn parse_values_with_wrong_timestamp() {
+        let columns = vec![
+            Some(CqlValue::Vector(vec![CqlValue::Float(1.0)])),
+            Some(CqlValue::Int(1234567890)),
+        ];
+        let result = parse_values(
+            columns.clone(),
+            None,
+            NonZeroUsize::new(1).unwrap(),
+            &vs_kind(),
+        );
+        assert_matches!(
+            result
+                .unwrap_err()
+                .to_string(),
+                err if err.contains("bad type of a writetime")
+        );
+    }
+
+    #[test]
+    fn parse_values_with_wrong_value() {
+        let columns = vec![Some(CqlValue::Int(1)), Some(CqlValue::BigInt(1234567890))];
+        let result = parse_values(
+            columns.clone(),
+            None,
+            NonZeroUsize::new(1).unwrap(),
+            &vs_kind(),
+        );
+        assert_matches!(
+            result
+                .unwrap_err()
+                .to_string(),
+                err if err.contains("unsupported CQL type")
+        );
+    }
+
+    #[test]
+    fn parse_values_with_wrong_columns_len() {
+        let columns = vec![
+            Some(CqlValue::Vector(vec![CqlValue::Float(1.0)])),
+            Some(CqlValue::BigInt(1234567890)),
+            Some(CqlValue::Vector(vec![CqlValue::Float(1.0)])),
+        ];
+        let result = parse_values(
+            columns.clone(),
+            None,
+            NonZeroUsize::new(1).unwrap(),
+            &vs_kind(),
+        );
+        assert_matches!(
+            result
+                .unwrap_err()
+                .to_string(),
+                err if err.contains("unable to get timestamp value from chunk")
+        );
+    }
+
+    #[test]
+    fn parse_values_with_wrong_target_len() {
+        let columns = vec![
+            Some(CqlValue::Vector(vec![CqlValue::Float(1.0)])),
+            Some(CqlValue::BigInt(1234567890)),
+            Some(CqlValue::Vector(vec![CqlValue::Float(2.0)])),
+            Some(CqlValue::BigInt(1234567891)),
+        ];
+        let result = parse_values(
+            columns.clone(),
+            None,
+            NonZeroUsize::new(3).unwrap(),
+            &vs_kind(),
+        );
+        assert_matches!(
+            result
+                .unwrap_err()
+                .to_string(),
+                err if err.contains("target len (3) is greater than values len (2)")
+        );
     }
 }
