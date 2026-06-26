@@ -1,0 +1,33 @@
+//! Quality metrics for vector-search workloads (format-agnostic).
+
+/// recall@k — the fraction of a query's true nearest neighbours that the search found.
+///
+///   recall@k = |returned ∩ true_top_k| / min(k, |ground_truth|)
+///
+///   returned       ids the ANN search returned for the query (≤ k)
+///   ground_truth   the query's true neighbours, nearest first (the exact answer)
+///   true_top_k     the first k of ground_truth (the targets to hit)
+///   ∩              set intersection (ids in both — the correct hits)
+///   |x|            size of set x
+///   k              number of neighbours requested
+///
+/// Normally divides by k; falls back to |ground_truth| when a query has fewer
+/// than k true neighbours (e.g. a small stratification bucket), so recall stays
+/// meaningful instead of being capped low.
+pub fn recall_at_k(returned_ids, ground_truth_ids, k) {
+    let limit = if ground_truth_ids.len() < k { ground_truth_ids.len() } else { k };
+    if limit == 0 {
+        return 1.0;
+    }
+    let expected = [];
+    for j in 0..limit {
+        expected.push(ground_truth_ids[j]);
+    }
+    let hits = 0;
+    for id in returned_ids {
+        if expected.iter().any(|e| e == id) {
+            hits = hits + 1;
+        }
+    }
+    hits as f64 / limit as f64
+}

@@ -1,0 +1,78 @@
+//! Text dataset loaders for vector-search workloads.
+//!
+//! A benchmark dataset is three plain-text files (fields separated by ", ").
+//! This layout is the workload's own convention, not a latte requirement —
+//! latte only provides generic line/field reading. A binary reader (e.g. fbin)
+//! would be a sibling module exposing the same loader functions.
+//!
+//!   base vectors  — the corpus: loaded into the table and indexed; ANN search
+//!                   returns these.         `id, [v1, v2, ...]`
+//!   query vectors — the vectors you search *with*, one ANN query each.
+//!                   `v1, v2, ...`
+//!   ground truth  — per query (aligned by line), the ids of its true nearest
+//!                   neighbours (nearest first, from an exact search); recall
+//!                   compares the ANN result against these.    `id1, id2, ...`
+
+const PARSING_DELIMITER = ", ";
+
+/// Parse a `[v1, v2, ...]` field into a Vec of f64 (the components of one
+/// vector). The line reader already stripped surrounding whitespace and the
+/// components are ", "-separated, so only the brackets are removed here.
+fn parse_vector(field) {
+    let body = field;
+    if body.starts_with("[") && body.ends_with("]") {
+        body = body[1..body.len() - 1];
+    }
+    let vector = [];
+    for component in body.split(PARSING_DELIMITER) {
+        vector.push(f64::parse(component)?);
+    }
+    Ok(vector)
+}
+
+/// Read a file whose every line is a ", "-separated list of values, parsing each
+/// value with `parse`. Returns a Vec of per-line Vecs; empty lines are skipped.
+async fn load_value_lines(path, parse) {
+    let it = fs::read_split_lines_iter(path, [PARSING_DELIMITER])?;
+    let lines = [];
+    while let Some(line) = it.next() {
+        let raw = line?;
+        if !raw.is_empty() {
+            let values = [];
+            for field in raw {
+                values.push(parse(field)?);
+            }
+            lines.push(values);
+        }
+    }
+    Ok(lines)
+}
+
+/// Load a base-vector file into a Vec of `#{ id, bucket, vector }`.
+///
+/// `bucketed` selects the line format: `id, [v...]` (bucket defaults to 0) when
+/// false; `id, bucket, [v...]` (bucket read from the line) when true.
+pub async fn load_base_vectors(path, bucketed) {
+    let maxsplit = if bucketed { 2 } else { 1 };
+    let it = fs::read_split_lines_iter(path, [PARSING_DELIMITER, maxsplit])?;
+    let rows = [];
+    while let Some(entry) = it.next() {
+        let raw = entry?;
+        if !raw.is_empty() {
+            let bucket = if bucketed { raw[1].parse::<i64>()? } else { 0 };
+            let vector_field = if bucketed { raw[2] } else { raw[1] };
+            rows.push(#{ "id": raw[0].parse::<i64>()?, "bucket": bucket, "vector": parse_vector(vector_field)? });
+        }
+    }
+    Ok(rows)
+}
+
+/// Load a query-vector file (`v1, v2, ...` per line) into a Vec of Vec<f64>.
+pub async fn load_query_vectors(path) {
+    load_value_lines(path, |field| f64::parse(field)).await
+}
+
+/// Load a ground-truth file (`id1, id2, ...` per line) into a Vec of Vec<i64>.
+pub async fn load_ground_truth(path) {
+    load_value_lines(path, |field| field.parse::<i64>()).await
+}
