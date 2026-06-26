@@ -10,6 +10,7 @@ use crate::indexes::Indexes;
 use crate::internals::Internals;
 use crate::metrics::Metrics;
 use crate::node_state::NodeState;
+use anyhow::bail;
 use axum::Router;
 use axum_server::Handle;
 use axum_server::accept::NoDelayAcceptor;
@@ -25,6 +26,7 @@ use tokio::sync::watch;
 use tokio::time;
 
 const GRACEFUL_SHUTDOWN_DURATION: Duration = Duration::from_secs(10);
+const SPAWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub enum HttpServer {
     Router {
@@ -315,7 +317,7 @@ async fn spawn_server(
         config.tls.is_some(),
     )
     .await;
-    tokio::spawn({
+    let mut server_task = tokio::spawn({
         let handle = handle.clone();
         let router = router.clone();
         let tls = config.tls.clone();
@@ -346,18 +348,32 @@ async fn spawn_server(
                         .await
                 }
             };
-            result.unwrap_or_else(|e| panic!("failed to run {protocol} server: {e}"));
+            if let Err(ref e) = result {
+                tracing::error!("failed to run {protocol} server: {e}");
+            }
+            result
         }
     });
 
-    // Wait for server to be listening and get actual bound address
-    // Add timeout to prevent hanging forever if server fails to start
-    let actual_addr = time::timeout(Duration::from_secs(5), handle.listening())
-        .await
-        .map_err(|_| anyhow::anyhow!("timeout waiting for server to start"))?
-        .ok_or(anyhow::anyhow!(
-            "server failed to start - listening notification not received"
-        ))?;
+    let actual_addr = tokio::select! {
+        addr = handle.listening() => {
+            addr.ok_or_else(|| anyhow::anyhow!(
+                "{protocol} server failed to start - listening notification not received"
+            ))?
+        }
+        result = &mut server_task => {
+            match result {
+                Ok(Err(e)) => bail!(e),
+                Ok(Ok(())) => bail!("{protocol} server exited unexpectedly"),
+                Err(join_err) => bail!("{protocol} server task panicked: {join_err}"),
+            }
+        }
+        _ = time::sleep(SPAWN_TIMEOUT) => {
+            server_task.abort();
+            let _ = server_task.await;
+            bail!("timeout waiting for {protocol} server to start");
+        }
+    };
 
     Ok((handle, actual_addr, router))
 }
@@ -374,4 +390,54 @@ fn describe_config_changes(old: &HttpServerConfig, new: &HttpServerConfig) -> St
         (None, None) => {}
     }
     changes.join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::indexes::Indexes;
+
+    fn test_deps() -> ServerDeps {
+        let (state_tx, _state_rx) = mpsc::channel(1);
+        let (engine_tx, _engine_rx) = mpsc::channel(1);
+        let (internals_tx, _internals_rx) = mpsc::channel(1);
+        ServerDeps {
+            state: state_tx,
+            indexes: Arc::new(RwLock::new(Indexes::new())),
+            engine: engine_tx,
+            metrics: Arc::new(Metrics::new()),
+            internals: internals_tx,
+            index_engine_version: "test".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_server_returns_error_on_occupied_port() {
+        let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let occupied_addr = occupied.local_addr().unwrap();
+        let config = HttpServerConfig {
+            addr: occupied_addr,
+            tls: None,
+        };
+        let deps = test_deps();
+
+        let result = spawn_server(&config, &deps).await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn spawn_server_binds_to_available_port() {
+        let config = HttpServerConfig {
+            addr: "127.0.0.1:0".parse().unwrap(),
+            tls: None,
+        };
+        let deps = test_deps();
+
+        let (handle, addr, _router) = spawn_server(&config, &deps).await.unwrap();
+
+        assert_ne!(addr.port(), 0);
+
+        handle.graceful_shutdown(Some(GRACEFUL_SHUTDOWN_DURATION));
+    }
 }
