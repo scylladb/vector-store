@@ -565,6 +565,16 @@ async fn post_index_ann(
                 }
                 (routed_key, index, primary_key_columns, table_columns)
             }
+            indexes::BestIndexState::NoGlobalIndex => {
+                timer.observe_duration();
+
+                let msg = format!(
+                    "Global ANN query is not supported when only a local \
+                    vector index is available for {keyspace}.{index_name}"
+                );
+                debug!("post_index_ann: {msg}");
+                return (StatusCode::BAD_REQUEST, msg).into_response();
+            }
             indexes::BestIndexState::NotServing(progress) => {
                 timer.observe_duration();
 
