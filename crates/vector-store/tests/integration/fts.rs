@@ -375,3 +375,19 @@ async fn fts_empty_index_returns_empty_bm25_results() {
     assert!(primary_keys.get(&"pk".into()).unwrap().is_empty());
     assert!(scores.is_empty());
 }
+
+#[tokio::test]
+async fn fts_index_appears_in_indexes_list() {
+    crate::enable_tracing();
+
+    let (client, keyspace_name, index_name, _hold) =
+        setup_fts_and_wait([(vec![CqlValue::Int(1)], "hello world", 10)], 1).await;
+
+    let indexes = client.indexes().await;
+    let fts_index = indexes
+        .iter()
+        .find(|i| i.keyspace == keyspace_name && i.index == index_name);
+
+    assert!(fts_index.is_some());
+    assert_eq!(fts_index.unwrap().index_type, httpapi::IndexType::Fulltext);
+}

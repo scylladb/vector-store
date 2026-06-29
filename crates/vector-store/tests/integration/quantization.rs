@@ -162,7 +162,12 @@ async fn quantization_is_returned_as_index_data_type() {
         )
         .await;
 
-        assert_eq!(index_info.data_type, expected_data_type);
+        assert_eq!(
+            index_info.index_type,
+            httpapi::IndexType::Vector {
+                data_type: expected_data_type
+            }
+        );
     }
 }
 

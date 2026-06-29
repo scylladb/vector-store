@@ -45,6 +45,7 @@ use axum_server_dual_protocol::Protocol;
 use bigdecimal::BigDecimal;
 use httpapi::DataType;
 use httpapi::IndexInfo;
+use httpapi::IndexType;
 use itertools::Itertools;
 use num_bigint::BigInt;
 use prometheus::Encoder;
@@ -88,7 +89,7 @@ use utoipa_swagger_ui::SwaggerUi;
             name = "LicenseRef-ScyllaDB-Source-Available-1.0"
         ),
         // version should be updated manually when there are changes in API
-        version = "1.5.0"
+        version = "2.0.0"
     ),
     tags(
         (
@@ -239,8 +240,8 @@ impl From<crate::SimilarityScore> for httpapi::SimilarityScore {
     path = "/api/v1/indexes",
     tag = "scylla-vector-store-index",
     description = "Returns the list of indexes managed by the Vector Store indexing service. \
-    The list includes indexes in any state (initializing, available/built, destroying). \
-    Due to synchronization delays, it may temporarily differ from the list of vector indexes inside ScyllaDB.",
+    The list includes both vector and fulltext indexes in any state (initializing, available/built, destroying). \
+    Due to synchronization delays, it may temporarily differ from the list of indexes inside ScyllaDB.",
     responses(
         (
             status = 200,
@@ -251,17 +252,25 @@ impl From<crate::SimilarityScore> for httpapi::SimilarityScore {
 )]
 
 async fn get_indexes(State(state): State<RoutesInnerState>) -> Response {
-    let indexes: Vec<_> = state
-        .engine
-        .get_vs_index_keys()
-        .await
+    let vs_indexes = state.engine.get_vs_index_keys().await;
+    let fts_guard = state.indexes.read().unwrap();
+
+    let indexes: Vec<_> = vs_indexes
         .iter()
         .map(|(key, vs)| IndexInfo {
             keyspace: key.keyspace().into(),
             index: key.index().into(),
-            data_type: vs.quantization.into(),
+            index_type: IndexType::Vector {
+                data_type: vs.quantization.into(),
+            },
         })
+        .chain(fts_guard.iter_fts().map(|(key, _)| IndexInfo {
+            keyspace: key.keyspace().into(),
+            index: key.index().into(),
+            index_type: IndexType::Fulltext,
+        }))
         .collect();
+
     (StatusCode::OK, response::Json(indexes)).into_response()
 }
 
