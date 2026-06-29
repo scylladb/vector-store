@@ -445,13 +445,17 @@ pub async fn load_config(env: impl Fn(&str) -> anyhow::Result<String>) -> anyhow
             "Unable to parse VECTOR_STORE_ALTER_INDEX_SIMULATOR env (true/false)"
         )))?;
 
-    config.fulltext_indexes = env("VECTOR_STORE_FULLTEXT_INDEXES")
-        .unwrap_or("false".into())
-        .trim()
-        .parse()
-        .or(Err(anyhow!(
-            "Unable to parse VECTOR_STORE_FULLTEXT_INDEXES env (true/false)"
-        )))?;
+    if let Some(fulltext_indexes) = env("VECTOR_STORE_FULLTEXT_INDEXES")
+        .ok()
+        .map(|v| {
+            v.trim().parse().map_err(|_| {
+                anyhow!("Unable to parse VECTOR_STORE_FULLTEXT_INDEXES env (true/false)")
+            })
+        })
+        .transpose()?
+    {
+        config.fulltext_indexes = fulltext_indexes;
+    }
 
     config.credentials = credentials(&env).await?;
 
@@ -842,6 +846,39 @@ mod tests {
         )]));
         let config = load_config(env).await.unwrap();
         assert_eq!(config.cql_connection_timeout, Some(Duration::from_secs(30)));
+    }
+
+    #[tokio::test]
+    async fn load_config_fulltext_indexes_default_true() {
+        let env = mock_env(HashMap::new());
+        let config = load_config(env).await.unwrap();
+        assert!(config.fulltext_indexes);
+    }
+
+    #[tokio::test]
+    async fn load_config_fulltext_indexes_override_false() {
+        let env = mock_env(HashMap::from([(
+            "VECTOR_STORE_FULLTEXT_INDEXES",
+            "false".into(),
+        )]));
+        let config = load_config(env).await.unwrap();
+        assert!(!config.fulltext_indexes);
+    }
+
+    #[tokio::test]
+    async fn load_config_fulltext_indexes_invalid_value_errors() {
+        let env = mock_env(HashMap::from([(
+            "VECTOR_STORE_FULLTEXT_INDEXES",
+            "not-a-bool".into(),
+        )]));
+        let result = load_config(env).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Unable to parse VECTOR_STORE_FULLTEXT_INDEXES")
+        );
     }
 
     #[test]
