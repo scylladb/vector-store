@@ -10,6 +10,7 @@ use crate::DbIndexedRow;
 use crate::DbIndexedValue;
 use crate::IndexKind;
 use crate::IndexMetadata;
+use crate::db_index_backend::CdcValueStatus;
 use crate::db_index_backend::DbIndexBackend;
 use crate::internals::Internals;
 use crate::internals::InternalsExt;
@@ -466,14 +467,12 @@ impl Consumer for CdcConsumer {
             OperationType::PartitionDelete | OperationType::RowDelete => None,
 
             OperationType::RowUpdate | OperationType::RowInsert | OperationType::PostImage => {
-                if row.is_value_deleted(column) {
-                    None
-                } else {
-                    let Some(value) = row.take_value(column) else {
-                        // If the column is not deleted but also has no value, skip this row.
-                        return Ok(());
-                    };
-                    extract_indexed_value(source, value, &self.0.kind)?
+                match source.take_cdc_value(&mut row) {
+                    CdcValueStatus::Deleted => None,
+                    CdcValueStatus::Skip => return Ok(()),
+                    CdcValueStatus::NewValue(value) => {
+                        extract_indexed_value(source, value, &self.0.kind)?
+                    }
                 }
             }
 

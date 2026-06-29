@@ -20,8 +20,21 @@ use scylla::client::session::Session;
 use scylla::statement::prepared::PreparedStatement;
 use scylla::value::CqlValue;
 use scylla_cdc::CqlIdentifier;
+use scylla_cdc::consumer::CDCRow;
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
+
+/// Alternator tables store all user attributes in a single map column `:attrs`.
+/// Because Alternator (DynamoDB-compatible) is schemaless, different items can
+/// have different types for the same attribute name, so a map is used instead
+/// of dedicated typed columns.
+const ALTERNATOR_ATTRS_COLUMN: &str = ":attrs";
+
+pub(crate) enum CdcValueStatus {
+    NewValue(CqlValue),
+    Deleted,
+    Skip,
+}
 
 pub(crate) struct IndexLocation {
     pub keyspace: KeyspaceName,
@@ -49,7 +62,7 @@ impl DbIndexBackend {
     pub fn target_column_name(&self) -> &str {
         match self {
             Self::Cql { target_column } => target_column.as_ref(),
-            Self::Alternator { .. } => ":attrs",
+            Self::Alternator { .. } => ALTERNATOR_ATTRS_COLUMN,
         }
     }
 
@@ -76,6 +89,42 @@ impl DbIndexBackend {
             }
         }
     }
+
+    pub fn take_cdc_value(&self, row: &mut CDCRow<'_>) -> CdcValueStatus {
+        match self {
+            Self::Cql { target_column } => {
+                let column = target_column.as_ref();
+                if row.is_value_deleted(column) {
+                    return CdcValueStatus::Deleted;
+                }
+                match row.take_value(column) {
+                    Some(value) => CdcValueStatus::NewValue(value),
+                    None => CdcValueStatus::Skip,
+                }
+            }
+            Self::Alternator { target_column } => {
+                // Check take_value before is_value_deleted.
+                // PutItem in Alternator deletes and re-adds :attrs in a single CDC event,
+                // so is_value_deleted can be true even when a new value is present.
+                // We must check for a value first to avoid misreporting it as deleted.
+                let column = ALTERNATOR_ATTRS_COLUMN;
+                match row.take_value(column) {
+                    Some(value) => CdcValueStatus::NewValue(value),
+                    None if row.is_value_deleted(column) => CdcValueStatus::Deleted,
+                    None => {
+                        let target_deleted = row.take_deleted_elements(column).iter().any(|el| {
+                            el.as_text().map(String::as_str) == Some(target_column.as_ref())
+                        });
+                        if target_deleted {
+                            CdcValueStatus::Deleted
+                        } else {
+                            CdcValueStatus::Skip
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Builds the CQL range scan query appropriate for the given keyspace.
@@ -90,7 +139,7 @@ pub(crate) fn range_scan_query(
     partition_key_list: &str,
 ) -> String {
     if keyspace.is_alternator() {
-        let attributes = CqlIdentifier::new(":attrs");
+        let attributes = CqlIdentifier::new(ALTERNATOR_ATTRS_COLUMN);
         let vector = CqlLiteral::new(target_column.as_ref());
         format!(
             "
