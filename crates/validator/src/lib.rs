@@ -38,6 +38,7 @@ use e2etest_vector_store_cluster::VectorStoreClusterExt;
 use std::env;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::sync::Arc;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
@@ -170,7 +171,7 @@ fn validate_different_subnet(dns_ip: Ipv4Addr, base_ip: Ipv4Addr) {
 
 e2etest::group!(name = validator, fixtures = (TestActors));
 
-pub async fn run() {
+pub async fn run() -> ExitCode {
     let args = Args::parse();
     let root = validator();
     let stats = match args.command {
@@ -178,7 +179,7 @@ pub async fn run() {
             root.test_names().into_iter().for_each(|name| {
                 println!("{name}");
             });
-            return;
+            return ExitCode::SUCCESS;
         }
         Command::Run(args) => e2etest::run(init(args), root).await,
     };
@@ -202,7 +203,10 @@ pub async fn run() {
             "{error_list}",
             error_list = format_failed_names(&stats.failed_names())
         );
+        return ExitCode::FAILURE;
     }
+
+    ExitCode::SUCCESS
 }
 
 pub(crate) fn format_failed_names(failed_names: &[String]) -> String {
