@@ -257,6 +257,9 @@ pub(crate) enum BestIndexState {
     NotFound,
     /// The requested index exists but no serving candidate was found.
     NotServing(Progress),
+    /// Serving candidates exist but none can handle a global query
+    /// (all are local-only and the query lacks partition key restrictions).
+    NoGlobalIndex,
     /// A serving candidate was found.
     Serving {
         key: IndexKey,
@@ -394,7 +397,17 @@ impl Indexes {
                     needs_filtering: needs_filtering.clone(),
                 }
             }
-            None => BestIndexState::NotServing(requested_entry.progress),
+            None => {
+                let has_serving = candidates
+                    .iter()
+                    .filter_map(|key| self.vs_entries.get(key))
+                    .any(|entry| entry.status == IndexStatus::Serving);
+                if has_serving {
+                    BestIndexState::NoGlobalIndex
+                } else {
+                    BestIndexState::NotServing(requested_entry.progress)
+                }
+            }
         }
     }
 }

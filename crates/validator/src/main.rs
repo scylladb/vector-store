@@ -4,6 +4,6 @@
  */
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() {
+async fn main() -> std::process::ExitCode {
     vector_search_validator::run().await
 }
