@@ -13,6 +13,21 @@ use aws_sdk_dynamodb::types::AttributeValue;
 use std::sync::Arc;
 use tracing::info;
 
+/// Builds an `UpdateItem` request with only the key and update expression.
+fn update_item_key(ctx: &TableContext, item: &Item, update_expr: &str) -> UpdateItemFluentBuilder {
+    let mut req = ctx
+        .client
+        .update_item()
+        .table_name(&ctx.table_name)
+        .update_expression(update_expr);
+    for attr_name in std::iter::once(ctx.shape.pk()).chain(ctx.shape.sk()) {
+        if let Some(attr_val) = item.0.get(attr_name) {
+            req = req.key(attr_name, attr_val.clone());
+        }
+    }
+    req
+}
+
 /// Builds an `UpdateItem` request on the vector column of `item`.
 ///
 /// The expression is supplied by the caller and may reference:
@@ -25,17 +40,7 @@ fn update_item_expr(
     value: Option<AttributeValue>,
 ) -> UpdateItemFluentBuilder {
     let va = ctx.shape.vec().expect("TableContext has no vec_attr");
-    let mut req = ctx
-        .client
-        .update_item()
-        .table_name(&ctx.table_name)
-        .update_expression(update_expr)
-        .expression_attribute_names("#vec", va);
-    for attr_name in std::iter::once(ctx.shape.pk()).chain(ctx.shape.sk()) {
-        if let Some(attr_val) = item.0.get(attr_name) {
-            req = req.key(attr_name, attr_val.clone());
-        }
-    }
+    let mut req = update_item_key(ctx, item, update_expr).expression_attribute_names("#vec", va);
     if let Some(val) = value {
         req = req.expression_attribute_values(":val", val);
     }
@@ -194,6 +199,118 @@ async fn update_item_with_invalid_vector_is_not_indexed(actors: Arc<TestActors>)
             "ValidationException",
         );
     }
+
+    ctx.done().await;
+    info!("finished");
+}
+
+/// Tests CDC rows where Alternator's physical `:attrs` map is present because
+/// an unrelated attribute changed, but the logical vector attribute did not.
+#[e2etest::test(group = update_item)]
+async fn update_item_unrelated_attribute_does_not_deindex(actors: Arc<TestActors>) {
+    info!("started");
+
+    let shape = &alternator::name_patterns()[1]; // plain names, HASH+RANGE for same-partition barriers
+    let vec_attr = shape.vec().expect("NAME_PATTERNS[1] always has vec");
+
+    let a = Item::key(shape.pk(), shape.sk(), "pk", "a").vec(vec_attr, [1.0, 2.0, 4.0]);
+    let b = Item::key(shape.pk(), shape.sk(), "pk", "b").vec(vec_attr, [-1.0, -1.0, -1.0]);
+
+    let ctx = TableContext::create_with_data(&actors, shape, &[a.clone(), b.clone()]).await;
+    ctx.wait_for_ann([1.0, 1.0, 1.0], &[a.clone(), b.clone()])
+        .await;
+
+    update_item_key(&ctx, &a, "SET unrelated = :val")
+        .expression_attribute_values(":val", AttributeValue::S("changed".into()))
+        .send()
+        .await
+        .expect("UpdateItem on unrelated attribute should succeed");
+
+    let b_updated = Item::key(shape.pk(), shape.sk(), "pk", "b").vec(vec_attr, [1.0, 1.0, 1.0]);
+    // CDC ordering barrier: ANN result for this update proves the preceding one was processed.
+    update_item_expr(
+        &ctx,
+        &b,
+        "SET #vec = :val",
+        Some(alternator::float_list([1.0_f32, 1.0, 1.0])),
+    )
+    .send()
+    .await
+    .expect("UpdateItem vector barrier should succeed");
+
+    ctx.wait_for_count(2).await;
+    ctx.wait_for_ann([1.0, 1.0, 1.0], &[b_updated, a]).await;
+
+    ctx.done().await;
+    info!("finished");
+}
+
+/// Tests a CDC row that deletes the vector attribute and updates another
+/// attribute in the same `:attrs` map delta. The vector deletion must not be
+/// masked by unrelated replacement data.
+#[e2etest::test(group = update_item)]
+async fn update_item_remove_vector_and_set_unrelated_deindexes(actors: Arc<TestActors>) {
+    info!("started");
+
+    let shape = &alternator::name_patterns()[1]; // plain names, HASH+RANGE for same-partition barriers
+    let vec_attr = shape.vec().expect("NAME_PATTERNS[1] always has vec");
+
+    let a = Item::key(shape.pk(), shape.sk(), "pk", "a").vec(vec_attr, [1.0, 1.0, 1.0]);
+    let b = Item::key(shape.pk(), shape.sk(), "pk", "b").vec(vec_attr, [4.0, 2.0, 1.0]);
+
+    let ctx = TableContext::create_with_data(&actors, shape, &[a.clone(), b.clone()]).await;
+    ctx.wait_for_ann([1.0, 1.0, 1.0], &[a.clone(), b.clone()])
+        .await;
+
+    update_item_expr(
+        &ctx,
+        &a,
+        "SET unrelated = :val REMOVE #vec",
+        Some(AttributeValue::S("kept".into())),
+    )
+    .send()
+    .await
+    .expect("UpdateItem remove vector plus unrelated set should succeed");
+
+    ctx.wait_for_count(1).await;
+    ctx.wait_for_ann([1.0, 1.0, 1.0], &[b]).await;
+
+    ctx.done().await;
+    info!("finished");
+}
+
+/// Tests a CDC row that deletes an unrelated attribute while updating the
+/// vector attribute. Unrelated deleted-elements metadata must not de-index the
+/// vector.
+#[e2etest::test(group = update_item)]
+async fn update_item_remove_unrelated_and_set_vector_updates_index(actors: Arc<TestActors>) {
+    info!("started");
+
+    let shape = &alternator::name_patterns()[0]; // plain names, HASH-only
+    let vec_attr = shape.vec().expect("NAME_PATTERNS[0] always has vec");
+
+    let a = Item::key(shape.pk(), shape.sk(), "pk", "a").vec(vec_attr, [4.0, 2.0, 1.0]);
+    let b = Item::key(shape.pk(), shape.sk(), "pk", "b")
+        .vec(vec_attr, [-1.0, -1.0, -1.0])
+        .attr("unrelated", AttributeValue::S("old".into()));
+
+    let ctx = TableContext::create_with_data(&actors, shape, &[a.clone(), b.clone()]).await;
+    ctx.wait_for_ann([1.0, 1.0, 1.0], &[a.clone(), b.clone()])
+        .await;
+
+    let b_updated = Item::key(shape.pk(), shape.sk(), "pk", "b").vec(vec_attr, [1.0, 1.0, 1.0]);
+    update_item_expr(
+        &ctx,
+        &b,
+        "SET #vec = :val REMOVE unrelated",
+        Some(alternator::float_list([1.0_f32, 1.0, 1.0])),
+    )
+    .send()
+    .await
+    .expect("UpdateItem remove unrelated plus vector set should succeed");
+
+    ctx.wait_for_count(2).await;
+    ctx.wait_for_ann([1.0, 1.0, 1.0], &[b_updated, a]).await;
 
     ctx.done().await;
     info!("finished");
