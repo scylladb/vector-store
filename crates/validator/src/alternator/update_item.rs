@@ -157,17 +157,6 @@ async fn update_item_with_invalid_vector_is_not_indexed(actors: Arc<TestActors>)
 
     let ctx = TableContext::create_with_data(&actors, shape, &[a.clone(), b.clone()]).await;
 
-    let vec_with_string_elem = AttributeValue::L(vec![
-        AttributeValue::N("1.0".into()),
-        AttributeValue::N("2.0".into()),
-        AttributeValue::S("3.0".into()),
-    ]);
-    let vec_with_null_elem = AttributeValue::L(vec![
-        AttributeValue::N("1.0".into()),
-        AttributeValue::N("2.0".into()),
-        AttributeValue::Null(true),
-    ]);
-
     update_item_expr(&ctx, &b, "REMOVE #vec", None)
         .send()
         .await
@@ -176,55 +165,35 @@ async fn update_item_with_invalid_vector_is_not_indexed(actors: Arc<TestActors>)
     ctx.wait_for_ann([1.0, 1.0, 1.0], std::slice::from_ref(&a))
         .await;
 
-    alternator::assert_service_error(
-        update_item_expr(
-            &ctx,
-            &a,
-            "SET #vec = :val",
-            Some(AttributeValue::S("not-a-vector".into())),
-        )
-        .send()
-        .await,
-        "ValidationException",
-    );
+    let invalid_values = [
+        AttributeValue::Null(true),
+        AttributeValue::S("not-a-vector".into()),
+        AttributeValue::L(vec![
+            AttributeValue::N("1.0".into()),
+            AttributeValue::N("2.0".into()),
+            AttributeValue::S("3.0".into()),
+        ]),
+        AttributeValue::L(vec![
+            AttributeValue::N("1.0".into()),
+            AttributeValue::N("2.0".into()),
+            AttributeValue::Null(true),
+        ]),
+        alternator::float_list([1.0_f32, 1.0]),
+        alternator::float_list([1.0_f32, 1.0, 1.0, 1.0]),
+    ];
 
-    alternator::assert_service_error(
-        update_item_expr(&ctx, &a, "SET #vec = :val", Some(vec_with_string_elem))
-            .send()
-            .await,
-        "ValidationException",
-    );
-
-    alternator::assert_service_error(
-        update_item_expr(&ctx, &a, "SET #vec = :val", Some(vec_with_null_elem))
-            .send()
-            .await,
-        "ValidationException",
-    );
-
-    alternator::assert_service_error(
-        update_item_expr(
-            &ctx,
-            &a,
-            "SET #vec = :val",
-            Some(alternator::float_list([1.0_f32, 1.0])),
-        )
-        .send()
-        .await,
-        "ValidationException",
-    );
-
-    alternator::assert_service_error(
-        update_item_expr(
-            &ctx,
-            &a,
-            "SET #vec = :val",
-            Some(alternator::float_list([1.0_f32, 1.0, 1.0, 1.0])),
-        )
-        .send()
-        .await,
-        "ValidationException",
-    );
+    for invalid_value in invalid_values {
+        info!(
+            ?invalid_value,
+            "expecting invalid vector UpdateItem to fail"
+        );
+        alternator::assert_service_error(
+            update_item_expr(&ctx, &a, "SET #vec = :val", Some(invalid_value))
+                .send()
+                .await,
+            "ValidationException",
+        );
+    }
 
     ctx.done().await;
     info!("finished");
