@@ -14,7 +14,6 @@ use crate::NonemptyArc;
 use crate::TableIdentifier;
 use crate::TableName;
 use crate::Vector;
-use crate::vector;
 use futures::TryStreamExt;
 use regex::Regex;
 use scylla::client::session::Session;
@@ -30,6 +29,9 @@ use std::sync::OnceLock;
 /// Because Alternator (DynamoDB-compatible) is schemaless, different items can
 /// have different types for the same attribute name, so a map is used instead
 /// of dedicated typed columns.
+///
+/// Current Alternator schema stores this as map<utf8, bytes>: attribute names
+/// are text keys and attribute values are serialized blobs.
 const ALTERNATOR_ATTRS_COLUMN: &str = ":attrs";
 
 pub(crate) enum CdcValueStatus {
@@ -79,14 +81,7 @@ impl DbIndexBackend {
     }
 
     pub fn extract_vector(&self, value: CqlValue) -> anyhow::Result<Option<Vector>> {
-        match self {
-            Self::Cql { .. } => Vector::try_from(value).map(Some),
-            Self::Alternator { target_columns } => vector::AlternatorAttrs {
-                attrs: value,
-                target_column: target_columns.first().as_ref(),
-            }
-            .try_into(),
-        }
+        Vector::try_from(value).map(Some)
     }
 
     pub fn extract_document(&self, value: CqlValue) -> anyhow::Result<Option<String>> {
@@ -102,17 +97,17 @@ impl DbIndexBackend {
         }
     }
 
-    pub fn take_cdc_value(&self, row: &mut CDCRow<'_>) -> CdcValueStatus {
+    pub fn take_cdc_value(&self, row: &mut CDCRow<'_>) -> anyhow::Result<CdcValueStatus> {
         match self {
             Self::Cql { target_columns } => {
                 let column = target_columns.first().as_ref();
                 if row.is_value_deleted(column) {
-                    return CdcValueStatus::Deleted;
+                    return Ok(CdcValueStatus::Deleted);
                 }
-                match row.take_value(column) {
+                Ok(match row.take_value(column) {
                     Some(value) => CdcValueStatus::NewValue(value),
                     None => CdcValueStatus::Skip,
-                }
+                })
             }
             Self::Alternator { target_columns } => {
                 // Check take_value before is_value_deleted.
@@ -120,24 +115,44 @@ impl DbIndexBackend {
                 // so is_value_deleted can be true even when a new value is present.
                 // We must check for a value first to avoid misreporting it as deleted.
                 let column = ALTERNATOR_ATTRS_COLUMN;
-                match row.take_value(column) {
-                    Some(value) => CdcValueStatus::NewValue(value),
-                    None if row.is_value_deleted(column) => CdcValueStatus::Deleted,
+                let target = target_columns.first().as_ref();
+                let value = match row.take_value(column) {
+                    Some(attrs) => take_alternator_attr(attrs, target)?,
+                    None => None,
+                };
+
+                match value {
+                    Some(value) => Ok(CdcValueStatus::NewValue(value)),
+                    None if row.is_value_deleted(column) => Ok(CdcValueStatus::Deleted),
                     None => {
-                        let target_deleted = row.take_deleted_elements(column).iter().any(|el| {
-                            el.as_text().map(String::as_str)
-                                == Some(target_columns.first().as_ref())
-                        });
+                        let target_deleted = row
+                            .take_deleted_elements(column)
+                            .iter()
+                            .any(|el| alternator_attr_key_matches_target(el, target));
                         if target_deleted {
-                            CdcValueStatus::Deleted
+                            Ok(CdcValueStatus::Deleted)
                         } else {
-                            CdcValueStatus::Skip
+                            Ok(CdcValueStatus::Skip)
                         }
                     }
                 }
             }
         }
     }
+}
+
+fn alternator_attr_key_matches_target(key: &CqlValue, target: &str) -> bool {
+    key.as_text().map(String::as_str) == Some(target)
+}
+
+fn take_alternator_attr(attrs: CqlValue, target: &str) -> anyhow::Result<Option<CqlValue>> {
+    let CqlValue::Map(entries) = attrs else {
+        anyhow::bail!("expected Map for :attrs column, got {attrs:?}");
+    };
+
+    Ok(entries
+        .into_iter()
+        .find_map(|(key, value)| alternator_attr_key_matches_target(&key, target).then_some(value)))
 }
 
 /// Builds the CQL range scan query appropriate for the given keyspace.
@@ -439,5 +454,49 @@ mod tests {
             query.contains(r#"writetime(":attrs"['it''s a "test"'])"#),
             "writetime must use the same escaped attribute access: {query}"
         );
+    }
+
+    #[test]
+    fn alternator_attr_text_key_matches_target() {
+        assert!(alternator_attr_key_matches_target(
+            &CqlValue::Text("vec".into()),
+            "vec"
+        ));
+    }
+
+    #[test]
+    fn alternator_attr_non_text_key_does_not_match_target() {
+        assert!(!alternator_attr_key_matches_target(
+            &CqlValue::Blob(b"vec".to_vec()),
+            "vec"
+        ));
+    }
+
+    #[test]
+    fn take_alternator_attr_returns_target_value() {
+        let attrs = CqlValue::Map(vec![
+            (CqlValue::Text("unrelated".into()), CqlValue::Blob(vec![1])),
+            (CqlValue::Text("vec".into()), CqlValue::Blob(vec![2])),
+        ]);
+
+        assert_eq!(
+            take_alternator_attr(attrs, "vec").unwrap(),
+            Some(CqlValue::Blob(vec![2]))
+        );
+    }
+
+    #[test]
+    fn take_alternator_attr_skips_unrelated_attrs() {
+        let attrs = CqlValue::Map(vec![(
+            CqlValue::Text("unrelated".into()),
+            CqlValue::Blob(vec![1]),
+        )]);
+
+        assert_eq!(take_alternator_attr(attrs, "vec").unwrap(), None);
+    }
+
+    #[test]
+    fn take_alternator_attr_rejects_non_map() {
+        assert!(take_alternator_attr(CqlValue::Blob(vec![1]), "vec").is_err());
     }
 }
