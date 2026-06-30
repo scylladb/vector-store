@@ -574,7 +574,7 @@ async fn post_index_ann(
         let index_key = IndexKey::new(&keyspace, &index_name);
         let (equality_cols, range_cols) = restriction_columns(&request.filter);
         let allow_filtering = request.filter.as_ref().is_some_and(|f| f.allow_filtering);
-        let (routed_key, index, primary_key_columns, table_columns) = match state
+        let (routed_key, index, primary_key_columns, filtering_columns, table_columns) = match state
             .indexes
             .read()
             .unwrap()
@@ -585,6 +585,7 @@ async fn post_index_ann(
                 index,
                 needs_filtering,
                 primary_key_columns,
+                filtering_columns,
                 table_columns,
             } => {
                 if matches!(needs_filtering, indexes::NeedsFiltering::Yes(_)) && !allow_filtering {
@@ -596,7 +597,13 @@ async fn post_index_ann(
                     debug!("post_index_ann: {msg}");
                     return (StatusCode::BAD_REQUEST, msg).into_response();
                 }
-                (routed_key, index, primary_key_columns, table_columns)
+                (
+                    routed_key,
+                    index,
+                    primary_key_columns,
+                    filtering_columns,
+                    table_columns,
+                )
             }
             indexes::BestIndexState::NoGlobalIndex => {
                 timer.observe_duration();
@@ -653,7 +660,7 @@ async fn post_index_ann(
         let search_result = if let Some(filter) = request.filter {
             let filter = match try_from_post_index_ann_filter(
                 filter,
-                primary_key_columns.as_slice(),
+                filtering_columns.as_slice(),
                 &table_columns,
             ) {
                 Ok(filter) => filter,
@@ -884,7 +891,7 @@ async fn post_index_bm25(
 
 fn try_from_post_index_ann_filter(
     json_filter: httpapi::PostIndexAnnFilter,
-    primary_key_columns: &[crate::ColumnName],
+    filtering_columns: &[crate::ColumnName],
     table_columns: &HashMap<crate::ColumnName, NativeType>,
 ) -> anyhow::Result<Filter> {
     let is_same_len = |columns: &[crate::ColumnName], values: &[Value]| -> anyhow::Result<()> {
@@ -898,8 +905,10 @@ fn try_from_post_index_ann_filter(
         Ok(())
     };
     let from_json = |column: &crate::ColumnName, value: Value| -> anyhow::Result<CqlValue> {
-        if !primary_key_columns.contains(column) {
-            bail!("Filtering on non primary key columns is not supported");
+        if !filtering_columns.contains(column) {
+            bail!(
+                "Column '{column}' in filter restriction is not part of the primary key or filtering columns, and cannot be used for filtering"
+            );
         };
         let Some(native_type) = table_columns.get(column) else {
             bail!(
