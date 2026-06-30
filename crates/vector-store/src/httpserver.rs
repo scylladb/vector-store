@@ -10,6 +10,7 @@ use crate::indexes::Indexes;
 use crate::internals::Internals;
 use crate::metrics::Metrics;
 use crate::node_state::NodeState;
+use anyhow::bail;
 use axum::Router;
 use axum_server::Handle;
 use axum_server::accept::NoDelayAcceptor;
@@ -22,9 +23,40 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
+use tokio::task::JoinHandle;
 use tokio::time;
 
-const GRACEFUL_SHUTDOWN_DURATION: Duration = Duration::from_secs(10);
+const SPAWN_TIMEOUT: Duration = Duration::from_secs(5);
+
+type ServerTask = JoinHandle<std::io::Result<()>>;
+
+struct RunningServer {
+    handle: Handle<SocketAddr>,
+    task: ServerTask,
+}
+
+impl RunningServer {
+    async fn shutdown(self) {
+        const GRACEFUL_SHUTDOWN_DURATION: Duration = Duration::from_secs(10);
+        const AWAIT_TASK_TIMEOUT: Duration =
+            Duration::from_secs(GRACEFUL_SHUTDOWN_DURATION.as_secs() + 5);
+        self.handle
+            .graceful_shutdown(Some(GRACEFUL_SHUTDOWN_DURATION));
+        let mut task = self.task;
+        match time::timeout(AWAIT_TASK_TIMEOUT, &mut task).await {
+            Ok(Ok(Ok(()))) => tracing::info!("HTTP server task completed"),
+            Ok(Ok(Err(e))) => tracing::warn!("HTTP server task completed with error: {e}"),
+            Ok(Err(join_err)) => tracing::warn!("HTTP server task panicked: {join_err}"),
+            Err(_) => {
+                tracing::warn!(
+                    "Timed out waiting for HTTP server task to complete after {AWAIT_TASK_TIMEOUT:?}, aborting"
+                );
+                task.abort();
+                let _ = task.await;
+            }
+        }
+    }
+}
 
 pub enum HttpServer {
     Router {
@@ -73,7 +105,7 @@ struct ServerDeps {
 async fn spawn_server_with_retry(
     config: &HttpServerConfig,
     deps: &ServerDeps,
-) -> anyhow::Result<(Handle<SocketAddr>, SocketAddr, Router)> {
+) -> anyhow::Result<(RunningServer, SocketAddr, Router)> {
     let mut retry_delay = Duration::from_millis(50);
     let max_retries = 10;
 
@@ -108,51 +140,46 @@ async fn spawn_server_with_retry(
 async fn enable_server(
     config: &HttpServerConfig,
     deps: &ServerDeps,
-) -> anyhow::Result<(Handle<SocketAddr>, SocketAddr, Router)> {
+) -> anyhow::Result<(RunningServer, SocketAddr, Router)> {
     tracing::info!("HTTP server being enabled");
-    let (handle, addr, router) = spawn_server_with_retry(config, deps).await?;
+    let (server, addr, router) = spawn_server_with_retry(config, deps).await?;
     tracing::info!(
         "{} server started successfully on {}",
         config.protocol_label(),
         addr
     );
-    Ok((handle, addr, router))
+    Ok((server, addr, router))
 }
 
-fn disable_server(handle: Option<Handle<SocketAddr>>) {
+async fn disable_server(server: Option<RunningServer>) {
     tracing::info!("HTTP server being disabled");
-    if let Some(handle) = handle {
-        handle.graceful_shutdown(Some(GRACEFUL_SHUTDOWN_DURATION));
-        tracing::info!("HTTP server shut down");
+    if let Some(server) = server {
+        server.shutdown().await;
     }
 }
 
 async fn reload_server(
     old_config: &HttpServerConfig,
     new_config: &HttpServerConfig,
-    current_handle: Option<Handle<SocketAddr>>,
+    current_server: Option<RunningServer>,
     deps: &ServerDeps,
-) -> (
-    Option<Handle<SocketAddr>>,
-    Option<SocketAddr>,
-    Option<Router>,
-) {
+) -> (Option<RunningServer>, Option<SocketAddr>, Option<Router>) {
     let changes = describe_config_changes(old_config, new_config);
     tracing::info!("HTTP server configuration changed ({changes}), reloading...");
 
-    if let Some(handle) = current_handle {
+    if let Some(server) = current_server {
         tracing::info!("Shutting down old HTTP server");
-        handle.graceful_shutdown(Some(GRACEFUL_SHUTDOWN_DURATION));
+        server.shutdown().await;
     }
 
     match spawn_server_with_retry(new_config, deps).await {
-        Ok((handle, addr, router)) => {
+        Ok((server, addr, router)) => {
             tracing::info!(
                 "{} server reloaded successfully on {}",
                 new_config.protocol_label(),
                 addr
             );
-            (Some(handle), Some(addr), Some(router))
+            (Some(server), Some(addr), Some(router))
         }
         Err(e) => {
             tracing::error!("Failed to reload HTTP server: {e}");
@@ -167,18 +194,20 @@ async fn reload_server(
 async fn handle_config_change(
     current_config: &Option<Arc<HttpServerConfig>>,
     new_config: &Option<Arc<HttpServerConfig>>,
-    current_handle: Option<Handle<SocketAddr>>,
+    current_server: Option<RunningServer>,
     deps: &ServerDeps,
     addr_tx: &watch::Sender<Option<SocketAddr>>,
     router: &mut Option<Router>,
-) -> Option<Handle<SocketAddr>> {
+) -> Option<RunningServer> {
     match (current_config, new_config) {
-        (None, None) => current_handle,
+        // No change: do nothing
+        (None, None) => current_server,
+        // New server enabled: start it
         (None, Some(config)) => match enable_server(config, deps).await {
-            Ok((handle, addr, new_router)) => {
+            Ok((server, addr, new_router)) => {
                 addr_tx.send(Some(addr)).ok();
                 *router = Some(new_router);
-                Some(handle)
+                Some(server)
             }
             Err(e) => {
                 tracing::error!("Failed to start HTTP server: {e}");
@@ -186,23 +215,25 @@ async fn handle_config_change(
                 None
             }
         },
+        // Server disabled: stop it
         (Some(_), None) => {
-            disable_server(current_handle);
+            disable_server(current_server).await;
             addr_tx.send(None).ok();
             *router = None;
             None
         }
+        // Config changed: reload server
         (Some(old), Some(new)) => {
             if **old != **new {
-                let (handle, addr, new_router) =
-                    reload_server(old, new, current_handle, deps).await;
+                let (server, addr, new_router) =
+                    reload_server(old, new, current_server, deps).await;
                 addr_tx.send(addr).ok();
                 if let Some(r) = new_router {
                     *router = Some(r);
                 }
-                handle
+                server
             } else {
-                current_handle
+                current_server
             }
         }
     }
@@ -235,10 +266,10 @@ pub(crate) async fn new(
     let initial_config = config_rx.borrow().clone();
 
     // Start initial server if config is provided
-    let (mut current_handle, mut router) = if let Some(ref config) = initial_config {
-        let (handle, actual_addr, router) = spawn_server_with_retry(config, &deps).await?;
+    let (mut current_server, mut router) = if let Some(ref config) = initial_config {
+        let (server, actual_addr, router) = spawn_server_with_retry(config, &deps).await?;
         addr_tx.send(Some(actual_addr)).ok();
-        (Some(handle), Some(router))
+        (Some(server), Some(router))
     } else {
         tracing::info!("HTTP server disabled by configuration");
         (None, None)
@@ -272,8 +303,8 @@ pub(crate) async fn new(
                     let new_config = config_rx.borrow().clone();
 
                     if current_config != new_config {
-                        current_handle =
-                            handle_config_change(&current_config, &new_config, current_handle, &deps, &addr_tx, &mut router)
+                        current_server =
+                            handle_config_change(&current_config, &new_config, current_server, &deps, &addr_tx, &mut router)
                                 .await;
                         current_config = new_config;
                     }
@@ -282,11 +313,9 @@ pub(crate) async fn new(
         }
 
         // Final shutdown
-        if let Some(handle) = current_handle {
+        if let Some(server) = current_server {
             tracing::info!("HTTP server shutting down");
-            handle.graceful_shutdown(Some(GRACEFUL_SHUTDOWN_DURATION));
-            // Brief delay to allow clean shutdown
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            server.shutdown().await;
         }
         addr_tx.send(None).ok();
     });
@@ -299,7 +328,7 @@ pub(crate) async fn new(
 async fn spawn_server(
     config: &HttpServerConfig,
     deps: &ServerDeps,
-) -> anyhow::Result<(Handle<SocketAddr>, SocketAddr, Router)> {
+) -> anyhow::Result<(RunningServer, SocketAddr, Router)> {
     let protocol = config.protocol_label();
     let addr = config.addr;
 
@@ -315,7 +344,7 @@ async fn spawn_server(
         config.tls.is_some(),
     )
     .await;
-    tokio::spawn({
+    let mut server_task = tokio::spawn({
         let handle = handle.clone();
         let router = router.clone();
         let tls = config.tls.clone();
@@ -346,20 +375,41 @@ async fn spawn_server(
                         .await
                 }
             };
-            result.unwrap_or_else(|e| panic!("failed to run {protocol} server: {e}"));
+            if let Err(ref e) = result {
+                tracing::error!("failed to run {protocol} server: {e}");
+            }
+            result
         }
     });
 
-    // Wait for server to be listening and get actual bound address
-    // Add timeout to prevent hanging forever if server fails to start
-    let actual_addr = time::timeout(Duration::from_secs(5), handle.listening())
-        .await
-        .map_err(|_| anyhow::anyhow!("timeout waiting for server to start"))?
-        .ok_or(anyhow::anyhow!(
-            "server failed to start - listening notification not received"
-        ))?;
+    let actual_addr = tokio::select! {
+        addr = handle.listening() => {
+            addr.ok_or_else(|| anyhow::anyhow!(
+                "{protocol} server failed to start - listening notification not received"
+            ))?
+        }
+        result = &mut server_task => {
+            match result {
+                Ok(Err(e)) => bail!(e),
+                Ok(Ok(())) => bail!("{protocol} server exited unexpectedly"),
+                Err(join_err) => bail!("{protocol} server task panicked: {join_err}"),
+            }
+        }
+        _ = time::sleep(SPAWN_TIMEOUT) => {
+            server_task.abort();
+            let _ = server_task.await;
+            bail!("timeout waiting for {protocol} server to start");
+        }
+    };
 
-    Ok((handle, actual_addr, router))
+    Ok((
+        RunningServer {
+            handle,
+            task: server_task,
+        },
+        actual_addr,
+        router,
+    ))
 }
 
 fn describe_config_changes(old: &HttpServerConfig, new: &HttpServerConfig) -> String {
@@ -374,4 +424,77 @@ fn describe_config_changes(old: &HttpServerConfig, new: &HttpServerConfig) -> St
         (None, None) => {}
     }
     changes.join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::indexes::Indexes;
+
+    fn test_deps() -> ServerDeps {
+        let (state_tx, _state_rx) = mpsc::channel(1);
+        let (engine_tx, _engine_rx) = mpsc::channel(1);
+        let (internals_tx, _internals_rx) = mpsc::channel(1);
+        ServerDeps {
+            state: state_tx,
+            indexes: Arc::new(RwLock::new(Indexes::new())),
+            engine: engine_tx,
+            metrics: Arc::new(Metrics::new()),
+            internals: internals_tx,
+            index_engine_version: "test".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_server_returns_error_on_occupied_port() {
+        let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let occupied_addr = occupied.local_addr().unwrap();
+        let config = HttpServerConfig {
+            addr: occupied_addr,
+            tls: None,
+        };
+        let deps = test_deps();
+
+        let result = spawn_server(&config, &deps).await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn spawn_server_binds_to_available_port() {
+        let config = HttpServerConfig {
+            addr: "127.0.0.1:0".parse().unwrap(),
+            tls: None,
+        };
+        let deps = test_deps();
+
+        let (server, addr, _router) = spawn_server(&config, &deps).await.unwrap();
+
+        assert_ne!(addr.port(), 0);
+
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn server_reload_rebinds_same_port() {
+        let deps = test_deps();
+        let config = HttpServerConfig {
+            addr: "127.0.0.1:0".parse().unwrap(),
+            tls: None,
+        };
+        let (server, addr, _router) = spawn_server(&config, &deps).await.unwrap();
+
+        let new_config = HttpServerConfig { addr, tls: None };
+
+        let (new_server, new_addr, _new_router) =
+            reload_server(&config, &new_config, Some(server), &deps).await;
+
+        assert!(
+            new_server.is_some(),
+            "server should successfully reload on the same port"
+        );
+        assert_eq!(new_addr, Some(addr));
+
+        new_server.unwrap().shutdown().await;
+    }
 }

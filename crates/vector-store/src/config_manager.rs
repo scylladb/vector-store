@@ -174,7 +174,6 @@ impl ConfigManager {
 
         self.send_config(new_config).await;
 
-        tracing::info!("Configuration reloaded successfully");
         Ok(())
     }
 
