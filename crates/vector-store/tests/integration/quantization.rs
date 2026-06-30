@@ -47,6 +47,7 @@ async fn quantization_is_effectively_applied() {
         let values = [(
             [CqlValue::Int(1)].into(),
             Some(add_vector.into()),
+            [].into(),
             Timestamp::from_millis(10),
         )];
         let values_len = values.len();
@@ -179,6 +180,7 @@ async fn search_with_quantization(quantization: Quantization, filter: Option<Pos
     let vectors = vec![(
         [CqlValue::Int(pk_value)].into(),
         Some(vector.clone().into()),
+        [].into(),
         Timestamp::from_millis(10),
     )];
 
@@ -298,6 +300,7 @@ async fn binary_quantization_with_non_divisible_by_8_dimensions() {
     let vectors = vec![(
         [CqlValue::Int(pk_value)].into(),
         Some(vector.clone().into()),
+        [].into(),
         Timestamp::from_millis(10),
     )];
 

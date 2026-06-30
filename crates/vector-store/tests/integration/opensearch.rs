@@ -93,16 +93,19 @@ async fn simple_create_search_delete_index() {
             (
                 [CqlValue::Int(1), CqlValue::Text("one".to_string())].into(),
                 Some(vec![1., 1., 1.].into()),
+                [].into(),
                 Timestamp::from_millis(10),
             ),
             (
                 [CqlValue::Int(2), CqlValue::Text("two".to_string())].into(),
                 Some(vec![2., -2., 2.].into()),
+                [].into(),
                 Timestamp::from_millis(20),
             ),
             (
                 [CqlValue::Int(3), CqlValue::Text("three".to_string())].into(),
                 Some(vec![3., 3., 3.].into()),
+                [].into(),
                 Timestamp::from_millis(30),
             ),
         ])),
