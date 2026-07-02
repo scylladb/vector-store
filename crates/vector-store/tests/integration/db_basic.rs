@@ -21,6 +21,7 @@ use vector_store::AsyncInProgress;
 use vector_store::ColumnName;
 use vector_store::DbCustomIndex;
 use vector_store::DbIndexKind;
+use vector_store::DbIndexedOperation;
 use vector_store::DbIndexedRow;
 use vector_store::DbIndexedValue;
 use vector_store::Dimensions;
@@ -30,11 +31,13 @@ use vector_store::IndexName;
 use vector_store::IndexVersion;
 use vector_store::KeyspaceName;
 use vector_store::NonemptyArc;
+use vector_store::NonemptyBox;
 use vector_store::Percentage;
 use vector_store::PrimaryKey;
 use vector_store::Progress;
 use vector_store::TableName;
 use vector_store::Timestamp;
+use vector_store::Timestamped;
 use vector_store::Vector;
 use vector_store::db::Db;
 use vector_store::db_index::DbIndex;
@@ -73,8 +76,13 @@ where
             .into_iter()
             .map(|(primary_key, embedding, timestamp)| DbIndexedRow {
                 primary_key,
-                value: embedding.map(DbIndexedValue::Vector),
-                timestamp,
+                operation: DbIndexedOperation::Upsert(
+                    NonemptyBox::new([Timestamped::new(
+                        timestamp,
+                        embedding.map(DbIndexedValue::Vector),
+                    )])
+                    .unwrap(),
+                ),
             }),
     )
 }
@@ -84,15 +92,18 @@ where
     I: IntoIterator<Item = (PrimaryKey, Option<String>, Timestamp)>,
     I::IntoIter: Send + Sync + 'static,
 {
-    make_scan_fn(
-        items
-            .into_iter()
-            .map(|(primary_key, document, timestamp)| DbIndexedRow {
-                primary_key,
-                value: document.map(DbIndexedValue::Document),
-                timestamp,
-            }),
-    )
+    make_scan_fn(items.into_iter().map(|(primary_key, document, timestamp)| {
+        DbIndexedRow {
+            primary_key,
+            operation: DbIndexedOperation::Upsert(
+                NonemptyBox::new([Timestamped::new(
+                    timestamp,
+                    document.map(DbIndexedValue::Document),
+                )])
+                .unwrap(),
+            ),
+        }
+    }))
 }
 
 #[derive(Clone, derive_more::Debug)]
@@ -259,7 +270,7 @@ impl DbBasic {
 
 fn process_db(db: &DbBasic, msg: Db, node_state: Sender<NodeState>) {
     match msg {
-        Db::GetDbIndex { metadata, tx } => tx
+        Db::GetDbIndex { metadata, tx, .. } => tx
             .send(new_db_index(db.clone(), metadata, node_state.clone()))
             .map_err(|_| anyhow!("Db::GetDbIndex: unable to send response"))
             .unwrap(),

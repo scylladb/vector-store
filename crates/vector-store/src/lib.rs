@@ -59,6 +59,7 @@ pub use crate::similarity::SimilarityScore;
 pub use crate::table::PartitionId;
 pub use crate::table::PrimaryId;
 pub use crate::timestamp::Timestamp;
+pub use crate::timestamp::Timestamped;
 use db::Db;
 use scylla::cluster::metadata::ColumnType;
 use scylla::serialize::SerializationError;
@@ -657,13 +658,21 @@ impl DbCustomIndex {
 pub enum DbIndexedValue {
     Vector(Vector),
     Document(String),
+    Filtering(CqlValue),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+/// The operation read from a CDC row or full scan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DbIndexedOperation {
+    Upsert(NonemptyBox<Timestamped<DbIndexedValue>>),
+    Delete(Timestamp),
+}
+
+/// A row read from a CDC row or full scan, containing the primary key and the operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DbIndexedRow {
     pub primary_key: PrimaryKey,
-    pub value: Option<DbIndexedValue>,
-    pub timestamp: Timestamp,
+    pub operation: DbIndexedOperation,
 }
 
 pub use async_in_progress::AsyncInProgress;
