@@ -86,80 +86,63 @@ async fn put_item_with_invalid_vector_is_not_indexed(actors: Arc<TestActors>) {
 
     let ctx = TableContext::create(&actors, shape).await;
 
-    let vec_with_string_elem = AttributeValue::L(vec![
-        AttributeValue::N("1.0".into()),
-        AttributeValue::N("2.0".into()),
-        AttributeValue::S("3.0".into()),
-    ]);
-    let vec_with_null_elem = AttributeValue::L(vec![
-        AttributeValue::N("1.0".into()),
-        AttributeValue::N("2.0".into()),
-        AttributeValue::Null(true),
-    ]);
-
     let no_vec = Item::key(pk, None, "pk", "no-vec");
     ctx.put(&no_vec)
         .send()
         .await
         .expect("PutItem should succeed");
 
-    let wrong_type_string = Item::key(pk, None, "pk", "wrong-type-string")
-        .attr(vec_attr, AttributeValue::S("not-a-vector".into()));
-    alternator::assert_service_error(
-        ctx.put(&wrong_type_string).send().await,
-        "ValidationException",
-    );
-
-    let wrong_type_mostly_float_one_s = Item::key(pk, None, "pk", "wrong-type-mostly-float-one-s")
-        .attr(vec_attr, vec_with_string_elem);
-    alternator::assert_service_error(
-        ctx.put(&wrong_type_mostly_float_one_s).send().await,
-        "ValidationException",
-    );
-
-    let wrong_type_mostly_float_one_null =
-        Item::key(pk, None, "pk", "wrong-type-mostly-float-one-null")
-            .attr(vec_attr, vec_with_null_elem);
-    alternator::assert_service_error(
-        ctx.put(&wrong_type_mostly_float_one_null).send().await,
-        "ValidationException",
-    );
-
-    let wrong_type_too_short = Item::key(pk, None, "pk", "wrong-type-too-short")
-        .attr(vec_attr, alternator::float_list([1.0_f32, 1.0]));
-    alternator::assert_service_error(
-        ctx.put(&wrong_type_too_short).send().await,
-        "ValidationException",
-    );
-
-    let wrong_type_too_long = Item::key(pk, None, "pk", "wrong-type-too-long")
-        .attr(vec_attr, alternator::float_list([1.0_f32, 1.0, 1.0, 1.0]));
-    alternator::assert_service_error(
-        ctx.put(&wrong_type_too_long).send().await,
-        "ValidationException",
-    );
-
-    // valid is put last so that wait_for_ann acts as a sequencing barrier:
-    // when VS has indexed valid it must have already processed the no_vec CDC
-    // event before it (CDC events are ordered), proving that the item without
-    // a vector attribute was correctly ignored.
-    let valid = Item::key(pk, None, "pk", "valid").vec(vec_attr, [1.0, 1.0, 1.0]);
-    ctx.put(&valid)
+    let try_replace_valid =
+        Item::key(pk, None, "pk", "try-replace-valid").vec(vec_attr, [1.0, 1.0, 1.0]);
+    ctx.put(&try_replace_valid)
         .send()
         .await
         .expect("PutItem should succeed");
-    ctx.wait_for_ann([1.0, 1.0, 1.0], &[valid]).await;
+    ctx.wait_for_ann([1.0, 1.0, 1.0], std::slice::from_ref(&try_replace_valid))
+        .await;
 
-    let valid_no_vec = Item::key(pk, None, "pk", "valid");
-    ctx.put(&valid_no_vec)
+    let invalid_items = [
+        Item::key(pk, None, "pk", "null-vec").attr(vec_attr, AttributeValue::Null(true)),
+        Item::key(pk, None, "pk", "wrong-type-string")
+            .attr(vec_attr, AttributeValue::S("not-a-vector".into())),
+        Item::key(pk, None, "pk", "wrong-type-mostly-float-one-s").attr(
+            vec_attr,
+            AttributeValue::L(vec![
+                AttributeValue::N("1.0".into()),
+                AttributeValue::N("2.0".into()),
+                AttributeValue::S("3.0".into()),
+            ]),
+        ),
+        Item::key(pk, None, "pk", "wrong-type-mostly-float-one-null").attr(
+            vec_attr,
+            AttributeValue::L(vec![
+                AttributeValue::N("1.0".into()),
+                AttributeValue::N("2.0".into()),
+                AttributeValue::Null(true),
+            ]),
+        ),
+        Item::key(pk, None, "pk", "wrong-type-too-short")
+            .attr(vec_attr, alternator::float_list([1.0_f32, 1.0])),
+        Item::key(pk, None, "pk", "wrong-type-too-long")
+            .attr(vec_attr, alternator::float_list([1.0_f32, 1.0, 1.0, 1.0])),
+        Item::key(pk, None, "pk", "try-replace-valid").attr(vec_attr, AttributeValue::Null(true)),
+        Item::key(pk, None, "pk", "try-replace-valid")
+            .attr(vec_attr, AttributeValue::S("bad".into())),
+    ];
+
+    for invalid_item in &invalid_items {
+        info!(?invalid_item, "expecting invalid PutItem to fail");
+        alternator::assert_service_error(ctx.put(invalid_item).send().await, "ValidationException");
+    }
+    ctx.wait_for_count(1).await;
+    ctx.wait_for_ann([1.0, 1.0, 1.0], std::slice::from_ref(&try_replace_valid))
+        .await;
+
+    let try_replace_valid_no_vec = Item::key(pk, None, "pk", "try-replace-valid");
+    ctx.put(&try_replace_valid_no_vec)
         .send()
         .await
         .expect("PutItem should succeed");
-    ctx.wait_for_count(0).await;
-
-    let wrong_type2 =
-        Item::key(pk, None, "pk", "valid").attr(vec_attr, AttributeValue::S("bad".into()));
-    alternator::assert_service_error(ctx.put(&wrong_type2).send().await, "ValidationException");
     ctx.wait_for_count(0).await;
 
     ctx.done().await;
