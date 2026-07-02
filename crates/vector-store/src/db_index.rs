@@ -11,7 +11,9 @@ use crate::DbIndexedValue;
 use crate::IndexKind;
 use crate::IndexMetadata;
 use crate::KeyspaceIdentifier;
+use crate::Metrics;
 use crate::NonemptyArc;
+use crate::NonemptyBox;
 use crate::NonemptyIteratorExt;
 use crate::Percentage;
 use crate::Progress;
@@ -27,6 +29,7 @@ use crate::node_state::Event;
 use crate::node_state::NodeState;
 use crate::node_state::NodeStateExt;
 use crate::perf;
+use crate::timestamp::Timestamped;
 use anyhow::Context;
 use anyhow::anyhow;
 use anyhow::bail;
@@ -151,6 +154,7 @@ pub(crate) async fn new(
     config_rx: watch::Receiver<Arc<Config>>,
     session_rx: watch::Receiver<Option<Arc<Session>>>,
     metadata: IndexMetadata,
+    metrics: Arc<Metrics>,
     node_state: Sender<NodeState>,
     internals: Sender<Internals>,
     cdc_error_notify: Arc<Notify>,
@@ -180,6 +184,7 @@ pub(crate) async fn new(
         config_rx.clone(),
         session_rx.clone(),
         metadata.clone(),
+        Arc::clone(&metrics),
         internals.clone(),
         tx_embeddings.clone(),
         CdcReaderConfig::Wide,
@@ -190,6 +195,7 @@ pub(crate) async fn new(
         config_rx,
         session_rx.clone(),
         metadata.clone(),
+        metrics,
         internals,
         tx_embeddings.clone(),
         CdcReaderConfig::Fine,
@@ -609,7 +615,7 @@ impl Statements {
                     debug!("range_scan_stream: bad type of a writetime");
                     return None;
                 };
-                let timestamp = Timestamp::UNIX_EPOCH + Duration::from_micros(timestamp as u64);
+                let timestamp = Timestamp::from_micros(timestamp as u64);
 
                 let Some(column_value) = row.columns.pop().unwrap() else {
                     debug!("range_scan_stream: missing target column");
@@ -635,8 +641,7 @@ impl Statements {
 
                 Some(DbIndexedRow {
                     primary_key,
-                    value,
-                    timestamp,
+                    values: NonemptyBox::new([Timestamped::new(timestamp, value)]).unwrap(),
                 })
             })
             .filter_map(|value| async move {

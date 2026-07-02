@@ -31,9 +31,11 @@ use vector_store::IndexKind;
 use vector_store::IndexMetadata;
 use vector_store::IndexOptionsVs;
 use vector_store::NonemptyArc;
+use vector_store::NonemptyBox;
 use vector_store::Quantization;
 use vector_store::SpaceType;
 use vector_store::Timestamp;
+use vector_store::Timestamped;
 
 #[tokio::test]
 /// The test case scenario:
@@ -100,8 +102,11 @@ async fn memory_limit_during_index_build() {
                         .send((
                             DbIndexedRow {
                                 primary_key: [CqlValue::Int(pk)].into(),
-                                value: Some(DbIndexedValue::Vector(item)),
-                                timestamp: Timestamp::from_unix_timestamp(10),
+                                values: NonemptyBox::new([Timestamped::new(
+                                    Timestamp::from_millis(10),
+                                    Some(DbIndexedValue::Vector(item)),
+                                )])
+                                .unwrap(),
                             },
                             AsyncInProgress::Fullscan(tx_in_progress.clone()),
                         ))

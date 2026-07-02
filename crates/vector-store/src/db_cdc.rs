@@ -8,20 +8,20 @@ use crate::ColumnName;
 use crate::Config;
 use crate::DbIndexedRow;
 use crate::DbIndexedValue;
+use crate::IndexKey;
 use crate::IndexKind;
 use crate::IndexMetadata;
+use crate::Metrics;
 use crate::NonemptyArc;
+use crate::NonemptyBox;
 use crate::NonemptyIteratorExt;
 use crate::db_index_backend::CdcValueStatus;
 use crate::db_index_backend::DbIndexBackend;
 use crate::internals::Internals;
 use crate::internals::InternalsExt;
 use crate::perf;
-use ::time::Date;
-use ::time::Month;
+use crate::timestamp::Timestamped;
 use ::time::OffsetDateTime;
-use ::time::PrimitiveDateTime;
-use ::time::Time;
 use anyhow::Context;
 use anyhow::anyhow;
 use anyhow::bail;
@@ -120,6 +120,7 @@ pub(crate) fn new(
     config_rx: watch::Receiver<Arc<Config>>,
     mut session_rx: watch::Receiver<Option<Arc<Session>>>,
     metadata: IndexMetadata,
+    metrics: Arc<Metrics>,
     internals: Sender<Internals>,
     tx_embeddings: mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
     config: CdcReaderConfig,
@@ -157,6 +158,7 @@ pub(crate) fn new(
                         let session_opt = session_rx.borrow_and_update().clone();
                         reader.handle_session_change(
                             session_opt, &config_rx, &metadata,
+                            Arc::clone(&metrics),
                             &tx_embeddings, &internals,
                         ).await;
                         err_counter = 0;
@@ -176,6 +178,7 @@ pub(crate) fn new(
                     _ = sleep_for_retry(backoff_duration.take()) => {
                         reader.restart_after_backoff(
                             &session_rx, &config_rx, &metadata,
+                            Arc::clone(&metrics),
                             &tx_embeddings, &internals,
                         ).await;
                     }
@@ -237,6 +240,7 @@ impl CdcReaderState {
         params: CdcReaderParams,
         session: &Arc<Session>,
         metadata: &IndexMetadata,
+        metrics: Arc<Metrics>,
         tx_embeddings: &mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
         internals: &Sender<Internals>,
     ) {
@@ -248,6 +252,7 @@ impl CdcReaderState {
             params.clone(),
             Arc::clone(session),
             metadata.clone(),
+            metrics,
             tx_embeddings.clone(),
             self.name,
         )
@@ -285,6 +290,7 @@ impl CdcReaderState {
         session: Option<Arc<Session>>,
         config_rx: &watch::Receiver<Arc<Config>>,
         metadata: &IndexMetadata,
+        metrics: Arc<Metrics>,
         tx_embeddings: &mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
         internals: &Sender<Internals>,
     ) {
@@ -300,8 +306,15 @@ impl CdcReaderState {
 
                 drain_pending_notifications(&self.error_notify);
                 let params = (self.params_fn)(&config);
-                self.restart(params, &session, metadata, tx_embeddings, internals)
-                    .await;
+                self.restart(
+                    params,
+                    &session,
+                    metadata,
+                    metrics,
+                    tx_embeddings,
+                    internals,
+                )
+                .await;
             }
             None => {
                 info!(
@@ -321,6 +334,7 @@ impl CdcReaderState {
         session_rx: &watch::Receiver<Option<Arc<Session>>>,
         config_rx: &watch::Receiver<Arc<Config>>,
         metadata: &IndexMetadata,
+        metrics: Arc<Metrics>,
         tx_embeddings: &mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
         internals: &Sender<Internals>,
     ) {
@@ -328,8 +342,15 @@ impl CdcReaderState {
         if let Some(session) = session {
             let config = config_rx.borrow().clone();
             let params = (self.params_fn)(&config);
-            self.restart(params, &session, metadata, tx_embeddings, internals)
-                .await;
+            self.restart(
+                params,
+                &session,
+                metadata,
+                metrics,
+                tx_embeddings,
+                internals,
+            )
+            .await;
         }
     }
 }
@@ -360,13 +381,15 @@ async fn create_cdc_reader(
     params: CdcReaderParams,
     session: Arc<Session>,
     metadata: IndexMetadata,
+    metrics: Arc<Metrics>,
     tx_embeddings: mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
     reader_name: &str,
 ) -> anyhow::Result<(
     scylla_cdc::log_reader::CDCLogReader,
     impl std::future::Future<Output = anyhow::Result<()>>,
 )> {
-    let consumer_factory = CdcConsumerFactory::new(Arc::clone(&session), &metadata, tx_embeddings)?;
+    let consumer_factory =
+        CdcConsumerFactory::new(Arc::clone(&session), &metadata, metrics, tx_embeddings)?;
 
     let cdc_start = start - CHECKPOINT_TIMESTAMP_OFFSET;
     info!(
@@ -442,11 +465,12 @@ fn extract_indexed_value(
 }
 
 struct CdcConsumerData {
+    index_key: IndexKey,
     primary_key_columns: NonemptyArc<ColumnName>,
     backend: DbIndexBackend,
     kind: IndexKind,
     tx: mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
-    gregorian_epoch: PrimitiveDateTime,
+    metrics: Arc<Metrics>,
 }
 
 struct CdcConsumer(Arc<CdcConsumerData>);
@@ -500,17 +524,10 @@ impl Consumer for CdcConsumer {
             return Ok(());
         };
 
-        const HUNDREDS_NANOS_TO_MICROS: u64 = 10;
-        let timestamp = (self.0.gregorian_epoch
-            + Duration::from_micros(
-                row.time
-                    .get_timestamp()
-                    .ok_or(anyhow!("CDC error: time has no timestamp"))?
-                    .to_gregorian()
-                    .0
-                    / HUNDREDS_NANOS_TO_MICROS,
-            ))
-        .into();
+        let timestamp = row
+            .time
+            .try_into()
+            .map_err(|err| anyhow!("CDC error: converting row.time: {err}"))?;
 
         _ = self
             .0
@@ -518,10 +535,15 @@ impl Consumer for CdcConsumer {
             .send((
                 DbIndexedRow {
                     primary_key,
-                    value,
-                    timestamp,
+                    values: NonemptyBox::new([Timestamped::new(timestamp, value)]).unwrap(),
                 },
-                AsyncInProgress::None,
+                AsyncInProgress::cdc(
+                    self.0.metrics.indexing_lag.with_label_values(&[
+                        self.0.index_key.keyspace().as_ref(),
+                        self.0.index_key.index().as_ref(),
+                    ]),
+                    timestamp,
+                ),
             ))
             .await;
         Ok(())
@@ -541,6 +563,7 @@ impl CdcConsumerFactory {
     fn new(
         session: Arc<Session>,
         metadata: &IndexMetadata,
+        metrics: Arc<Metrics>,
         tx: mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
     ) -> anyhow::Result<Self> {
         let cluster_state = session.get_cluster_state();
@@ -560,19 +583,15 @@ impl CdcConsumerFactory {
             .collect_nonempty_arc()
             .ok_or_else(|| anyhow!("primary key must have at least one column"))?;
 
-        let gregorian_epoch = PrimitiveDateTime::new(
-            Date::from_calendar_date(1582, Month::October, 15)?,
-            Time::MIDNIGHT,
-        );
-
         let backend = DbIndexBackend::from(metadata);
 
         Ok(Self(Arc::new(CdcConsumerData {
+            index_key: metadata.key(),
             primary_key_columns,
             backend,
             kind: metadata.kind.clone(),
             tx,
-            gregorian_epoch,
+            metrics,
         })))
     }
 }
