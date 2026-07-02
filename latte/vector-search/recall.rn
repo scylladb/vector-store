@@ -1,0 +1,114 @@
+//! Vector-search recall, throughput and latency workload.
+//!
+//! Loads a base-vector dataset into a table, builds an approximate-nearest-
+//! neighbour index on the vector column, then runs ANN queries over the whole
+//! table measuring throughput, latency and recall@k. Recall is computed in the
+//! workload (query results vs. precomputed ground truth) and exported through
+//! the custom-metrics channel, so it appears in the JSON report, `latte show`
+//! and baseline comparison alongside QPS and latency; the dataset, k, dimension
+//! and index options are recorded as report metadata so a report is
+//! self-describing. For a recall/throughput-vs-index-size curve over nested
+//! subsets of a single upload, see `recall_buckets.rn`.
+//!
+//! Note: string `-P` values are parsed as expressions, so quote paths —
+//! `-P 'vector_data_dir="/abs/dir/"'`.
+//!   latte schema latte/vector-search/recall.rn <node>
+//!   latte run -f load   latte/vector-search/recall.rn <node> -d <dataset_size> \
+//!       -P load_data=true -P 'vector_data_dir="<dir>/"' --threads 1 --concurrency 64
+//!   latte run -f search latte/vector-search/recall.rn <node> -d 60s --concurrency 32 \
+//!       -P 'vector_data_dir="<dir>/"' --generate-report -o report.json
+//!
+//! `load` preloads the dataset into memory and inserts one row per cycle, so run
+//! it single-threaded with high async concurrency to avoid per-thread copies;
+//! pass `-d <dataset_size>`. `search` loads only the small query-vector and
+//! ground-truth files.
+
+use latte::*;
+
+mod text_dataset;
+mod metrics;
+
+// Schema / index
+const KEYSPACE = latte::param!("keyspace", "vector_bench");
+const TABLE = latte::param!("table", "vectors");
+const INDEX = latte::param!("index", "vectors_ann_idx");
+const REPLICATION_FACTOR = latte::param!("replication_factor", 1);
+const DIMENSION = latte::param!("dimension", 1536);
+// Index tuning (e.g. "{'maximum_node_connections': '16'}"); empty => server defaults.
+const INDEX_OPTIONS = latte::param!("index_options", "");
+
+// Search
+const ANN_LIMIT = latte::param!("ann_limit", 10);   // k for recall@k
+
+// Dataset files (text)
+const VECTOR_DATA_DIR = latte::param!("vector_data_dir", "./");
+const DATASET_FILE = latte::param!("dataset_file", "dataset.txt");
+const QUERY_VECTORS_FILE = latte::param!("query_vectors_file", "queries.txt");
+const GROUND_TRUTH_FILE = latte::param!("ground_truth_file", "ground_truth.txt");
+
+// Phase: true on the load run (`-P load_data=true`), false (default) on search.
+const LOAD_DATA = latte::param!("load_data", false);
+
+const INSERT = "insert";
+const SEARCH = "search";
+
+pub async fn schema(db) {
+    db.execute(`CREATE KEYSPACE IF NOT EXISTS ${KEYSPACE} WITH REPLICATION = \
+        {'class': 'NetworkTopologyStrategy', 'replication_factor': '${REPLICATION_FACTOR}'}`).await?;
+    db.execute(`DROP TABLE IF EXISTS ${KEYSPACE}.${TABLE}`).await?;
+    db.execute(`CREATE TABLE ${KEYSPACE}.${TABLE} (
+        id bigint PRIMARY KEY,
+        vector vector<float, ${DIMENSION}>
+    )`).await?;
+    let options_clause = if INDEX_OPTIONS == "" { "" } else { `WITH OPTIONS = ${INDEX_OPTIONS}` };
+    db.execute(`CREATE CUSTOM INDEX ${INDEX} ON ${KEYSPACE}.${TABLE}(vector) USING 'vector_index' ${options_clause}`).await?;
+}
+
+pub async fn erase(db) {
+    db.execute(`TRUNCATE TABLE ${KEYSPACE}.${TABLE}`).await?;
+}
+
+pub async fn prepare(db) {
+    if LOAD_DATA {
+        db.prepare(INSERT, `INSERT INTO ${KEYSPACE}.${TABLE} (id, vector) VALUES (:id, :vector)`).await?;
+        db.data.dataset = text_dataset::load_base_vectors(VECTOR_DATA_DIR + DATASET_FILE, false).await?;
+        db.load_cycle_count = db.data.dataset.len();
+        println!("Loaded {} dataset rows for insert", db.data.dataset.len());
+    } else {
+        db.prepare(SEARCH, `SELECT id FROM ${KEYSPACE}.${TABLE} ORDER BY vector ANN OF :vector LIMIT ${ANN_LIMIT}`).await?;
+        db.data.query_vectors = text_dataset::load_query_vectors(VECTOR_DATA_DIR + QUERY_VECTORS_FILE).await?;
+        db.data.ground_truth = text_dataset::load_ground_truth(VECTOR_DATA_DIR + GROUND_TRUTH_FILE).await?;
+        println!("Loaded {} query vectors / {} ground-truth rows",
+                 db.data.query_vectors.len(), db.data.ground_truth.len());
+
+        // recall is better when higher; record run context so the report is self-describing.
+        db.declare_metric("recall", "higher");
+        db.set_report_field("dataset", DATASET_FILE);
+        db.set_report_field("k", `${ANN_LIMIT}`);
+        db.set_report_field("dimension", `${DIMENSION}`);
+        db.set_report_field("query_path", "cql");
+        db.set_report_field("index_options", if INDEX_OPTIONS == "" { "server_defaults" } else { INDEX_OPTIONS });
+    }
+}
+
+pub async fn load(db, i) {
+    // Map the cycle index into the dataset; modulo keeps it in bounds regardless
+    // of the exact `-d` count (inserts are idempotent on the primary key).
+    let row = db.data.dataset[i % db.data.dataset.len()];
+    db.execute_prepared(INSERT, #{ "id": row.id, "vector": row.vector }).await?;
+}
+
+pub async fn search(db, i) {
+    let idx = latte::hash(i) % db.data.query_vectors.len();
+    let vector = db.data.query_vectors[idx];
+    let ground_truth_ids = db.data.ground_truth[idx];
+
+    let rows = db.execute_prepared_with_result(SEARCH, #{ "vector": vector }).await?;
+
+    let returned_ids = [];
+    for row in rows {
+        returned_ids.push(row.id);
+    }
+
+    db.record_metric("recall", metrics::recall_at_k(returned_ids, ground_truth_ids, ANN_LIMIT));
+}
