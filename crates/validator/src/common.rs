@@ -630,14 +630,19 @@ pub async fn create_table(session: &Session, columns: &str, options: Option<&str
 
 #[framed]
 pub async fn create_index(query: CreateIndexQuery<'_>) -> IndexInfo {
+    let options_clause = if query.options.is_empty() {
+        String::new()
+    } else {
+        format!(" WITH OPTIONS = {{{}}}", query.options)
+    };
     let cql_query = format!(
-        "CREATE CUSTOM INDEX {index} ON {table}({partition_columns}{vector_column}{filter_columns}) USING 'vector_index' WITH OPTIONS = {{{options}}}",
+        "CREATE CUSTOM INDEX {index} ON {table}({partition_columns}{target_column}{filter_columns}) USING '{index_type}'{options_clause}",
         index = query.index,
         table = query.table,
         partition_columns = query.partition_columns,
-        vector_column = query.vector_column,
+        target_column = query.target_column,
         filter_columns = query.filter_columns,
-        options = query.options,
+        index_type = query.index_type,
     );
     info!("Create index: '{cql_query}'");
     query
@@ -679,9 +684,10 @@ pub struct CreateIndexQuery<'a> {
     table: String,
     index: IndexName,
     partition_columns: String,
-    vector_column: String,
+    target_column: String,
     filter_columns: String,
     options: String,
+    index_type: String,
 }
 
 impl<'a> CreateIndexQuery<'a> {
@@ -689,7 +695,7 @@ impl<'a> CreateIndexQuery<'a> {
         session: &'a Session,
         clients: &'a [HttpClient],
         table: impl AsRef<str>,
-        vector_column: impl AsRef<str>,
+        target_column: impl AsRef<str>,
     ) -> Self {
         assert!(!clients.is_empty(), "No vector store clients provided");
         Self {
@@ -698,10 +704,16 @@ impl<'a> CreateIndexQuery<'a> {
             table: table.as_ref().into(),
             index: unique_index_name(),
             partition_columns: String::new(),
-            vector_column: vector_column.as_ref().into(),
+            target_column: target_column.as_ref().into(),
             filter_columns: String::new(),
             options: String::new(),
+            index_type: "vector_index".into(),
         }
+    }
+
+    pub fn index_type(mut self, index_type: impl Into<String>) -> Self {
+        self.index_type = index_type.into();
+        self
     }
 
     pub fn index_name(mut self, index_name: impl Into<String>) -> Self {

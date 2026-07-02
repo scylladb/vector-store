@@ -12,6 +12,7 @@ mod connection_timeout;
 mod crud;
 mod db_timeout;
 mod filtering;
+mod fts;
 mod full_scan;
 mod high_availability;
 mod index_create;
