@@ -34,7 +34,8 @@ async fn setup_single_vector_index() -> (
         Some(db_basic::scan_fn_vectors([(
             [CqlValue::Int(1), CqlValue::Text("one".to_string())].into(),
             Some(vec![1., 1., 1.].into()),
-            Timestamp::from_unix_timestamp(10),
+            [].into(),
+            Timestamp::from_millis(10),
         )])),
         None,
         Some(1),

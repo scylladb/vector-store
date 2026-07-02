@@ -19,6 +19,7 @@ use crate::IndexMetadata;
 use crate::IndexName;
 use crate::IndexVersion;
 use crate::KeyspaceName;
+use crate::Metrics;
 use crate::NonemptyArc;
 use crate::NonemptyIteratorExt;
 use crate::Quantization;
@@ -93,6 +94,7 @@ const RECONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 pub enum Db {
     GetDbIndex {
         metadata: IndexMetadata,
+        metrics: Arc<Metrics>,
         tx: oneshot::Sender<GetDbIndexR>,
     },
 
@@ -140,7 +142,7 @@ pub enum Db {
 }
 
 pub(crate) trait DbExt {
-    async fn get_db_index(&self, metadata: IndexMetadata) -> GetDbIndexR;
+    async fn get_db_index(&self, metadata: IndexMetadata, metrics: Arc<Metrics>) -> GetDbIndexR;
 
     async fn latest_schema_version(&self) -> LatestSchemaVersionR;
 
@@ -172,9 +174,14 @@ pub(crate) trait DbExt {
 }
 
 impl DbExt for mpsc::Sender<Db> {
-    async fn get_db_index(&self, metadata: IndexMetadata) -> GetDbIndexR {
+    async fn get_db_index(&self, metadata: IndexMetadata, metrics: Arc<Metrics>) -> GetDbIndexR {
         let (tx, rx) = oneshot::channel();
-        self.send(Db::GetDbIndex { metadata, tx }).await?;
+        self.send(Db::GetDbIndex {
+            metadata,
+            metrics,
+            tx,
+        })
+        .await?;
         rx.await?
     }
 
@@ -286,7 +293,10 @@ pub(crate) async fn new(
                                     internals.create_session(Some(session.clone())).await;
                                     session_tx.send(Some(session)).ok();
                                     if statements.is_none() {
-                                        statements = Some(Arc::new(Statements::new(config_rx.clone(), session_rx.clone()).await.unwrap()));
+                                        statements = Some(Arc::new(Statements::new(
+                                            config_rx.clone(),
+                                            session_rx.clone(),
+                                        ).await.unwrap()));
                                     }
                                     info!("Connected to ScyllaDB at {}", config.scylladb_uri);
                                 }
@@ -397,10 +407,20 @@ async fn process(
     cdc_error_notify: Arc<Notify>,
 ) {
     match msg {
-        Db::GetDbIndex { metadata, tx } => tx
+        Db::GetDbIndex {
+            metadata,
+            metrics,
+            tx,
+        } => tx
             .send(
                 statements
-                    .get_db_index(metadata, node_state.clone(), internals, cdc_error_notify)
+                    .get_db_index(
+                        metadata,
+                        metrics,
+                        node_state.clone(),
+                        internals,
+                        cdc_error_notify,
+                    )
                     .await,
             )
             .unwrap_or_else(|_| trace!("process: Db::GetDbIndex: unable to send response")),
@@ -679,6 +699,7 @@ impl Statements {
     async fn get_db_index(
         &self,
         metadata: IndexMetadata,
+        metrics: Arc<Metrics>,
         node_state: Sender<NodeState>,
         internals: Sender<Internals>,
         cdc_error_notify: Arc<Notify>,
@@ -687,6 +708,7 @@ impl Statements {
             self.config_rx.clone(),
             self.session_rx.clone(),
             metadata,
+            metrics,
             node_state,
             internals,
             cdc_error_notify,
@@ -1188,7 +1210,11 @@ pub(crate) mod tests {
 
                 while let Some(msg) = rx.recv().await {
                     match msg {
-                        Db::GetDbIndex { metadata, tx } => sim.get_db_index(metadata, tx).await,
+                        Db::GetDbIndex {
+                            metadata,
+                            metrics: _,
+                            tx,
+                        } => sim.get_db_index(metadata, tx).await,
 
                         Db::LatestSchemaVersion { tx } => sim.latest_schema_version(tx).await,
 

@@ -6,25 +6,18 @@
 use crate::ColumnName;
 use crate::CqlLiteral;
 use crate::Dimensions;
-use crate::IndexMetadata;
 use crate::IndexName;
 use crate::KeyspaceIdentifier;
 use crate::KeyspaceName;
-use crate::NonemptyArc;
 use crate::TableIdentifier;
 use crate::TableName;
-use crate::Vector;
-use crate::vector;
 use futures::TryStreamExt;
 use regex::Regex;
 use scylla::client::session::Session;
 use scylla::statement::prepared::PreparedStatement;
-use scylla::value::CqlValue;
 use scylla_cdc::CqlIdentifier;
-use scylla_cdc::consumer::CDCRow;
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
-use std::sync::OnceLock;
 
 /// Alternator tables store all user attributes in a single map column `:attrs`.
 /// Because Alternator (DynamoDB-compatible) is schemaless, different items can
@@ -32,111 +25,36 @@ use std::sync::OnceLock;
 /// of dedicated typed columns.
 const ALTERNATOR_ATTRS_COLUMN: &str = ":attrs";
 
-pub(crate) enum CdcValueStatus {
-    NewValue(CqlValue),
-    Deleted,
-    Skip,
-}
-
 pub(crate) struct IndexLocation {
     pub keyspace: KeyspaceName,
     pub table: TableName,
     pub index: IndexName,
 }
 
-pub(crate) enum DbIndexBackend {
-    Cql {
-        target_columns: NonemptyArc<ColumnName>,
-    },
-    Alternator {
-        target_columns: NonemptyArc<ColumnName>,
-    },
-}
-
-impl From<&IndexMetadata> for DbIndexBackend {
-    fn from(metadata: &IndexMetadata) -> Self {
-        let target_columns = metadata.target_columns.clone();
-        if metadata.keyspace_name.is_alternator() {
-            Self::Alternator { target_columns }
-        } else {
-            Self::Cql { target_columns }
-        }
-    }
-}
-
-impl DbIndexBackend {
-    pub fn target_column_names(&self) -> &NonemptyArc<ColumnName> {
-        match self {
-            Self::Cql { target_columns } => target_columns,
-            Self::Alternator { .. } => {
-                static ALTERNATOR_ATTRS_COLUMN_NAMES: OnceLock<NonemptyArc<ColumnName>> =
-                    OnceLock::new();
-                ALTERNATOR_ATTRS_COLUMN_NAMES.get_or_init(|| {
-                    NonemptyArc::new([ColumnName::from(ALTERNATOR_ATTRS_COLUMN)]).unwrap()
-                })
-            }
-        }
-    }
-
-    pub fn extract_vector(&self, value: CqlValue) -> anyhow::Result<Option<Vector>> {
-        match self {
-            Self::Cql { .. } => Vector::try_from(value).map(Some),
-            Self::Alternator { target_columns } => vector::AlternatorAttrs {
-                attrs: value,
-                target_column: target_columns.first().as_ref(),
-            }
-            .try_into(),
-        }
-    }
-
-    pub fn extract_document(&self, value: CqlValue) -> anyhow::Result<Option<String>> {
-        match self {
-            Self::Cql { .. } => match value {
-                CqlValue::Text(s) => Ok(Some(s)),
-                CqlValue::Ascii(s) => Ok(Some(s)),
-                other => anyhow::bail!("expected text column, got {:?}", other),
-            },
-            Self::Alternator { .. } => {
-                anyhow::bail!("FTS not supported for Alternator")
-            }
-        }
-    }
-
-    pub fn take_cdc_value(&self, row: &mut CDCRow<'_>) -> CdcValueStatus {
-        match self {
-            Self::Cql { target_columns } => {
-                let column = target_columns.first().as_ref();
-                if row.is_value_deleted(column) {
-                    return CdcValueStatus::Deleted;
-                }
-                match row.take_value(column) {
-                    Some(value) => CdcValueStatus::NewValue(value),
-                    None => CdcValueStatus::Skip,
-                }
-            }
-            Self::Alternator { target_columns } => {
-                // Check take_value before is_value_deleted.
-                // PutItem in Alternator deletes and re-adds :attrs in a single CDC event,
-                // so is_value_deleted can be true even when a new value is present.
-                // We must check for a value first to avoid misreporting it as deleted.
-                let column = ALTERNATOR_ATTRS_COLUMN;
-                match row.take_value(column) {
-                    Some(value) => CdcValueStatus::NewValue(value),
-                    None if row.is_value_deleted(column) => CdcValueStatus::Deleted,
-                    None => {
-                        let target_deleted = row.take_deleted_elements(column).iter().any(|el| {
-                            el.as_text().map(String::as_str)
-                                == Some(target_columns.first().as_ref())
-                        });
-                        if target_deleted {
-                            CdcValueStatus::Deleted
-                        } else {
-                            CdcValueStatus::Skip
-                        }
-                    }
-                }
-            }
-        }
+fn build_columns_list<'a>(
+    keyspace: &KeyspaceIdentifier,
+    columns: impl IntoIterator<Item = &'a ColumnName>,
+) -> String {
+    if keyspace.is_alternator() {
+        let attributes = CqlIdentifier::new(ALTERNATOR_ATTRS_COLUMN);
+        itertools::join(
+            columns.into_iter().map(CqlLiteral::new).flat_map(|column| {
+                [
+                    format!("{attributes}[{column}]"),
+                    format!("writetime({attributes}[{column}])"),
+                ]
+            }),
+            ", ",
+        )
+    } else {
+        itertools::join(
+            columns
+                .into_iter()
+                .map(AsRef::as_ref)
+                .map(CqlIdentifier::new)
+                .flat_map(|column| [format!("{column}"), format!("writetime({column})")]),
+            ", ",
+        )
     }
 }
 
@@ -144,39 +62,52 @@ impl DbIndexBackend {
 ///
 /// For CQL-native tables, selects the vector column directly.
 /// For Alternator tables, selects from the `:attrs` map column.
-pub(crate) fn range_scan_query(
+pub(crate) fn range_scan_query<'a>(
     keyspace: &KeyspaceIdentifier,
     table: &TableIdentifier,
-    target_column: &ColumnName,
+    columns: impl IntoIterator<Item = &'a ColumnName>,
     primary_key_list: &str,
     partition_key_list: &str,
 ) -> String {
-    if keyspace.is_alternator() {
-        let attributes = CqlIdentifier::new(ALTERNATOR_ATTRS_COLUMN);
-        let vector = CqlLiteral::new(target_column.as_ref());
-        format!(
-            "
-            SELECT {primary_key_list}, {attributes}[{vector}], writetime({attributes}[{vector}])
+    let columns = build_columns_list(keyspace, columns);
+    format!(
+        "
+        SELECT {primary_key_list}, {columns}
+        FROM {keyspace}.{table}
+        WHERE
+            token({partition_key_list}) >= ?
+            AND token({partition_key_list}) <= ?
+        BYPASS CACHE
+        "
+    )
+}
+
+/// Builds the CQL request query appropriate for the given keyspace.
+///
+/// For CQL-native tables, selects the vector column directly.
+/// For Alternator tables, selects from the `:attrs` map column.
+pub(crate) fn request_query<'a, 'b>(
+    keyspace: &KeyspaceIdentifier,
+    table: &TableIdentifier,
+    columns: impl IntoIterator<Item = &'a ColumnName>,
+    primary_key_columns: impl IntoIterator<Item = &'b ColumnName>,
+) -> String {
+    let columns = build_columns_list(keyspace, columns);
+    let restrictions = itertools::join(
+        primary_key_columns
+            .into_iter()
+            .map(AsRef::as_ref)
+            .map(CqlIdentifier::new)
+            .map(|column| format!("{column} = ?")),
+        " AND ",
+    );
+    format!(
+        "
+            SELECT {columns}
             FROM {keyspace}.{table}
-            WHERE
-                token({partition_key_list}) >= ?
-                AND token({partition_key_list}) <= ?
-            BYPASS CACHE
+            WHERE {restrictions}
             "
-        )
-    } else {
-        let vector = CqlIdentifier::new(target_column.as_ref());
-        format!(
-            "
-            SELECT {primary_key_list}, {vector}, writetime({vector})
-            FROM {keyspace}.{table}
-            WHERE
-                token({partition_key_list}) >= ?
-                AND token({partition_key_list}) <= ?
-            BYPASS CACHE
-            "
-        )
-    }
+    )
 }
 
 /// Retrieves the vector dimensions for the given index, dispatching to the
@@ -268,7 +199,7 @@ mod tests {
         let query = range_scan_query(
             &KeyspaceIdentifier::from("ks"),
             &TableIdentifier::from("tbl"),
-            &ColumnName::from("embedding"),
+            &[ColumnName::from("embedding")],
             &CqlIdentifier::new("id").to_string(),
             &CqlIdentifier::new("id").to_string(),
         );
@@ -288,7 +219,7 @@ mod tests {
         let query = range_scan_query(
             &KeyspaceIdentifier::from("MyKeyspace"),
             &TableIdentifier::from("MyTable"),
-            &ColumnName::from("EmbeddingCol"),
+            &[ColumnName::from("EmbeddingCol")],
             &pk_list,
             &CqlIdentifier::new("UserId").to_string(),
         );
@@ -311,7 +242,7 @@ mod tests {
         let query = range_scan_query(
             &KeyspaceIdentifier::from("UPPER_KS"),
             &TableIdentifier::from("UPPER_TBL"),
-            &ColumnName::from("VEC"),
+            &[ColumnName::from("VEC")],
             &CqlIdentifier::new("ID").to_string(),
             &CqlIdentifier::new("ID").to_string(),
         );
@@ -333,7 +264,7 @@ mod tests {
         let query = range_scan_query(
             &KeyspaceIdentifier::from("my-app"),
             &TableIdentifier::from("my-table:v1"),
-            &ColumnName::from("my-vector"),
+            &[ColumnName::from("my-vector")],
             &pk_list,
             &CqlIdentifier::new(":pk").to_string(),
         );
@@ -359,7 +290,7 @@ mod tests {
         let query = range_scan_query(
             &KeyspaceIdentifier::from("alternator_my-app"),
             &TableIdentifier::from("my-table"),
-            &ColumnName::from("v"),
+            &[ColumnName::from("v")],
             &pk_list,
             &CqlIdentifier::new(":pk").to_string(),
         );
@@ -387,7 +318,7 @@ mod tests {
         let query = range_scan_query(
             &KeyspaceIdentifier::from("alternator_ks"),
             &TableIdentifier::from("tbl"),
-            &ColumnName::from("my-vector:v1"),
+            &[ColumnName::from("my-vector:v1")],
             &pk_list,
             &pk_list,
         );
@@ -407,7 +338,7 @@ mod tests {
         let query = range_scan_query(
             &KeyspaceIdentifier::from("alternator_Ks"),
             &TableIdentifier::from("Tbl"),
-            &ColumnName::from("EmbeddingCol"),
+            &[ColumnName::from("EmbeddingCol")],
             &pk_list,
             &pk_list,
         );
@@ -427,7 +358,7 @@ mod tests {
         let query = range_scan_query(
             &KeyspaceIdentifier::from("alternator_ks"),
             &TableIdentifier::from("tbl"),
-            &ColumnName::from("it's a \"test\""),
+            &[ColumnName::from("it's a \"test\"")],
             &pk_list,
             &pk_list,
         );

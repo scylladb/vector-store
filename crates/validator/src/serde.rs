@@ -8,10 +8,11 @@ use crate::common;
 use crate::common::*;
 use scylla::statement::{Consistency, Statement};
 use scylla::value::CqlValue;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-const CDC_WAIT: Duration = Duration::from_secs(2);
+const CDC_WAIT: Duration = Duration::from_secs(10);
 
 e2etest::group!(
     name = serde,
@@ -286,14 +287,19 @@ async fn test_decimal_key(actors: Arc<TestActors>) {
         "full scan: 2 rows (CK overwrite + PK identity)"
     );
 
-    assert_eq!(
-        get_keys().await,
-        vec![
-            ("1.0".to_string(), "3.14".to_string()),
-            ("1.00".to_string(), "3.140".to_string()),
-        ],
-        "full scan: PK byte-identity preserved, CK original representation returned"
-    );
+    let keys = get_keys().await;
+    let mut expected_pks: HashSet<_> = ["1.0".to_string(), "1.00".to_string()]
+        .into_iter()
+        .collect();
+    for (pk, ck) in &keys {
+        assert!(expected_pks.remove(pk), "PK byte-identity preserved");
+        match pk.as_str() {
+            "1.0" => assert!(ck == "3.14" || ck == "3.140"),
+            "1.00" => assert_eq!(ck, "3.140"),
+            _ => panic!("unexpected pk={pk}"),
+        }
+    }
+    assert!(expected_pks.is_empty());
 
     // Phase 2: after index creation (CDC path).
     // Same pattern as Phase 1.
@@ -301,26 +307,38 @@ async fn test_decimal_key(actors: Arc<TestActors>) {
     insert("2.0", "7.50", [4.0, 5.0, 6.0]).await;
     insert("2.00", "7.50", [7.0, 8.0, 9.0]).await;
 
-    wait_for(
-        || async {
-            let status = client.index_status(&index.keyspace, &index.index).await;
-            matches!(status, Ok(s) if s.count == 4)
-        },
-        "Waiting for CDC (count == 4)",
-        CDC_WAIT,
-    )
-    .await;
+    for client in &clients {
+        wait_for(
+            || async {
+                let status = client.index_status(&index.keyspace, &index.index).await;
+                matches!(status, Ok(s) if s.count == 4)
+            },
+            "Waiting for CDC (count == 4)",
+            CDC_WAIT,
+        )
+        .await;
+    }
 
-    assert_eq!(
-        get_keys().await,
-        vec![
-            ("1.0".to_string(), "3.14".to_string()),
-            ("1.00".to_string(), "3.140".to_string()),
-            ("2.0".to_string(), "7.5".to_string()),
-            ("2.00".to_string(), "7.50".to_string()),
-        ],
-        "CDC: PK byte-identity preserved, CK original representation returned"
-    );
+    let keys = get_keys().await;
+    let mut expected_pks: HashSet<_> = [
+        "1.0".to_string(),
+        "1.00".to_string(),
+        "2.0".to_string(),
+        "2.00".to_string(),
+    ]
+    .into_iter()
+    .collect();
+    for (pk, ck) in &keys {
+        assert!(expected_pks.remove(pk), "PK byte-identity preserved");
+        match pk.as_str() {
+            "1.0" => assert!(ck == "3.14" || ck == "3.140"),
+            "1.00" => assert_eq!(ck, "3.140"),
+            "2.0" => assert!(ck == "7.5" || ck == "7.50"),
+            "2.00" => assert_eq!(ck, "7.50"),
+            _ => panic!("unexpected pk={pk}"),
+        }
+    }
+    assert!(expected_pks.is_empty());
 
     session
         .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())

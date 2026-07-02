@@ -114,12 +114,12 @@ async fn fts_index_returns_proper_count() {
             (
                 [CqlValue::Int(1), CqlValue::Text("one".to_string())].into(),
                 Some("hello world".to_string()),
-                Timestamp::from_unix_timestamp(10),
+                Timestamp::from_millis(10),
             ),
             (
                 [CqlValue::Int(2), CqlValue::Text("two".to_string())].into(),
                 Some("foo bar".to_string()),
-                Timestamp::from_unix_timestamp(20),
+                Timestamp::from_millis(20),
             ),
         ])),
         None,
@@ -158,7 +158,7 @@ async fn setup_fts_and_wait(
             (
                 pk.into_iter().collect(),
                 Some(doc.to_string()),
-                Timestamp::from_unix_timestamp(ts),
+                Timestamp::from_millis(ts),
             )
         })
         .collect();

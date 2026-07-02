@@ -227,10 +227,7 @@ mod tests {
 
         // Create and immediately drop a Cdc marker to trigger observation.
         let histogram = metrics.indexing_lag.with_label_values(&["ks", "idx"]);
-        drop(AsyncInProgress::cdc(
-            histogram.clone(),
-            Timestamp::from_unix_timestamp(0),
-        ));
+        drop(AsyncInProgress::cdc(histogram.clone(), Timestamp::MIN));
 
         assert_eq!(histogram.get_sample_count(), 1);
         assert!(histogram.get_sample_sum() > 0.0);

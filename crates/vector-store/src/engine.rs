@@ -210,7 +210,10 @@ async fn add_index(
 
     info!("creating the index {key}");
 
-    let (db_index, embeddings_stream) = match db.get_db_index(metadata.clone()).await {
+    let (db_index, embeddings_stream) = match db
+        .get_db_index(metadata.clone(), Arc::clone(&metrics))
+        .await
+    {
         Ok((db_index, embeddings_stream)) => (db_index, embeddings_stream),
         Err(err) => {
             debug!("unable to create a db monitoring task for an index {key}: {err}");
@@ -232,7 +235,8 @@ async fn add_index(
         primary_key_columns.clone(),
         partition_key_count,
         partition_key_columns,
-        &metadata.filtering_columns,
+        metadata.target_columns.len(),
+        Arc::clone(&metadata.filtering_columns),
         table_columns,
     ) {
         Ok(table) => Arc::new(RwLock::new(table)),
