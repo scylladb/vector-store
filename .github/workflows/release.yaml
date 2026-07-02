@@ -1,0 +1,143 @@
+name: Vector Store Release
+
+on:
+  release:
+    types: [released]
+  workflow_dispatch:
+    inputs:
+      VECTOR_VERSION:
+        description: 'Git tag / version to build from (e.g. 1.8.0)'
+        required: true
+
+env:
+  VECTOR_VERSION: ${{ github.event_name == 'release' && github.event.release.tag_name || github.event.inputs.VECTOR_VERSION }}
+
+jobs:
+  build-docker:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ env.VECTOR_VERSION }}
+          fetch-depth: 0
+
+      - name: Set up QEMU (multi-arch emulation)
+        uses: docker/setup-qemu-action@49b3bc8e6bdd4a60e6116a5414239cba5943d3cf # v3.2.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@c47758b77c9736f4b2ef4073d4d51994fabfe349 # v3.7.1
+
+      - name: Install SBOM tooling (syft + cargo-cyclonedx) used by build-release
+        run: |
+          set -euo pipefail
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+          cargo install cargo-cyclonedx --locked
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build images, SBOMs and manifest
+        run: ./scripts/build-release
+
+      - name: Push per-arch images and multi-arch manifest
+        run: |
+          set -euo pipefail
+          IMAGE=scylladb/vector-store
+          for arch in amd64 arm64 ; do
+            docker push "${IMAGE}:${VECTOR_VERSION}-${arch}"
+          done
+          docker manifest create --amend "${IMAGE}:${VECTOR_VERSION}" \
+            "${IMAGE}:${VECTOR_VERSION}-amd64" \
+            "${IMAGE}:${VECTOR_VERSION}-arm64"
+          docker manifest push --purge "${IMAGE}:${VECTOR_VERSION}"
+
+      - name: Archive SBOMs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vector-store-sboms-${{ env.VECTOR_VERSION }}
+          path: |
+            vector-store-${{ env.VECTOR_VERSION }}.cdx.json
+            vector-store-docker-${{ env.VECTOR_VERSION }}-*.cdx.json
+          if-no-files-found: warn
+
+  build-cloud-images:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write     # to attach the packer manifest to the release
+      id-token: write     # for GCP Workload Identity Federation
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ env.VECTOR_VERSION }}
+
+      - name: Setup Packer
+        uses: hashicorp/setup-packer@d38faf1295e2cddabf3ce395dc78405b7877be2d # v3.0.0
+        with:
+          version: '1.10.0'
+
+      - name: Setup AWS credentials
+        uses: aws-actions/configure-aws-credentials@e7f100cf4c008499ea8adda475de1042d6975c7b # v6.2.0
+        with:
+          aws-access-key-id: ${{ secrets.VECTOR_AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.VECTOR_AWS_SECRET_ACCESS_KEY }}
+          aws-region: 'us-east-1'
+
+      - name: Setup GCP credentials
+        uses: google-github-actions/auth@55bd3a7c6e2ae7cf1877fd1ccb9d54c0503c457c # v2.1.2
+        with:
+          workload_identity_provider: ${{ secrets.MONITOR_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.MONITOR_GCP_SERVICE_ACCOUNT }}
+
+      - name: Build Images
+        working-directory: packer
+        run: |
+          set -euo pipefail
+          packer plugins install github.com/hashicorp/googlecompute
+          packer plugins install github.com/hashicorp/amazon
+          # AWS x86
+          packer build -only=amazon-ebs -var vector_version="$VECTOR_VERSION" vector-store-template.json
+          # AWS arm64
+          packer build -only=amazon-ebs -var vector_version="$VECTOR_VERSION" -var 'arch=arm64' vector-store-template.json
+          # GCE x86
+          packer build -only=googlecompute -var vector_version="$VECTOR_VERSION" vector-store-template.json
+
+      - name: Archive Packer manifest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vector-store-cloud-images-${{ env.VECTOR_VERSION }}
+          path: packer/packer-manifest.json
+
+      - name: Upload Packer manifest to the release
+        if: github.event_name == 'release' && github.event.release
+        uses: actions/upload-release-asset@e8f9f06c4b078e705bd2ea027f0926603fc9b4d5 # v1.0.2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: packer/packer-manifest.json
+          asset_name: vector-store-cloud-images-${{ env.VECTOR_VERSION }}.json
+          asset_content_type: application/json
+
+  announce:
+    needs: [build-docker, build-cloud-images]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Announce release on Slack
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: |
+          curl -sS -X POST -H 'Content-type: application/json' \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            --data "{
+              \"channel\": \"#release-announce\",
+              \"text\": \"<!here> ScyllaDB Vector Store *${VECTOR_VERSION}* is released\",
+              \"link_names\": 1
+            }" \
+            https://slack.com/api/chat.postMessage
