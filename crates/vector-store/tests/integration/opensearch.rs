@@ -22,6 +22,7 @@ use vector_store::HttpServerExt;
 use vector_store::IndexKind;
 use vector_store::IndexMetadata;
 use vector_store::IndexOptionsVs;
+use vector_store::NonemptyArc;
 use vector_store::Timestamp;
 
 #[tokio::test]
@@ -35,9 +36,9 @@ async fn simple_create_search_delete_index() {
         keyspace_name: "vector".into(),
         table_name: "items".into(),
         index_name: "ann".into(),
-        target_column: "embedding".into(),
+        target_columns: NonemptyArc::new(["embedding"]).unwrap(),
         partitioning: DbIndexPartitioning::Global,
-        filtering_columns: Arc::new(Vec::new()),
+        filtering_columns: Arc::new([]),
         version: Uuid::new_v4().into(),
         kind: IndexKind::Vs(IndexOptionsVs {
             dimensions: NonZeroUsize::new(3).unwrap().into(),
@@ -67,7 +68,7 @@ async fn simple_create_search_delete_index() {
         index.keyspace_name.clone(),
         index.table_name.clone(),
         Table {
-            primary_keys: Arc::new(vec!["pk".into(), "ck".into()]),
+            primary_keys: NonemptyArc::new(["pk", "ck"]).unwrap(),
             partition_key_count: 1,
             columns: Arc::new(
                 [
@@ -77,9 +78,12 @@ async fn simple_create_search_delete_index() {
                 .into_iter()
                 .collect(),
             ),
-            dimensions: [(index.target_column.clone(), index.vs().unwrap().dimensions)]
-                .into_iter()
-                .collect(),
+            dimensions: [(
+                index.target_columns.first().clone(),
+                index.vs().unwrap().dimensions,
+            )]
+            .into_iter()
+            .collect(),
         },
     )
     .unwrap();

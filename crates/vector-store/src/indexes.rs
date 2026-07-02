@@ -9,6 +9,7 @@ use crate::IndexKey;
 use crate::IndexMetadata;
 use crate::IndexVersion;
 use crate::KeyspaceName;
+use crate::NonemptyArc;
 use crate::Progress;
 use crate::TableName;
 use crate::db_index::DbIndex;
@@ -62,7 +63,7 @@ impl Ord for NeedsFiltering {
 pub(crate) struct RoutingGroupKey {
     keyspace: KeyspaceName,
     table: TableName,
-    column: ColumnName,
+    columns: NonemptyArc<ColumnName>,
 }
 
 impl From<&IndexMetadata> for RoutingGroupKey {
@@ -70,7 +71,7 @@ impl From<&IndexMetadata> for RoutingGroupKey {
         Self {
             keyspace: metadata.keyspace_name.clone(),
             table: metadata.table_name.clone(),
-            column: metadata.target_column.clone(),
+            columns: metadata.target_columns.clone(),
         }
     }
 }
@@ -81,7 +82,7 @@ pub(crate) struct IndexEntry<I, D = ()> {
     db_index: mpsc::Sender<DbIndex>,
     status: IndexStatus,
     progress: Progress,
-    primary_key_columns: Arc<Vec<ColumnName>>,
+    primary_key_columns: NonemptyArc<ColumnName>,
     data: D,
 }
 
@@ -102,7 +103,7 @@ pub(crate) type FtsIndexEntry = IndexEntry<FtsIndex>;
 pub(crate) struct VsIndexData {
     routing_group: RoutingGroupKey,
     partitioning: DbIndexPartitioning,
-    filtering_columns: Arc<Vec<ColumnName>>,
+    filtering_columns: Arc<[ColumnName]>,
     table_columns: Arc<HashMap<ColumnName, NativeType>>,
     version: IndexVersion,
     options: crate::IndexOptionsVs,
@@ -133,7 +134,7 @@ impl<I, D> IndexEntry<I, D> {
         self.status = status;
     }
 
-    pub(crate) fn primary_key_columns(&self) -> &Arc<Vec<ColumnName>> {
+    pub(crate) fn primary_key_columns(&self) -> &NonemptyArc<ColumnName> {
         &self.primary_key_columns
     }
 }
@@ -153,14 +154,12 @@ impl VsIndexEntry {
             })?
             .clone();
         let primary_key_columns = db_index.get_primary_key_columns().await;
-        let filtering_columns: Arc<Vec<ColumnName>> = Arc::new(
-            metadata
-                .filtering_columns
-                .iter()
-                .chain(primary_key_columns.iter())
-                .cloned()
-                .collect(),
-        );
+        let filtering_columns = metadata
+            .filtering_columns
+            .iter()
+            .chain(primary_key_columns.iter())
+            .cloned()
+            .collect();
         let table_columns = db_index.get_table_columns().await;
         let progress = db_index.full_scan_progress().await;
         Ok(Self {
@@ -220,7 +219,8 @@ impl VsIndexEntry {
                 if !pk_columns.iter().all(|col| equality_columns.contains(col)) {
                     return None;
                 }
-                let uncovered = equality_columns.len() - pk_columns.len() + range_columns.len();
+                let uncovered =
+                    equality_columns.len() - pk_columns.len().get() + range_columns.len();
                 Some(if uncovered == 0 {
                     NeedsFiltering::No
                 } else {
@@ -264,7 +264,7 @@ pub(crate) enum BestIndexState {
     Serving {
         key: IndexKey,
         index: mpsc::Sender<VsIndex>,
-        primary_key_columns: Arc<Vec<ColumnName>>,
+        primary_key_columns: NonemptyArc<ColumnName>,
         table_columns: Arc<HashMap<ColumnName, NativeType>>,
         needs_filtering: NeedsFiltering,
     },
@@ -392,7 +392,7 @@ impl Indexes {
                 BestIndexState::Serving {
                     key: routed_key.clone(),
                     index: routed_entry.index.clone(),
-                    primary_key_columns: Arc::clone(&routed_entry.primary_key_columns),
+                    primary_key_columns: routed_entry.primary_key_columns.clone(),
                     table_columns: Arc::clone(&routed_entry.data.table_columns),
                     needs_filtering: needs_filtering.clone(),
                 }

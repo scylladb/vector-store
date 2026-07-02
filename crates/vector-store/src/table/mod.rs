@@ -12,6 +12,7 @@ use crate::ColumnName;
 use crate::DbIndexedRow;
 use crate::DbIndexedValue;
 use crate::IndexKey;
+use crate::NonemptyArc;
 use crate::PartitionKey;
 use crate::PrimaryKey;
 use crate::Restriction;
@@ -131,7 +132,7 @@ enum IndexData {
     Local {
         /// Column names for which the index is built. The order of column names is important, as it
         /// defines the order of values in the index key.
-        key_columns: Arc<Vec<ColumnName>>,
+        key_columns: NonemptyArc<ColumnName>,
 
         map: BTreeMap<PartitionKey, PartitionId>,
         free_ids: FreePartitionIds,
@@ -198,7 +199,7 @@ impl Index {
 
     fn new_global(
         index_id: IndexId,
-        primary_key_columns: Arc<Vec<ColumnName>>,
+        primary_key_columns: NonemptyArc<ColumnName>,
         filtering_columns: &[ColumnName],
     ) -> Self {
         Self {
@@ -215,7 +216,7 @@ impl Index {
 
     fn new_local(
         index_id: IndexId,
-        key_columns: Arc<Vec<ColumnName>>,
+        key_columns: NonemptyArc<ColumnName>,
         filtering_columns: &[ColumnName],
     ) -> Self {
         Self {
@@ -357,7 +358,7 @@ impl Index {
 /// A struct that represents a table in the database.
 #[derive(Debug)]
 pub struct Table {
-    primary_key_columns: Arc<Vec<ColumnName>>,
+    primary_key_columns: NonemptyArc<ColumnName>,
     partition_key_count: usize,
     needs_ck_normalization: bool,
     primary_ids: BTreeMap<PrimaryKey, PrimaryId>,
@@ -376,29 +377,21 @@ impl Table {
 
     pub(crate) fn new(
         index_key: IndexKey,
-        primary_key_columns: Arc<Vec<ColumnName>>,
+        primary_key_columns: NonemptyArc<ColumnName>,
         partition_key_count: usize,
-        partition_key_columns: Option<Arc<Vec<ColumnName>>>,
+        partition_key_columns: Option<NonemptyArc<ColumnName>>,
         filtering_columns: &[ColumnName],
         table_columns: Arc<HashMap<ColumnName, NativeType>>,
     ) -> anyhow::Result<Self> {
-        let partition_key_count = partition_key_count.min(primary_key_columns.len());
+        let partition_key_count = partition_key_count.min(primary_key_columns.len().get());
         let mut index_id_generator = IndexIdGenerator::new();
         let mut indexes = BTreeMap::new();
         let mut index_ids = BTreeMap::new();
         let index_id = index_id_generator.next(partition_key_columns.is_none())?;
         let index = if let Some(partition_key_columns) = partition_key_columns.as_ref() {
-            Index::new_local(
-                index_id,
-                Arc::clone(partition_key_columns),
-                filtering_columns,
-            )
+            Index::new_local(index_id, partition_key_columns.clone(), filtering_columns)
         } else {
-            Index::new_global(
-                index_id,
-                Arc::clone(&primary_key_columns),
-                filtering_columns,
-            )
+            Index::new_global(index_id, primary_key_columns.clone(), filtering_columns)
         };
         indexes.insert(index_id, index);
         index_ids.insert(index_key, index_id);
@@ -423,7 +416,7 @@ impl Table {
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
         columns.extend(column_with_values);
-        let needs_ck_normalization = primary_key_columns[partition_key_count..]
+        let needs_ck_normalization = primary_key_columns.as_slice()[partition_key_count..]
             .iter()
             .any(|col| matches!(table_columns.get(col), Some(NativeType::Decimal)));
         let mut table = Self {
@@ -622,9 +615,10 @@ impl TableAdd for Table {
                             let partition_id = match index.data {
                                 IndexData::Global => PartitionId::global(*index_id),
                                 IndexData::Local { .. } => {
-                                    let Some(partition_key) = index
-                                        .partition_key(&self.primary_key_columns, &primary_key)
-                                    else {
+                                    let Some(partition_key) = index.partition_key(
+                                        self.primary_key_columns.as_slice(),
+                                        &primary_key,
+                                    ) else {
                                         return Ok(());
                                     };
                                     index.add(primary_id, partition_key)?
@@ -693,7 +687,7 @@ impl TableSearch for Table {
                 key_columns, map, ..
             } => restrictions
                 .and_then(|restrictions| {
-                    partition_key_from_restrictions(key_columns.as_ref(), restrictions)
+                    partition_key_from_restrictions(key_columns.as_slice(), restrictions)
                 })
                 .and_then(|(partition_key, restrictions)| {
                     map.get(&partition_key)
@@ -950,11 +944,11 @@ mod tests {
 
     #[test]
     fn flow() {
-        for partition_key_columns in [None, Some(Arc::new(vec!["pk".into()]))] {
+        for partition_key_columns in [None, NonemptyArc::new(["pk"])] {
             let index_key = IndexKey::new(&"ks".into(), &"idx".into());
             let mut table = Table::new(
                 index_key.clone(),
-                Arc::new(vec!["pk".into(), "ck".into()]),
+                NonemptyArc::new(["pk", "ck"]).unwrap(),
                 1,
                 partition_key_columns.clone(),
                 &[],

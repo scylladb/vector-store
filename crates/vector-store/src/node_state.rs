@@ -184,13 +184,13 @@ pub(crate) async fn new() -> mpsc::Sender<NodeState> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ColumnName;
     use crate::DbIndexPartitioning;
     use crate::Dimensions;
     use crate::IndexKind;
     use crate::IndexName;
     use crate::IndexOptionsVs;
     use crate::KeyspaceName;
+    use crate::NonemptyArc;
     use crate::TableName;
     use std::num::NonZeroUsize;
     use std::sync::Arc;
@@ -212,9 +212,9 @@ mod tests {
             keyspace_name: KeyspaceName("test_keyspace".to_string()),
             index_name: IndexName("test_index".to_string()),
             table_name: TableName("test_table".to_string()),
-            target_column: ColumnName("test_column".to_string()),
+            target_columns: NonemptyArc::new(["test_column"]).unwrap(),
             partitioning: DbIndexPartitioning::Global,
-            filtering_columns: Arc::new(Vec::new()),
+            filtering_columns: Arc::new([]),
             version: Uuid::new_v4().into(),
             kind: IndexKind::Vs(IndexOptionsVs {
                 dimensions: Dimensions(NonZeroUsize::new(3).unwrap()),
@@ -229,9 +229,9 @@ mod tests {
             keyspace_name: KeyspaceName("test_keyspace".to_string()),
             index_name: IndexName("test_index1".to_string()),
             table_name: TableName("test_table".to_string()),
-            target_column: ColumnName("test_column".to_string()),
+            target_columns: NonemptyArc::new(["test_column"]).unwrap(),
             partitioning: DbIndexPartitioning::Global,
-            filtering_columns: Arc::new(Vec::new()),
+            filtering_columns: Arc::new([]),
             version: Uuid::new_v4().into(),
             kind: IndexKind::Vs(IndexOptionsVs {
                 dimensions: Dimensions(NonZeroUsize::new(3).unwrap()),
@@ -270,9 +270,9 @@ mod tests {
             keyspace_name: KeyspaceName("test_keyspace".to_string()),
             index_name: IndexName("test_index".to_string()),
             table_name: TableName("test_table".to_string()),
-            target_column: ColumnName("test_column".to_string()),
+            target_columns: NonemptyArc::new(["test_column"]).unwrap(),
             partitioning: DbIndexPartitioning::Global,
-            filtering_columns: Arc::new(Vec::new()),
+            filtering_columns: Arc::new([]),
             version: Uuid::new_v4().into(),
             kind: IndexKind::Vs(IndexOptionsVs {
                 dimensions: Dimensions(NonZeroUsize::new(3).unwrap()),
@@ -361,9 +361,9 @@ mod tests {
             keyspace_name: KeyspaceName("test_keyspace".to_string()),
             index_name: IndexName("test_index".to_string()),
             table_name: TableName("test_table".to_string()),
-            target_column: ColumnName("test_column".to_string()),
+            target_columns: NonemptyArc::new(["test_column"]).unwrap(),
             partitioning: DbIndexPartitioning::Global,
-            filtering_columns: Arc::new(Vec::new()),
+            filtering_columns: Arc::new([]),
             version: Uuid::new_v4().into(),
             kind: IndexKind::Vs(IndexOptionsVs {
                 dimensions: Dimensions(NonZeroUsize::new(3).unwrap()),

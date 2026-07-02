@@ -11,6 +11,8 @@ use crate::DbIndexedValue;
 use crate::IndexKind;
 use crate::IndexMetadata;
 use crate::KeyspaceIdentifier;
+use crate::NonemptyArc;
+use crate::NonemptyIteratorExt;
 use crate::Percentage;
 use crate::Progress;
 use crate::TableIdentifier;
@@ -64,7 +66,7 @@ use tracing::info;
 use tracing::trace;
 use tracing::warn;
 
-type GetPrimaryKeyColumnsR = Arc<Vec<ColumnName>>;
+type GetPrimaryKeyColumnsR = NonemptyArc<ColumnName>;
 type GetTableColumnsR = Arc<HashMap<ColumnName, NativeType>>;
 type RangeScanResult =
     anyhow::Result<Pin<Box<dyn Stream<Item = DbIndexedRow> + std::marker::Send>>, anyhow::Error>;
@@ -300,7 +302,7 @@ async fn process(statements: Arc<Statements>, msg: DbIndex, completed_scan_lengt
 
 struct Statements {
     session_rx: tokio::sync::watch::Receiver<Option<Arc<Session>>>,
-    primary_key_columns: Arc<Vec<ColumnName>>,
+    primary_key_columns: NonemptyArc<ColumnName>,
     partition_key_count: usize,
     table_columns: GetTableColumnsR,
     st_range_scan: PreparedStatement,
@@ -327,18 +329,23 @@ impl Statements {
             .ok_or_else(|| anyhow!("table {} does not exist", metadata.table_name))?;
 
         let partition_key_count = table.partition_key.len();
-        let primary_key_columns = Arc::new(
-            table
-                .partition_key
-                .iter()
-                .chain(table.clustering_key.iter())
-                .cloned()
-                .map(ColumnName::from)
-                .collect_vec(),
-        );
+        let primary_key_columns = table
+            .partition_key
+            .iter()
+            .chain(table.clustering_key.iter())
+            .cloned()
+            .map(ColumnName::from)
+            .collect_nonempty_arc()
+            .ok_or_else(|| {
+                anyhow!(
+                    "table {}.{} has no primary key",
+                    metadata.keyspace_name,
+                    metadata.table_name
+                )
+            })?;
 
         anyhow::ensure!(
-            primary_key_columns.len() <= InvariantKey::MAX_COLUMNS,
+            primary_key_columns.len().get() <= InvariantKey::MAX_COLUMNS,
             "table {}.{} has {} primary key columns, but at most {} are supported",
             metadata.keyspace_name,
             metadata.table_name,
@@ -373,7 +380,7 @@ impl Statements {
         let query = db_index_backend::range_scan_query(
             &keyspace_identifier,
             &table_identifier,
-            &metadata.target_column,
+            metadata.target_columns.first(),
             &st_primary_key_list,
             &st_partition_key_list,
         );
@@ -566,7 +573,7 @@ impl Statements {
         end: Token,
     ) -> anyhow::Result<BoxStream<'static, DbIndexedRow>> {
         // last two columns are embedding and writetime
-        let columns_len_expected = self.primary_key_columns.len() + 2;
+        let columns_len_expected = self.primary_key_columns.len().get() + 2;
         let kind = self.kind.clone();
 
         // wait for an active session

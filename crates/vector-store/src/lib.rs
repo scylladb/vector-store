@@ -25,6 +25,7 @@ mod metrics;
 mod monitor_indexes;
 mod monitor_items;
 pub mod node_state;
+mod nonempty;
 mod partition_key;
 mod perf;
 mod primary_key;
@@ -49,6 +50,9 @@ pub use crate::info::Info;
 use crate::internals::Internals;
 use crate::metrics::Metrics;
 use crate::node_state::NodeState;
+pub use crate::nonempty::NonemptyArc;
+pub use crate::nonempty::NonemptyBox;
+pub use crate::nonempty::NonemptyIteratorExt;
 pub use crate::partition_key::PartitionKey;
 pub use crate::primary_key::PrimaryKey;
 pub use crate::similarity::SimilarityScore;
@@ -595,9 +599,9 @@ pub struct IndexMetadata {
     pub keyspace_name: KeyspaceName,
     pub index_name: IndexName,
     pub table_name: TableName,
-    pub target_column: ColumnName,
+    pub target_columns: NonemptyArc<ColumnName>,
     pub partitioning: DbIndexPartitioning,
-    pub filtering_columns: Arc<Vec<ColumnName>>,
+    pub filtering_columns: Arc<[ColumnName]>,
     pub version: IndexVersion,
     pub kind: IndexKind,
 }
@@ -621,7 +625,7 @@ impl IndexMetadata {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum DbIndexPartitioning {
     Global,
-    Local(Arc<Vec<ColumnName>>),
+    Local(NonemptyArc<ColumnName>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -636,9 +640,9 @@ pub struct DbCustomIndex {
     pub keyspace: KeyspaceName,
     pub index: IndexName,
     pub table: TableName,
-    pub target_column: ColumnName,
+    pub target_columns: NonemptyArc<ColumnName>,
     pub partitioning: DbIndexPartitioning,
-    pub filtering_columns: Arc<Vec<ColumnName>>,
+    pub filtering_columns: Arc<[ColumnName]>,
     pub kind: DbIndexKind,
 }
 

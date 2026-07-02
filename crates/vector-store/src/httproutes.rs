@@ -620,7 +620,7 @@ async fn post_index_ann(
         let search_result = if let Some(filter) = request.filter {
             let filter = match try_from_post_index_ann_filter(
                 filter,
-                &primary_key_columns,
+                primary_key_columns.as_slice(),
                 &table_columns,
             ) {
                 Ok(filter) => filter,
@@ -674,7 +674,7 @@ async fn post_index_ann(
                         .collect();
 
                     let primary_keys =
-                        try_collect_primary_keys(&primary_key_columns, &primary_keys);
+                        try_collect_primary_keys(primary_key_columns.as_slice(), &primary_keys);
 
                     match primary_keys {
                         Err(err) => {
@@ -789,10 +789,7 @@ async fn post_index_bm25(
                 }
             }
         }
-        (
-            entry.index().clone(),
-            Arc::clone(entry.primary_key_columns()),
-        )
+        (entry.index().clone(), entry.primary_key_columns().clone())
     };
 
     let search_result = fts_sender
@@ -817,7 +814,8 @@ async fn post_index_bm25(
                 return (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response();
             }
 
-            let primary_keys = try_collect_primary_keys(&primary_key_columns, &primary_keys);
+            let primary_keys =
+                try_collect_primary_keys(primary_key_columns.as_slice(), &primary_keys);
 
             match primary_keys {
                 Err(err) => {

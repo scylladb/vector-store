@@ -30,6 +30,7 @@ use vector_store::HttpServerExt;
 use vector_store::IndexKind;
 use vector_store::IndexMetadata;
 use vector_store::IndexOptionsVs;
+use vector_store::NonemptyArc;
 use vector_store::Quantization;
 use vector_store::SpaceType;
 use vector_store::Timestamp;
@@ -55,9 +56,9 @@ async fn memory_limit_during_index_build() {
         keyspace_name: "ksp".into(),
         table_name: "tbl".into(),
         index_name: "idx".into(),
-        target_column: "v".into(),
+        target_columns: NonemptyArc::new(["v"]).unwrap(),
         partitioning: DbIndexPartitioning::Global,
-        filtering_columns: Arc::new(Vec::new()),
+        filtering_columns: Arc::new([]),
         version: Uuid::new_v4().into(),
         kind: IndexKind::Vs(IndexOptionsVs {
             dimensions: NonZeroUsize::new(3).unwrap().into(),
@@ -73,12 +74,15 @@ async fn memory_limit_during_index_build() {
         index.keyspace_name.clone(),
         index.table_name.clone(),
         Table {
-            primary_keys: Arc::new(vec!["pk".into()]),
+            primary_keys: NonemptyArc::new(["pk"]).unwrap(),
             partition_key_count: 1,
             columns: Arc::new([("pk".into(), NativeType::Int)].into_iter().collect()),
-            dimensions: [(index.target_column.clone(), index.vs().unwrap().dimensions)]
-                .into_iter()
-                .collect(),
+            dimensions: [(
+                index.target_columns.first().clone(),
+                index.vs().unwrap().dimensions,
+            )]
+            .into_iter()
+            .collect(),
         },
     )
     .unwrap();

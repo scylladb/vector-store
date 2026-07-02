@@ -29,6 +29,7 @@ use vector_store::IndexMetadata;
 use vector_store::IndexName;
 use vector_store::IndexVersion;
 use vector_store::KeyspaceName;
+use vector_store::NonemptyArc;
 use vector_store::Percentage;
 use vector_store::PrimaryKey;
 use vector_store::Progress;
@@ -112,7 +113,7 @@ pub(crate) fn new(node_state: Sender<NodeState>) -> (mpsc::Sender<Db>, DbBasic) 
 }
 
 pub(crate) struct Table {
-    pub(crate) primary_keys: Arc<Vec<ColumnName>>,
+    pub(crate) primary_keys: NonemptyArc<ColumnName>,
     pub(crate) partition_key_count: usize,
     pub(crate) columns: Arc<HashMap<ColumnName, NativeType>>,
     pub(crate) dimensions: HashMap<ColumnName, Dimensions>,
@@ -289,7 +290,7 @@ fn process_db(db: &DbBasic, msg: Db, node_state: Sender<NodeState>) {
                                 keyspace: keyspace_name.clone(),
                                 index: index_name.clone(),
                                 table: index.metadata.table_name.clone(),
-                                target_column: index.metadata.target_column.clone(),
+                                target_columns: index.metadata.target_columns.clone(),
                                 partitioning: index.metadata.partitioning.clone(),
                                 filtering_columns: index.metadata.filtering_columns.clone(),
                                 kind: match index.metadata.kind {
@@ -506,7 +507,7 @@ async fn spawn_process_db_index(
                         .get(&metadata.keyspace_name)
                         .and_then(|keyspace| keyspace.tables.get(&metadata.table_name))
                         .map(|table| table.primary_keys.clone())
-                        .unwrap_or_default(),
+                        .unwrap(),
                 )
                 .map_err(|_| anyhow!("DbIndex::GetPrimaryKeyColumns: unable to send response"))
                 .unwrap(),

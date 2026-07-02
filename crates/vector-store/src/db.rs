@@ -19,6 +19,8 @@ use crate::IndexMetadata;
 use crate::IndexName;
 use crate::IndexVersion;
 use crate::KeyspaceName;
+use crate::NonemptyArc;
+use crate::NonemptyIteratorExt;
 use crate::Quantization;
 use crate::SpaceType;
 use crate::TableName;
@@ -760,14 +762,18 @@ impl Statements {
                                     keyspace: keyspace_name.into(),
                                     index: index_name.clone().into(),
                                     table: table_name.into(),
-                                    target_column,
+                                    target_columns: NonemptyArc::new([target_column])
+                                        .expect("target column should be non-empty"),
                                     partitioning,
-                                    filtering_columns: Arc::new(filtering_columns),
+                                    filtering_columns,
                                     kind,
                                 },
                             )
                             .inspect_err(|err| {
-                                warn!("Skipping index {index_name} due to invalid target option: {err}");
+                                warn!(
+                                    "Skipping index {index_name} \
+                                    due to invalid target option: {err}"
+                                );
                             })
                             .ok()
                     }))
@@ -1032,10 +1038,10 @@ fn from_target_option(
     table: &Table,
     value: String,
     kind: DbIndexKind,
-) -> anyhow::Result<(DbIndexPartitioning, ColumnName, Vec<ColumnName>)> {
+) -> anyhow::Result<(DbIndexPartitioning, ColumnName, Arc<[ColumnName]>)> {
     let Some(target) = parse_target_option(table, &value)? else {
         // Global index with a single target column
-        return Ok((DbIndexPartitioning::Global, value.into(), vec![]));
+        return Ok((DbIndexPartitioning::Global, value.into(), Arc::new([])));
     };
 
     validate_target_column(table, &target.target_column, kind)?;
@@ -1050,13 +1056,16 @@ fn from_target_option(
         {
             bail!("invalid target option: pk column {invalid} is not in the table's partition key");
         }
-        DbIndexPartitioning::Local(Arc::new(
+        DbIndexPartitioning::Local(
             target
                 .partition_key_columns
                 .into_iter()
                 .map(ColumnName::from)
-                .collect(),
-        ))
+                .collect_nonempty_arc()
+                .ok_or_else(|| {
+                    anyhow!("invalid target option: failed to parse partition key columns")
+                })?,
+        )
     };
 
     Ok((

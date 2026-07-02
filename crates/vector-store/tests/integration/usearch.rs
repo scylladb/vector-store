@@ -38,6 +38,8 @@ use vector_store::HttpServerExt;
 use vector_store::IndexKind;
 use vector_store::IndexMetadata;
 use vector_store::IndexOptionsVs;
+use vector_store::NonemptyArc;
+use vector_store::NonemptyIteratorExt;
 use vector_store::Percentage;
 use vector_store::Quantization;
 use vector_store::SpaceType;
@@ -106,9 +108,9 @@ pub(crate) async fn setup_store_with_quantization(
         keyspace_name: "vector".into(),
         table_name: "items".into(),
         index_name: "ann".into(),
-        target_column: "embedding".into(),
+        target_columns: NonemptyArc::new(["embedding"]).unwrap(),
         partitioning,
-        filtering_columns: Arc::new(columns.keys().cloned().collect()),
+        filtering_columns: columns.keys().cloned().collect(),
         version: Uuid::new_v4().into(),
         kind: IndexKind::Vs(IndexOptionsVs {
             dimensions: dimension,
@@ -124,12 +126,15 @@ pub(crate) async fn setup_store_with_quantization(
         index.keyspace_name.clone(),
         index.table_name.clone(),
         Table {
-            primary_keys: Arc::new(primary_keys.into_iter().collect()),
+            primary_keys: primary_keys.into_iter().collect_nonempty_arc().unwrap(),
             partition_key_count,
             columns,
-            dimensions: [(index.target_column.clone(), index.vs().unwrap().dimensions)]
-                .into_iter()
-                .collect(),
+            dimensions: [(
+                index.target_columns.first().clone(),
+                index.vs().unwrap().dimensions,
+            )]
+            .into_iter()
+            .collect(),
         },
     )
     .unwrap();
@@ -295,9 +300,9 @@ async fn failed_db_index_create() {
         keyspace_name: "vector".into(),
         table_name: "items".into(),
         index_name: "ann".into(),
-        target_column: "embedding".into(),
+        target_columns: NonemptyArc::new(["embedding"]).unwrap(),
         partitioning: DbIndexPartitioning::Global,
-        filtering_columns: Arc::new(Vec::new()),
+        filtering_columns: Arc::new([]),
         version: Uuid::new_v4().into(),
         kind: IndexKind::Vs(IndexOptionsVs {
             dimensions: NonZeroUsize::new(3).unwrap().into(),
@@ -327,7 +332,7 @@ async fn failed_db_index_create() {
         index.keyspace_name.clone(),
         index.table_name.clone(),
         Table {
-            primary_keys: Arc::new(vec!["pk".into(), "ck".into()]),
+            primary_keys: NonemptyArc::new(["pk", "ck"]).unwrap(),
             partition_key_count: 1,
             columns: Arc::new(
                 [
@@ -337,9 +342,12 @@ async fn failed_db_index_create() {
                 .into_iter()
                 .collect(),
             ),
-            dimensions: [(index.target_column.clone(), index.vs().unwrap().dimensions)]
-                .into_iter()
-                .collect(),
+            dimensions: [(
+                index.target_columns.first().clone(),
+                index.vs().unwrap().dimensions,
+            )]
+            .into_iter()
+            .collect(),
         },
     )
     .unwrap();
@@ -1558,9 +1566,9 @@ async fn similarity_scores_are_decreasing_and_correctly_converted() {
         keyspace_name: "vector".into(),
         table_name: "items".into(),
         index_name: "ann".into(),
-        target_column: "embedding".into(),
+        target_columns: NonemptyArc::new(["embedding"]).unwrap(),
         partitioning: DbIndexPartitioning::Global,
-        filtering_columns: Arc::new(Vec::new()),
+        filtering_columns: Arc::new([]),
         version: Uuid::new_v4().into(),
         kind: IndexKind::Vs(IndexOptionsVs {
             dimensions: NonZeroUsize::new(1).unwrap().into(),
@@ -1576,12 +1584,15 @@ async fn similarity_scores_are_decreasing_and_correctly_converted() {
         index.keyspace_name.clone(),
         index.table_name.clone(),
         Table {
-            primary_keys: Arc::new(vec!["pk".into()]),
+            primary_keys: NonemptyArc::new(["pk"]).unwrap(),
             partition_key_count: 1,
             columns: Arc::new([("pk".into(), NativeType::Int)].into_iter().collect()),
-            dimensions: [(index.target_column.clone(), index.vs().unwrap().dimensions)]
-                .into_iter()
-                .collect(),
+            dimensions: [(
+                index.target_columns.first().clone(),
+                index.vs().unwrap().dimensions,
+            )]
+            .into_iter()
+            .collect(),
         },
     )
     .unwrap();
