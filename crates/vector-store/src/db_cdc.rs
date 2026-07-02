@@ -17,11 +17,7 @@ use crate::db_index_backend::DbIndexBackend;
 use crate::internals::Internals;
 use crate::internals::InternalsExt;
 use crate::perf;
-use ::time::Date;
-use ::time::Month;
 use ::time::OffsetDateTime;
-use ::time::PrimitiveDateTime;
-use ::time::Time;
 use anyhow::Context;
 use anyhow::anyhow;
 use anyhow::bail;
@@ -446,7 +442,6 @@ struct CdcConsumerData {
     backend: DbIndexBackend,
     kind: IndexKind,
     tx: mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
-    gregorian_epoch: PrimitiveDateTime,
 }
 
 struct CdcConsumer(Arc<CdcConsumerData>);
@@ -500,17 +495,10 @@ impl Consumer for CdcConsumer {
             return Ok(());
         };
 
-        const HUNDREDS_NANOS_TO_MICROS: u64 = 10;
-        let timestamp = (self.0.gregorian_epoch
-            + Duration::from_micros(
-                row.time
-                    .get_timestamp()
-                    .ok_or(anyhow!("CDC error: time has no timestamp"))?
-                    .to_gregorian()
-                    .0
-                    / HUNDREDS_NANOS_TO_MICROS,
-            ))
-        .into();
+        let timestamp = row
+            .time
+            .try_into()
+            .map_err(|err| anyhow!("CDC error: converting row.time: {err}"))?;
 
         _ = self
             .0
@@ -560,11 +548,6 @@ impl CdcConsumerFactory {
             .collect_nonempty_arc()
             .ok_or_else(|| anyhow!("primary key must have at least one column"))?;
 
-        let gregorian_epoch = PrimitiveDateTime::new(
-            Date::from_calendar_date(1582, Month::October, 15)?,
-            Time::MIDNIGHT,
-        );
-
         let backend = DbIndexBackend::from(metadata);
 
         Ok(Self(Arc::new(CdcConsumerData {
@@ -572,7 +555,6 @@ impl CdcConsumerFactory {
             backend,
             kind: metadata.kind.clone(),
             tx,
-            gregorian_epoch,
         })))
     }
 }
