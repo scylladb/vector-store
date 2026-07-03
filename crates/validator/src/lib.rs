@@ -17,6 +17,7 @@ mod fts;
 mod full_scan;
 mod high_availability;
 mod index_create;
+mod index_modify;
 mod index_status;
 mod quantization_and_rescoring;
 mod reconnect;
