@@ -51,6 +51,7 @@ use std::collections::btree_map::Entry;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tap::Pipe;
+use tracing::debug;
 use vec_chunks::Chunk;
 use vec_chunks::VecChunks;
 
@@ -100,7 +101,9 @@ enum IndexData {
     Local {
         /// Column names for which the index is built. The order of column names is important, as it
         /// defines the order of values in the index key.
-        key_columns: NonemptyArc<ColumnName>,
+        partition_key_columns: NonemptyArc<ColumnName>,
+
+        nonpk_partition_key_columns: Box<[ColumnName]>,
 
         map: BTreeMap<PartitionKey, PartitionId>,
         free_ids: FreePartitionIds,
@@ -113,26 +116,35 @@ enum IndexData {
 
 impl IndexData {
     /// Returns true if partition is empty
-    fn remove_row(&mut self, primary_id: PrimaryId) -> bool {
+    fn remove_row_from_partition(
+        &mut self,
+        primary_id: PrimaryId,
+        partition_id: PartitionId,
+    ) -> bool {
         match self {
             Self::Global { .. } => false,
             Self::Local {
-                ids,
                 keys,
                 sizes,
                 map,
+                ids,
                 free_ids,
                 ..
             } => {
-                let Some(Some(partition_id)) = ids.get_mut(primary_id).map(|id| id.take()) else {
-                    return false;
-                };
-
+                if let Some(stored_partition_id) = ids.get_mut(primary_id) {
+                    *stored_partition_id = None;
+                }
                 let is_empty = sizes
                     .get_mut(partition_id)
                     .map(|size| {
                         if size.0 > 0 {
                             size.0 -= 1;
+                        } else {
+                            debug!(
+                                "Partition size should be greater than 0 when removing a row, \
+                                but got {size:?} for partition_id {partition_id:?}"
+                            );
+                            debug_assert!(false);
                         }
                         size.0 == 0
                     })
@@ -143,6 +155,132 @@ impl IndexData {
                     free_ids.return_id(partition_id);
                 }
                 is_empty
+            }
+        }
+    }
+
+    fn insert_row_into_partition(&mut self, primary_id: PrimaryId, partition_id: PartitionId) {
+        match self {
+            Self::Global { .. } => {}
+            Self::Local { ids, sizes, .. } => {
+                if let Some(partition_id_storage) = ids.get_mut(primary_id) {
+                    partition_id_storage.replace(partition_id);
+                }
+
+                if let Some(size) = sizes.get_mut(partition_id) {
+                    size.0 += 1;
+                }
+            }
+        }
+    }
+
+    fn get_partition_key(
+        &self,
+        index_id: IndexId,
+        primary_id: PrimaryId,
+        primary_keys: &ColumnVec<PrimaryId, Option<PrimaryKey>>,
+        columns: &BTreeMap<ColumnName, Column>,
+    ) -> anyhow::Result<ProcessingPartition> {
+        match &self {
+            IndexData::Global => Ok(ProcessingPartition::Existing(PartitionId::global(index_id))),
+
+            IndexData::Local {
+                map,
+                ids,
+                partition_key_columns,
+                nonpk_partition_key_columns,
+                ..
+            } => {
+                let partition_id_ids = *ids
+                    .get(primary_id)
+                    .ok_or_else(|| anyhow!("PrimaryId index out of partition ids bounds"))?;
+
+                if nonpk_partition_key_columns.is_empty()
+                    && let Some(partition_id) = partition_id_ids
+                {
+                    return Ok(ProcessingPartition::Existing(partition_id));
+                }
+                let Some(partition_key) = partition_key(
+                    primary_id,
+                    partition_key_columns.as_slice(),
+                    primary_keys,
+                    columns,
+                ) else {
+                    if let Some(partition_id) = partition_id_ids {
+                        return Ok(ProcessingPartition::MissingKey(partition_id));
+                    } else {
+                        return Ok(ProcessingPartition::Missing);
+                    }
+                };
+
+                let Some(&partition_id_map) = map.get(&partition_key) else {
+                    if let Some(partition_id) = partition_id_ids {
+                        return Ok(ProcessingPartition::MoveToNew(partition_id, partition_key));
+                    } else {
+                        return Ok(ProcessingPartition::New(partition_key));
+                    }
+                };
+                let Some(partition_id_ids) = partition_id_ids else {
+                    return Ok(ProcessingPartition::AddToExisting(partition_id_map));
+                };
+                if partition_id_map == partition_id_ids {
+                    Ok(ProcessingPartition::Existing(partition_id_ids))
+                } else {
+                    Ok(ProcessingPartition::MoveToExisting {
+                        cur: partition_id_ids,
+                        new: partition_id_map,
+                    })
+                }
+            }
+        }
+    }
+
+    fn create_partition(&mut self, partition_key: PartitionKey) -> anyhow::Result<PartitionId> {
+        match self {
+            IndexData::Global => {
+                bail!("Global index does not support partition keys")
+            }
+
+            IndexData::Local {
+                map,
+                free_ids,
+                keys,
+                sizes,
+                ..
+            } => {
+                let partition_id = match map.entry(partition_key.clone()) {
+                    Entry::Occupied(entry) => {
+                        debug!(
+                            "Partition key {partition_key:?} already exists in map \
+                            with partition_id {:?} while trying to create a new partition",
+                            entry.get()
+                        );
+                        debug_assert!(false);
+                        *entry.get()
+                    }
+
+                    Entry::Vacant(entry) => {
+                        let partition_id = free_ids.take_id()?;
+                        entry.insert(partition_id);
+                        keys.get_mut(partition_id)
+                            .ok_or_else(|| {
+                                anyhow!("PartitionId index out of partition keys bounds")
+                            })?
+                            .replace(partition_key);
+                        partition_id
+                    }
+                };
+                if let Some(size) = sizes.get_mut(partition_id) {
+                    if size.0 > 0 {
+                        debug!(
+                            "Partition size should be 0 when creating a new partition, \
+                            but got {size:?} for partition_id {partition_id:?}"
+                        );
+                        debug_assert!(false);
+                    }
+                    size.0 = 0;
+                }
+                Ok(partition_id)
             }
         }
     }
@@ -162,6 +300,29 @@ struct Index {
 
     /// Timestamps of the last vector update
     values_timestamps: ColumnVecChunks<PrimaryId, ChunkTimestamps>,
+}
+
+#[derive(Debug)]
+enum ProcessingPartition {
+    Existing(PartitionId),
+    New(PartitionKey),
+    AddToExisting(PartitionId),
+    MoveToNew(PartitionId, PartitionKey),
+    MoveToExisting { cur: PartitionId, new: PartitionId },
+    MissingKey(PartitionId),
+    Missing,
+}
+
+impl ProcessingPartition {
+    fn is_changing_partitions(&self) -> bool {
+        matches!(
+            self,
+            Self::MoveToNew(_, _)
+                | Self::MoveToExisting { .. }
+                | Self::MissingKey(_)
+                | Self::New(_)
+        )
+    }
 }
 
 impl Index {
@@ -188,13 +349,14 @@ impl Index {
 
     fn new_local(
         index_id: IndexId,
-        key_columns: NonemptyArc<ColumnName>,
+        primary_key_columns: &[ColumnName],
+        partition_key_columns: NonemptyArc<ColumnName>,
         column_targets_count: NonZeroUsize,
         filtering_columns: Arc<[ColumnName]>,
     ) -> Self {
         Self {
             index_id,
-            _available_columns: key_columns
+            _available_columns: partition_key_columns
                 .iter()
                 .chain(filtering_columns.iter())
                 .cloned()
@@ -202,7 +364,12 @@ impl Index {
             filtering_columns,
             values_timestamps: ColumnVecChunks::new(ChunkTimestamps::new(column_targets_count)),
             data: IndexData::Local {
-                key_columns,
+                nonpk_partition_key_columns: partition_key_columns
+                    .iter()
+                    .filter(|col| !primary_key_columns.contains(col))
+                    .cloned()
+                    .collect(),
+                partition_key_columns,
                 map: BTreeMap::new(),
                 free_ids: FreePartitionIds(VecDeque::new()),
                 keys: ColumnVec::new(),
@@ -249,91 +416,34 @@ impl Index {
         Ok(())
     }
 
-    fn add_partition_key(
-        &mut self,
-        index_id: IndexId,
-        primary_id: PrimaryId,
-        primary_key: &PrimaryKey,
-        primary_key_columns: &[ColumnName],
-    ) -> anyhow::Result<PartitionId> {
-        match &mut self.data {
-            IndexData::Global => Ok(PartitionId::global(index_id)),
+    fn nonpk_partition_key_columns(&self) -> impl Iterator<Item = &ColumnName> {
+        let partition_key_columsn = match &self.data {
+            IndexData::Global => None,
             IndexData::Local {
-                map,
-                free_ids,
-                keys,
-                ids,
-                sizes,
-                key_columns,
-            } => {
-                let partition_id_storage = ids
-                    .get_mut(primary_id)
-                    .ok_or_else(|| anyhow!("PrimaryId index out of partition ids bounds"))?;
-                if let Some(partition_id) = &partition_id_storage {
-                    return Ok(*partition_id);
-                }
-                let partition_key =
-                    partition_key(primary_key, primary_key_columns, key_columns.as_slice())?;
-                match map.entry(partition_key.clone()) {
-                    Entry::Occupied(entry) => {
-                        let partition_id = *entry.get();
-                        partition_id_storage.replace(partition_id);
-                        sizes
-                            .get_mut(partition_id)
-                            .ok_or_else(|| {
-                                anyhow!("PartitionId index out of partition sizes bounds")
-                            })?
-                            .0 += 1;
-                        Ok(partition_id)
-                    }
-                    Entry::Vacant(entry) => {
-                        let partition_id = free_ids.take_id()?;
-                        entry.insert(partition_id);
-                        keys.get_mut(partition_id)
-                            .ok_or_else(|| {
-                                anyhow!("PartitionId index out of partition keys bounds")
-                            })?
-                            .replace(partition_key);
-                        partition_id_storage.replace(partition_id);
-                        sizes
-                            .get_mut(partition_id)
-                            .ok_or_else(|| {
-                                anyhow!("PartitionId index out of partition sizes bounds")
-                            })?
-                            .0 = 1;
-                        Ok(partition_id)
-                    }
-                }
-            }
-        }
+                nonpk_partition_key_columns,
+                ..
+            } => Some(nonpk_partition_key_columns.iter()),
+        };
+        partition_key_columsn.into_iter().flatten()
     }
 }
 
 fn partition_key(
-    primary_key: &PrimaryKey,
-    primary_key_columns: &[ColumnName],
+    primary_id: PrimaryId,
     partition_key_columns: &[ColumnName],
-) -> anyhow::Result<PartitionKey> {
+    primary_keys: &ColumnVec<PrimaryId, Option<PrimaryKey>>,
+    columns: &BTreeMap<ColumnName, Column>,
+) -> Option<PartitionKey> {
     partition_key_columns
         .iter()
-        .map(|name| {
-            primary_key_columns
-                .iter()
-                .position(|col_name| col_name == name)
-                .and_then(|idx| primary_key.get(idx))
-        })
-        .collect::<Option<PartitionKey>>()
-        .ok_or_else(|| {
-            anyhow!(
-                "Failed to construct partition key: missing partition key column in primary key"
-            )
-        })
+        .map(|name| columns.get(name))
+        .map(|column| column.and_then(|column| column.get(primary_id, primary_keys)))
+        .collect()
 }
 
 /// A struct that represents a table in the database.
 #[derive(Debug)]
 pub struct Table {
-    primary_key_columns: NonemptyArc<ColumnName>,
     partition_primary_key_count: NonZeroUsize,
     needs_ck_normalization: bool,
     primary_ids: BTreeMap<PrimaryKey, PrimaryId>,
@@ -374,6 +484,7 @@ impl Table {
         let index = if let Some(partition_key_columns) = partition_key_columns.as_ref() {
             Index::new_local(
                 index_id,
+                primary_key_columns.as_slice(),
                 partition_key_columns.clone(),
                 column_targets_count,
                 Arc::clone(&filtering_columns),
@@ -417,7 +528,6 @@ impl Table {
             primary_ids: BTreeMap::new(),
             free_primary_ids: FreePrimaryIds(VecDeque::new()),
             primary_keys: ColumnVec::new(),
-            primary_key_columns,
             partition_primary_key_count,
             needs_ck_normalization,
             columns,
@@ -522,7 +632,8 @@ impl Table {
 struct CompareTimestamps {
     is_cur_tombstone: bool,
     is_new_tombstone: bool,
-    is_newer: bool,
+    is_newer_timestamp: bool,
+    is_same_timestamp: bool,
 }
 
 fn compare_timestamps(
@@ -542,7 +653,8 @@ fn compare_timestamps(
             CompareTimestamps {
                 is_cur_tombstone: false,
                 is_new_tombstone: true,
-                is_newer: false,
+                is_newer_timestamp: false,
+                is_same_timestamp: true,
             },
             |mut comparision, (cur, new)| {
                 if cur.is_tombstone() {
@@ -552,7 +664,10 @@ fn compare_timestamps(
                     comparision.is_new_tombstone = false;
                 }
                 if cur.timestamp() < new.timestamp() {
-                    comparision.is_newer = true;
+                    comparision.is_newer_timestamp = true;
+                }
+                if cur.timestamp() != new.timestamp() {
+                    comparision.is_same_timestamp = false;
                 }
                 comparision
             },
@@ -573,15 +688,15 @@ fn update_timestamps(
         })
 }
 
-fn update_filtering_columns(
-    columns: &mut BTreeMap<ColumnName, Column>,
+fn update_columns<'a>(
     primary_id: PrimaryId,
-    filtering_columns: &[ColumnName],
-    filtering: Box<[(Timestamp, Option<CqlValue>)]>,
+    columns: &mut BTreeMap<ColumnName, Column>,
+    column_names: impl IntoIterator<Item = &'a ColumnName>,
+    values: Box<[(Timestamp, Option<CqlValue>)]>,
 ) -> anyhow::Result<()> {
-    filtering
+    values
         .into_iter()
-        .zip(filtering_columns.iter())
+        .zip(column_names)
         .try_for_each(|((timestamp, value), column_name)| {
             let column = columns
                 .get_mut(column_name)
@@ -655,86 +770,247 @@ fn split_values_filtering(
     })
 }
 
+#[derive(Debug)]
+enum UpdateWork {
+    None,
+    MoveInsidePartition(PartitionId),
+    MoveBetweenPartitions { cur: PartitionId, new: PartitionId },
+    AddToPartition(PartitionId),
+    RemoveFromPartition(PartitionId),
+}
+
+impl UpdateWork {
+    fn new(
+        processing_partition: ProcessingPartition,
+        compare_timestamps: CompareTimestamps,
+        index_data: &mut IndexData,
+        values: &mut Option<SplittingValues>,
+        timestamps: &mut NonemptyBox<Timestamped<()>>,
+    ) -> anyhow::Result<Option<Self>> {
+        let CompareTimestamps {
+            is_cur_tombstone,
+            is_new_tombstone,
+            ..
+        } = compare_timestamps;
+        let work = match processing_partition {
+            ProcessingPartition::Existing(partition_id) => {
+                if is_cur_tombstone {
+                    if is_new_tombstone {
+                        UpdateWork::None
+                    } else {
+                        UpdateWork::AddToPartition(partition_id)
+                    }
+                } else {
+                    if is_new_tombstone {
+                        UpdateWork::RemoveFromPartition(partition_id)
+                    } else {
+                        UpdateWork::MoveInsidePartition(partition_id)
+                    }
+                }
+            }
+
+            ProcessingPartition::New(partition_key) => {
+                if is_new_tombstone {
+                    UpdateWork::None
+                } else {
+                    let partition_id = index_data.create_partition(partition_key)?;
+                    UpdateWork::AddToPartition(partition_id)
+                }
+            }
+
+            ProcessingPartition::AddToExisting(partition_id) => {
+                if is_new_tombstone {
+                    UpdateWork::None
+                } else {
+                    UpdateWork::AddToPartition(partition_id)
+                }
+            }
+
+            ProcessingPartition::MoveToNew(cur_partition_id, partition_key) => {
+                if is_new_tombstone {
+                    if is_cur_tombstone {
+                        UpdateWork::None
+                    } else {
+                        UpdateWork::RemoveFromPartition(cur_partition_id)
+                    }
+                } else {
+                    let new_partition_id = index_data.create_partition(partition_key)?;
+                    if is_cur_tombstone {
+                        UpdateWork::AddToPartition(new_partition_id)
+                    } else {
+                        UpdateWork::MoveBetweenPartitions {
+                            cur: cur_partition_id,
+                            new: new_partition_id,
+                        }
+                    }
+                }
+            }
+
+            ProcessingPartition::MoveToExisting { cur, new } => {
+                if is_cur_tombstone {
+                    if is_new_tombstone {
+                        UpdateWork::None
+                    } else {
+                        UpdateWork::AddToPartition(new)
+                    }
+                } else {
+                    if is_new_tombstone {
+                        UpdateWork::RemoveFromPartition(cur)
+                    } else {
+                        UpdateWork::MoveBetweenPartitions { cur, new }
+                    }
+                }
+            }
+
+            ProcessingPartition::MissingKey(cur_partition_id) => {
+                *values = None;
+                timestamps.first_mut().set_tombstone();
+                if is_cur_tombstone {
+                    UpdateWork::None
+                } else {
+                    UpdateWork::RemoveFromPartition(cur_partition_id)
+                }
+            }
+
+            ProcessingPartition::Missing => {
+                // TODO: We don't have current partition_id or new partition_key, which means that we
+                // cannot update the index. Let's fix this with retry functionality from VECTOR-726
+                debug!("Missing partition, skipping update");
+                return Ok(None);
+            }
+        };
+        Ok(Some(work))
+    }
+
+    fn is_adding_value(&self) -> bool {
+        matches!(
+            self,
+            UpdateWork::MoveInsidePartition(_)
+                | UpdateWork::MoveBetweenPartitions { .. }
+                | UpdateWork::AddToPartition(_)
+        )
+    }
+
+    fn is_inserting_new_row(&self) -> bool {
+        matches!(
+            self,
+            UpdateWork::MoveBetweenPartitions { .. } | UpdateWork::AddToPartition(_)
+        )
+    }
+}
+
 fn update_index(
-    primary_id: PrimaryId,
-    partition_id: PartitionId,
+    cur_primary_id: PrimaryId,
+    processing_partition: ProcessingPartition,
     index: &mut Index,
-    columns: &mut BTreeMap<ColumnName, Column>,
-    splitting_values_filtering: SplitValuesFiltering,
+    mut values: Option<SplittingValues>,
+    mut timestamps: NonemptyBox<Timestamped<()>>,
 ) -> anyhow::Result<Vec<Operation>> {
     let mut operations = vec![];
 
-    let Some(mut values_timestamps) = index.values_timestamps.get_mut(primary_id) else {
+    let Some(mut values_timestamps) = index.values_timestamps.get_mut(cur_primary_id) else {
         bail!(
             "Failed to update value: missing value timestamp \
-            for index_id {index_id:?} and primary_id {primary_id:?}",
+            for index_id {index_id:?} and primary_id {cur_primary_id:?}",
             index_id = index.index_id,
         )
     };
 
-    let SplitValuesFiltering {
-        values,
-        timestamps,
-        filtering,
-    } = splitting_values_filtering;
-
-    let filtering_columns = Arc::clone(&index.filtering_columns);
-    update_filtering_columns(columns, primary_id, &filtering_columns, filtering)?;
-    let epoch = values_timestamps.epoch();
-    let CompareTimestamps {
-        is_cur_tombstone,
-        is_new_tombstone,
-        is_newer,
-    } = compare_timestamps(&values_timestamps, timestamps.as_slice())?;
-    if !is_newer {
+    let cur_epoch = values_timestamps.epoch();
+    let mut compare_timestamps = compare_timestamps(&values_timestamps, timestamps.as_slice())?;
+    if !compare_timestamps.is_newer_timestamp
+        && (!compare_timestamps.is_same_timestamp || !processing_partition.is_changing_partitions())
+    {
         return Ok(operations);
     }
 
-    let primary_id = primary_id.new_epoch(epoch);
-    if !is_new_tombstone {
-        let values = values.ok_or_else(|| {
-            anyhow!("Expected vector or document value for first column, got None")
-        })?;
-        if !is_cur_tombstone {
-            operations.push(Operation::RemoveBeforeAddValue {
-                primary_id,
-                partition_id,
-            });
+    if values.is_none() && !compare_timestamps.is_new_tombstone {
+        compare_timestamps.is_new_tombstone = true;
+        timestamps.first_mut().set_tombstone();
+    }
+
+    let Some(work) = UpdateWork::new(
+        processing_partition,
+        compare_timestamps,
+        &mut index.data,
+        &mut values,
+        &mut timestamps,
+    )?
+    else {
+        return Ok(operations);
+    };
+
+    let cur_primary_id = cur_primary_id.new_epoch(cur_epoch);
+    let new_epoch = cur_epoch.next();
+    let new_primary_id = cur_primary_id.new_epoch(new_epoch);
+
+    values_timestamps.set_epoch(new_epoch);
+    update_timestamps(values_timestamps, timestamps)?;
+
+    if let UpdateWork::MoveInsidePartition(partition_id) = work {
+        operations.push(Operation::RemoveBeforeAddValue {
+            primary_id: cur_primary_id,
+            partition_id,
+        });
+    }
+
+    if let UpdateWork::MoveBetweenPartitions {
+        cur: partition_id, ..
+    } = work
+    {
+        operations.push(Operation::RemoveBeforeAddValue {
+            primary_id: cur_primary_id,
+            partition_id,
+        });
+        if index
+            .data
+            .remove_row_from_partition(cur_primary_id, partition_id)
+        {
+            operations.push(Operation::RemovePartition { partition_id });
         }
+    }
 
-        let primary_id = primary_id.next_epoch();
-        values_timestamps.set_epoch(primary_id.epoch());
-        update_timestamps(values_timestamps, timestamps)?;
-
-        let is_update = !is_cur_tombstone;
-        let operation = match values {
+    if let Some(values) = values
+        && work.is_adding_value()
+    {
+        let (partition_id, is_update) = match work {
+            UpdateWork::MoveInsidePartition(partition_id) => (partition_id, true),
+            UpdateWork::MoveBetweenPartitions { new, .. } => (new, true),
+            UpdateWork::AddToPartition(partition_id) => (partition_id, false),
+            _ => unreachable!(),
+        };
+        operations.push(match values {
             SplittingValues::Vector(vector) => Operation::AddVector {
-                primary_id,
+                primary_id: new_primary_id,
                 partition_id,
                 vector,
                 is_update,
             },
             SplittingValues::Document(document) => Operation::AddDocument {
-                primary_id,
+                primary_id: new_primary_id,
                 partition_id,
                 document,
                 is_update,
             },
-        };
-        operations.push(operation);
-    } else {
-        let epoch = primary_id.epoch().next();
-        values_timestamps.set_epoch(epoch);
-        update_timestamps(values_timestamps, timestamps)?;
+        });
 
-        if !is_cur_tombstone {
-            operations.push(Operation::RemoveValue {
-                primary_id,
-                partition_id,
-            });
-            if index.data.remove_row(primary_id) {
-                operations.push(Operation::RemovePartition { partition_id });
-            }
+        if work.is_inserting_new_row() {
+            index
+                .data
+                .insert_row_into_partition(new_primary_id, partition_id);
+        }
+    }
+
+    if let UpdateWork::RemoveFromPartition(partition_id) = work {
+        operations.push(Operation::RemoveValue {
+            primary_id: cur_primary_id,
+            partition_id,
+        });
+        if index
+            .data
+            .remove_row_from_partition(cur_primary_id, partition_id)
+        {
+            operations.push(Operation::RemovePartition { partition_id });
         }
     }
 
@@ -783,20 +1059,29 @@ impl TableModify for Table {
             .get_mut(&index_id)
             .ok_or_else(|| anyhow!("Index id {index_id:?} not found"))?;
 
-        let partition_id = index.add_partition_key(
-            index_id,
+        let SplitValuesFiltering {
+            values,
+            timestamps,
+            filtering,
+        } = split_values_filtering(values)?;
+
+        update_columns(
             primary_id,
-            &primary_key,
-            self.primary_key_columns.as_slice(),
+            &mut self.columns,
+            index
+                .nonpk_partition_key_columns()
+                .chain(index.filtering_columns.iter()),
+            filtering,
         )?;
 
-        update_index(
+        let processing_partition = index.data.get_partition_key(
+            index_id,
             primary_id,
-            partition_id,
-            index,
-            &mut self.columns,
-            split_values_filtering(values)?,
-        )
+            &self.primary_keys,
+            &self.columns,
+        )?;
+
+        update_index(primary_id, processing_partition, index, values, timestamps)
     }
 
     #[hotpath::measure]
@@ -819,29 +1104,31 @@ impl TableModify for Table {
             .get_mut(&index_id)
             .ok_or_else(|| anyhow!("Index id {index_id:?} not found"))?;
 
-        let partition_id = index.add_partition_key(
-            index_id,
+        // remove only filtering columns, as partition key columns cannot be removed
+        update_columns(
             primary_id,
-            &primary_key,
-            self.primary_key_columns.as_slice(),
+            &mut self.columns,
+            index.filtering_columns.iter(),
+            index
+                .filtering_columns
+                .iter()
+                .map(|_| (timestamp, None))
+                .collect(),
         )?;
 
-        let filtering = index
-            .filtering_columns
-            .iter()
-            .map(|_| (timestamp, None))
-            .collect();
+        let processing_partition = index.data.get_partition_key(
+            index_id,
+            primary_id,
+            &self.primary_keys,
+            &self.columns,
+        )?;
 
         update_index(
             primary_id,
-            partition_id,
+            processing_partition,
             index,
-            &mut self.columns,
-            SplitValuesFiltering {
-                values: None,
-                timestamps: NonemptyBox::new([Timestamped::new_tombstone(timestamp)]).unwrap(),
-                filtering,
-            },
+            None,
+            NonemptyBox::new([Timestamped::new_tombstone(timestamp)]).unwrap(),
         )
     }
 }
@@ -884,10 +1171,12 @@ impl TableSearch for Table {
         match &index.data {
             IndexData::Global => Some((PartitionId::global(*index_id), restrictions)),
             IndexData::Local {
-                key_columns, map, ..
+                partition_key_columns,
+                map,
+                ..
             } => restrictions
                 .and_then(|restrictions| {
-                    partition_key_from_restrictions(key_columns.as_slice(), restrictions)
+                    partition_key_from_restrictions(partition_key_columns.as_slice(), restrictions)
                 })
                 .and_then(|(partition_key, restrictions)| {
                     map.get(&partition_key)
@@ -1759,7 +2048,7 @@ mod tests {
             Some(DbIndexedValue::Vector(vec![1.0].into())),
         );
         let values = NonemptyBox::new([value]).unwrap();
-        let split = split_values_filtering(values).unwrap();
+        let split = split_values_filtering(values, 0).unwrap();
         assert_eq!(
             split.values,
             Some(SplittingValues::Vector(vec![1.0].into()))
@@ -1777,7 +2066,7 @@ mod tests {
     fn split_values_filtering_only_values_tombstone() {
         let value = Timestamped::new(Timestamp::from_millis(2), None);
         let values = NonemptyBox::new([value]).unwrap();
-        let split = split_values_filtering(values).unwrap();
+        let split = split_values_filtering(values, 0).unwrap();
         assert!(split.values.is_none());
         assert_eq!(split.timestamps.len().get(), 1);
         assert_eq!(
@@ -1799,7 +2088,7 @@ mod tests {
             Some(DbIndexedValue::Filtering(CqlValue::Int(42))),
         );
         let values = NonemptyBox::new([value, filtering]).unwrap();
-        let split = split_values_filtering(values).unwrap();
+        let split = split_values_filtering(values, 0).unwrap();
         assert_eq!(
             split.values,
             Some(SplittingValues::Vector(vec![2.0].into()))
@@ -1825,7 +2114,7 @@ mod tests {
             Some(DbIndexedValue::Filtering(CqlValue::Int(1))),
         );
         let values = NonemptyBox::new([value]).unwrap();
-        assert!(split_values_filtering(values).is_err());
+        assert!(split_values_filtering(values, 0).is_err());
 
         // Vector in the filtering place is not allowed
         let value1 = Timestamped::new(
@@ -1837,7 +2126,7 @@ mod tests {
             Some(DbIndexedValue::Vector(vec![2.0].into())),
         );
         let values = NonemptyBox::new([value1, value2]).unwrap();
-        assert!(split_values_filtering(values).is_err());
+        assert!(split_values_filtering(values, 0).is_err());
 
         // Document in the filtering place is not allowed
         let value1 = Timestamped::new(
@@ -1849,7 +2138,7 @@ mod tests {
             Some(DbIndexedValue::Document("doc2".to_string())),
         );
         let values = NonemptyBox::new([value1, value2]).unwrap();
-        assert!(split_values_filtering(values).is_err());
+        assert!(split_values_filtering(values, 0).is_err());
     }
 
     #[test]

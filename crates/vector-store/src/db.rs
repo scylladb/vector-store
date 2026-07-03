@@ -1072,9 +1072,9 @@ fn from_target_option(
         if let Some(invalid) = target
             .partition_key_columns
             .iter()
-            .find(|pk_col| !table.partition_key.contains(pk_col))
+            .find(|pk_col| !table.columns.contains_key(*pk_col))
         {
-            bail!("invalid target option: pk column {invalid} is not in the table's partition key");
+            bail!("invalid target option: pk column {invalid} is not in the table's columns");
         }
         DbIndexPartitioning::Local(
             target

@@ -157,6 +157,7 @@ impl VsIndexEntry {
         let filtering_columns = metadata
             .primary_key_columns
             .iter()
+            .chain(metadata.nonpk_partition_key_columns().into_iter().flatten())
             .chain(metadata.filtering_columns.iter())
             .cloned()
             .collect_nonempty_arc()

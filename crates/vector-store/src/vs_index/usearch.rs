@@ -816,7 +816,7 @@ where
                 .unwrap()
                 .partition_id(&index_key, Some(filter.restrictions))
             else {
-                warn!("partition id not found for index key {index_key:?} during filtered ann");
+                debug!("partition id not found for index key {index_key:?} during filtered ann");
                 _ = tx.send(Ok((vec![], vec![])));
                 return None;
             };
@@ -826,7 +826,7 @@ where
                 .zip(partitions.get(&partition_id))
                 .map(|(state, partition)| (state, Arc::clone(partition)))
             else {
-                warn!(
+                debug!(
                     "state or partition not found for index key {index_key:?} \
                         during filtered ann"
                 );
