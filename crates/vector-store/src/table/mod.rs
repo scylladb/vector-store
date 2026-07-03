@@ -87,10 +87,6 @@ impl FreePartitionIds {
             .pop_front()
             .ok_or(anyhow!("Partition ids should be reserved"))
     }
-
-    fn return_id(&mut self, id: PartitionId) {
-        self.0.push_back(id);
-    }
 }
 
 /// An enum that represents the data of an index specific to the index type.
@@ -100,7 +96,10 @@ enum IndexData {
     Local {
         /// Column names for which the index is built. The order of column names is important, as it
         /// defines the order of values in the index key.
-        key_columns: NonemptyArc<ColumnName>,
+        partition_key_columns: NonemptyArc<ColumnName>,
+
+        column_targets_count: NonZeroUsize,
+        nonpk_partition_key_columns: Box<[ColumnName]>,
 
         map: BTreeMap<PartitionKey, PartitionId>,
         free_ids: FreePartitionIds,
@@ -121,10 +120,9 @@ impl IndexData {
                 keys,
                 sizes,
                 map,
-                free_ids,
                 ..
             } => {
-                let Some(Some(partition_id)) = ids.get_mut(primary_id).map(|id| id.take()) else {
+                let Some(partition_id) = ids.get(primary_id).copied().flatten() else {
                     return false;
                 };
 
@@ -140,7 +138,6 @@ impl IndexData {
                 if is_empty && let Some(key) = keys.get_mut(partition_id).and_then(|key| key.take())
                 {
                     map.remove(&key);
-                    free_ids.return_id(partition_id);
                 }
                 is_empty
             }
@@ -188,13 +185,14 @@ impl Index {
 
     fn new_local(
         index_id: IndexId,
-        key_columns: NonemptyArc<ColumnName>,
+        primary_key_columns: &[ColumnName],
+        partition_key_columns: NonemptyArc<ColumnName>,
         column_targets_count: NonZeroUsize,
         filtering_columns: Arc<[ColumnName]>,
     ) -> Self {
         Self {
             index_id,
-            _available_columns: key_columns
+            _available_columns: partition_key_columns
                 .iter()
                 .chain(filtering_columns.iter())
                 .cloned()
@@ -202,7 +200,13 @@ impl Index {
             filtering_columns,
             values_timestamps: ColumnVecChunks::new(ChunkTimestamps::new(column_targets_count)),
             data: IndexData::Local {
-                key_columns,
+                nonpk_partition_key_columns: partition_key_columns
+                    .iter()
+                    .filter(|col| !primary_key_columns.contains(col))
+                    .cloned()
+                    .collect(),
+                column_targets_count,
+                partition_key_columns,
                 map: BTreeMap::new(),
                 free_ids: FreePartitionIds(VecDeque::new()),
                 keys: ColumnVec::new(),
@@ -255,6 +259,7 @@ impl Index {
         primary_id: PrimaryId,
         primary_key: &PrimaryKey,
         primary_key_columns: &[ColumnName],
+        values: Option<&NonemptyBox<Timestamped<DbIndexedValue>>>,
     ) -> anyhow::Result<PartitionId> {
         match &mut self.data {
             IndexData::Global => Ok(PartitionId::global(index_id)),
@@ -264,7 +269,9 @@ impl Index {
                 keys,
                 ids,
                 sizes,
-                key_columns,
+                partition_key_columns,
+                nonpk_partition_key_columns,
+                column_targets_count,
             } => {
                 let partition_id_storage = ids
                     .get_mut(primary_id)
@@ -272,8 +279,35 @@ impl Index {
                 if let Some(partition_id) = &partition_id_storage {
                     return Ok(*partition_id);
                 }
-                let partition_key =
-                    partition_key(primary_key, primary_key_columns, key_columns.as_slice())?;
+                let values = if nonpk_partition_key_columns.is_empty() {
+                    &[]
+                } else {
+                    let Some(values) = values else {
+                        // There is operation only on primary key, so let's create a new partition
+                        // id for it and don't fill other fields in the IndexData as a sign of a
+                        // tombstone.
+                        let partition_id = free_ids.take_id()?;
+                        partition_id_storage.replace(partition_id);
+                        return Ok(partition_id);
+                    };
+                    let left = column_targets_count.get();
+                    let right = left + nonpk_partition_key_columns.len();
+                    if right > values.len().get() {
+                        bail!(
+                            "Not enough values to construct partition key: \
+                            expected at least {right}, got {len}",
+                            len = values.len()
+                        );
+                    }
+                    &values.as_slice()[left..right]
+                };
+                let partition_key = partition_key(
+                    primary_key,
+                    primary_key_columns,
+                    partition_key_columns.as_slice(),
+                    nonpk_partition_key_columns,
+                    values,
+                )?;
                 match map.entry(partition_key.clone()) {
                     Entry::Occupied(entry) => {
                         let partition_id = *entry.get();
@@ -313,6 +347,8 @@ fn partition_key(
     primary_key: &PrimaryKey,
     primary_key_columns: &[ColumnName],
     partition_key_columns: &[ColumnName],
+    nonpk_partition_key_columns: &[ColumnName],
+    nonpk_partition_key_values: &[Timestamped<DbIndexedValue>],
 ) -> anyhow::Result<PartitionKey> {
     partition_key_columns
         .iter()
@@ -321,11 +357,24 @@ fn partition_key(
                 .iter()
                 .position(|col_name| col_name == name)
                 .and_then(|idx| primary_key.get(idx))
+                .or_else(|| {
+                    nonpk_partition_key_columns
+                        .iter()
+                        .position(|col_name| col_name == name)
+                        .and_then(|idx| nonpk_partition_key_values.get(idx))
+                        .and_then(|value| value.value())
+                        .and_then(|value| match value {
+                            DbIndexedValue::Filtering(value) => Some(value),
+                            _ => None,
+                        })
+                        .cloned()
+                })
         })
         .collect::<Option<PartitionKey>>()
         .ok_or_else(|| {
             anyhow!(
-                "Failed to construct partition key: missing partition key column in primary key"
+                "Failed to construct partition key: \
+                missing partition key column in primary key or non-partition key values"
             )
         })
 }
@@ -374,6 +423,7 @@ impl Table {
         let index = if let Some(partition_key_columns) = partition_key_columns.as_ref() {
             Index::new_local(
                 index_id,
+                primary_key_columns.as_slice(),
                 partition_key_columns.clone(),
                 column_targets_count,
                 Arc::clone(&filtering_columns),
@@ -608,6 +658,7 @@ struct SplitValuesFiltering {
 
 fn split_values_filtering(
     values: NonemptyBox<Timestamped<DbIndexedValue>>,
+    nonpk_partition_key_columns_count: usize,
 ) -> anyhow::Result<SplitValuesFiltering> {
     let mut row_values = values.into_iter();
 
@@ -635,6 +686,7 @@ fn split_values_filtering(
     };
 
     let filtering = row_values
+        .skip(nonpk_partition_key_columns_count)
         .map(|value| (value.timestamp(), value.into_value()))
         .map(|(timestamp, value)| {
             let filtering_value = match value {
@@ -788,14 +840,22 @@ impl TableModify for Table {
             primary_id,
             &primary_key,
             self.primary_key_columns.as_slice(),
+            Some(&values),
         )?;
 
+        let nonpk_partition_key_columns_count = match &index.data {
+            IndexData::Global => 0,
+            IndexData::Local {
+                nonpk_partition_key_columns,
+                ..
+            } => nonpk_partition_key_columns.len(),
+        };
         update_index(
             primary_id,
             partition_id,
             index,
             &mut self.columns,
-            split_values_filtering(values)?,
+            split_values_filtering(values, nonpk_partition_key_columns_count)?,
         )
     }
 
@@ -824,6 +884,7 @@ impl TableModify for Table {
             primary_id,
             &primary_key,
             self.primary_key_columns.as_slice(),
+            None,
         )?;
 
         let filtering = index
@@ -884,10 +945,12 @@ impl TableSearch for Table {
         match &index.data {
             IndexData::Global => Some((PartitionId::global(*index_id), restrictions)),
             IndexData::Local {
-                key_columns, map, ..
+                partition_key_columns,
+                map,
+                ..
             } => restrictions
                 .and_then(|restrictions| {
-                    partition_key_from_restrictions(key_columns.as_slice(), restrictions)
+                    partition_key_from_restrictions(partition_key_columns.as_slice(), restrictions)
                 })
                 .and_then(|(partition_key, restrictions)| {
                     map.get(&partition_key)
@@ -1759,7 +1822,7 @@ mod tests {
             Some(DbIndexedValue::Vector(vec![1.0].into())),
         );
         let values = NonemptyBox::new([value]).unwrap();
-        let split = split_values_filtering(values).unwrap();
+        let split = split_values_filtering(values, 0).unwrap();
         assert_eq!(
             split.values,
             Some(SplittingValues::Vector(vec![1.0].into()))
@@ -1777,7 +1840,7 @@ mod tests {
     fn split_values_filtering_only_values_tombstone() {
         let value = Timestamped::new(Timestamp::from_millis(2), None);
         let values = NonemptyBox::new([value]).unwrap();
-        let split = split_values_filtering(values).unwrap();
+        let split = split_values_filtering(values, 0).unwrap();
         assert!(split.values.is_none());
         assert_eq!(split.timestamps.len().get(), 1);
         assert_eq!(
@@ -1799,7 +1862,7 @@ mod tests {
             Some(DbIndexedValue::Filtering(CqlValue::Int(42))),
         );
         let values = NonemptyBox::new([value, filtering]).unwrap();
-        let split = split_values_filtering(values).unwrap();
+        let split = split_values_filtering(values, 0).unwrap();
         assert_eq!(
             split.values,
             Some(SplittingValues::Vector(vec![2.0].into()))
@@ -1825,7 +1888,7 @@ mod tests {
             Some(DbIndexedValue::Filtering(CqlValue::Int(1))),
         );
         let values = NonemptyBox::new([value]).unwrap();
-        assert!(split_values_filtering(values).is_err());
+        assert!(split_values_filtering(values, 0).is_err());
 
         // Vector in the filtering place is not allowed
         let value1 = Timestamped::new(
@@ -1837,7 +1900,7 @@ mod tests {
             Some(DbIndexedValue::Vector(vec![2.0].into())),
         );
         let values = NonemptyBox::new([value1, value2]).unwrap();
-        assert!(split_values_filtering(values).is_err());
+        assert!(split_values_filtering(values, 0).is_err());
 
         // Document in the filtering place is not allowed
         let value1 = Timestamped::new(
@@ -1849,7 +1912,7 @@ mod tests {
             Some(DbIndexedValue::Document("doc2".to_string())),
         );
         let values = NonemptyBox::new([value1, value2]).unwrap();
-        assert!(split_values_filtering(values).is_err());
+        assert!(split_values_filtering(values, 0).is_err());
     }
 
     #[test]

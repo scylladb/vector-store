@@ -623,6 +623,17 @@ impl IndexMetadata {
         copy.version = IndexVersion(Uuid::nil());
         copy
     }
+
+    fn nonpk_partition_key_columns(&self) -> Option<impl Iterator<Item = &ColumnName>> {
+        match &self.partitioning {
+            DbIndexPartitioning::Global => None,
+            DbIndexPartitioning::Local(pk_columns) => Some(
+                pk_columns
+                    .iter()
+                    .filter(|col| !self.primary_key_columns.contains(col)),
+            ),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

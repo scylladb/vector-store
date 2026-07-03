@@ -281,6 +281,7 @@ struct Statements {
     session_rx: tokio::sync::watch::Receiver<Option<Arc<Session>>>,
     primary_key_columns: NonemptyArc<ColumnName>,
     target_columns: NonemptyArc<ColumnName>,
+    nonpk_partition_key_columns: Box<[ColumnName]>,
     filtering_columns: Arc<[ColumnName]>,
     table_columns: GetTableColumnsR,
     st_range_scan: PreparedStatement,
@@ -320,6 +321,12 @@ impl Statements {
                     metadata.table_name
                 )
             })?;
+        let nonpk_partition_key_columns: Box<[_]> = metadata
+            .nonpk_partition_key_columns()
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect();
 
         anyhow::ensure!(
             primary_key_columns.len().get() <= InvariantKey::MAX_COLUMNS,
@@ -365,7 +372,10 @@ impl Statements {
         let query = db_index_backend::range_scan_query(
             &keyspace_identifier,
             &table_identifier,
-            target_columns.iter().chain(filtering_columns.iter()),
+            target_columns
+                .iter()
+                .chain(nonpk_partition_key_columns.iter())
+                .chain(filtering_columns.iter()),
             &st_primary_key_list,
             &st_partition_key_list,
         );
@@ -380,6 +390,7 @@ impl Statements {
 
         Ok(Self {
             primary_key_columns,
+            nonpk_partition_key_columns,
             target_columns,
             filtering_columns,
             table_columns,
@@ -556,7 +567,10 @@ impl Statements {
     ) -> anyhow::Result<BoxStream<'static, DbIndexedRow>> {
         // last values columns are value and writetime
         let columns_len_expected = self.primary_key_columns.len().get()
-            + (self.target_columns.len().get() + self.filtering_columns.len()) * 2;
+            + (self.target_columns.len().get()
+                + self.nonpk_partition_key_columns.len()
+                + self.filtering_columns.len())
+                * 2;
         let target_columns_offset = self.primary_key_columns.len().get();
         let target_columns_len = self.target_columns.len();
         let kind = self.kind.clone();
