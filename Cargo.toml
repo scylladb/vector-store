@@ -67,7 +67,7 @@ rand = "0.10.1"
 rcgen = "0.14.5"
 regex = "1.11.1"
 reqwest = { version = "0.12.15", default-features = false, features = ["json", "rustls-tls"] }
-scylla = { version = "1.5.0", features = ["time-03", "rustls-023", "metrics", "bigdecimal-04", "num-bigint-04"] }
+scylla = { version = "1.7.0", features = ["time-03", "rustls-023", "metrics", "bigdecimal-04", "num-bigint-04"] }
 scylla-cdc = "0.6.3"
 scylla-proxy = "0.0.5"
 serde = { version = "1.0.219", features = ["derive"] }
