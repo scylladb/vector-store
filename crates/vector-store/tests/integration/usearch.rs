@@ -224,17 +224,17 @@ async fn simple_create_search_delete_index() {
             (
                 [CqlValue::Int(1), CqlValue::Text("one".to_string())].into(),
                 Some(vec![1., 1., 1.].into()),
-                Timestamp::from_unix_timestamp(10),
+                Timestamp::from_millis(10),
             ),
             (
                 [CqlValue::Int(2), CqlValue::Text("two".to_string())].into(),
                 Some(vec![2., -2., 2.].into()),
-                Timestamp::from_unix_timestamp(20),
+                Timestamp::from_millis(20),
             ),
             (
                 [CqlValue::Int(3), CqlValue::Text("three".to_string())].into(),
                 Some(vec![3., 3., 3.].into()),
-                Timestamp::from_unix_timestamp(30),
+                Timestamp::from_millis(30),
             ),
         ])),
         None,
@@ -430,7 +430,7 @@ async fn ann_returns_bad_request_when_provided_vector_size_is_not_eq_index_dimen
         Some(db_basic::scan_fn_vectors([(
             [CqlValue::Int(1), CqlValue::Text("one".to_string())].into(),
             Some(vec![1., 1., 1.].into()),
-            Timestamp::from_unix_timestamp(10),
+            Timestamp::from_millis(10),
         )])),
         None,
         Some(1),
@@ -468,7 +468,7 @@ async fn ann_returns_bad_request_when_filtering_required_but_not_allowed() {
         Some(db_basic::scan_fn_vectors([(
             [CqlValue::Int(1), CqlValue::Int(1)].into(),
             Some(vec![1., 1., 1.].into()),
-            Timestamp::from_unix_timestamp(10),
+            Timestamp::from_millis(10),
         )])),
         None,
         Some(1),
@@ -559,7 +559,7 @@ async fn ann_failed_when_wrong_number_of_primary_keys() {
         Some(db_basic::scan_fn_vectors([(
             [CqlValue::Int(1), CqlValue::Text("one".to_string())].into(),
             Some(vec![1., 1., 1.].into()),
-            Timestamp::from_unix_timestamp(10),
+            Timestamp::from_millis(10),
         )])),
         None,
         Some(1),
@@ -911,7 +911,7 @@ async fn setup_int_int_store() -> (
                 (
                     [CqlValue::Int(i / 10), CqlValue::Int(i % 10)].into(),
                     Some(vec![i as f32, i as f32, i as f32].into()),
-                    Timestamp::from_unix_timestamp(10),
+                    Timestamp::from_millis(10),
                 )
             }),
         )),
@@ -1401,7 +1401,7 @@ async fn ann_filter_partition_key_text_gt() {
                 (
                     [CqlValue::Text(pk.to_string()), CqlValue::Int(i as i32)].into(),
                     Some(vec![i as f32, i as f32, i as f32].into()),
-                    Timestamp::from_unix_timestamp(10),
+                    Timestamp::from_millis(10),
                 )
             }),
         )),
@@ -1487,7 +1487,7 @@ async fn http_server_is_responsive_when_index_add_hangs() {
         Some(db_basic::scan_fn_vectors([(
             [CqlValue::Int(1), CqlValue::Text("one".to_string())].into(),
             Some(vec![1., 1., 1.].into()),
-            Timestamp::from_unix_timestamp(10),
+            Timestamp::from_millis(10),
         )])),
         None,
     )
@@ -1516,13 +1516,9 @@ async fn null_vector_is_not_indexed() {
             (
                 [CqlValue::Int(1)].into(),
                 Some(vec![1., 1., 1.].into()),
-                Timestamp::from_unix_timestamp(10),
+                Timestamp::from_millis(10),
             ),
-            (
-                [CqlValue::Int(2)].into(),
-                None,
-                Timestamp::from_unix_timestamp(20),
-            ),
+            ([CqlValue::Int(2)].into(), None, Timestamp::from_millis(20)),
         ])),
         None,
     )
@@ -1607,17 +1603,17 @@ async fn similarity_scores_are_decreasing_and_correctly_converted() {
             (
                 [CqlValue::Int(1)].into(),
                 Some(vec![0.0_f32].into()),
-                Timestamp::from_unix_timestamp(10),
+                Timestamp::from_millis(10),
             ),
             (
                 [CqlValue::Int(2)].into(),
                 Some(vec![1.0_f32].into()),
-                Timestamp::from_unix_timestamp(20),
+                Timestamp::from_millis(20),
             ),
             (
                 [CqlValue::Int(3)].into(),
                 Some(vec![3.0_f32].into()),
-                Timestamp::from_unix_timestamp(30),
+                Timestamp::from_millis(30),
             ),
         ])),
         None,

@@ -294,7 +294,7 @@ mod tests {
         let embedding = DbIndexedRow {
             primary_key: [CqlValue::Int(1)].into(),
             value: Some(DbIndexedValue::Vector(vec![1.].into())),
-            timestamp: Timestamp::from_unix_timestamp(10),
+            timestamp: Timestamp::from_millis(10),
         };
         table
             .write()
@@ -332,7 +332,7 @@ mod tests {
         let embedding = DbIndexedRow {
             primary_key: [CqlValue::Int(1)].into(),
             value: Some(DbIndexedValue::Vector(vec![1.].into())),
-            timestamp: Timestamp::from_unix_timestamp(10),
+            timestamp: Timestamp::from_millis(10),
         };
         let (tx_progress, _rx_progress) = mpsc::channel(1);
         table
@@ -397,7 +397,7 @@ mod tests {
         let embedding = DbIndexedRow {
             primary_key: [CqlValue::Int(1)].into(),
             value: Some(DbIndexedValue::Vector(vec![1.].into())),
-            timestamp: Timestamp::from_unix_timestamp(10),
+            timestamp: Timestamp::from_millis(10),
         };
         table
             .write()
@@ -462,7 +462,7 @@ mod tests {
         let embedding = DbIndexedRow {
             primary_key: [CqlValue::Int(1)].into(),
             value: Some(DbIndexedValue::Vector(vec![1.].into())),
-            timestamp: Timestamp::from_unix_timestamp(10),
+            timestamp: Timestamp::from_millis(10),
         };
         table
             .write()
@@ -539,7 +539,7 @@ mod tests {
         let embedding = DbIndexedRow {
             primary_key: [CqlValue::Int(1)].into(),
             value: Some(DbIndexedValue::Vector(vec![1.].into())),
-            timestamp: Timestamp::from_unix_timestamp(10),
+            timestamp: Timestamp::from_millis(10),
         };
         table
             .write()
@@ -640,7 +640,7 @@ mod tests {
         let embedding = DbIndexedRow {
             primary_key: [CqlValue::Int(1)].into(),
             value: None,
-            timestamp: Timestamp::from_unix_timestamp(10),
+            timestamp: Timestamp::from_millis(10),
         };
         table
             .write()
@@ -696,7 +696,7 @@ mod tests {
         let embedding = DbIndexedRow {
             primary_key: [CqlValue::Int(1)].into(),
             value: None,
-            timestamp: Timestamp::from_unix_timestamp(10),
+            timestamp: Timestamp::from_millis(10),
         };
         table
             .write()

@@ -609,7 +609,7 @@ impl Statements {
                     debug!("range_scan_stream: bad type of a writetime");
                     return None;
                 };
-                let timestamp = Timestamp::UNIX_EPOCH + Duration::from_micros(timestamp as u64);
+                let timestamp = Timestamp::from_micros(timestamp as u64);
 
                 let Some(column_value) = row.columns.pop().unwrap() else {
                     debug!("range_scan_stream: missing target column");
