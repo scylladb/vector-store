@@ -470,7 +470,7 @@ impl Consumer for CdcConsumer {
             OperationType::PartitionDelete | OperationType::RowDelete => None,
 
             OperationType::RowUpdate | OperationType::RowInsert | OperationType::PostImage => {
-                match source.take_cdc_value(&mut row) {
+                match source.take_cdc_value(&mut row)? {
                     CdcValueStatus::Deleted => None,
                     CdcValueStatus::Skip => return Ok(()),
                     CdcValueStatus::NewValue(value) => {

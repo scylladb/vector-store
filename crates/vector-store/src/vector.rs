@@ -128,44 +128,6 @@ fn parse_alternator_list_json(bytes: &[u8]) -> anyhow::Result<Vec<f32>> {
         .collect()
 }
 
-pub(crate) struct AlternatorAttrs<'a> {
-    pub attrs: CqlValue,
-    pub target_column: &'a str,
-}
-
-/// Extracts a vector from the Alternator `:attrs` map column.
-///
-/// In Alternator, non-key attributes are stored in a `map<bytes, bytes>` column named `:attrs`.
-/// Each entry's key is the attribute name and the value is a serialised attribute prefixed with a 1-byte type tag.
-impl TryFrom<AlternatorAttrs<'_>> for Option<Vector> {
-    type Error = anyhow::Error;
-
-    fn try_from(input: AlternatorAttrs<'_>) -> anyhow::Result<Self> {
-        let AlternatorAttrs {
-            attrs,
-            target_column,
-        } = input;
-        let CqlValue::Map(entries) = attrs else {
-            bail!("expected Map for :attrs column, got {attrs:?}");
-        };
-
-        let target = target_column.as_bytes();
-
-        entries
-            .into_iter()
-            .find_map(|(key, value)| {
-                let matches = match &key {
-                    CqlValue::Blob(b) => b.as_slice() == target,
-                    CqlValue::Text(s) => s.as_bytes() == target,
-                    _ => false,
-                };
-                matches.then_some(value)
-            })
-            .map(Vector::try_from)
-            .transpose()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,68 +209,6 @@ mod tests {
     }
 
     #[test]
-    fn extract_from_attrs_map_with_blob_keys() {
-        let json = r#"{"L": [{"N": "1.0"}, {"N": "2.0"}]}"#;
-        let attrs = CqlValue::Map(vec![
-            (
-                CqlValue::Blob(b"other".to_vec()),
-                CqlValue::Blob(alternator_list_blob(r#"{"S": "ignored"}"#)),
-            ),
-            (
-                CqlValue::Blob(b"v".to_vec()),
-                CqlValue::Blob(alternator_list_blob(json)),
-            ),
-        ]);
-        let result = Option::<Vector>::try_from(AlternatorAttrs {
-            attrs,
-            target_column: "v",
-        })
-        .unwrap();
-        assert_eq!(result, Some(Vector::from(vec![1.0, 2.0])));
-    }
-
-    #[test]
-    fn extract_from_attrs_map_with_text_keys() {
-        let json = r#"{"L": [{"N": "3.0"}]}"#;
-        let attrs = CqlValue::Map(vec![(
-            CqlValue::Text("v".to_string()),
-            CqlValue::Blob(alternator_list_blob(json)),
-        )]);
-        let result = Option::<Vector>::try_from(AlternatorAttrs {
-            attrs,
-            target_column: "v",
-        })
-        .unwrap();
-        assert_eq!(result, Some(Vector::from(vec![3.0])));
-    }
-
-    #[test]
-    fn extract_from_attrs_map_missing_target() {
-        let attrs = CqlValue::Map(vec![(
-            CqlValue::Blob(b"other".to_vec()),
-            CqlValue::Blob(b"data".to_vec()),
-        )]);
-        let result = Option::<Vector>::try_from(AlternatorAttrs {
-            attrs,
-            target_column: "v",
-        })
-        .unwrap();
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn extract_from_attrs_non_map() {
-        let attrs = CqlValue::Int(42);
-        assert!(
-            Option::<Vector>::try_from(AlternatorAttrs {
-                attrs,
-                target_column: "v"
-            })
-            .is_err()
-        );
-    }
-
-    #[test]
     fn extract_from_alternator_vector_blob() {
         let value = CqlValue::Blob(alternator_vector_blob(&[1.0, 2.5, 3.0]));
         let result = Vector::try_from(value).unwrap();
@@ -329,25 +229,5 @@ mod tests {
         bytes.extend_from_slice(&[0x00, 0x01, 0x02, 0x03, 0x04]);
         let value = CqlValue::Blob(bytes);
         assert!(Vector::try_from(value).is_err());
-    }
-
-    #[test]
-    fn extract_from_attrs_map_alternator_vector() {
-        let attrs = CqlValue::Map(vec![
-            (
-                CqlValue::Blob(b"other".to_vec()),
-                CqlValue::Blob(alternator_list_blob(r#"{"S": "ignored"}"#)),
-            ),
-            (
-                CqlValue::Blob(b"v".to_vec()),
-                CqlValue::Blob(alternator_vector_blob(&[1.0, 2.0, 3.0])),
-            ),
-        ]);
-        let result = Option::<Vector>::try_from(AlternatorAttrs {
-            attrs,
-            target_column: "v",
-        })
-        .unwrap();
-        assert_eq!(result, Some(Vector::from(vec![1.0, 2.0, 3.0])));
     }
 }
