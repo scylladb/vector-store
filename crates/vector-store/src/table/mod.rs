@@ -1197,19 +1197,67 @@ mod tests {
 
     #[test]
     fn flow() {
-        for partition_key_columns in [None, NonemptyArc::new(["pk"])] {
+        for partition_key_columns in [
+            None,
+            NonemptyArc::new(["pk"]),
+            NonemptyArc::new(["pk", "c1"]),
+            NonemptyArc::new(["pk", "c1", "f"]),
+            NonemptyArc::new(["pk", "f"]),
+            NonemptyArc::new(["pk", "f", "c1"]),
+            NonemptyArc::new(["c1"]),
+            NonemptyArc::new(["c1", "pk"]),
+            NonemptyArc::new(["c1", "pk", "f"]),
+            NonemptyArc::new(["c1", "f"]),
+            NonemptyArc::new(["c1", "f", "pk"]),
+            NonemptyArc::new(["f"]),
+            NonemptyArc::new(["f", "pk"]),
+            NonemptyArc::new(["f", "pk", "c1"]),
+            NonemptyArc::new(["f", "c1"]),
+            NonemptyArc::new(["f", "c1", "pk"]),
+        ] {
+            dbg!(&partition_key_columns);
+            let v_pk = CqlValue::Int(1);
+            let v_c1 = CqlValue::Int(1);
+            let v_f = Timestamped::new(
+                Timestamp::from_millis(100),
+                Some(DbIndexedValue::Filtering(CqlValue::Int(1))),
+            );
+            let pk = |c2| -> PrimaryKey { [v_pk.clone(), v_c1.clone(), CqlValue::Int(c2)].into() };
+            let values = |millis, vector: Option<[f32; 3]>| {
+                NonemptyBox::<Timestamped<DbIndexedValue>>::new([
+                    Timestamped::new(
+                        Timestamp::from_millis(millis),
+                        vector.map(|vector| {
+                            DbIndexedValue::Vector(vector.into_iter().collect_vec().into())
+                        }),
+                    ),
+                    v_f.clone(),
+                ])
+                .unwrap()
+            };
+
+            let filtering_columns: Arc<[_]> = if let Some(partition_key_columns) =
+                &partition_key_columns
+                && partition_key_columns.contains(&"f".into())
+            {
+                Arc::new(["f".into()])
+            } else {
+                Arc::new([])
+            };
             let index_key = IndexKey::new(&"ks".into(), &"idx".into());
             let mut table = Table::new(
                 index_key.clone(),
-                NonemptyArc::new(["pk", "ck"]).unwrap(),
+                NonemptyArc::new(["pk", "c1", "c2"]).unwrap(),
                 NonZeroUsize::new(1).unwrap(),
                 partition_key_columns.clone(),
                 NonZeroUsize::new(1).unwrap(),
-                Arc::new([]),
+                filtering_columns,
                 Arc::new(
                     [
                         ("pk".into(), NativeType::Int),
-                        ("ck".into(), NativeType::Int),
+                        ("c1".into(), NativeType::Int),
+                        ("c2".into(), NativeType::Int),
+                        ("f".into(), NativeType::Int),
                     ]
                     .into_iter()
                     .collect(),
@@ -1219,15 +1267,7 @@ mod tests {
 
             // insert first vector
             let operations = table
-                .upsert(
-                    &index_key,
-                    [CqlValue::Int(1), CqlValue::Int(1)].into(),
-                    NonemptyBox::new([Timestamped::new(
-                        Timestamp::from_millis(100),
-                        Some(DbIndexedValue::Vector(vec![0.1, 0.2, 0.3].into())),
-                    )])
-                    .unwrap(),
-                )
+                .upsert(&index_key, pk(1), values(100, Some([0.1, 0.2, 0.3])))
                 .unwrap();
             assert_eq!(operations.len(), 1);
             let (primary_id11, partition_id11) = match operations.first().unwrap() {
@@ -1245,15 +1285,7 @@ mod tests {
 
             // insert second vector
             let operations = table
-                .upsert(
-                    &index_key,
-                    [CqlValue::Int(1), CqlValue::Int(2)].into(),
-                    NonemptyBox::new([Timestamped::new(
-                        Timestamp::from_millis(100),
-                        Some(DbIndexedValue::Vector(vec![0.2, 0.2, 0.3].into())),
-                    )])
-                    .unwrap(),
-                )
+                .upsert(&index_key, pk(2), values(100, Some([0.2, 0.2, 0.3])))
                 .unwrap();
             assert_eq!(operations.len(), 1);
             let (primary_id21, partition_id21) = match operations.first().unwrap() {
@@ -1273,15 +1305,7 @@ mod tests {
 
             // insert third vector
             let operations = table
-                .upsert(
-                    &index_key,
-                    [CqlValue::Int(1), CqlValue::Int(3)].into(),
-                    NonemptyBox::new([Timestamped::new(
-                        Timestamp::from_millis(100),
-                        Some(DbIndexedValue::Vector(vec![0.3, 0.2, 0.3].into())),
-                    )])
-                    .unwrap(),
-                )
+                .upsert(&index_key, pk(3), values(100, Some([0.3, 0.2, 0.3])))
                 .unwrap();
             assert_eq!(operations.len(), 1);
             let (primary_id31, partition_id31) = match operations.first().unwrap() {
@@ -1303,22 +1327,22 @@ mod tests {
 
             assert_eq!(
                 table.primary_key(partition_id11, primary_id11).unwrap(),
-                [CqlValue::Int(1), CqlValue::Int(1)].into()
+                [CqlValue::Int(1), CqlValue::Int(1), CqlValue::Int(1)].into()
             );
             assert_eq!(
                 table.primary_key(partition_id11, primary_id21).unwrap(),
-                [CqlValue::Int(1), CqlValue::Int(2)].into()
+                [CqlValue::Int(1), CqlValue::Int(1), CqlValue::Int(2)].into()
             );
             assert_eq!(
                 table.primary_key(partition_id11, primary_id31).unwrap(),
-                [CqlValue::Int(1), CqlValue::Int(3)].into()
+                [CqlValue::Int(1), CqlValue::Int(1), CqlValue::Int(3)].into()
             );
 
             assert!(table.is_valid_for(
                 partition_id11,
                 primary_id11,
                 &Restriction::Eq {
-                    lhs: "ck".into(),
+                    lhs: "c2".into(),
                     rhs: CqlValue::Int(1)
                 }
             ));
@@ -1326,7 +1350,7 @@ mod tests {
                 partition_id21,
                 primary_id21,
                 &Restriction::Eq {
-                    lhs: "ck".into(),
+                    lhs: "c2".into(),
                     rhs: CqlValue::Int(2)
                 }
             ));
@@ -1334,36 +1358,20 @@ mod tests {
                 partition_id31,
                 primary_id31,
                 &Restriction::Eq {
-                    lhs: "ck".into(),
+                    lhs: "c2".into(),
                     rhs: CqlValue::Int(3)
                 }
             ));
 
             // insert second vector with older timestamp - should not update the vector
             let operations = table
-                .upsert(
-                    &index_key,
-                    [CqlValue::Int(1), CqlValue::Int(2)].into(),
-                    NonemptyBox::new([Timestamped::new(
-                        Timestamp::from_millis(50),
-                        Some(DbIndexedValue::Vector(vec![0.2, 0.2, 0.3].into())),
-                    )])
-                    .unwrap(),
-                )
+                .upsert(&index_key, pk(2), values(50, Some([0.2, 0.2, 0.3])))
                 .unwrap();
             assert_eq!(operations.len(), 0);
 
             // insert second vector with newer timestamp - should update the vector
             let operations = table
-                .upsert(
-                    &index_key,
-                    [CqlValue::Int(1), CqlValue::Int(2)].into(),
-                    NonemptyBox::new([Timestamped::new(
-                        Timestamp::from_millis(150),
-                        Some(DbIndexedValue::Vector(vec![0.5, 0.5, 0.3].into())),
-                    )])
-                    .unwrap(),
-                )
+                .upsert(&index_key, pk(2), values(150, Some([0.5, 0.5, 0.3])))
                 .unwrap();
             assert_eq!(operations.len(), 2);
             let (primary_id22, partition_id22) = match operations.first().unwrap() {
@@ -1393,18 +1401,11 @@ mod tests {
             assert!(table.primary_key(partition_id21, primary_id21).is_none());
             assert_eq!(
                 table.primary_key(partition_id22, primary_id22).unwrap(),
-                [CqlValue::Int(1), CqlValue::Int(2)].into()
+                pk(2),
             );
 
             // remove first vector
-            let operations = table
-                .upsert(
-                    &index_key,
-                    [CqlValue::Int(1), CqlValue::Int(1)].into(),
-                    NonemptyBox::new([Timestamped::new(Timestamp::from_millis(200), None)])
-                        .unwrap(),
-                )
-                .unwrap();
+            let operations = table.upsert(&index_key, pk(1), values(200, None)).unwrap();
             assert_eq!(operations.len(), 1);
             let (primary_id13, partition_id13) = match operations.first().unwrap() {
                 Operation::RemoveValue {
@@ -1418,14 +1419,7 @@ mod tests {
             assert!(table.primary_key(partition_id13, primary_id13).is_none());
 
             // remove second vector
-            let operations = table
-                .upsert(
-                    &index_key,
-                    [CqlValue::Int(1), CqlValue::Int(2)].into(),
-                    NonemptyBox::new([Timestamped::new(Timestamp::from_millis(200), None)])
-                        .unwrap(),
-                )
-                .unwrap();
+            let operations = table.upsert(&index_key, pk(2), values(200, None)).unwrap();
             assert_eq!(operations.len(), 1);
             let (primary_id23, partition_id23) = match operations.first().unwrap() {
                 Operation::RemoveValue {
@@ -1439,14 +1433,7 @@ mod tests {
             assert!(table.primary_key(partition_id23, primary_id23).is_none());
 
             // remove third vector
-            let operations = table
-                .upsert(
-                    &index_key,
-                    [CqlValue::Int(1), CqlValue::Int(3)].into(),
-                    NonemptyBox::new([Timestamped::new(Timestamp::from_millis(200), None)])
-                        .unwrap(),
-                )
-                .unwrap();
+            let operations = table.upsert(&index_key, pk(3), values(200, None)).unwrap();
             if partition_key_columns.is_none() {
                 assert_eq!(operations.len(), 1);
             } else {
