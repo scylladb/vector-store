@@ -15,10 +15,17 @@ use tantivy::collector::TopDocs;
 use tantivy::indexer::IndexWriterOptions;
 use tantivy::query::QueryParser;
 use tantivy::schema::INDEXED;
+use tantivy::schema::IndexRecordOption;
 use tantivy::schema::STORED;
 use tantivy::schema::Schema;
-use tantivy::schema::TEXT;
+use tantivy::schema::TextFieldIndexing;
+use tantivy::schema::TextOptions;
 use tantivy::schema::Value;
+use tantivy::tokenizer::Language;
+use tantivy::tokenizer::LowerCaser;
+use tantivy::tokenizer::SimpleTokenizer;
+use tantivy::tokenizer::StopWordFilter;
+use tantivy::tokenizer::TextAnalyzer;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tracing::debug;
@@ -72,10 +79,15 @@ struct IndexState {
     schema: Schema,
 }
 
+const TOKENIZER_NAME: &str = "standard";
+
 impl IndexState {
     fn new() -> anyhow::Result<Self> {
         let schema = build_schema();
         let index = tantivy::Index::create_in_ram(schema.clone());
+        index
+            .tokenizers()
+            .register(TOKENIZER_NAME, build_standard_analyzer()?);
         let options = IndexWriterOptions::builder()
             .num_worker_threads(perf::num_workers().into())
             .build();
@@ -94,10 +106,26 @@ impl IndexState {
     }
 }
 
+fn build_standard_analyzer() -> anyhow::Result<TextAnalyzer> {
+    let stop_words = StopWordFilter::new(Language::English)
+        .ok_or_else(|| anyhow!("fts: english stop words unavailable"))?;
+    Ok(TextAnalyzer::builder(SimpleTokenizer::default())
+        .filter(LowerCaser)
+        .filter(stop_words)
+        .build())
+}
+
+fn body_text_options() -> TextOptions {
+    let indexing = TextFieldIndexing::default()
+        .set_tokenizer(TOKENIZER_NAME)
+        .set_index_option(IndexRecordOption::WithFreqsAndPositions);
+    TextOptions::default().set_indexing_options(indexing)
+}
+
 fn build_schema() -> Schema {
     let mut schema_builder = Schema::builder();
     schema_builder.add_u64_field("primary_id", INDEXED | STORED);
-    schema_builder.add_text_field("body", TEXT);
+    schema_builder.add_text_field("body", body_text_options());
     schema_builder.build()
 }
 
@@ -433,6 +461,16 @@ mod tests {
         tx
     }
 
+    fn tokenize_with_standard_analyzer(text: &str) -> Vec<String> {
+        let mut analyzer = build_standard_analyzer().unwrap();
+        let mut stream = analyzer.token_stream(text);
+        let mut tokens = Vec::new();
+        while stream.advance() {
+            tokens.push(stream.token().text.clone());
+        }
+        tokens
+    }
+
     #[tokio::test]
     async fn add_document_increments_count() {
         let table = make_table_with_keys();
@@ -566,5 +604,52 @@ mod tests {
         let key = make_index_key();
         let count = sender.count(key).await.unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn tokenize_lowercases_mixed_case() {
+        assert_eq!(
+            tokenize_with_standard_analyzer("Hello WORLD Rust"),
+            vec!["hello", "world", "rust"]
+        );
+    }
+
+    #[test]
+    fn tokenize_splits_on_punctuation() {
+        assert_eq!(
+            tokenize_with_standard_analyzer("hello,world!rust.programming"),
+            vec!["hello", "world", "rust", "programming"]
+        );
+    }
+
+    #[test]
+    fn tokenize_removes_english_stop_words() {
+        assert_eq!(
+            tokenize_with_standard_analyzer("the quick brown fox and a lazy dog"),
+            vec!["quick", "brown", "fox", "lazy", "dog"]
+        );
+    }
+
+    #[test]
+    fn tokenize_preserves_unicode_alphanumerics() {
+        assert_eq!(
+            tokenize_with_standard_analyzer("Café Über Naïve Straße"),
+            vec!["café", "über", "naïve", "straße"]
+        );
+    }
+
+    #[test]
+    fn tokenize_empty_string_yields_no_tokens() {
+        assert!(tokenize_with_standard_analyzer("").is_empty());
+    }
+
+    #[test]
+    fn tokenize_whitespace_only_yields_no_tokens() {
+        assert!(tokenize_with_standard_analyzer("   \t\n  ").is_empty());
+    }
+
+    #[test]
+    fn tokenize_punctuation_only_yields_no_tokens() {
+        assert!(tokenize_with_standard_analyzer("!@#$ ,.;:").is_empty());
     }
 }
