@@ -390,25 +390,12 @@ mod tests {
         assert_eq!(idx_status, Some(IndexStatus::Initializing));
     }
 
-    /// Regression test for bootstrap completion when index metadata changes mid-bootstrap.
-    ///
-    /// The node should transition to `Serving` once all initially discovered index keys finish
-    /// their full scan, even if an index was recreated and now has a different metadata version.
-    #[tokio::test]
-    #[ignore = "reproduces Vector bug: node stuck in BOOTSTRAPPING when index metadata/version changes mid-bootstrap; enable once fixed"]
-    async fn node_stuck_bootstrapping_when_index_version_changes_mid_bootstrap() {
-        let node_state = new().await;
-
-        node_state.send_event(Event::ConnectingToDb).await;
-        node_state.send_event(Event::DiscoveringIndexes).await;
-        assert_eq!(
-            node_state.get_status().await,
-            NodeStatus::DiscoveringIndexes
-        );
-
-        let idx_v1 = IndexMetadata {
+    /// Build an `IndexMetadata` for tests. Only the index name varies, so distinct names map to
+    /// distinct `key()`s while sharing all other fields.
+    fn make_index(name: &str) -> IndexMetadata {
+        IndexMetadata {
             keyspace_name: KeyspaceName("test_keyspace".to_string()),
-            index_name: IndexName("test_index".to_string()),
+            index_name: IndexName(name.to_string()),
             table_name: TableName("test_table".to_string()),
             target_columns: NonemptyArc::new(["test_column"]).unwrap(),
             partitioning: DbIndexPartitioning::Global,
@@ -422,27 +409,100 @@ mod tests {
                 space_type: Default::default(),
                 quantization: Default::default(),
             }),
-        };
+        }
+    }
 
+    /// Regression test: the node must reach `Serving` once every initially discovered index has
+    /// finished its full scan, even if a schema change triggers a re-discovery mid-bootstrap.
+    ///
+    /// This reproduces a hang observed in production using only event sequences that the real
+    /// producers emit (`monitor_indexes` sends `DiscoveringIndexes` + `IndexesDiscovered` on every
+    /// schema change; `db_index` sends `FullScanFinished` once per index task). The scenario:
+    ///
+    ///   1. Bootstrap discovers indexes A and B; both start scanning.
+    ///   2. A finishes quickly (`FullScanFinished(A)`), so only B remains outstanding.
+    ///   3. While B is still scanning, an unrelated schema change fires a new monitor tick:
+    ///      `DiscoveringIndexes` (flipping the node back off `IndexingEmbeddings`) followed by
+    ///      `IndexesDiscovered({A, B})` with the same still-present indexes.
+    ///   4. B finishes (`FullScanFinished(B)`).
+    ///
+    /// A already completed in step 2 and its `db_index` task will never emit `FullScanFinished`
+    /// again, so the re-discovery in step 3 must not resurrect A as an outstanding index. Because
+    /// all discovered indexes have finished scanning, the node should be `Serving`.
+    #[tokio::test]
+    #[ignore = "reproduces Vector bug: node stuck in BOOTSTRAPPING when a schema change re-discovers indexes mid-bootstrap; enable once fixed"]
+    async fn node_stuck_bootstrapping_when_rediscovering_indexes_mid_bootstrap() {
+        let node_state = new().await;
+
+        node_state.send_event(Event::ConnectingToDb).await;
+        node_state.send_event(Event::DiscoveringIndexes).await;
+        assert_eq!(
+            node_state.get_status().await,
+            NodeStatus::DiscoveringIndexes
+        );
+
+        let idx_a = make_index("index_a");
+        let idx_b = make_index("index_b");
+
+        // Step 1: bootstrap discovers both indexes.
         node_state
-            .send_event(Event::IndexesDiscovered(HashSet::from([idx_v1.clone()])))
+            .send_event(Event::IndexesDiscovered(HashSet::from([
+                idx_a.clone(),
+                idx_b.clone(),
+            ])))
             .await;
-        assert_eq!(node_state.get_status().await, NodeStatus::IndexingEmbeddings);
+        assert_eq!(
+            node_state.get_status().await,
+            NodeStatus::IndexingEmbeddings
+        );
 
-        let mut idx_v2 = idx_v1.clone();
-        idx_v2.version = Uuid::new_v4().into();
-        assert_eq!(idx_v1.key(), idx_v2.key());
-        assert_ne!(idx_v1, idx_v2);
-
+        // Step 2: A finishes its full scan; B is still scanning.
         node_state
-            .send_event(Event::FullScanFinished(idx_v2.clone()))
+            .send_event(Event::FullScanFinished(idx_a.clone()))
+            .await;
+        assert_eq!(
+            node_state.get_status().await,
+            NodeStatus::IndexingEmbeddings
+        );
+        assert_eq!(
+            node_state
+                .get_index_status(&idx_a.keyspace_name.0, &idx_a.index_name.0)
+                .await,
+            Some(IndexStatus::Serving)
+        );
+
+        // Step 3: an unrelated schema change re-triggers discovery of the same indexes while B is
+        // still scanning. This mirrors a monitor_indexes tick: DiscoveringIndexes then
+        // IndexesDiscovered with the currently present indexes.
+        node_state.send_event(Event::DiscoveringIndexes).await;
+        node_state
+            .send_event(Event::IndexesDiscovered(HashSet::from([
+                idx_a.clone(),
+                idx_b.clone(),
+            ])))
             .await;
 
-        let idx_status = node_state
-            .get_index_status(&idx_v2.keyspace_name.0, &idx_v2.index_name.0)
+        // Step 4: B finishes its full scan. A already finished in step 2 and will not emit
+        // FullScanFinished again.
+        node_state
+            .send_event(Event::FullScanFinished(idx_b.clone()))
             .await;
-        assert_eq!(idx_status, Some(IndexStatus::Serving));
 
+        // Both indexes report Serving per-index...
+        assert_eq!(
+            node_state
+                .get_index_status(&idx_a.keyspace_name.0, &idx_a.index_name.0)
+                .await,
+            Some(IndexStatus::Serving)
+        );
+        assert_eq!(
+            node_state
+                .get_index_status(&idx_b.keyspace_name.0, &idx_b.index_name.0)
+                .await,
+            Some(IndexStatus::Serving)
+        );
+
+        // ...so the node should have finished bootstrapping.
         assert_eq!(node_state.get_status().await, NodeStatus::Serving);
     }
 }
