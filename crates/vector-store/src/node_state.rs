@@ -389,4 +389,60 @@ mod tests {
             .await;
         assert_eq!(idx_status, Some(IndexStatus::Initializing));
     }
+
+    /// Regression test for bootstrap completion when index metadata changes mid-bootstrap.
+    ///
+    /// The node should transition to `Serving` once all initially discovered index keys finish
+    /// their full scan, even if an index was recreated and now has a different metadata version.
+    #[tokio::test]
+    #[ignore = "reproduces Vector bug: node stuck in BOOTSTRAPPING when index metadata/version changes mid-bootstrap; enable once fixed"]
+    async fn node_stuck_bootstrapping_when_index_version_changes_mid_bootstrap() {
+        let node_state = new().await;
+
+        node_state.send_event(Event::ConnectingToDb).await;
+        node_state.send_event(Event::DiscoveringIndexes).await;
+        assert_eq!(
+            node_state.get_status().await,
+            NodeStatus::DiscoveringIndexes
+        );
+
+        let idx_v1 = IndexMetadata {
+            keyspace_name: KeyspaceName("test_keyspace".to_string()),
+            index_name: IndexName("test_index".to_string()),
+            table_name: TableName("test_table".to_string()),
+            target_columns: NonemptyArc::new(["test_column"]).unwrap(),
+            partitioning: DbIndexPartitioning::Global,
+            filtering_columns: Arc::new([]),
+            version: Uuid::new_v4().into(),
+            kind: IndexKind::Vs(IndexOptionsVs {
+                dimensions: Dimensions(NonZeroUsize::new(3).unwrap()),
+                connectivity: Default::default(),
+                expansion_add: Default::default(),
+                expansion_search: Default::default(),
+                space_type: Default::default(),
+                quantization: Default::default(),
+            }),
+        };
+
+        node_state
+            .send_event(Event::IndexesDiscovered(HashSet::from([idx_v1.clone()])))
+            .await;
+        assert_eq!(node_state.get_status().await, NodeStatus::IndexingEmbeddings);
+
+        let mut idx_v2 = idx_v1.clone();
+        idx_v2.version = Uuid::new_v4().into();
+        assert_eq!(idx_v1.key(), idx_v2.key());
+        assert_ne!(idx_v1, idx_v2);
+
+        node_state
+            .send_event(Event::FullScanFinished(idx_v2.clone()))
+            .await;
+
+        let idx_status = node_state
+            .get_index_status(&idx_v2.keyspace_name.0, &idx_v2.index_name.0)
+            .await;
+        assert_eq!(idx_status, Some(IndexStatus::Serving));
+
+        assert_eq!(node_state.get_status().await, NodeStatus::Serving);
+    }
 }
