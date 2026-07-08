@@ -14,6 +14,7 @@ use tokio::sync::oneshot;
 use tracing::Instrument;
 use tracing::debug;
 use tracing::debug_span;
+use tracing::error;
 use tracing::info;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,7 +105,7 @@ pub(crate) async fn new() -> mpsc::Sender<NodeState> {
             debug!("starting");
 
             let mut status = NodeStatus::Initializing;
-            let mut initial_idxs = HashSet::new();
+            let mut initial_idxs: Option<HashSet<_>> = None;
             let mut idxs = HashMap::<IndexKey, IndexStatus>::new();
             while let Some(msg) = rx.recv().await {
                 match msg {
@@ -112,17 +113,32 @@ pub(crate) async fn new() -> mpsc::Sender<NodeState> {
                         Event::ConnectingToDb => {
                             status = NodeStatus::ConnectingToDb;
                         }
+
                         Event::ConnectedToDb => {}
-                        Event::DiscoveringIndexes => {
-                            if status != NodeStatus::Serving {
-                                status = NodeStatus::DiscoveringIndexes;
+
+                        Event::DiscoveringIndexes => match status {
+                            NodeStatus::Initializing | NodeStatus::ConnectingToDb => {
+                                if let Some(initial_idxs) = &initial_idxs {
+                                    if initial_idxs.is_empty() {
+                                        // Initial indexes already built
+                                        status = NodeStatus::Serving;
+                                    } else {
+                                        // Still in the process of building initial indexes
+                                        status = NodeStatus::IndexingEmbeddings
+                                    }
+                                } else {
+                                    // Need to discover indexes first
+                                    status = NodeStatus::DiscoveringIndexes;
+                                }
                             }
-                        }
+                            _ => {}
+                        },
+
                         Event::IndexesDiscovered(indexes) => {
-                            if indexes.is_empty() && status != NodeStatus::Serving {
-                                status = NodeStatus::Serving;
-                                info!("Service is running, no indexes to build");
-                                continue;
+                            let mut initial = false;
+                            if initial_idxs.is_none() {
+                                initial = true;
+                                initial_idxs = Some(indexes.clone());
                             }
 
                             update_indexes(
@@ -130,25 +146,52 @@ pub(crate) async fn new() -> mpsc::Sender<NodeState> {
                                 indexes.iter().map(|meta| meta.key()).collect(),
                             );
 
-                            if status == NodeStatus::DiscoveringIndexes {
-                                status = NodeStatus::IndexingEmbeddings;
-                                initial_idxs = indexes;
+                            let initial_idxs = initial_idxs
+                                .as_mut()
+                                .expect("initial_idxs should be Some here");
+
+                            // remove any initial indexes that are no longer present
+                            initial_idxs.retain(|idx| idxs.contains_key(&idx.key()));
+
+                            if initial_idxs.is_empty() {
+                                if status != NodeStatus::Serving {
+                                    status = NodeStatus::Serving;
+                                    info!(
+                                        "Service is running, no {more}initial indexes to build",
+                                        more = if initial { "" } else { "more " }
+                                    );
+                                }
+                                continue;
                             }
+
+                            // we have initial indexes to build, so we need to be in the
+                            // IndexingEmbeddings state
+                            status = NodeStatus::IndexingEmbeddings;
                         }
+
                         Event::FullScanStarted(metadata) => {
                             if let Some(index_status) = idxs.get_mut(&metadata.key()) {
                                 *index_status = IndexStatus::FullScanning;
                             }
                         }
+
                         Event::FullScanFinished(metadata) => {
                             if let Some(index_status) = idxs.get_mut(&metadata.key()) {
                                 *index_status = IndexStatus::Serving;
                             }
 
+                            let Some(initial_idxs) = &mut initial_idxs else {
+                                error!(
+                                    "Received FullScanFinished for index {index:?} \
+                                    but initial_idxs is None",
+                                    index = metadata.key()
+                                );
+                                continue;
+                            };
                             initial_idxs.remove(&metadata);
                             if initial_idxs.is_empty() && status != NodeStatus::Serving {
                                 status = NodeStatus::Serving;
-                                info!("Service is running, finished building indexes");
+                                info!("Service is running, finished building initial indexes");
                             }
                         }
                     },
@@ -196,61 +239,267 @@ mod tests {
     use std::sync::Arc;
     use uuid::Uuid;
 
+    fn index_metadata(name: &str) -> IndexMetadata {
+        IndexMetadata {
+            keyspace_name: KeyspaceName("test_keyspace".to_string()),
+            index_name: IndexName(name.to_string()),
+            table_name: TableName("test_table".to_string()),
+            target_columns: NonemptyArc::new(["test_column"]).unwrap(),
+            partitioning: DbIndexPartitioning::Global,
+            filtering_columns: Arc::new([]),
+            version: Uuid::new_v4().into(),
+            kind: IndexKind::Vs(IndexOptionsVs {
+                dimensions: Dimensions(NonZeroUsize::new(3).unwrap()),
+                connectivity: Default::default(),
+                expansion_add: Default::default(),
+                expansion_search: Default::default(),
+                space_type: Default::default(),
+                quantization: Default::default(),
+            }),
+        }
+    }
+
     #[tokio::test]
-    async fn test_node_state_changes_as_expected() {
+    async fn node_state_events_one_by_one() {
         let node_state = new().await;
-        let mut status = node_state.get_status().await;
+        let idx1 = index_metadata("idx1");
+        let idx2 = index_metadata("idx2");
+
+        let status = node_state.get_status().await;
         assert_eq!(status, NodeStatus::Initializing);
+
         node_state.send_event(Event::ConnectingToDb).await;
-        status = node_state.get_status().await;
+        let status = node_state.get_status().await;
         assert_eq!(status, NodeStatus::ConnectingToDb);
+
         node_state.send_event(Event::ConnectedToDb).await;
+        assert_eq!(status, NodeStatus::ConnectingToDb);
+
         node_state.send_event(Event::DiscoveringIndexes).await;
-        status = node_state.get_status().await;
+        let status = node_state.get_status().await;
         assert_eq!(status, NodeStatus::DiscoveringIndexes);
-        let idx1 = IndexMetadata {
-            keyspace_name: KeyspaceName("test_keyspace".to_string()),
-            index_name: IndexName("test_index".to_string()),
-            table_name: TableName("test_table".to_string()),
-            target_columns: NonemptyArc::new(["test_column"]).unwrap(),
-            partitioning: DbIndexPartitioning::Global,
-            filtering_columns: Arc::new([]),
-            version: Uuid::new_v4().into(),
-            kind: IndexKind::Vs(IndexOptionsVs {
-                dimensions: Dimensions(NonZeroUsize::new(3).unwrap()),
-                connectivity: Default::default(),
-                expansion_add: Default::default(),
-                expansion_search: Default::default(),
-                space_type: Default::default(),
-                quantization: Default::default(),
-            }),
-        };
-        let idx2 = IndexMetadata {
-            keyspace_name: KeyspaceName("test_keyspace".to_string()),
-            index_name: IndexName("test_index1".to_string()),
-            table_name: TableName("test_table".to_string()),
-            target_columns: NonemptyArc::new(["test_column"]).unwrap(),
-            partitioning: DbIndexPartitioning::Global,
-            filtering_columns: Arc::new([]),
-            version: Uuid::new_v4().into(),
-            kind: IndexKind::Vs(IndexOptionsVs {
-                dimensions: Dimensions(NonZeroUsize::new(3).unwrap()),
-                connectivity: Default::default(),
-                expansion_add: Default::default(),
-                expansion_search: Default::default(),
-                space_type: Default::default(),
-                quantization: Default::default(),
-            }),
-        };
-        let idxs = HashSet::from([idx1.clone(), idx2.clone()]);
-        node_state.send_event(Event::IndexesDiscovered(idxs)).await;
-        status = node_state.get_status().await;
+
+        node_state
+            .send_event(Event::IndexesDiscovered(HashSet::from([
+                idx1.clone(),
+                idx2.clone(),
+            ])))
+            .await;
+        let status = node_state.get_status().await;
         assert_eq!(status, NodeStatus::IndexingEmbeddings);
+
         node_state.send_event(Event::FullScanFinished(idx1)).await;
-        status = node_state.get_status().await;
+        let status = node_state.get_status().await;
         assert_eq!(status, NodeStatus::IndexingEmbeddings);
+
         node_state.send_event(Event::FullScanFinished(idx2)).await;
-        status = node_state.get_status().await;
+        let status = node_state.get_status().await;
+        assert_eq!(status, NodeStatus::Serving);
+    }
+
+    #[tokio::test]
+    async fn node_state_discovering_indexes_while_bootstrapping() {
+        let node_state = new().await;
+        let idx1 = index_metadata("idx1");
+        let idx2 = index_metadata("idx2");
+
+        let status = node_state.get_status().await;
+        assert_eq!(status, NodeStatus::Initializing);
+
+        node_state.send_event(Event::ConnectingToDb).await;
+        let status = node_state.get_status().await;
+        assert_eq!(status, NodeStatus::ConnectingToDb);
+
+        node_state.send_event(Event::ConnectedToDb).await;
+        assert_eq!(status, NodeStatus::ConnectingToDb);
+
+        node_state.send_event(Event::DiscoveringIndexes).await;
+        let status = node_state.get_status().await;
+        assert_eq!(status, NodeStatus::DiscoveringIndexes);
+
+        node_state
+            .send_event(Event::IndexesDiscovered(HashSet::from([
+                idx1.clone(),
+                idx2.clone(),
+            ])))
+            .await;
+        let status = node_state.get_status().await;
+        assert_eq!(status, NodeStatus::IndexingEmbeddings);
+
+        node_state
+            .send_event(Event::FullScanFinished(idx1.clone()))
+            .await;
+        let status = node_state.get_status().await;
+        assert_eq!(status, NodeStatus::IndexingEmbeddings);
+
+        node_state.send_event(Event::DiscoveringIndexes).await;
+        let status = node_state.get_status().await;
+        assert_eq!(status, NodeStatus::IndexingEmbeddings);
+
+        node_state
+            .send_event(Event::IndexesDiscovered(HashSet::from([
+                idx1.clone(),
+                idx2.clone(),
+            ])))
+            .await;
+        let status = node_state.get_status().await;
+        assert_eq!(status, NodeStatus::IndexingEmbeddings);
+
+        node_state.send_event(Event::FullScanFinished(idx2)).await;
+        let status = node_state.get_status().await;
+        assert_eq!(status, NodeStatus::Serving);
+    }
+
+    #[tokio::test]
+    async fn node_state_db_reconnect_while_bootstrapping() {
+        let node_state = new().await;
+        let idx1 = index_metadata("idx1");
+        let idx2 = index_metadata("idx2");
+
+        let status = node_state.get_status().await;
+        assert_eq!(status, NodeStatus::Initializing);
+
+        node_state.send_event(Event::ConnectingToDb).await;
+        let status = node_state.get_status().await;
+        assert_eq!(status, NodeStatus::ConnectingToDb);
+
+        node_state.send_event(Event::ConnectedToDb).await;
+        assert_eq!(status, NodeStatus::ConnectingToDb);
+
+        node_state.send_event(Event::DiscoveringIndexes).await;
+        let status = node_state.get_status().await;
+        assert_eq!(status, NodeStatus::DiscoveringIndexes);
+
+        node_state
+            .send_event(Event::IndexesDiscovered(HashSet::from([
+                idx1.clone(),
+                idx2.clone(),
+            ])))
+            .await;
+        let status = node_state.get_status().await;
+        assert_eq!(status, NodeStatus::IndexingEmbeddings);
+
+        node_state
+            .send_event(Event::FullScanFinished(idx1.clone()))
+            .await;
+        let status = node_state.get_status().await;
+        assert_eq!(status, NodeStatus::IndexingEmbeddings);
+
+        node_state.send_event(Event::ConnectingToDb).await;
+        let status = node_state.get_status().await;
+        assert_eq!(status, NodeStatus::ConnectingToDb);
+
+        node_state.send_event(Event::ConnectedToDb).await;
+        assert_eq!(status, NodeStatus::ConnectingToDb);
+
+        node_state.send_event(Event::DiscoveringIndexes).await;
+        let status = node_state.get_status().await;
+        assert_eq!(status, NodeStatus::IndexingEmbeddings);
+
+        node_state
+            .send_event(Event::IndexesDiscovered(HashSet::from([
+                idx1.clone(),
+                idx2.clone(),
+            ])))
+            .await;
+        let status = node_state.get_status().await;
+        assert_eq!(status, NodeStatus::IndexingEmbeddings);
+
+        node_state.send_event(Event::FullScanFinished(idx2)).await;
+        let status = node_state.get_status().await;
+        assert_eq!(status, NodeStatus::Serving);
+    }
+
+    #[tokio::test]
+    async fn node_state_removing_index_while_bootstrapping() {
+        let node_state = new().await;
+        let idx1 = index_metadata("idx1");
+        let idx2 = index_metadata("idx2");
+
+        let status = node_state.get_status().await;
+        assert_eq!(status, NodeStatus::Initializing);
+
+        node_state.send_event(Event::ConnectingToDb).await;
+        let status = node_state.get_status().await;
+        assert_eq!(status, NodeStatus::ConnectingToDb);
+
+        node_state.send_event(Event::ConnectedToDb).await;
+        assert_eq!(status, NodeStatus::ConnectingToDb);
+
+        node_state.send_event(Event::DiscoveringIndexes).await;
+        let status = node_state.get_status().await;
+        assert_eq!(status, NodeStatus::DiscoveringIndexes);
+
+        node_state
+            .send_event(Event::IndexesDiscovered(HashSet::from([
+                idx1.clone(),
+                idx2.clone(),
+            ])))
+            .await;
+        let status = node_state.get_status().await;
+        assert_eq!(status, NodeStatus::IndexingEmbeddings);
+
+        node_state
+            .send_event(Event::FullScanFinished(idx1.clone()))
+            .await;
+        let status = node_state.get_status().await;
+        assert_eq!(status, NodeStatus::IndexingEmbeddings);
+
+        node_state
+            .send_event(Event::IndexesDiscovered(HashSet::from([idx1.clone()])))
+            .await;
+        let status = node_state.get_status().await;
+        assert_eq!(status, NodeStatus::Serving);
+    }
+
+    #[tokio::test]
+    async fn node_state_adding_index_while_bootstrapping() {
+        let node_state = new().await;
+        let idx1 = index_metadata("idx1");
+        let idx2 = index_metadata("idx2");
+        let idx3 = index_metadata("idx3");
+
+        let status = node_state.get_status().await;
+        assert_eq!(status, NodeStatus::Initializing);
+
+        node_state.send_event(Event::ConnectingToDb).await;
+        let status = node_state.get_status().await;
+        assert_eq!(status, NodeStatus::ConnectingToDb);
+
+        node_state.send_event(Event::ConnectedToDb).await;
+        assert_eq!(status, NodeStatus::ConnectingToDb);
+
+        node_state.send_event(Event::DiscoveringIndexes).await;
+        let status = node_state.get_status().await;
+        assert_eq!(status, NodeStatus::DiscoveringIndexes);
+
+        node_state
+            .send_event(Event::IndexesDiscovered(HashSet::from([
+                idx1.clone(),
+                idx2.clone(),
+            ])))
+            .await;
+        let status = node_state.get_status().await;
+        assert_eq!(status, NodeStatus::IndexingEmbeddings);
+
+        node_state
+            .send_event(Event::FullScanFinished(idx1.clone()))
+            .await;
+        let status = node_state.get_status().await;
+        assert_eq!(status, NodeStatus::IndexingEmbeddings);
+
+        node_state
+            .send_event(Event::IndexesDiscovered(HashSet::from([
+                idx1.clone(),
+                idx2.clone(),
+                idx3.clone(),
+            ])))
+            .await;
+        let status = node_state.get_status().await;
+        assert_eq!(status, NodeStatus::IndexingEmbeddings);
+
+        node_state.send_event(Event::FullScanFinished(idx2)).await;
+        let status = node_state.get_status().await;
         assert_eq!(status, NodeStatus::Serving);
     }
 
