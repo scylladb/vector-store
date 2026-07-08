@@ -104,7 +104,8 @@ pub(crate) async fn new() -> mpsc::Sender<NodeState> {
             debug!("starting");
 
             let mut status = NodeStatus::Initializing;
-            let mut initial_idxs = HashSet::new();
+            let mut bootstrap_started = false;
+            let mut initial_idxs = HashSet::<IndexKey>::new();
             let mut idxs = HashMap::<IndexKey, IndexStatus>::new();
             while let Some(msg) = rx.recv().await {
                 match msg {
@@ -125,15 +126,39 @@ pub(crate) async fn new() -> mpsc::Sender<NodeState> {
                                 continue;
                             }
 
-                            update_indexes(
-                                &mut idxs,
-                                indexes.iter().map(|meta| meta.key()).collect(),
-                            );
+                            let keys: HashSet<IndexKey> =
+                                indexes.iter().map(|meta| meta.key()).collect();
+                            update_indexes(&mut idxs, keys.clone());
 
-                            if status == NodeStatus::DiscoveringIndexes {
-                                status = NodeStatus::IndexingEmbeddings;
-                                initial_idxs = indexes;
+                            // Once the node is serving, later schema changes are
+                            // reflected in the per-index map above and must not move
+                            // the node back to bootstrapping.
+                            if status == NodeStatus::Serving {
+                                continue;
                             }
+
+                            if !bootstrap_started {
+                                // Capture the initial set of indexes to build during
+                                // the first bootstrap. This set is only ever shrunk
+                                // afterwards (as scans finish or indexes disappear).
+                                bootstrap_started = true;
+                                initial_idxs = keys;
+                            } else {
+                                // A schema change happened mid-bootstrap. Stop waiting
+                                // on indexes that no longer exist, but never re-add
+                                // indexes: an index that already finished its initial
+                                // full scan won't emit FullScanFinished again, so
+                                // re-adding it would hang the bootstrap forever
+                                // (VECTOR-730).
+                                initial_idxs.retain(|key| keys.contains(key));
+                            }
+
+                            status = if initial_idxs.is_empty() {
+                                info!("Service is running, finished building indexes");
+                                NodeStatus::Serving
+                            } else {
+                                NodeStatus::IndexingEmbeddings
+                            };
                         }
                         Event::FullScanStarted(metadata) => {
                             if let Some(index_status) = idxs.get_mut(&metadata.key()) {
@@ -141,12 +166,16 @@ pub(crate) async fn new() -> mpsc::Sender<NodeState> {
                             }
                         }
                         Event::FullScanFinished(metadata) => {
-                            if let Some(index_status) = idxs.get_mut(&metadata.key()) {
+                            let key = metadata.key();
+                            if let Some(index_status) = idxs.get_mut(&key) {
                                 *index_status = IndexStatus::Serving;
                             }
 
-                            initial_idxs.remove(&metadata);
-                            if initial_idxs.is_empty() && status != NodeStatus::Serving {
+                            initial_idxs.remove(&key);
+                            if bootstrap_started
+                                && initial_idxs.is_empty()
+                                && status != NodeStatus::Serving
+                            {
                                 status = NodeStatus::Serving;
                                 info!("Service is running, finished building indexes");
                             }
@@ -388,5 +417,89 @@ mod tests {
             .get_index_status(&idx.keyspace_name.0, &idx.index_name.0)
             .await;
         assert_eq!(idx_status, Some(IndexStatus::Initializing));
+    }
+
+    fn make_index(name: &str) -> IndexMetadata {
+        IndexMetadata {
+            keyspace_name: KeyspaceName("test_keyspace".to_string()),
+            index_name: IndexName(name.to_string()),
+            table_name: TableName("test_table".to_string()),
+            target_columns: NonemptyArc::new(["test_column"]).unwrap(),
+            partitioning: DbIndexPartitioning::Global,
+            filtering_columns: Arc::new([]),
+            version: Uuid::new_v4().into(),
+            kind: IndexKind::Vs(IndexOptionsVs {
+                dimensions: Dimensions(NonZeroUsize::new(3).unwrap()),
+                connectivity: Default::default(),
+                expansion_add: Default::default(),
+                expansion_search: Default::default(),
+                space_type: Default::default(),
+                quantization: Default::default(),
+            }),
+        }
+    }
+
+    // Regression test for VECTOR-730: dropping and recreating an index while the
+    // node is still performing its initial bootstrap must not prevent the node
+    // from ever reaching Serving.
+    #[tokio::test]
+    async fn node_reaches_serving_after_index_recreated_mid_bootstrap() {
+        let node_state = new().await;
+        node_state.send_event(Event::ConnectingToDb).await;
+        node_state.send_event(Event::ConnectedToDb).await;
+        node_state.send_event(Event::DiscoveringIndexes).await;
+
+        // A slow index (long full scan) and a fast one are discovered together.
+        let slow = make_index("slow_index");
+        let fast = make_index("fast_index");
+        node_state
+            .send_event(Event::IndexesDiscovered(HashSet::from([
+                slow.clone(),
+                fast.clone(),
+            ])))
+            .await;
+        assert_eq!(
+            node_state.get_status().await,
+            NodeStatus::IndexingEmbeddings
+        );
+
+        // The fast index finishes its initial full scan first.
+        node_state
+            .send_event(Event::FullScanFinished(fast.clone()))
+            .await;
+        assert_eq!(
+            node_state.get_status().await,
+            NodeStatus::IndexingEmbeddings
+        );
+
+        // The fast index is dropped and then recreated (new version) while the
+        // slow index is still building. Each schema change re-emits discovery.
+        node_state.send_event(Event::DiscoveringIndexes).await;
+        node_state
+            .send_event(Event::IndexesDiscovered(HashSet::from([slow.clone()])))
+            .await;
+
+        let fast_recreated = make_index("fast_index"); // same key, new version
+        node_state.send_event(Event::DiscoveringIndexes).await;
+        node_state
+            .send_event(Event::IndexesDiscovered(HashSet::from([
+                slow.clone(),
+                fast_recreated.clone(),
+            ])))
+            .await;
+
+        // Still bootstrapping: the slow index has not finished yet.
+        assert_eq!(
+            node_state.get_status().await,
+            NodeStatus::IndexingEmbeddings
+        );
+
+        // The slow index finishes. The node must now reach Serving even though
+        // the recreated fast index never emits FullScanFinished for its new
+        // version during this bootstrap.
+        node_state
+            .send_event(Event::FullScanFinished(slow.clone()))
+            .await;
+        assert_eq!(node_state.get_status().await, NodeStatus::Serving);
     }
 }
