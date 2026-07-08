@@ -1,0 +1,18 @@
+#!/bin/bash
+
+set -e
+
+repo=$(dirname "${BASH_SOURCE[0]}")
+repo=$(realpath $repo/..)
+
+cd $repo
+
+vector_store_version=$(./scripts/run-with-release-toolchain cargo info vector-store | grep ^version: | cut -d ' ' -f 2)
+
+archs="amd64 arm64"
+
+docker_tag=scylladb/vector-store:$vector_store_version
+for arch in $archs ; do
+    docker push $docker_tag-$arch
+done
+docker push $docker_tag

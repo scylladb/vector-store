@@ -47,29 +47,13 @@ cargo_sbom=crates/vector-store/vector-store.cdx.json
 mv $cargo_sbom vector-store-$vector_store_version.cdx.json
 echo "Cargo SBOM: vector-store-$vector_store_version.cdx.json"
 
-for arch in $archs ; do
-    echo build the docker image for linux/$arch
-    docker_tag=scylladb/vector-store:$vector_store_version-$arch
-    docker build --platform linux/$arch --tag $docker_tag -f- . <<EOF
-FROM redhat/ubi9-minimal
-ARG TARGETARCH
-RUN mkdir /opt/vector-store
-COPY target/\$TARGETARCH/release/vector-store /opt/vector-store
-CMD ["/opt/vector-store/vector-store"]
-EOF
+./scripts/build-dockers
 
+for arch in $archs ; do
     echo generate Docker image SBOM for $arch using syft
     docker_sbom=vector-store-docker-$vector_store_version-$arch.cdx.json
+    docker_tag=scylladb/vector-store:$vector_store_version-$arch
     syft $docker_tag -o cyclonedx-json > $docker_sbom
     [[ -s $docker_sbom ]] || { echo "error: Docker SBOM is empty at $docker_sbom"; exit 1; }
     echo "Docker SBOM: $docker_sbom"
 done
-
-echo create multi-platform docker manifest
-docker_manifest=scylladb/vector-store:$vector_store_version
-docker_arch_tags=()
-for arch in $archs ; do
-    docker_arch_tags+=("scylladb/vector-store:$vector_store_version-$arch")
-done
-docker manifest create $docker_manifest "${docker_arch_tags[@]}"
-echo "Docker manifest: $docker_manifest"
