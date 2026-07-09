@@ -384,6 +384,7 @@ impl CdcReaderState {
     ) {
         let session = session_rx.borrow().clone();
         if let Some(session) = session {
+            record_reader_restart(&self.metrics, &self.keyspace, &self.index_name, self.name);
             let config = config_rx.borrow().clone();
             let params = (self.params_fn)(&config);
             self.restart(params, &session, metadata, tx_embeddings, internals)
@@ -401,6 +402,19 @@ fn record_handler_error(
 ) {
     metrics
         .cdc_handler_errors_total
+        .with_label_values(&[keyspace.as_ref(), index_name.as_ref(), reader])
+        .inc();
+}
+
+/// Increments the `cdc_reader_restarts_total` counter for the given index and reader.
+fn record_reader_restart(
+    metrics: &Metrics,
+    keyspace: &KeyspaceName,
+    index_name: &IndexName,
+    reader: &str,
+) {
+    metrics
+        .cdc_reader_restarts_total
         .with_label_values(&[keyspace.as_ref(), index_name.as_ref(), reader])
         .inc();
 }

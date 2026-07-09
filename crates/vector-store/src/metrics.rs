@@ -23,6 +23,7 @@ pub struct Metrics {
     pub indexing_lag: HistogramVec,
     pub cdc_reader_up: GaugeVec,
     pub cdc_handler_errors_total: CounterVec,
+    pub cdc_reader_restarts_total: CounterVec,
     dirty_indexes: Arc<DashSet<(String, String)>>,
 }
 
@@ -118,6 +119,15 @@ impl Metrics {
         )
         .unwrap();
 
+        let cdc_reader_restarts_total = CounterVec::new(
+            prometheus::Opts::new(
+                "cdc_reader_restarts_total",
+                "Total number of CDC reader restart attempts after an error, per index and reader",
+            ),
+            &["keyspace", "index_name", "reader"],
+        )
+        .unwrap();
+
         registry.register(Box::new(latency.clone())).unwrap();
         registry.register(Box::new(size.clone())).unwrap();
         registry.register(Box::new(modified.clone())).unwrap();
@@ -125,6 +135,9 @@ impl Metrics {
         registry.register(Box::new(cdc_reader_up.clone())).unwrap();
         registry
             .register(Box::new(cdc_handler_errors_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(cdc_reader_restarts_total.clone()))
             .unwrap();
 
         Self {
@@ -135,6 +148,7 @@ impl Metrics {
             indexing_lag,
             cdc_reader_up,
             cdc_handler_errors_total,
+            cdc_reader_restarts_total,
             dirty_indexes: Arc::new(DashSet::new()),
         }
     }
@@ -177,6 +191,9 @@ impl Metrics {
             .remove_label_values(&[keyspace, index_name, reader]);
         let _ = self
             .cdc_handler_errors_total
+            .remove_label_values(&[keyspace, index_name, reader]);
+        let _ = self
+            .cdc_reader_restarts_total
             .remove_label_values(&[keyspace, index_name, reader]);
     }
 }
@@ -351,6 +368,28 @@ mod tests {
     }
 
     #[test]
+    fn cdc_reader_restarts_total_is_exported() {
+        let metrics = Metrics::new();
+
+        metrics
+            .cdc_reader_restarts_total
+            .with_label_values(&["ks", "idx", READER_FINE])
+            .inc_by(2.0);
+
+        let output = metric_families_text(&metrics);
+        assert!(
+            output.contains("# TYPE cdc_reader_restarts_total counter"),
+            "cdc_reader_restarts_total counter missing from export:\n{output}"
+        );
+        assert!(
+            output.contains(
+                r#"cdc_reader_restarts_total{index_name="idx",keyspace="ks",reader="fine"} 2"#
+            ),
+            "expected two observed restarts in export:\n{output}"
+        );
+    }
+
+    #[test]
     fn remove_index_labels_does_not_clear_cdc_reader_metrics() {
         let metrics = Metrics::new();
 
@@ -387,6 +426,10 @@ mod tests {
                 .set(1.0);
             metrics
                 .cdc_handler_errors_total
+                .with_label_values(&["ks", "idx", reader])
+                .inc();
+            metrics
+                .cdc_reader_restarts_total
                 .with_label_values(&["ks", "idx", reader])
                 .inc();
         }
