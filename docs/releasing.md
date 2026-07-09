@@ -33,9 +33,7 @@ per-architecture docker images, and a multi-platform docker manifest. You can
 push the docker images and manifest to docker hub:
 
 ```bash
-docker push scylladb/vector-store:X.Y.Z-amd64
-docker push scylladb/vector-store:X.Y.Z-arm64
-docker manifest push scylladb/vector-store:X.Y.Z
+./scripts/upload-dockers
 ```
 
 The build script also generates SBOM files in CycloneDX JSON format:

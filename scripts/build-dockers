@@ -1,0 +1,40 @@
+#!/bin/bash
+
+set -e
+
+repo=$(dirname "${BASH_SOURCE[0]}")
+repo=$(realpath $repo/..)
+
+cd $repo
+
+vector_store_version=$(./scripts/run-with-release-toolchain cargo info vector-store | grep ^version: | cut -d ' ' -f 2)
+
+archs="amd64 arm64"
+
+dockerfile=$(cat <<EOF
+FROM redhat/ubi9-minimal
+ARG TARGETARCH
+RUN mkdir /opt/vector-store
+COPY target/\$TARGETARCH/release/vector-store /opt/vector-store
+CMD ["/opt/vector-store/vector-store"]
+EOF
+)
+
+docker_tag=scylladb/vector-store:$vector_store_version
+for arch in $archs ; do
+    echo Build the docker image for linux/$arch
+    docker build --platform linux/$arch --tag $docker_tag-$arch -f- . <<EOF
+$dockerfile
+EOF
+done
+
+for arch in $archs ; do
+    [[ -z $platform ]] && platform="linux/$arch" || platform="$platform,linux/$arch"
+done
+
+echo Build the multi-arch docker image for $platform
+docker build --platform $platform --tag $docker_tag -f- . <<EOF
+$dockerfile
+EOF
+
+docker images -f "reference=$docker_tag*"
