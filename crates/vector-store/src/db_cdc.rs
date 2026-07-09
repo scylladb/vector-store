@@ -97,17 +97,20 @@ impl CdcReaderParams {
 
 pub(crate) enum DbCdc {}
 
+pub(crate) const READER_WIDE: &str = "wide";
+pub(crate) const READER_FINE: &str = "fine";
+
 /// Preset configurations for CDC reader actors.
 pub(crate) enum CdcReaderConfig {
     Wide,
     Fine,
 }
 
-impl From<CdcReaderConfig> for CdcReaderState {
-    fn from(config: CdcReaderConfig) -> Self {
-        match config {
-            CdcReaderConfig::Wide => Self::new("wide", CdcReaderParams::wide),
-            CdcReaderConfig::Fine => Self::new("fine", CdcReaderParams::fine),
+impl CdcReaderConfig {
+    fn name_and_params_fn(self) -> (&'static str, fn(&Config) -> CdcReaderParams) {
+        match self {
+            CdcReaderConfig::Wide => (READER_WIDE, CdcReaderParams::wide),
+            CdcReaderConfig::Fine => (READER_FINE, CdcReaderParams::fine),
         }
     }
 }
@@ -127,7 +130,8 @@ pub(crate) fn new(
     // Mark the receiver to ensure first session update is visible
     session_rx.mark_changed();
 
-    let mut reader: CdcReaderState = config.into();
+    let (name, params_fn) = config.name_and_params_fn();
+    let mut reader = CdcReaderState::new(name, params_fn);
     let name = reader.name;
     let actor_key = metadata.key();
     let span_key = actor_key.clone();
