@@ -151,7 +151,9 @@ pub(crate) async fn new() -> mpsc::Sender<NodeState> {
                                 .expect("initial_idxs should be Some here");
 
                             // remove any initial indexes that are no longer present
-                            initial_idxs.retain(|idx| idxs.contains_key(&idx.key()));
+                            initial_idxs.retain(|idx| {
+                                idxs.contains_key(&idx.key()) && indexes.contains(idx)
+                            });
 
                             if initial_idxs.is_empty() {
                                 if status != NodeStatus::Serving {
@@ -447,6 +449,55 @@ mod tests {
 
         node_state
             .send_event(Event::IndexesDiscovered(HashSet::from([idx1.clone()])))
+            .await;
+        let status = node_state.get_status().await;
+        assert_eq!(status, NodeStatus::Serving);
+    }
+
+    #[tokio::test]
+    async fn node_state_update_index_with_changed_metadata_while_bootstrapping() {
+        let node_state = new().await;
+        let idx1 = index_metadata("idx1");
+        let idx2 = index_metadata("idx2");
+        let idx2_updated = IndexMetadata {
+            version: Uuid::new_v4().into(),
+            ..idx2.clone()
+        };
+
+        let status = node_state.get_status().await;
+        assert_eq!(status, NodeStatus::Initializing);
+
+        node_state.send_event(Event::ConnectingToDb).await;
+        let status = node_state.get_status().await;
+        assert_eq!(status, NodeStatus::ConnectingToDb);
+
+        node_state.send_event(Event::ConnectedToDb).await;
+        assert_eq!(status, NodeStatus::ConnectingToDb);
+
+        node_state.send_event(Event::DiscoveringIndexes).await;
+        let status = node_state.get_status().await;
+        assert_eq!(status, NodeStatus::DiscoveringIndexes);
+
+        node_state
+            .send_event(Event::IndexesDiscovered(HashSet::from([
+                idx1.clone(),
+                idx2.clone(),
+            ])))
+            .await;
+        let status = node_state.get_status().await;
+        assert_eq!(status, NodeStatus::IndexingEmbeddings);
+
+        node_state
+            .send_event(Event::FullScanFinished(idx1.clone()))
+            .await;
+        let status = node_state.get_status().await;
+        assert_eq!(status, NodeStatus::IndexingEmbeddings);
+
+        node_state
+            .send_event(Event::IndexesDiscovered(HashSet::from([
+                idx1.clone(),
+                idx2_updated.clone(),
+            ])))
             .await;
         let status = node_state.get_status().await;
         assert_eq!(status, NodeStatus::Serving);
