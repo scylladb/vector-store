@@ -10,6 +10,7 @@ use crate::DbIndexedRow;
 use crate::DbIndexedValue;
 use crate::IndexKind;
 use crate::IndexMetadata;
+use crate::Metrics;
 use crate::NonemptyArc;
 use crate::NonemptyIteratorExt;
 use crate::db_index_backend::CdcValueStatus;
@@ -117,6 +118,7 @@ pub(crate) fn new(
     mut session_rx: watch::Receiver<Option<Arc<Session>>>,
     metadata: IndexMetadata,
     internals: Sender<Internals>,
+    _metrics: Arc<Metrics>,
     tx_embeddings: mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
     config: CdcReaderConfig,
 ) -> mpsc::Sender<DbCdc> {

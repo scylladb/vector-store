@@ -56,10 +56,16 @@ async fn simple_create_search_delete_index() {
         vector_store::new_index_factory_opensearch(server.base_url(), config_rx_factory).unwrap();
 
     let (receivers, _senders) = create_config_channels(test_config()).await;
-    let (server, _mtls) =
-        vector_store::run(node_state, db_actor, internals, index_factory, receivers)
-            .await
-            .unwrap();
+    let (server, _mtls) = vector_store::run(
+        node_state,
+        db_actor,
+        internals,
+        index_factory,
+        receivers,
+        vector_store::new_metrics(),
+    )
+    .await
+    .unwrap();
     let addr = (*server.address().await.borrow()).unwrap();
 
     let client = HttpClient::new(addr);

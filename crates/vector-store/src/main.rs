@@ -87,8 +87,14 @@ fn main() -> anyhow::Result<()> {
         };
 
         let internals = vector_store::new_internals();
-        let db_actor =
-            vector_store::new_db(node_state.clone(), internals.clone(), config_rx).await?;
+        let metrics = vector_store::new_metrics();
+        let db_actor = vector_store::new_db(
+            node_state.clone(),
+            internals.clone(),
+            config_rx,
+            metrics.clone(),
+        )
+        .await?;
 
         let (server, _mtls) = vector_store::run(
             node_state,
@@ -96,6 +102,7 @@ fn main() -> anyhow::Result<()> {
             internals,
             index_factory,
             config_receivers,
+            metrics,
         )
         .await?;
         let addr = (*server.address().await.borrow())

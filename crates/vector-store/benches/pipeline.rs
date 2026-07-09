@@ -202,9 +202,16 @@ async fn run_vector_store(
         mtls_http: mtls_http_rx,
     };
 
-    let (server, _mtls) = vector_store::run(node_state, db, internals, index_factory, receivers)
-        .await
-        .unwrap();
+    let (server, _mtls) = vector_store::run(
+        node_state,
+        db,
+        internals,
+        index_factory,
+        receivers,
+        vector_store::new_metrics(),
+    )
+    .await
+    .unwrap();
 
     let client = Arc::new(TestClient::new(server.router().await.unwrap()));
     ((http_tx, server), client)

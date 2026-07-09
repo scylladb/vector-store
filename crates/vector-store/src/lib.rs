@@ -692,8 +692,8 @@ pub async fn run(
     internals: Sender<Internals>,
     index_factory: Box<dyn VsIndexFactory + Send + Sync>,
     receivers: ConfigReceivers,
+    metrics: Arc<Metrics>,
 ) -> anyhow::Result<(Sender<HttpServer>, Sender<HttpServer>)> {
-    let metrics: Arc<Metrics> = Arc::new(metrics::Metrics::new());
     let index_engine_version = index_factory.index_engine_version();
     let indexes = Arc::new(RwLock::new(Indexes::new()));
     let fts_index_factory: Box<dyn fts_index::FtsIndexFactory + Send + Sync> =
@@ -741,8 +741,13 @@ pub async fn new_db(
     node_state: Sender<NodeState>,
     internals: Sender<Internals>,
     config_rx: watch::Receiver<Arc<Config>>,
+    metrics: Arc<Metrics>,
 ) -> anyhow::Result<Sender<Db>> {
-    db::new(node_state, internals, config_rx).await
+    db::new(node_state, internals, config_rx, metrics).await
+}
+
+pub fn new_metrics() -> Arc<Metrics> {
+    Arc::new(Metrics::new())
 }
 
 pub async fn new_node_state() -> Sender<NodeState> {
