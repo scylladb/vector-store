@@ -133,6 +133,9 @@ impl Metrics {
     pub fn remove_index_labels(&self, keyspace: &str, index_name: &str) {
         let _ = self.latency.remove_label_values(&[keyspace, index_name]);
         let _ = self.size.remove_label_values(&[keyspace, index_name]);
+        let _ = self
+            .indexing_lag
+            .remove_label_values(&[keyspace, index_name]);
         for op in OPERATIONS {
             let _ = self
                 .modified
@@ -168,6 +171,10 @@ mod tests {
             .inc();
         metrics
             .latency
+            .with_label_values(&["ks", "idx"])
+            .observe(0.001);
+        metrics
+            .indexing_lag
             .with_label_values(&["ks", "idx"])
             .observe(0.001);
 
