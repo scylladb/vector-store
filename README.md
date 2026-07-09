@@ -34,6 +34,8 @@ service supports also `.env` files.
 | `VECTOR_STORE_MONITOR_INDEXES_INTERVAL`    | How often to poll Scylla for schema changes (new/removed vector indexes). The value is in human readable format (ie. `100ms`)                                                        | `1s`                     |
 | `VECTOR_STORE_INDEX_STATUS_UPDATE_INTERVAL` | How often to sync index status (e.g., BOOTSTRAPPING->SERVING) into the engine's cached state. The value is in human readable format (ie. `100ms`) | `1s`            |
 | `VECTOR_STORE_USEARCH_SIMULATOR`           | Enable simulator for USearch. Provides human readable delays for simulated operations (`search:add-remove:reserve`).                                                                 |                          |
+| `VECTOR_STORE_DISKANN_ROOT_PATH`          | Path to a directory where DiskANN indexes are stored. If set, DiskANN will be used as the indexing backend instead of USearch. The path must exist and be a directory.               |                          |
+| `VECTOR_STORE_DISKANN_ALPHA`               | DiskANN parameter that controls the trade-off between index quality and build time.                  | (DiskANN default)                    |
 | `VECTOR_STORE_ALTER_INDEX_SIMULATOR`       | Enable simulator for missing `ALTER INDEX`. When enable indexes aren't deleted and their version is not checked.                                                                     | `false`                  |
 
 ## Development builds
