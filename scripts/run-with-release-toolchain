@@ -18,10 +18,15 @@ docker_cargo_home=$(docker run --rm $image sh -c 'echo $CARGO_HOME')
 [[ -n $user_cargo_home ]] && mount_cargo="-v $user_cargo_home/git:$docker_cargo_home/git -v $user_cargo_home/registry:$docker_cargo_home/registry "
 
 version=$(git describe --dirty) || { echo "error: no annotated tag found"; exit 1; }
-tmp_cargo=$(mktemp /tmp/Cargo.XXXXXX)
-cat $repo/Cargo.toml | sed -e "s/version = \"0.0.0-dev\"/version = \"$version\"/" > $tmp_cargo
 
+tmp_cargo_toml=$(mktemp /tmp/Cargo_toml.XXXXXX)
+tmp_cargo_lock=$(mktemp /tmp/Cargo_lock.XXXXXX)
 tmp_rust_toolchain=$(mktemp /tmp/rust-toolchain.XXXXXX)
+trap "rm -f $tmp_cargo_toml $tmp_cargo_lock $tmp_rust_toolchain" EXIT
+
+cat $repo/Cargo.toml | sed -e "s/version = \"0.0.0-dev\"/version = \"$version\"/" > $tmp_cargo_toml
+cat $repo/Cargo.lock | sed -e "s/version = \"0.0.0-dev\"/version = \"$version\"/" > $tmp_cargo_lock
+
 grep -v components $repo/rust-toolchain.toml > $tmp_rust_toolchain
 
 docker run --rm \
@@ -29,12 +34,10 @@ docker run --rm \
     --user "$(id -u)":"$(id -g)" \
     -e CARGO_TARGET_DIR="./target/$TARGETARCH" \
     -v "$repo":"$repo" \
-    -v $tmp_cargo:"$repo/Cargo.toml" \
+    -v $tmp_cargo_toml:"$repo/Cargo.toml" \
+    -v $tmp_cargo_lock:"$repo/Cargo.lock" \
     -v $tmp_rust_toolchain:"$repo/rust-toolchain.toml" \
     $mount_cargo \
     -w "$repo" \
     $image \
     "$@"
-
-rm $tmp_cargo
-rm $tmp_rust_toolchain
