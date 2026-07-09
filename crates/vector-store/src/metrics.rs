@@ -22,6 +22,7 @@ pub struct Metrics {
     pub modified: CounterVec,
     pub indexing_lag: HistogramVec,
     pub cdc_reader_up: GaugeVec,
+    pub cdc_handler_errors_total: CounterVec,
     dirty_indexes: Arc<DashSet<(String, String)>>,
 }
 
@@ -108,11 +109,23 @@ impl Metrics {
         )
         .unwrap();
 
+        let cdc_handler_errors_total = CounterVec::new(
+            prometheus::Opts::new(
+                "cdc_handler_errors_total",
+                "Total number of CDC handler errors per index and reader",
+            ),
+            &["keyspace", "index_name", "reader"],
+        )
+        .unwrap();
+
         registry.register(Box::new(latency.clone())).unwrap();
         registry.register(Box::new(size.clone())).unwrap();
         registry.register(Box::new(modified.clone())).unwrap();
         registry.register(Box::new(indexing_lag.clone())).unwrap();
         registry.register(Box::new(cdc_reader_up.clone())).unwrap();
+        registry
+            .register(Box::new(cdc_handler_errors_total.clone()))
+            .unwrap();
 
         Self {
             registry,
@@ -121,6 +134,7 @@ impl Metrics {
             modified,
             indexing_lag,
             cdc_reader_up,
+            cdc_handler_errors_total,
             dirty_indexes: Arc::new(DashSet::new()),
         }
     }
@@ -160,6 +174,9 @@ impl Metrics {
     pub fn remove_reader_labels(&self, keyspace: &str, index_name: &str, reader: &str) {
         let _ = self
             .cdc_reader_up
+            .remove_label_values(&[keyspace, index_name, reader]);
+        let _ = self
+            .cdc_handler_errors_total
             .remove_label_values(&[keyspace, index_name, reader]);
     }
 }
@@ -312,6 +329,28 @@ mod tests {
     }
 
     #[test]
+    fn cdc_handler_errors_total_is_exported() {
+        let metrics = Metrics::new();
+
+        metrics
+            .cdc_handler_errors_total
+            .with_label_values(&["ks", "idx", READER_FINE])
+            .inc();
+
+        let output = metric_families_text(&metrics);
+        assert!(
+            output.contains("# TYPE cdc_handler_errors_total counter"),
+            "cdc_handler_errors_total counter missing from export:\n{output}"
+        );
+        assert!(
+            output.contains(
+                r#"cdc_handler_errors_total{index_name="idx",keyspace="ks",reader="fine"} 1"#
+            ),
+            "expected a single observed handler error in export:\n{output}"
+        );
+    }
+
+    #[test]
     fn remove_index_labels_does_not_clear_cdc_reader_metrics() {
         let metrics = Metrics::new();
 
@@ -346,6 +385,10 @@ mod tests {
                 .cdc_reader_up
                 .with_label_values(&["ks", "idx", reader])
                 .set(1.0);
+            metrics
+                .cdc_handler_errors_total
+                .with_label_values(&["ks", "idx", reader])
+                .inc();
         }
 
         metrics.remove_reader_labels("ks", "idx", READER_WIDE);

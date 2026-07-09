@@ -314,6 +314,7 @@ impl CdcReaderState {
                     Arc::clone(&self.shutdown_notify),
                     Arc::clone(&self.error_notify),
                     internals.clone(),
+                    Arc::clone(&self.metrics),
                     metadata,
                     self.name,
                 ));
@@ -391,6 +392,19 @@ impl CdcReaderState {
     }
 }
 
+/// Increments the `cdc_handler_errors_total` counter for the given index and reader.
+fn record_handler_error(
+    metrics: &Metrics,
+    keyspace: &KeyspaceName,
+    index_name: &IndexName,
+    reader: &str,
+) {
+    metrics
+        .cdc_handler_errors_total
+        .with_label_values(&[keyspace.as_ref(), index_name.as_ref(), reader])
+        .inc();
+}
+
 fn cdc_now() -> Duration {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -451,6 +465,7 @@ fn spawn_handler_task(
     shutdown_notify: Arc<Notify>,
     cdc_error_notify: Arc<Notify>,
     internals: Sender<Internals>,
+    metrics: Arc<Metrics>,
     metadata: &IndexMetadata,
     reader_name: &str,
 ) -> tokio::task::JoinHandle<Duration> {
@@ -459,6 +474,9 @@ fn spawn_handler_task(
     let started_counter_name = format!("{handler_key}-{reader_name}-cdc-handler-started");
     let stopped_counter_name = format!("{handler_key}-{reader_name}-cdc-handler-stopped");
     let errors_counter_name = format!("{handler_key}-{reader_name}-cdc-handler-errors");
+    let keyspace = metadata.keyspace_name.clone();
+    let index_name = metadata.index_name.clone();
+    let reader_name = reader_name.to_string();
 
     tokio::spawn(
         async move {
@@ -468,6 +486,7 @@ fn spawn_handler_task(
                     if let Err(err) = result {
                         warn!("CDC handler error: {err}");
                         internals.increment_counter(errors_counter_name).await;
+                        record_handler_error(&metrics, &keyspace, &index_name, &reader_name);
                         cdc_error_notify.notify_one();
                     }
                 }
