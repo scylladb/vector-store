@@ -8,6 +8,7 @@ use crate::usearch::test_config;
 use crate::{db_basic, mock_opensearch};
 use httpclient::HttpClient;
 use std::sync::Arc;
+use tempfile::TempDir;
 use tokio::sync::watch;
 use vector_store::Config;
 use vector_store::HttpServerExt;
@@ -54,4 +55,23 @@ async fn get_application_info_opensearch() {
     assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
     assert_eq!(info.service, env!("CARGO_PKG_NAME"));
     assert_eq!(info.engine, "opensearch");
+}
+
+#[tokio::test]
+async fn get_application_info_diskann() {
+    let temp_dir = TempDir::new().unwrap();
+    let diskann_config = vector_store::Config {
+        diskann_index_path: Some(temp_dir.path().to_path_buf()),
+        ..Default::default()
+    };
+
+    let (_, config_rx) = watch::channel(Arc::new(diskann_config));
+    let (client, _server, _config_senders) =
+        run_vs(vector_store::new_index_factory_diskann(config_rx).unwrap()).await;
+
+    let info = client.info().await;
+
+    assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
+    assert_eq!(info.service, env!("CARGO_PKG_NAME"));
+    assert_eq!(info.engine, format!("diskann-{}", diskann::version()));
 }
