@@ -402,16 +402,20 @@ fn spawn_handler_task(
     tokio::spawn(
         async move {
             internals.increment_counter(started_counter_name).await;
-            tokio::select! {
-                result = handler => {
-                    if let Err(err) = result {
-                        warn!("CDC handler error: {err}");
-                        internals.increment_counter(errors_counter_name).await;
-                        cdc_error_notify.notify_one();
+            tokio::pin!(handler);
+            loop {
+                tokio::select! {
+                    result = &mut handler => {
+                        if let Err(err) = result {
+                            warn!("CDC handler error: {err}");
+                            internals.increment_counter(errors_counter_name).await;
+                            cdc_error_notify.notify_one();
+                        }
+                        break;
                     }
-                }
-                _ = shutdown_notify.notified() => {
-                    debug!("CDC handler: shutdown requested");
+                    _ = shutdown_notify.notified() => {
+                        debug!("CDC handler: shutdown requested, waiting for the reader to stop");
+                    }
                 }
             }
             internals.increment_counter(stopped_counter_name).await;
@@ -556,5 +560,75 @@ impl CdcConsumerFactory {
             kind: metadata.kind.clone(),
             tx,
         })))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
+
+    fn sample_metadata() -> IndexMetadata {
+        IndexMetadata {
+            keyspace_name: "ks".into(),
+            index_name: "idx".into(),
+            table_name: "tbl".into(),
+            target_columns: NonemptyArc::new(["embedding"]).unwrap(),
+            partitioning: crate::DbIndexPartitioning::Global,
+            filtering_columns: Arc::new([]),
+            version: uuid::Uuid::new_v4().into(),
+            kind: IndexKind::Vs(crate::IndexOptionsVs {
+                dimensions: std::num::NonZeroUsize::new(3).unwrap().into(),
+                connectivity: Default::default(),
+                expansion_add: Default::default(),
+                expansion_search: Default::default(),
+                space_type: Default::default(),
+                quantization: Default::default(),
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_handler_task_waits_for_handler_after_shutdown_notify() {
+        let internals = crate::internals::new();
+        let shutdown_notify = Arc::new(Notify::new());
+        let cdc_error_notify = Arc::new(Notify::new());
+        let metadata = sample_metadata();
+
+        // Simulates a driver future that does not complete immediately on
+        // shutdown - the driver needs time to notice the stop timestamp and
+        // wind down its internal per-stream tasks on its own.
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let handler_finished = Arc::new(AtomicBool::new(false));
+        let handler_finished_inner = Arc::clone(&handler_finished);
+        let handler = async move {
+            let _ = release_rx.await;
+            handler_finished_inner.store(true, Ordering::SeqCst);
+            Ok(())
+        };
+
+        let task = spawn_handler_task(
+            handler,
+            Arc::clone(&shutdown_notify),
+            cdc_error_notify,
+            internals,
+            &metadata,
+            "wide",
+        );
+
+        // Request shutdown before the simulated driver has finished.
+        shutdown_notify.notify_one();
+        tokio::task::yield_now().await;
+        assert!(
+            !handler_finished.load(Ordering::SeqCst),
+            "shutdown must not cancel the handler; dropping it would orphan the driver's per-stream tasks"
+        );
+
+        // Let the simulated driver actually finish.
+        release_tx.send(()).unwrap();
+
+        task.await.unwrap();
+        assert!(handler_finished.load(Ordering::SeqCst));
     }
 }
