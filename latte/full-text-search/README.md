@@ -32,6 +32,12 @@ Latte reads TSV files directly into CQL prepared statements — no intermediate
 processing. This is the simplest portable format that works across any data
 source (BEIR, custom, synthetic).
 
+### Creating datasets
+
+See [DATASET_PREPARATION.md](DATASET_PREPARATION.md) for full documentation on
+BEIR download, scaling (replicate / synthetic fragment-shuffle), and synthetic
+query generation. The `testdata/` directory is a ready-to-use smoke test.
+
 ## Quick Start (testdata)
 
 ```bash
