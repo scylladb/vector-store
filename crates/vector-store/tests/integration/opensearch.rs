@@ -36,6 +36,7 @@ async fn simple_create_search_delete_index() {
         keyspace_name: "vector".into(),
         table_name: "items".into(),
         index_name: "ann".into(),
+        primary_key_columns: NonemptyArc::new(["pk", "ck"]).unwrap(),
         target_columns: NonemptyArc::new(["embedding"]).unwrap(),
         partitioning: DbIndexPartitioning::Global,
         filtering_columns: Arc::new([]),

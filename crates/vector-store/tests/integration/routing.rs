@@ -57,7 +57,8 @@ fn single_row_scan(pks: impl IntoIterator<Item = CqlValue> + Send + Sync + 'stat
 
 fn make_index(
     name: &str,
-    column: &str,
+    primary_key_columns: &[&str],
+    target_column: &str,
     partitioning: DbIndexPartitioning,
     filtering_columns: &[&str],
     version: Uuid,
@@ -66,7 +67,11 @@ fn make_index(
         keyspace_name: "vector".into(),
         table_name: "items".into(),
         index_name: name.into(),
-        target_columns: NonemptyArc::new([column]).unwrap(),
+        primary_key_columns: NonemptyArc::new(
+            primary_key_columns.iter().map(|v| ColumnName::from(*v)),
+        )
+        .unwrap(),
+        target_columns: NonemptyArc::new([target_column]).unwrap(),
         partitioning,
         filtering_columns: filtering_columns
             .iter()
@@ -248,6 +253,7 @@ async fn ann_routes_to_serving_index_while_replacement_is_bootstrapping() {
 
     let oldest = make_index(
         "oldest",
+        &["pk"],
         "embedding",
         DbIndexPartitioning::Global,
         &[],
@@ -263,6 +269,7 @@ async fn ann_routes_to_serving_index_while_replacement_is_bootstrapping() {
 
     let replacement = make_index(
         "replacement",
+        &["pk"],
         "embedding",
         DbIndexPartitioning::Global,
         &[],
@@ -293,6 +300,7 @@ async fn ann_routes_to_newest_serving_index() {
 
     let oldest = make_index(
         "oldest",
+        &["pk"],
         "embedding",
         DbIndexPartitioning::Global,
         &[],
@@ -308,6 +316,7 @@ async fn ann_routes_to_newest_serving_index() {
 
     let replacement = make_index(
         "replacement",
+        &["pk"],
         "embedding",
         DbIndexPartitioning::Global,
         &[],
@@ -345,6 +354,7 @@ async fn ann_routes_to_newest_local_index_with_same_score() {
 
     let older_local = make_index(
         "older",
+        &["pk", "ck"],
         "embedding",
         DbIndexPartitioning::Local(NonemptyArc::new(["pk"]).unwrap()),
         &[],
@@ -360,6 +370,7 @@ async fn ann_routes_to_newest_local_index_with_same_score() {
 
     let newer_local = make_index(
         "newer",
+        &["pk", "ck"],
         "embedding",
         DbIndexPartitioning::Local(NonemptyArc::new(["pk"]).unwrap()),
         &[],
@@ -411,6 +422,7 @@ async fn ann_routes_to_local_index_with_more_matching_partition_key_columns() {
 
     let less_precise = make_index(
         "less_precise",
+        &["pk1", "pk2", "ck"],
         "embedding",
         DbIndexPartitioning::Local(NonemptyArc::new(["pk1"]).unwrap()),
         &[],
@@ -430,6 +442,7 @@ async fn ann_routes_to_local_index_with_more_matching_partition_key_columns() {
 
     let more_precise = make_index(
         "more_precise",
+        &["pk1", "pk2", "ck"],
         "embedding",
         DbIndexPartitioning::Local(NonemptyArc::new(["pk1", "pk2"]).unwrap()),
         &[],
@@ -491,6 +504,7 @@ async fn ann_routes_to_local_index_with_filter_columns_covering_restriction() {
 
     let covering = make_index(
         "covering",
+        &["pk", "ck"],
         "embedding",
         DbIndexPartitioning::Local(NonemptyArc::new(["pk"]).unwrap()),
         &["f"],
@@ -506,6 +520,7 @@ async fn ann_routes_to_local_index_with_filter_columns_covering_restriction() {
 
     let non_covering = make_index(
         "non_covering",
+        &["pk", "ck"],
         "embedding",
         DbIndexPartitioning::Local(NonemptyArc::new(["pk"]).unwrap()),
         &[],
@@ -563,6 +578,7 @@ async fn ann_routes_to_global_index_with_filter_columns_covering_restriction() {
 
     let covering = make_index(
         "covering",
+        &["pk", "ck"],
         "embedding",
         DbIndexPartitioning::Global,
         &["f"],
@@ -578,6 +594,7 @@ async fn ann_routes_to_global_index_with_filter_columns_covering_restriction() {
 
     let non_covering = make_index(
         "non_covering",
+        &["pk", "ck"],
         "embedding",
         DbIndexPartitioning::Global,
         &[],
@@ -634,6 +651,7 @@ async fn ann_routes_to_local_index_when_pk_restrictions_match() {
 
     let local_index = make_index(
         "local_idx",
+        &["pk", "ck"],
         "embedding",
         DbIndexPartitioning::Local(NonemptyArc::new(["pk"]).unwrap()),
         &[],
@@ -649,6 +667,7 @@ async fn ann_routes_to_local_index_when_pk_restrictions_match() {
 
     let global_index = make_index(
         "global_idx",
+        &["pk", "ck"],
         "embedding",
         DbIndexPartitioning::Global,
         &[],
@@ -699,6 +718,7 @@ async fn ann_routes_to_global_index_without_pk_restrictions() {
 
     let local_index = make_index(
         "local_idx",
+        &["pk", "ck"],
         "embedding",
         DbIndexPartitioning::Local(NonemptyArc::new(["pk"]).unwrap()),
         &[],
@@ -714,6 +734,7 @@ async fn ann_routes_to_global_index_without_pk_restrictions() {
 
     let global_index = make_index(
         "global_idx",
+        &["pk", "ck"],
         "embedding",
         DbIndexPartitioning::Global,
         &[],
