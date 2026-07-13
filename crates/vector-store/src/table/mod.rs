@@ -334,7 +334,7 @@ fn partition_key(
 #[derive(Debug)]
 pub struct Table {
     primary_key_columns: NonemptyArc<ColumnName>,
-    partition_primary_key_count: usize,
+    partition_primary_key_count: NonZeroUsize,
     needs_ck_normalization: bool,
     primary_ids: BTreeMap<PrimaryKey, PrimaryId>,
     free_primary_ids: FreePrimaryIds,
@@ -353,14 +353,20 @@ impl Table {
     pub(crate) fn new(
         index_key: IndexKey,
         primary_key_columns: NonemptyArc<ColumnName>,
-        partition_primary_key_count: usize,
+        partition_primary_key_count: NonZeroUsize,
         partition_key_columns: Option<NonemptyArc<ColumnName>>,
         column_targets_count: NonZeroUsize,
         filtering_columns: Arc<[ColumnName]>,
         table_columns: Arc<HashMap<ColumnName, NativeType>>,
     ) -> anyhow::Result<Self> {
-        let partition_primary_key_count =
-            partition_primary_key_count.min(primary_key_columns.len().get());
+        if partition_primary_key_count > primary_key_columns.len() {
+            bail!(
+                "Partition key count ({partition_primary_key_count}) \
+                cannot be greater than primary key columns \
+                count ({primary_count}) for index {index_key:?}",
+                primary_count = primary_key_columns.len(),
+            );
+        }
         let mut index_id_generator = IndexIdGenerator::new();
         let mut indexes = BTreeMap::new();
         let mut index_ids = BTreeMap::new();
@@ -403,7 +409,8 @@ impl Table {
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
         columns.extend(column_with_values);
-        let needs_ck_normalization = primary_key_columns.as_slice()[partition_primary_key_count..]
+        let needs_ck_normalization = primary_key_columns.as_slice()
+            [partition_primary_key_count.get()..]
             .iter()
             .any(|col| matches!(table_columns.get(col), Some(NativeType::Decimal)));
         let mut table = Self {
@@ -438,7 +445,7 @@ impl Table {
         let normalized: PrimaryKey = (0..key.len())
             .map(|idx| {
                 let value = key.get(idx).expect("primary key column exists");
-                if idx >= self.partition_primary_key_count {
+                if idx >= self.partition_primary_key_count.get() {
                     normalize(value)
                 } else {
                     value
@@ -1148,7 +1155,7 @@ mod tests {
             let mut table = Table::new(
                 index_key.clone(),
                 NonemptyArc::new(["pk", "ck"]).unwrap(),
-                1,
+                NonZeroUsize::new(1).unwrap(),
                 partition_key_columns.clone(),
                 NonZeroUsize::new(1).unwrap(),
                 Arc::new([]),
@@ -1435,7 +1442,7 @@ mod tests {
         let mut table = Table::new(
             index_key.clone(),
             NonemptyArc::new(["p"]).unwrap(),
-            1,
+            NonZeroUsize::new(1).unwrap(),
             None,
             NonZeroUsize::new(1).unwrap(),
             Arc::new([]),
@@ -1599,7 +1606,7 @@ mod tests {
             let mut table = Table::new(
                 index_key.clone(),
                 primary_key_columns,
-                1,
+                NonZeroUsize::new(1).unwrap(),
                 partition_key_columns,
                 NonZeroUsize::new(1).unwrap(),
                 Arc::new(["f".into()]),
@@ -1699,7 +1706,7 @@ mod tests {
             let mut table = Table::new(
                 index_key.clone(),
                 primary_key_columns,
-                1,
+                NonZeroUsize::new(1).unwrap(),
                 partition_key_columns,
                 NonZeroUsize::new(1).unwrap(),
                 Arc::new([]),

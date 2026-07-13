@@ -37,6 +37,7 @@ async fn simple_create_search_delete_index() {
         table_name: "items".into(),
         index_name: "ann".into(),
         primary_key_columns: NonemptyArc::new(["pk", "ck"]).unwrap(),
+        partition_key_count: NonZeroUsize::new(1).unwrap(),
         target_columns: NonemptyArc::new(["embedding"]).unwrap(),
         partitioning: DbIndexPartitioning::Global,
         filtering_columns: Arc::new([]),

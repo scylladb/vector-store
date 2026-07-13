@@ -96,9 +96,6 @@ impl From<u64> for Progress {
 }
 
 pub enum DbIndex {
-    GetPartitionKeyCount {
-        tx: oneshot::Sender<usize>,
-    },
     GetTableColumns {
         tx: oneshot::Sender<GetTableColumnsR>,
     },
@@ -108,20 +105,11 @@ pub enum DbIndex {
 }
 
 pub(crate) trait DbIndexExt {
-    async fn get_partition_key_count(&self) -> usize;
     async fn get_table_columns(&self) -> GetTableColumnsR;
     async fn full_scan_progress(&self) -> Progress;
 }
 
 impl DbIndexExt for mpsc::Sender<DbIndex> {
-    async fn get_partition_key_count(&self) -> usize {
-        let (tx, rx) = oneshot::channel();
-        self.send(DbIndex::GetPartitionKeyCount { tx })
-            .await
-            .expect("internal actor should receive request");
-        rx.await.expect("internal actor should send response")
-    }
-
     async fn get_table_columns(&self) -> GetTableColumnsR {
         let (tx, rx) = oneshot::channel();
         self.send(DbIndex::GetTableColumns { tx })
@@ -275,11 +263,6 @@ pub(crate) async fn new(
 
 async fn process(statements: Arc<Statements>, msg: DbIndex, completed_scan_length: Arc<AtomicU64>) {
     match msg {
-        DbIndex::GetPartitionKeyCount { tx } => {
-            tx.send(statements.partition_key_count).unwrap_or_else(|_| {
-                trace!("process: Db::GetPartitionKeyCount: unable to send response")
-            })
-        }
         DbIndex::GetTableColumns { tx } => tx
             .send(statements.get_table_columns())
             .unwrap_or_else(|_| trace!("process: Db::GetTableColumns: unable to send response")),
@@ -297,7 +280,6 @@ async fn process(statements: Arc<Statements>, msg: DbIndex, completed_scan_lengt
 struct Statements {
     session_rx: tokio::sync::watch::Receiver<Option<Arc<Session>>>,
     primary_key_columns: NonemptyArc<ColumnName>,
-    partition_key_count: usize,
     target_columns: NonemptyArc<ColumnName>,
     filtering_columns: Arc<[ColumnName]>,
     table_columns: GetTableColumnsR,
@@ -324,7 +306,6 @@ impl Statements {
             .get(metadata.table_name.as_ref())
             .ok_or_else(|| anyhow!("table {} does not exist", metadata.table_name))?;
 
-        let partition_key_count = table.partition_key.len();
         let primary_key_columns = table
             .partition_key
             .iter()
@@ -399,7 +380,6 @@ impl Statements {
 
         Ok(Self {
             primary_key_columns,
-            partition_key_count,
             target_columns,
             filtering_columns,
             table_columns,

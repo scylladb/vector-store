@@ -35,14 +35,16 @@ use vector_store::Timestamp;
 use vector_store::node_state::NodeState;
 
 fn fts_index_metadata(primary_key_columns: impl IntoIterator<Item = ColumnName>) -> IndexMetadata {
+    let primary_key_columns = primary_key_columns
+        .into_iter()
+        .collect_nonempty_arc()
+        .unwrap();
     IndexMetadata {
         keyspace_name: "fts_ks".into(),
         table_name: "documents".into(),
         index_name: "fts_idx".into(),
-        primary_key_columns: primary_key_columns
-            .into_iter()
-            .collect_nonempty_arc()
-            .unwrap(),
+        partition_key_count: primary_key_columns.len(),
+        primary_key_columns,
         target_columns: NonemptyArc::new(["content"]).unwrap(),
         partitioning: DbIndexPartitioning::Global,
         filtering_columns: Arc::new([]),

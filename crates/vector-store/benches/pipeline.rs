@@ -117,6 +117,7 @@ fn default_runtime() -> Runtime {
 
 fn default_index_metadata(
     primary_key_columns: impl IntoIterator<Item = ColumnName>,
+    partition_key_count: usize,
     dimensions: usize,
 ) -> IndexMetadata {
     IndexMetadata {
@@ -124,6 +125,7 @@ fn default_index_metadata(
         table_name: "items".into(),
         index_name: "ann".into(),
         primary_key_columns: NonemptyArc::new(primary_key_columns).unwrap(),
+        partition_key_count: NonZeroUsize::new(partition_key_count).unwrap(),
         target_columns: NonemptyArc::new(["embedding"]).unwrap(),
         partitioning: DbIndexPartitioning::Global,
         filtering_columns: Arc::new([]),
@@ -305,7 +307,7 @@ fn fullscan_add(c: &mut Criterion) {
     init();
 
     const DIMENSIONS: usize = 128;
-    let index_metadata = default_index_metadata(["id".into()], DIMENSIONS);
+    let index_metadata = default_index_metadata(["id".into()], 1, DIMENSIONS);
     let concurrency = default_concurrency();
 
     let mut group = c.benchmark_group("pipeline");
@@ -402,7 +404,7 @@ fn search(c: &mut Criterion) {
 
     const DIMENSIONS: usize = 128;
     let concurrency = default_concurrency();
-    let index_metadata = default_index_metadata(["id".into()], DIMENSIONS);
+    let index_metadata = default_index_metadata(["id".into()], 1, DIMENSIONS);
     let limit = NonZeroUsize::new(1).unwrap().into();
 
     let mut group = c.benchmark_group("pipeline");
@@ -511,7 +513,7 @@ fn cdc_add(c: &mut Criterion) {
 
     const DIMENSIONS: usize = 128;
     let concurrency = default_concurrency();
-    let index_metadata = default_index_metadata(["id".into()], DIMENSIONS);
+    let index_metadata = default_index_metadata(["id".into()], 1, DIMENSIONS);
 
     let mut group = c.benchmark_group("pipeline");
     group.throughput(criterion::Throughput::Elements(concurrency as u64));
@@ -608,7 +610,7 @@ fn cdc_update(c: &mut Criterion) {
     const DIMENSIONS: usize = 1536;
     const INDEX_SIZE: usize = 100000;
     let concurrency = default_concurrency();
-    let index_metadata = default_index_metadata(["id".into()], DIMENSIONS);
+    let index_metadata = default_index_metadata(["id".into()], 1, DIMENSIONS);
 
     let mut group = c.benchmark_group("pipeline");
     group.throughput(criterion::Throughput::Elements(concurrency as u64));
@@ -734,11 +736,11 @@ fn search_while_updating(c: &mut Criterion) {
     const DIMENSIONS: usize = 1536;
     const INDEX_SIZE: usize = 100000;
     let concurrency = default_concurrency();
-    let index_metadata = default_index_metadata(["id".into()], DIMENSIONS);
+    let index_metadata = default_index_metadata(["id".into()], 1, DIMENSIONS);
     let index_metadata_bg = IndexMetadata {
         table_name: "tbl_bg".into(),
         index_name: "idx_bg".into(),
-        ..default_index_metadata(["id".into()], DIMENSIONS)
+        ..default_index_metadata(["id".into()], 1, DIMENSIONS)
     };
     let limit = NonZeroUsize::new(1).unwrap().into();
 
@@ -954,11 +956,11 @@ fn search_while_inserting(c: &mut Criterion) {
 
     const DIMENSIONS: usize = 1536;
     let concurrency = default_concurrency();
-    let index_metadata = default_index_metadata(["id".into()], DIMENSIONS);
+    let index_metadata = default_index_metadata(["id".into()], 1, DIMENSIONS);
     let index_metadata_bg = IndexMetadata {
         table_name: "tbl_bg".into(),
         index_name: "idx_bg".into(),
-        ..default_index_metadata(["id".into()], DIMENSIONS)
+        ..default_index_metadata(["id".into()], 1, DIMENSIONS)
     };
     let limit = NonZeroUsize::new(1).unwrap().into();
 
