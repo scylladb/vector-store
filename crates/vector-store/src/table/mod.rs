@@ -44,7 +44,6 @@ use scylla::value::CqlValue;
 use scylla::value::CqlVarintBorrowed;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::collections::btree_map::Entry;
@@ -154,9 +153,6 @@ struct Index {
 
     filtering_columns: Arc<[ColumnName]>,
 
-    /// All column names that are used in this index (key columns + filtering columns)
-    _available_columns: BTreeSet<ColumnName>,
-
     /// Timestamps of the last vector update
     values_timestamps: ColumnVecChunks<PrimaryId, ChunkTimestamps>,
 }
@@ -166,18 +162,12 @@ impl Index {
 
     fn new_global(
         index_id: IndexId,
-        primary_key_columns: NonemptyArc<ColumnName>,
         column_targets_count: NonZeroUsize,
         filtering_columns: Arc<[ColumnName]>,
     ) -> Self {
         Self {
             index_id,
             data: IndexData::Global,
-            _available_columns: primary_key_columns
-                .iter()
-                .chain(filtering_columns.iter())
-                .cloned()
-                .collect(),
             filtering_columns,
             values_timestamps: ColumnVecChunks::new(ChunkTimestamps::new(column_targets_count)),
         }
@@ -192,11 +182,6 @@ impl Index {
     ) -> Self {
         Self {
             index_id,
-            _available_columns: partition_key_columns
-                .iter()
-                .chain(filtering_columns.iter())
-                .cloned()
-                .collect(),
             filtering_columns,
             values_timestamps: ColumnVecChunks::new(ChunkTimestamps::new(column_targets_count)),
             data: IndexData::Local {
@@ -431,7 +416,6 @@ impl Table {
         } else {
             Index::new_global(
                 index_id,
-                primary_key_columns.clone(),
                 column_targets_count,
                 Arc::clone(&filtering_columns),
             )
