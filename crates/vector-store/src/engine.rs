@@ -240,7 +240,6 @@ async fn add_index(
         }
     };
 
-    let partition_key_count = db_index.get_partition_key_count().await;
     let table_columns = db_index.get_table_columns().await;
     let partition_key_columns = match &metadata.partitioning {
         DbIndexPartitioning::Local(partition_key_columns) => Some(partition_key_columns.clone()),
@@ -249,7 +248,7 @@ async fn add_index(
     let table = match Table::new(
         key.clone(),
         metadata.primary_key_columns.clone(),
-        partition_key_count,
+        metadata.partition_key_count,
         partition_key_columns,
         metadata.target_columns.len(),
         Arc::clone(&metadata.filtering_columns),

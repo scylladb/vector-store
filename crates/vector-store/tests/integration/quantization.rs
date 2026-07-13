@@ -139,7 +139,7 @@ async fn quantization_is_returned_as_index_data_type() {
             test_config(),
             DbIndexPartitioning::Global,
             ["pk".into()],
-            0,
+            1,
             [],
             None,
             None,

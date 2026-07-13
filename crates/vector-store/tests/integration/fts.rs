@@ -59,6 +59,7 @@ async fn setup_fts_store(
     let index = IndexMetadata {
         keyspace_name: "fts_ks".into(),
         primary_key_columns: primary_key_columns.clone(),
+        partition_key_count: NonZeroUsize::new(partition_key_count).unwrap(),
         table_name: "documents".into(),
         index_name: "fts_idx".into(),
         target_columns: NonemptyArc::new(["content"]).unwrap(),
