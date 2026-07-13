@@ -55,8 +55,10 @@ async fn setup_fts_store(
     let (db_actor, db) = db_basic::new(node_state.clone());
 
     let columns: Arc<HashMap<_, _>> = Arc::new(columns.into_iter().collect());
+    let primary_key_columns = primary_keys.into_iter().collect_nonempty_arc().unwrap();
     let index = IndexMetadata {
         keyspace_name: "fts_ks".into(),
+        primary_key_columns: primary_key_columns.clone(),
         table_name: "documents".into(),
         index_name: "fts_idx".into(),
         target_columns: NonemptyArc::new(["content"]).unwrap(),
@@ -70,7 +72,7 @@ async fn setup_fts_store(
         index.keyspace_name.clone(),
         index.table_name.clone(),
         Table {
-            primary_keys: primary_keys.into_iter().collect_nonempty_arc().unwrap(),
+            primary_keys: primary_key_columns,
             partition_key_count,
             columns,
             dimensions: HashMap::new(),

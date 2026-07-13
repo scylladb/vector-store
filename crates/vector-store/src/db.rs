@@ -760,6 +760,16 @@ impl Statements {
                         .ok_or_else(|| {
                             anyhow!("table {table_name} does not exist").context(InvalidMetadata)
                         })?;
+                    let primary_key_columns = table
+                        .partition_key
+                        .iter()
+                        .chain(table.clustering_key.iter())
+                        .map(ColumnName::from)
+                        .collect_nonempty_arc()
+                        .ok_or_else(|| {
+                            anyhow!("table {table_name} has no primary key columns")
+                                .context(InvalidMetadata)
+                        })?;
                     Ok(options.remove("target").and_then(|target| {
                         let kind = db_index_kind_from_options(&mut options)?;
                         from_target_option(table, target, kind)
@@ -768,6 +778,7 @@ impl Statements {
                                     keyspace: keyspace_name.into(),
                                     index: index_name.clone().into(),
                                     table: table_name.into(),
+                                    primary_key_columns,
                                     target_columns: NonemptyArc::new([target_column])
                                         .expect("target column should be non-empty"),
                                     partitioning,

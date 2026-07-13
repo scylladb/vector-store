@@ -240,7 +240,6 @@ async fn add_index(
         }
     };
 
-    let primary_key_columns = db_index.get_primary_key_columns().await;
     let partition_key_count = db_index.get_partition_key_count().await;
     let table_columns = db_index.get_table_columns().await;
     let partition_key_columns = match &metadata.partitioning {
@@ -249,7 +248,7 @@ async fn add_index(
     };
     let table = match Table::new(
         key.clone(),
-        primary_key_columns.clone(),
+        metadata.primary_key_columns.clone(),
         partition_key_count,
         partition_key_columns,
         metadata.target_columns.len(),
@@ -357,7 +356,9 @@ async fn add_index_fts(ctx: AddIndexContext<'_>) -> anyhow::Result<()> {
     )
     .await?;
 
-    let entry = crate::indexes::FtsIndexEntry::new(fts_sender, monitor_actor, ctx.db_index).await;
+    let entry =
+        crate::indexes::FtsIndexEntry::new(ctx.metadata, fts_sender, monitor_actor, ctx.db_index)
+            .await;
     ctx.indexes.write().unwrap().insert_fts(ctx.key, entry);
     Ok(())
 }

@@ -71,7 +71,6 @@ use tracing::info;
 use tracing::trace;
 use tracing::warn;
 
-type GetPrimaryKeyColumnsR = NonemptyArc<ColumnName>;
 type GetTableColumnsR = Arc<HashMap<ColumnName, NativeType>>;
 type RangeScanResult =
     anyhow::Result<Pin<Box<dyn Stream<Item = DbIndexedRow> + std::marker::Send>>, anyhow::Error>;
@@ -97,9 +96,6 @@ impl From<u64> for Progress {
 }
 
 pub enum DbIndex {
-    GetPrimaryKeyColumns {
-        tx: oneshot::Sender<GetPrimaryKeyColumnsR>,
-    },
     GetPartitionKeyCount {
         tx: oneshot::Sender<usize>,
     },
@@ -112,21 +108,12 @@ pub enum DbIndex {
 }
 
 pub(crate) trait DbIndexExt {
-    async fn get_primary_key_columns(&self) -> GetPrimaryKeyColumnsR;
     async fn get_partition_key_count(&self) -> usize;
     async fn get_table_columns(&self) -> GetTableColumnsR;
     async fn full_scan_progress(&self) -> Progress;
 }
 
 impl DbIndexExt for mpsc::Sender<DbIndex> {
-    async fn get_primary_key_columns(&self) -> GetPrimaryKeyColumnsR {
-        let (tx, rx) = oneshot::channel();
-        self.send(DbIndex::GetPrimaryKeyColumns { tx })
-            .await
-            .expect("internal actor should receive request");
-        rx.await.expect("internal actor should send response")
-    }
-
     async fn get_partition_key_count(&self) -> usize {
         let (tx, rx) = oneshot::channel();
         self.send(DbIndex::GetPartitionKeyCount { tx })
@@ -288,11 +275,6 @@ pub(crate) async fn new(
 
 async fn process(statements: Arc<Statements>, msg: DbIndex, completed_scan_length: Arc<AtomicU64>) {
     match msg {
-        DbIndex::GetPrimaryKeyColumns { tx } => tx
-            .send(statements.get_primary_key_columns())
-            .unwrap_or_else(|_| {
-                trace!("process: Db::GetPrimaryKeyColumns: unable to send response")
-            }),
         DbIndex::GetPartitionKeyCount { tx } => {
             tx.send(statements.partition_key_count).unwrap_or_else(|_| {
                 trace!("process: Db::GetPartitionKeyCount: unable to send response")
@@ -425,10 +407,6 @@ impl Statements {
             session_rx,
             kind: metadata.kind.clone(),
         })
-    }
-
-    fn get_primary_key_columns(&self) -> GetPrimaryKeyColumnsR {
-        self.primary_key_columns.clone()
     }
 
     fn get_table_columns(&self) -> GetTableColumnsR {

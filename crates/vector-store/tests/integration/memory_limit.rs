@@ -57,6 +57,7 @@ async fn memory_limit_during_index_build() {
 
     let index = IndexMetadata {
         keyspace_name: "ksp".into(),
+        primary_key_columns: NonemptyArc::new(["pk"]).unwrap(),
         table_name: "tbl".into(),
         index_name: "idx".into(),
         target_columns: NonemptyArc::new(["v"]).unwrap(),
