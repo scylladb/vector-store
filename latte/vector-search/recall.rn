@@ -60,8 +60,9 @@ const INDEX_BEFORE_LOAD = latte::param!("index_before_load", false);
 // Search
 const ANN_LIMIT = latte::param!("ann_limit", 10);   // k for recall@k
 
-// `dataset_format` selects the loader: "text" (text_dataset.rn) or "fbin"
-// (fbin_dataset.rn); file params must point at files of the matching format.
+// `dataset_format` selects the loader: "text" (text_dataset.rn), "fbin"
+// (fbin_dataset.rn), or "fbin_packed" (base vectors kept as packed bytes,
+// far less memory); file params must match the format.
 const DATASET_FORMAT = latte::param!("dataset_format", "text");
 const VECTOR_DATA_DIR = latte::param!("vector_data_dir", "./");
 const DATASET_FILE = latte::param!("dataset_file", "dataset.txt");
@@ -82,7 +83,8 @@ async fn load_base_vectors(path) {
     match DATASET_FORMAT {
         "text" => text_dataset::load_base_vectors(path, false).await,
         "fbin" => fbin_dataset::load_base_vectors(path, false).await,
-        _ => Err(`unknown dataset_format "${DATASET_FORMAT}" (expected "text" or "fbin")`),
+        "fbin_packed" => fbin_dataset::load_base_vectors_packed(path).await,
+        _ => Err(`unknown dataset_format "${DATASET_FORMAT}" (expected "text", "fbin" or "fbin_packed")`),
     }
 }
 
@@ -90,7 +92,8 @@ async fn load_query_vectors(path) {
     match DATASET_FORMAT {
         "text" => text_dataset::load_query_vectors(path).await,
         "fbin" => fbin_dataset::load_query_vectors(path).await,
-        _ => Err(`unknown dataset_format "${DATASET_FORMAT}" (expected "text" or "fbin")`),
+        "fbin_packed" => fbin_dataset::load_query_vectors(path).await,
+        _ => Err(`unknown dataset_format "${DATASET_FORMAT}" (expected "text", "fbin" or "fbin_packed")`),
     }
 }
 
@@ -98,7 +101,8 @@ async fn load_ground_truth(path) {
     match DATASET_FORMAT {
         "text" => text_dataset::load_ground_truth(path).await,
         "fbin" => fbin_dataset::load_ground_truth(path).await,
-        _ => Err(`unknown dataset_format "${DATASET_FORMAT}" (expected "text" or "fbin")`),
+        "fbin_packed" => fbin_dataset::load_ground_truth(path).await,
+        _ => Err(`unknown dataset_format "${DATASET_FORMAT}" (expected "text", "fbin" or "fbin_packed")`),
     }
 }
 

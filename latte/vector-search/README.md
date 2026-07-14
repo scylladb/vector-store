@@ -56,14 +56,20 @@ a partial index and you must wait an unbounded delay before `search`).
 
 ## Datasets
 
-A dataset is three files - base vectors, query vectors, ground truth - in one of
-two formats, selected with `-P 'dataset_format="..."'` on `recall.rn`:
+A dataset is three files - base vectors, query vectors, ground truth - in one
+of the following formats, selected with `-P 'dataset_format="..."'` on
+`recall.rn`:
 
 - **`text`** (default; format documented in `text_dataset.rn`) - prepared
   offline from the source parquet datasets.
 - **`fbin`** (format documented in `fbin_dataset.rn`) - the big-ann-benchmarks
   binary formats, read directly: big-ann datasets (e.g. deep1b) need no
   conversion at all.
+- **`fbin_packed`** - same fbin/ibin files, but the `load` phase keeps base
+  vectors as packed bytes and binds them to the vector column directly
+  (far less memory and a much faster prepare than `fbin`). Prefer this for
+  large datasets; `fbin` remains useful when script code needs to inspect
+  vector components.
 
 Default filenames — each overridable with the matching `-P` param:
 
@@ -84,5 +90,5 @@ the default name.
 number (not params): `bucket/test_bucket<N>.txt`, `bucket/gt_bucket<N>.txt`.
 The bucketed workload is text-only (fbin has no bucket column).
 
-Both formats are currently read into memory up front, which does not scale to
+All formats are currently read into memory up front, which does not scale to
 billion-vector datasets.

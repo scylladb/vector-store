@@ -45,6 +45,20 @@ pub async fn load_base_vectors(path, bucketed) {
     Ok(rows)
 }
 
+/// Like `load_base_vectors`, but keeps each vector as packed little-endian f32
+/// bytes (4 bytes per component instead of a rune value); latte binds them to
+/// `vector<float, N>` directly. Bind-only: script code cannot index the
+/// components.
+pub async fn load_base_vectors_packed(path) {
+    let file = fs::open_binary(path)?;
+    let header = read_fbin_header(file, path)?;
+    let rows = [];
+    for id in 0..header.count {
+        rows.push(#{ "id": id, "bucket": 0, "vector": file.read_bytes(header.dimension * 4)? });
+    }
+    Ok(rows)
+}
+
 /// Load an fbin query-vector file into a Vec of Vec<f64>.
 pub async fn load_query_vectors(path) {
     let file = fs::open_binary(path)?;
