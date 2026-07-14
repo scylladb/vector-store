@@ -147,10 +147,16 @@ pub(crate) async fn setup_store_with_quantization(
     let run = {
         let node_state = node_state.clone();
         async move {
-            let (server, _mtls) =
-                vector_store::run(node_state, db_actor, internals, index_factory, receivers)
-                    .await
-                    .unwrap();
+            let (server, _mtls) = vector_store::run(
+                node_state,
+                db_actor,
+                internals,
+                index_factory,
+                receivers,
+                vector_store::new_metrics(),
+            )
+            .await
+            .unwrap();
             let addr = (*server.address().await.borrow()).unwrap();
 
             (HttpClient::new(addr), server, senders)
@@ -318,10 +324,16 @@ async fn failed_db_index_create() {
     let index_factory = vector_store::new_index_factory_usearch(rx).unwrap();
 
     let (receivers, _senders) = create_config_channels(test_config()).await;
-    let (server, _mtls) =
-        vector_store::run(node_state, db_actor, internals, index_factory, receivers)
-            .await
-            .unwrap();
+    let (server, _mtls) = vector_store::run(
+        node_state,
+        db_actor,
+        internals,
+        index_factory,
+        receivers,
+        vector_store::new_metrics(),
+    )
+    .await
+    .unwrap();
     let addr = (*server.address().await.borrow()).unwrap();
 
     let client = HttpClient::new(addr);
@@ -1623,10 +1635,16 @@ async fn similarity_scores_are_decreasing_and_correctly_converted() {
     let (_, rx) = watch::channel(Arc::new(Config::default()));
     let index_factory = vector_store::new_index_factory_usearch(rx).unwrap();
     let (receivers, _senders) = create_config_channels(test_config()).await;
-    let (server, _mtls) =
-        vector_store::run(node_state, db_actor, internals, index_factory, receivers)
-            .await
-            .unwrap();
+    let (server, _mtls) = vector_store::run(
+        node_state,
+        db_actor,
+        internals,
+        index_factory,
+        receivers,
+        vector_store::new_metrics(),
+    )
+    .await
+    .unwrap();
     let addr = (*server.address().await.borrow()).unwrap();
     let client = HttpClient::new(addr);
 

@@ -11,6 +11,7 @@ use crate::DbIndexedValue;
 use crate::IndexKind;
 use crate::IndexMetadata;
 use crate::KeyspaceIdentifier;
+use crate::Metrics;
 use crate::NonemptyArc;
 use crate::NonemptyIteratorExt;
 use crate::Percentage;
@@ -153,6 +154,7 @@ pub(crate) async fn new(
     metadata: IndexMetadata,
     node_state: Sender<NodeState>,
     internals: Sender<Internals>,
+    metrics: Arc<Metrics>,
     cdc_error_notify: Arc<Notify>,
 ) -> anyhow::Result<(
     mpsc::Sender<DbIndex>,
@@ -181,6 +183,7 @@ pub(crate) async fn new(
         session_rx.clone(),
         metadata.clone(),
         internals.clone(),
+        metrics.clone(),
         tx_embeddings.clone(),
         CdcReaderConfig::Wide,
     );
@@ -191,6 +194,7 @@ pub(crate) async fn new(
         session_rx.clone(),
         metadata.clone(),
         internals,
+        metrics,
         tx_embeddings.clone(),
         CdcReaderConfig::Fine,
     );

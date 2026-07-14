@@ -63,10 +63,16 @@ async fn run_server(enable_mtls: bool) -> MtlsTestServer {
     let (receivers, senders) = create_config_channels(config.clone()).await;
     let index_factory = vector_store::new_index_factory_usearch(receivers.config.clone()).unwrap();
 
-    let (server, mtls) =
-        vector_store::run(node_state, db_actor, internals, index_factory, receivers)
-            .await
-            .unwrap();
+    let (server, mtls) = vector_store::run(
+        node_state,
+        db_actor,
+        internals,
+        index_factory,
+        receivers,
+        vector_store::new_metrics(),
+    )
+    .await
+    .unwrap();
     let main_addr = (*server.address().await.borrow()).unwrap();
 
     let mtls_addr = if enable_mtls {

@@ -21,6 +21,9 @@ pub struct Metrics {
     pub size: GaugeVec,
     pub modified: CounterVec,
     pub indexing_lag: HistogramVec,
+    pub cdc_reader_up: GaugeVec,
+    pub cdc_handler_errors_total: CounterVec,
+    pub cdc_reader_restarts_total: CounterVec,
     dirty_indexes: Arc<DashSet<(String, String)>>,
 }
 
@@ -98,10 +101,44 @@ impl Metrics {
         )
         .unwrap();
 
+        let cdc_reader_up = GaugeVec::new(
+            prometheus::Opts::new(
+                "cdc_reader_up",
+                "Whether the CDC reader for an index is currently running (1) or stopped (0)",
+            ),
+            &["keyspace", "index_name", "reader"],
+        )
+        .unwrap();
+
+        let cdc_handler_errors_total = CounterVec::new(
+            prometheus::Opts::new(
+                "cdc_handler_errors_total",
+                "Total number of CDC handler errors per index and reader",
+            ),
+            &["keyspace", "index_name", "reader"],
+        )
+        .unwrap();
+
+        let cdc_reader_restarts_total = CounterVec::new(
+            prometheus::Opts::new(
+                "cdc_reader_restarts_total",
+                "Total number of CDC reader restart attempts after an error, per index and reader",
+            ),
+            &["keyspace", "index_name", "reader"],
+        )
+        .unwrap();
+
         registry.register(Box::new(latency.clone())).unwrap();
         registry.register(Box::new(size.clone())).unwrap();
         registry.register(Box::new(modified.clone())).unwrap();
         registry.register(Box::new(indexing_lag.clone())).unwrap();
+        registry.register(Box::new(cdc_reader_up.clone())).unwrap();
+        registry
+            .register(Box::new(cdc_handler_errors_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(cdc_reader_restarts_total.clone()))
+            .unwrap();
 
         Self {
             registry,
@@ -109,6 +146,9 @@ impl Metrics {
             size,
             modified,
             indexing_lag,
+            cdc_reader_up,
+            cdc_handler_errors_total,
+            cdc_reader_restarts_total,
             dirty_indexes: Arc::new(DashSet::new()),
         }
     }
@@ -133,6 +173,9 @@ impl Metrics {
     pub fn remove_index_labels(&self, keyspace: &str, index_name: &str) {
         let _ = self.latency.remove_label_values(&[keyspace, index_name]);
         let _ = self.size.remove_label_values(&[keyspace, index_name]);
+        let _ = self
+            .indexing_lag
+            .remove_label_values(&[keyspace, index_name]);
         for op in OPERATIONS {
             let _ = self
                 .modified
@@ -141,11 +184,25 @@ impl Metrics {
         self.dirty_indexes
             .remove(&(keyspace.to_owned(), index_name.to_owned()));
     }
+
+    pub fn remove_reader_labels(&self, keyspace: &str, index_name: &str, reader: &str) {
+        let _ = self
+            .cdc_reader_up
+            .remove_label_values(&[keyspace, index_name, reader]);
+        let _ = self
+            .cdc_handler_errors_total
+            .remove_label_values(&[keyspace, index_name, reader]);
+        let _ = self
+            .cdc_reader_restarts_total
+            .remove_label_values(&[keyspace, index_name, reader]);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db_cdc::READER_FINE;
+    use crate::db_cdc::READER_WIDE;
     use prometheus::Encoder;
     use prometheus::TextEncoder;
 
@@ -168,6 +225,10 @@ mod tests {
             .inc();
         metrics
             .latency
+            .with_label_values(&["ks", "idx"])
+            .observe(0.001);
+        metrics
+            .indexing_lag
             .with_label_values(&["ks", "idx"])
             .observe(0.001);
 
@@ -261,6 +322,128 @@ mod tests {
                 .with_label_values(&["ks", "idx"])
                 .get_sample_count(),
             0
+        );
+    }
+
+    #[test]
+    fn cdc_reader_up_is_exported() {
+        let metrics = Metrics::new();
+
+        metrics
+            .cdc_reader_up
+            .with_label_values(&["ks", "idx", READER_WIDE])
+            .set(1.0);
+
+        let output = metric_families_text(&metrics);
+        assert!(
+            output.contains("# TYPE cdc_reader_up gauge"),
+            "cdc_reader_up gauge missing from export:\n{output}"
+        );
+        assert!(
+            output.contains(r#"cdc_reader_up{index_name="idx",keyspace="ks",reader="wide"} 1"#),
+            "expected cdc_reader_up=1 for wide reader in export:\n{output}"
+        );
+    }
+
+    #[test]
+    fn cdc_handler_errors_total_is_exported() {
+        let metrics = Metrics::new();
+
+        metrics
+            .cdc_handler_errors_total
+            .with_label_values(&["ks", "idx", READER_FINE])
+            .inc();
+
+        let output = metric_families_text(&metrics);
+        assert!(
+            output.contains("# TYPE cdc_handler_errors_total counter"),
+            "cdc_handler_errors_total counter missing from export:\n{output}"
+        );
+        assert!(
+            output.contains(
+                r#"cdc_handler_errors_total{index_name="idx",keyspace="ks",reader="fine"} 1"#
+            ),
+            "expected a single observed handler error in export:\n{output}"
+        );
+    }
+
+    #[test]
+    fn cdc_reader_restarts_total_is_exported() {
+        let metrics = Metrics::new();
+
+        metrics
+            .cdc_reader_restarts_total
+            .with_label_values(&["ks", "idx", READER_FINE])
+            .inc_by(2.0);
+
+        let output = metric_families_text(&metrics);
+        assert!(
+            output.contains("# TYPE cdc_reader_restarts_total counter"),
+            "cdc_reader_restarts_total counter missing from export:\n{output}"
+        );
+        assert!(
+            output.contains(
+                r#"cdc_reader_restarts_total{index_name="idx",keyspace="ks",reader="fine"} 2"#
+            ),
+            "expected two observed restarts in export:\n{output}"
+        );
+    }
+
+    #[test]
+    fn remove_index_labels_does_not_clear_cdc_reader_metrics() {
+        let metrics = Metrics::new();
+
+        // Non-CDC index-scoped metric; must be cleared.
+        metrics.size.with_label_values(&["ks", "idx"]).set(1.0);
+
+        // CDC reader metrics are owned by the CDC actor; remove_index_labels must not touch them.
+        metrics
+            .cdc_reader_up
+            .with_label_values(&["ks", "idx", READER_WIDE])
+            .set(1.0);
+
+        metrics.remove_index_labels("ks", "idx");
+
+        let output = metric_families_text(&metrics);
+        assert!(
+            !output.contains(r#"index_size{index_name="idx",keyspace="ks"}"#),
+            "index_size should be removed, got:\n{output}"
+        );
+        assert!(
+            output.contains(r#"cdc_reader_up{index_name="idx",keyspace="ks",reader="wide"} 1"#),
+            "cdc_reader_up must survive remove_index_labels, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn remove_reader_labels_clears_only_the_given_readers_cdc_metrics() {
+        let metrics = Metrics::new();
+
+        for reader in [READER_WIDE, READER_FINE] {
+            metrics
+                .cdc_reader_up
+                .with_label_values(&["ks", "idx", reader])
+                .set(1.0);
+            metrics
+                .cdc_handler_errors_total
+                .with_label_values(&["ks", "idx", reader])
+                .inc();
+            metrics
+                .cdc_reader_restarts_total
+                .with_label_values(&["ks", "idx", reader])
+                .inc();
+        }
+
+        metrics.remove_reader_labels("ks", "idx", READER_WIDE);
+
+        let output = metric_families_text(&metrics);
+        assert!(
+            !output.contains(r#"reader="wide""#),
+            "the wide reader's CDC metric series should be removed, got:\n{output}"
+        );
+        assert!(
+            output.contains(r#"reader="fine""#),
+            "the fine reader's CDC metric series must be unaffected, got:\n{output}"
         );
     }
 }

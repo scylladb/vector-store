@@ -19,6 +19,7 @@ use crate::IndexMetadata;
 use crate::IndexName;
 use crate::IndexVersion;
 use crate::KeyspaceName;
+use crate::Metrics;
 use crate::NonemptyArc;
 use crate::NonemptyIteratorExt;
 use crate::Quantization;
@@ -257,6 +258,7 @@ pub(crate) async fn new(
     node_state: Sender<NodeState>,
     internals: Sender<Internals>,
     mut config_rx: watch::Receiver<Arc<Config>>,
+    metrics: Arc<Metrics>,
 ) -> anyhow::Result<mpsc::Sender<Db>> {
     let (tx, mut rx) = mpsc::channel(perf::channel_size().into());
     tokio::spawn(
@@ -286,7 +288,7 @@ pub(crate) async fn new(
                                     internals.create_session(Some(session.clone())).await;
                                     session_tx.send(Some(session)).ok();
                                     if statements.is_none() {
-                                        statements = Some(Arc::new(Statements::new(config_rx.clone(), session_rx.clone()).await.unwrap()));
+                                        statements = Some(Arc::new(Statements::new(config_rx.clone(), session_rx.clone(), metrics.clone()).await.unwrap()));
                                     }
                                     info!("Connected to ScyllaDB at {}", config.scylladb_uri);
                                 }
@@ -505,6 +507,7 @@ fn credentials_changed(
 struct Statements {
     config_rx: watch::Receiver<Arc<Config>>,
     session_rx: watch::Receiver<Option<Arc<Session>>>,
+    metrics: Arc<Metrics>,
     st_latest_schema_version: PreparedStatement,
     st_get_indexes: PreparedStatement,
     st_get_index_target_type: PreparedStatement,
@@ -641,6 +644,7 @@ impl Statements {
     async fn new(
         config_rx: watch::Receiver<Arc<Config>>,
         session_rx: watch::Receiver<Option<Arc<Session>>>,
+        metrics: Arc<Metrics>,
     ) -> anyhow::Result<Self> {
         let session = session_rx.borrow().clone().ok_or_else(|| {
             anyhow::anyhow!("No session available during Statements initialization")
@@ -648,6 +652,7 @@ impl Statements {
 
         Ok(Self {
             config_rx,
+            metrics,
 
             st_latest_schema_version: session
                 .prepare(Self::ST_LATEST_SCHEMA_VERSION)
@@ -689,6 +694,7 @@ impl Statements {
             metadata,
             node_state,
             internals,
+            self.metrics.clone(),
             cdc_error_notify,
         )
         .await

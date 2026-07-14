@@ -86,10 +86,16 @@ async fn setup_fts_store(
     let run = {
         let node_state = node_state.clone();
         async move {
-            let (server, _mtls) =
-                vector_store::run(node_state, db_actor, internals, index_factory, receivers)
-                    .await
-                    .unwrap();
+            let (server, _mtls) = vector_store::run(
+                node_state,
+                db_actor,
+                internals,
+                index_factory,
+                receivers,
+                vector_store::new_metrics(),
+            )
+            .await
+            .unwrap();
             let addr = (*server.address().await.borrow()).unwrap();
 
             (HttpClient::new(addr), server, senders)

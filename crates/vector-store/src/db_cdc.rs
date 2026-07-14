@@ -10,6 +10,9 @@ use crate::DbIndexedRow;
 use crate::DbIndexedValue;
 use crate::IndexKind;
 use crate::IndexMetadata;
+use crate::IndexName;
+use crate::KeyspaceName;
+use crate::Metrics;
 use crate::NonemptyArc;
 use crate::NonemptyIteratorExt;
 use crate::db_index_backend::CdcValueStatus;
@@ -96,17 +99,20 @@ impl CdcReaderParams {
 
 pub(crate) enum DbCdc {}
 
+pub(crate) const READER_WIDE: &str = "wide";
+pub(crate) const READER_FINE: &str = "fine";
+
 /// Preset configurations for CDC reader actors.
 pub(crate) enum CdcReaderConfig {
     Wide,
     Fine,
 }
 
-impl From<CdcReaderConfig> for CdcReaderState {
-    fn from(config: CdcReaderConfig) -> Self {
-        match config {
-            CdcReaderConfig::Wide => Self::new("wide", CdcReaderParams::wide),
-            CdcReaderConfig::Fine => Self::new("fine", CdcReaderParams::fine),
+impl CdcReaderConfig {
+    fn name_and_params_fn(self) -> (&'static str, fn(&Config) -> CdcReaderParams) {
+        match self {
+            CdcReaderConfig::Wide => (READER_WIDE, CdcReaderParams::wide),
+            CdcReaderConfig::Fine => (READER_FINE, CdcReaderParams::fine),
         }
     }
 }
@@ -117,6 +123,7 @@ pub(crate) fn new(
     mut session_rx: watch::Receiver<Option<Arc<Session>>>,
     metadata: IndexMetadata,
     internals: Sender<Internals>,
+    metrics: Arc<Metrics>,
     tx_embeddings: mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
     config: CdcReaderConfig,
 ) -> mpsc::Sender<DbCdc> {
@@ -125,7 +132,14 @@ pub(crate) fn new(
     // Mark the receiver to ensure first session update is visible
     session_rx.mark_changed();
 
-    let mut reader: CdcReaderState = config.into();
+    let (name, params_fn) = config.name_and_params_fn();
+    let mut reader = CdcReaderState::new(
+        name,
+        params_fn,
+        metrics,
+        metadata.keyspace_name.clone(),
+        metadata.index_name.clone(),
+    );
     let name = reader.name;
     let actor_key = metadata.key();
     let span_key = actor_key.clone();
@@ -162,6 +176,7 @@ pub(crate) fn new(
                     _ = reader.error_notify.notified() => {
                         err_counter += 1;
                         backoff_duration = Some(DEFAULT_BACKOFF_DURATION);
+                        reader.set_reader_metric_down();
                         warn!(
                             "{name} CDC reader error {err_counter}, restarting after {duration:?} backoff",
                             name = reader.name,
@@ -180,6 +195,7 @@ pub(crate) fn new(
 
             // Cleanup
             reader.stop().await;
+            reader.remove_metrics();
 
             internals
                 .increment_counter(format!("{actor_key}-{name}-cdc-actor-stopped"))
@@ -201,11 +217,20 @@ struct CdcReaderState {
     start: Duration,
     name: &'static str,
     params_fn: fn(&Config) -> CdcReaderParams,
+    metrics: Arc<Metrics>,
+    keyspace: KeyspaceName,
+    index_name: IndexName,
 }
 
 impl CdcReaderState {
-    fn new(name: &'static str, params_fn: fn(&Config) -> CdcReaderParams) -> Self {
-        Self {
+    fn new(
+        name: &'static str,
+        params_fn: fn(&Config) -> CdcReaderParams,
+        metrics: Arc<Metrics>,
+        keyspace: KeyspaceName,
+        index_name: IndexName,
+    ) -> Self {
+        let state = Self {
             reader: None,
             handler_task: None,
             shutdown_notify: Arc::new(Notify::new()),
@@ -213,7 +238,39 @@ impl CdcReaderState {
             start: cdc_now(),
             name,
             params_fn,
-        }
+            metrics,
+            keyspace,
+            index_name,
+        };
+        state.set_reader_metric_down();
+        state
+    }
+
+    /// Sets the `cdc_reader_up` gauge to 1 (running) for this reader.
+    fn set_reader_metric_up(&self) {
+        self.metrics
+            .cdc_reader_up
+            .with_label_values(&[self.keyspace.as_ref(), self.index_name.as_ref(), self.name])
+            .set(1.0);
+    }
+
+    /// Sets the `cdc_reader_up` gauge to 0 (stopped) for this reader.
+    fn set_reader_metric_down(&self) {
+        self.metrics
+            .cdc_reader_up
+            .with_label_values(&[self.keyspace.as_ref(), self.index_name.as_ref(), self.name])
+            .set(0.0);
+    }
+
+    /// Removes this reader's metric series.
+    /// Must only be called after the actor loop has exited.
+    /// Calling it earlier races with updates that would recreate the series.
+    fn remove_metrics(&self) {
+        self.metrics.remove_reader_labels(
+            self.keyspace.as_ref(),
+            self.index_name.as_ref(),
+            self.name,
+        );
     }
 
     /// Stops the current CDC reader and handler task, preserving the last checkpoint.
@@ -225,6 +282,7 @@ impl CdcReaderState {
             self.shutdown_notify.notify_one();
             self.start = task.await.unwrap_or(cdc_now());
         }
+        self.set_reader_metric_down();
     }
 
     /// Stops the current reader, drains stale notifications, and starts a new reader with the given parameters.
@@ -256,9 +314,12 @@ impl CdcReaderState {
                     Arc::clone(&self.shutdown_notify),
                     Arc::clone(&self.error_notify),
                     internals.clone(),
+                    Arc::clone(&self.metrics),
                     metadata,
                     self.name,
                 ));
+
+                self.set_reader_metric_up();
 
                 info!(
                     "{} CDC reader created successfully for {} (safety: {:?}, sleep: {:?})",
@@ -270,6 +331,7 @@ impl CdcReaderState {
             }
             Err(e) => {
                 error!("Failed to create {} CDC reader: {e}", self.name);
+                self.set_reader_metric_down();
                 self.error_notify.notify_one();
             }
         }
@@ -322,12 +384,39 @@ impl CdcReaderState {
     ) {
         let session = session_rx.borrow().clone();
         if let Some(session) = session {
+            record_reader_restart(&self.metrics, &self.keyspace, &self.index_name, self.name);
             let config = config_rx.borrow().clone();
             let params = (self.params_fn)(&config);
             self.restart(params, &session, metadata, tx_embeddings, internals)
                 .await;
         }
     }
+}
+
+/// Increments the `cdc_handler_errors_total` counter for the given index and reader.
+fn record_handler_error(
+    metrics: &Metrics,
+    keyspace: &KeyspaceName,
+    index_name: &IndexName,
+    reader: &str,
+) {
+    metrics
+        .cdc_handler_errors_total
+        .with_label_values(&[keyspace.as_ref(), index_name.as_ref(), reader])
+        .inc();
+}
+
+/// Increments the `cdc_reader_restarts_total` counter for the given index and reader.
+fn record_reader_restart(
+    metrics: &Metrics,
+    keyspace: &KeyspaceName,
+    index_name: &IndexName,
+    reader: &str,
+) {
+    metrics
+        .cdc_reader_restarts_total
+        .with_label_values(&[keyspace.as_ref(), index_name.as_ref(), reader])
+        .inc();
 }
 
 fn cdc_now() -> Duration {
@@ -390,6 +479,7 @@ fn spawn_handler_task(
     shutdown_notify: Arc<Notify>,
     cdc_error_notify: Arc<Notify>,
     internals: Sender<Internals>,
+    metrics: Arc<Metrics>,
     metadata: &IndexMetadata,
     reader_name: &str,
 ) -> tokio::task::JoinHandle<Duration> {
@@ -398,6 +488,9 @@ fn spawn_handler_task(
     let started_counter_name = format!("{handler_key}-{reader_name}-cdc-handler-started");
     let stopped_counter_name = format!("{handler_key}-{reader_name}-cdc-handler-stopped");
     let errors_counter_name = format!("{handler_key}-{reader_name}-cdc-handler-errors");
+    let keyspace = metadata.keyspace_name.clone();
+    let index_name = metadata.index_name.clone();
+    let reader_name = reader_name.to_string();
 
     tokio::spawn(
         async move {
@@ -407,6 +500,7 @@ fn spawn_handler_task(
                     if let Err(err) = result {
                         warn!("CDC handler error: {err}");
                         internals.increment_counter(errors_counter_name).await;
+                        record_handler_error(&metrics, &keyspace, &index_name, &reader_name);
                         cdc_error_notify.notify_one();
                     }
                 }
@@ -556,5 +650,58 @@ impl CdcConsumerFactory {
             kind: metadata.kind.clone(),
             tx,
         })))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prometheus::Encoder;
+    use prometheus::TextEncoder;
+
+    fn metric_families_text(metrics: &Metrics) -> String {
+        let mut buf = Vec::new();
+        TextEncoder::new()
+            .encode(&metrics.registry.gather(), &mut buf)
+            .unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    fn new_state(metrics: Arc<Metrics>) -> CdcReaderState {
+        CdcReaderState::new(
+            READER_WIDE,
+            CdcReaderParams::wide,
+            metrics,
+            "ks".into(),
+            "idx".into(),
+        )
+    }
+
+    #[test]
+    fn new_state_initializes_reader_up_gauge_to_zero() {
+        let metrics = Arc::new(Metrics::new());
+
+        // The gauge must be present immediately, even for a reader that never starts.
+        let _state = new_state(Arc::clone(&metrics));
+
+        let output = metric_families_text(&metrics);
+        assert!(
+            output.contains(r#"cdc_reader_up{index_name="idx",keyspace="ks",reader="wide"} 0"#),
+            "expected cdc_reader_up=0 immediately after creation, got:\n{output}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_on_freshly_created_state_sets_reader_up_to_zero() {
+        let metrics = Arc::new(Metrics::new());
+        let mut state = new_state(Arc::clone(&metrics));
+
+        // Never started: `stop()` should be a no-op but must still report the reader as down.
+        state.stop().await;
+
+        let output = metric_families_text(&metrics);
+        assert!(
+            output.contains(r#"cdc_reader_up{index_name="idx",keyspace="ks",reader="wide"} 0"#)
+        );
     }
 }
