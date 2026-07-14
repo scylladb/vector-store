@@ -606,6 +606,7 @@ mod tests {
     use std::collections::HashMap;
     use std::io::Write;
     use tempfile::NamedTempFile;
+    use tempfile::tempdir;
 
     const USERNAME: &str = "test_user";
     const PASSWORD: &str = "test_pass";
@@ -913,6 +914,62 @@ mod tests {
                 .to_string()
                 .contains("Unable to parse VECTOR_STORE_FULLTEXT_INDEXES")
         );
+    }
+
+    #[tokio::test]
+    async fn load_config_diskann() {
+        let env = mock_env(HashMap::new());
+        let config = load_config(env).await.unwrap();
+        assert!(config.diskann_index_path.is_none());
+        assert!(config.diskann_alpha.is_none());
+
+        let dir = tempdir().unwrap();
+        let path_str = dir.path().to_str().unwrap().to_string();
+        let env = mock_env(HashMap::from([
+            ("VECTOR_STORE_DISKANN_INDEX_PATH", path_str.clone()),
+            ("VECTOR_STORE_DISKANN_ALPHA", "1.2".into()),
+        ]));
+        let config = load_config(env).await.unwrap();
+        assert_eq!(config.diskann_index_path, Some(PathBuf::from(path_str)));
+        assert_eq!(
+            config.diskann_alpha,
+            Some(PositiveFiniteF32::new(1.2).unwrap())
+        );
+
+        let env = mock_env(HashMap::from([(
+            "VECTOR_STORE_DISKANN_ALPHA",
+            "not-a-float".into(),
+        )]));
+        let result = load_config(env).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Unable to parse VECTOR_STORE_DISKANN_ALPHA env (float)")
+        );
+
+        let env = mock_env(HashMap::from([(
+            "VECTOR_STORE_DISKANN_INDEX_PATH",
+            "/no/such/path/exists".into(),
+        )]));
+        let result = load_config(env).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains(
+            "DiskANN index path specified in VECTOR_STORE_DISKANN_INDEX_PATH does not exist"
+        ));
+
+        let file = NamedTempFile::new().unwrap();
+        let path_str = file.path().to_str().unwrap().to_string();
+        let env = mock_env(HashMap::from([(
+            "VECTOR_STORE_DISKANN_INDEX_PATH",
+            path_str.clone(),
+        )]));
+        let result = load_config(env).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains(
+            "DiskANN index path specified in VECTOR_STORE_DISKANN_INDEX_PATH is not a directory"
+        ));
     }
 
     #[test]
