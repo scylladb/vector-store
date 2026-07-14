@@ -24,6 +24,7 @@ pub struct Metrics {
     pub cdc_reader_up: GaugeVec,
     pub cdc_handler_errors_total: CounterVec,
     pub cdc_reader_restarts_total: CounterVec,
+    pub cdc_last_processed_timestamp_seconds: GaugeVec,
     dirty_indexes: Arc<DashSet<(String, String)>>,
 }
 
@@ -128,6 +129,16 @@ impl Metrics {
         )
         .unwrap();
 
+        let cdc_last_processed_timestamp_seconds = GaugeVec::new(
+            prometheus::Opts::new(
+                "cdc_last_processed_timestamp_seconds",
+                "Unix timestamp (seconds) up to which the CDC log has been fully consumed. \
+                 This is the reader's checkpoint position, not the wall-clock time of the last mutation.",
+            ),
+            &["keyspace", "index_name", "reader"],
+        )
+        .unwrap();
+
         registry.register(Box::new(latency.clone())).unwrap();
         registry.register(Box::new(size.clone())).unwrap();
         registry.register(Box::new(modified.clone())).unwrap();
@@ -139,6 +150,9 @@ impl Metrics {
         registry
             .register(Box::new(cdc_reader_restarts_total.clone()))
             .unwrap();
+        registry
+            .register(Box::new(cdc_last_processed_timestamp_seconds.clone()))
+            .unwrap();
 
         Self {
             registry,
@@ -149,6 +163,7 @@ impl Metrics {
             cdc_reader_up,
             cdc_handler_errors_total,
             cdc_reader_restarts_total,
+            cdc_last_processed_timestamp_seconds,
             dirty_indexes: Arc::new(DashSet::new()),
         }
     }
@@ -194,6 +209,9 @@ impl Metrics {
             .remove_label_values(&[keyspace, index_name, reader]);
         let _ = self
             .cdc_reader_restarts_total
+            .remove_label_values(&[keyspace, index_name, reader]);
+        let _ = self
+            .cdc_last_processed_timestamp_seconds
             .remove_label_values(&[keyspace, index_name, reader]);
     }
 }
@@ -416,6 +434,28 @@ mod tests {
     }
 
     #[test]
+    fn cdc_last_processed_timestamp_seconds_is_exported() {
+        let metrics = Metrics::new();
+
+        metrics
+            .cdc_last_processed_timestamp_seconds
+            .with_label_values(&["ks", "idx", READER_WIDE])
+            .set(1_700_000_000.0);
+
+        let output = metric_families_text(&metrics);
+        assert!(
+            output.contains("# TYPE cdc_last_processed_timestamp_seconds gauge"),
+            "cdc_last_processed_timestamp_seconds gauge missing from export:\n{output}"
+        );
+        assert!(
+            output.contains(
+                r#"cdc_last_processed_timestamp_seconds{index_name="idx",keyspace="ks",reader="wide"} 1700000000"#
+            ),
+            "expected observed value in export:\n{output}"
+        );
+    }
+
+    #[test]
     fn remove_reader_labels_clears_only_the_given_readers_cdc_metrics() {
         let metrics = Metrics::new();
 
@@ -432,6 +472,10 @@ mod tests {
                 .cdc_reader_restarts_total
                 .with_label_values(&["ks", "idx", reader])
                 .inc();
+            metrics
+                .cdc_last_processed_timestamp_seconds
+                .with_label_values(&["ks", "idx", reader])
+                .set(1_700_000_000.0);
         }
 
         metrics.remove_reader_labels("ks", "idx", READER_WIDE);

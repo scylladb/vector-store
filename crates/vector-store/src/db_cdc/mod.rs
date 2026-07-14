@@ -4,6 +4,7 @@
  */
 
 pub(crate) mod actor;
+mod checkpoint_saver;
 mod consumer;
 
 pub(crate) const READER_WIDE: &str = "wide";

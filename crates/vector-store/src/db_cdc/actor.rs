@@ -12,6 +12,7 @@ use crate::KeyspaceName;
 use crate::Metrics;
 use crate::db_cdc::READER_FINE;
 use crate::db_cdc::READER_WIDE;
+use crate::db_cdc::checkpoint_saver::MetricsCheckpointSaver;
 use crate::db_cdc::consumer::CdcConsumerFactory;
 use crate::internals::Internals;
 use crate::internals::InternalsExt;
@@ -288,6 +289,7 @@ impl CdcReaderState {
             Arc::clone(session),
             metadata.clone(),
             tx_embeddings.clone(),
+            Arc::clone(&self.metrics),
             self.name,
         )
         .await
@@ -431,6 +433,7 @@ async fn create_cdc_reader(
     session: Arc<Session>,
     metadata: IndexMetadata,
     tx_embeddings: mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
+    metrics: Arc<Metrics>,
     reader_name: &str,
 ) -> anyhow::Result<(
     scylla_cdc::log_reader::CDCLogReader,
@@ -445,6 +448,13 @@ async fn create_cdc_reader(
         OffsetDateTime::UNIX_EPOCH + cdc_start
     );
 
+    let checkpoint_saver = Arc::new(MetricsCheckpointSaver::new(
+        metrics,
+        metadata.keyspace_name.as_ref().to_string(),
+        metadata.index_name.as_ref().to_string(),
+        reader_name.to_string(),
+    ));
+
     CDCLogReaderBuilder::new()
         .session(session)
         .keyspace(metadata.keyspace_name.as_ref())
@@ -453,6 +463,8 @@ async fn create_cdc_reader(
         .start_timestamp(chrono::Duration::from_std(cdc_start)?)
         .safety_interval(params.safety_interval)
         .sleep_interval(params.sleep_interval)
+        .should_save_progress(true)
+        .checkpoint_saver(checkpoint_saver)
         .build()
         .await
         .context(format!("Failed to build {reader_name} CDC log reader"))
