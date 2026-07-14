@@ -761,11 +761,19 @@ async fn post_index_bm25(
         return resp;
     }
 
+    let timer = state
+        .metrics
+        .latency
+        .with_label_values(&[keyspace.as_ref(), index_name.as_ref()])
+        .start_timer();
+
     let index_key = IndexKey::new(&keyspace, &index_name);
 
     let (fts_sender, primary_key_columns) = {
         let indexes = state.indexes.read().unwrap();
         let Some(entry) = indexes.get_fts(&index_key) else {
+            timer.observe_duration();
+
             let msg = format!("missing index: {keyspace}.{index_name}");
             debug!("post_index_bm25: {msg}");
             return (StatusCode::NOT_FOUND, msg).into_response();
@@ -773,6 +781,8 @@ async fn post_index_bm25(
         if entry.status() != crate::node_state::IndexStatus::Serving {
             match entry.progress() {
                 Progress::InProgress(percentage) => {
+                    timer.observe_duration();
+
                     let msg = format!(
                         "Index {keyspace}.{index_name} is not available yet as it is still being constructed, progress: {:.3}%",
                         percentage.get()
@@ -781,6 +791,8 @@ async fn post_index_bm25(
                     return (StatusCode::SERVICE_UNAVAILABLE, msg).into_response();
                 }
                 Progress::Done => {
+                    timer.observe_duration();
+
                     let msg = format!(
                         "Index {keyspace}.{index_name} is not serving, but full scan did finish."
                     );
@@ -795,6 +807,8 @@ async fn post_index_bm25(
     let search_result = fts_sender
         .search(index_key, request.query, request.limit.into())
         .await;
+
+    timer.observe_duration();
 
     match search_result {
         Err(err) => {
