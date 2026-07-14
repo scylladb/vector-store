@@ -164,6 +164,7 @@ pub async fn prepare(db) {
         // recall is better when higher; record run context so the report is self-describing.
         db.declare_metric("recall", "higher");
         db.set_report_field("dataset", DATASET_FILE);
+        db.set_report_field("dataset_format", "text");
         db.set_report_field("k", `${ANN_LIMIT}`);
         db.set_report_field("dimension", `${DIMENSION}`);
         db.set_report_field("query_path", "cql");
