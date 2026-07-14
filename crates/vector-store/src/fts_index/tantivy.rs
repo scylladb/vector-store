@@ -48,6 +48,8 @@ use crate::worker::WorkerExt;
 
 use super::actor::FtsIndex;
 use super::actor::FtsSearchR;
+use super::actor::FtsStats;
+use super::actor::FtsStatsR;
 
 pub(crate) struct TantivyIndexFactory {
     worker: async_channel::Sender<Worker>,
@@ -242,6 +244,22 @@ fn handle_search(
     Ok((primary_keys, scores))
 }
 
+fn handle_stats(state: &IndexState) -> FtsStatsR {
+    let searcher = state.reader.searcher();
+    let num_docs = searcher.num_docs();
+    let segment_count = searcher.segment_readers().len();
+    let size_bytes = searcher
+        .space_usage()
+        .map_err(|e| anyhow!("fts: failed to compute space usage: {e}"))?
+        .total()
+        .get_bytes();
+    Ok(FtsStats {
+        num_docs,
+        size_bytes,
+        segment_count,
+    })
+}
+
 fn get_or_create_state<T: TableSearch>(
     states: &mut BTreeMap<IndexId, Arc<IndexState>>,
     table: &RwLock<T>,
@@ -361,6 +379,18 @@ pub(crate) fn new(
                         .spawn_blocking(move || {
                             let result =
                                 handle_search(&state, table.as_ref(), &index_key, &query, limit);
+                            _ = tx.send(result);
+                        })
+                        .await;
+                }
+                FtsIndex::Stats { index_key, tx } => {
+                    let Some(state) = get_state(&states, table.as_ref(), &index_key) else {
+                        _ = tx.send(Ok(FtsStats::default()));
+                        continue;
+                    };
+                    worker
+                        .spawn_blocking(move || {
+                            let result = handle_stats(&state);
                             _ = tx.send(result);
                         })
                         .await;
@@ -590,6 +620,35 @@ mod tests {
 
         assert_eq!(keys.len(), 1);
         assert_eq!(scores.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn stats_reflects_doc_count_and_segments() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+
+        add_doc(&sender, 1, "hello world").await;
+        add_doc(&sender, 2, "foo bar").await;
+
+        let key = make_index_key();
+        let stats = sender.stats(key).await.unwrap();
+
+        assert_eq!(stats.num_docs, 2);
+        assert!(stats.segment_count > 0);
+        assert!(stats.size_bytes > 0);
+    }
+
+    #[tokio::test]
+    async fn stats_for_unknown_index_returns_default() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+
+        let key = make_index_key();
+        let stats = sender.stats(key).await.unwrap();
+
+        assert_eq!(stats.num_docs, 0);
+        assert_eq!(stats.segment_count, 0);
+        assert_eq!(stats.size_bytes, 0);
     }
 
     #[tokio::test]

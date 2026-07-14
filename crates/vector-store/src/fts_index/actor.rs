@@ -14,6 +14,15 @@ use tokio::sync::oneshot;
 
 pub(crate) type FtsSearchR = anyhow::Result<(Vec<PrimaryKey>, Vec<f32>)>;
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FtsStats {
+    pub(crate) num_docs: u64,
+    pub(crate) size_bytes: u64,
+    pub(crate) segment_count: usize,
+}
+
+pub(crate) type FtsStatsR = anyhow::Result<FtsStats>;
+
 #[allow(dead_code)]
 pub(crate) enum FtsIndex {
     AddDocument {
@@ -35,6 +44,10 @@ pub(crate) enum FtsIndex {
         limit: Limit,
         tx: oneshot::Sender<FtsSearchR>,
     },
+    Stats {
+        index_key: IndexKey,
+        tx: oneshot::Sender<FtsStatsR>,
+    },
 }
 
 #[allow(dead_code)]
@@ -48,6 +61,7 @@ pub(crate) trait FtsIndexExt {
     async fn remove_document(&self, primary_id: PrimaryId, in_progress: AsyncInProgress);
     async fn count(&self, index_key: IndexKey) -> CountR;
     async fn search(&self, index_key: IndexKey, query: String, limit: Limit) -> FtsSearchR;
+    async fn stats(&self, index_key: IndexKey) -> FtsStatsR;
 }
 
 impl FtsIndexExt for mpsc::Sender<FtsIndex> {
@@ -90,6 +104,12 @@ impl FtsIndexExt for mpsc::Sender<FtsIndex> {
             tx,
         })
         .await?;
+        rx.await?
+    }
+
+    async fn stats(&self, index_key: IndexKey) -> FtsStatsR {
+        let (tx, rx) = oneshot::channel();
+        self.send(FtsIndex::Stats { index_key, tx }).await?;
         rx.await?
     }
 }
