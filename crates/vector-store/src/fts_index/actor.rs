@@ -23,7 +23,6 @@ pub(crate) struct FtsStats {
 
 pub(crate) type FtsStatsR = anyhow::Result<FtsStats>;
 
-#[allow(dead_code)]
 pub(crate) enum FtsIndex {
     AddDocument {
         primary_id: PrimaryId,
@@ -50,7 +49,6 @@ pub(crate) enum FtsIndex {
     },
 }
 
-#[allow(dead_code)]
 pub(crate) trait FtsIndexExt {
     async fn add_document(
         &self,
