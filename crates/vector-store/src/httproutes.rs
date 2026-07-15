@@ -5,6 +5,8 @@
 
 use crate::Filter;
 use crate::IndexKey;
+use crate::IndexName;
+use crate::KeyspaceName;
 use crate::Progress;
 use crate::Quantization;
 use crate::Restriction;
@@ -372,23 +374,54 @@ async fn get_index_status(
     }
 }
 
+async fn refresh_index_metrics(
+    state: &RoutesInnerState,
+    keyspace: KeyspaceName,
+    index_name: IndexName,
+) {
+    let key = IndexKey::new(&keyspace, &index_name);
+    let labels = [keyspace.as_ref(), index_name.as_ref()];
+
+    if let Some((index, _)) = state.engine.get_vs_index(key.clone()).await {
+        if let Ok(count) = index.count(key).await {
+            state
+                .metrics
+                .size
+                .with_label_values(&labels)
+                .set(count as f64);
+        }
+        return;
+    }
+
+    if let Some((index, _)) = state.engine.get_fts_index(key.clone()).await
+        && let Ok(stats) = index.stats(key).await
+    {
+        state
+            .metrics
+            .size
+            .with_label_values(&labels)
+            .set(stats.num_docs as f64);
+        state
+            .metrics
+            .fts_index_size_bytes
+            .with_label_values(&labels)
+            .set(stats.size_bytes as f64);
+        state
+            .metrics
+            .fts_segment_count
+            .with_label_values(&labels)
+            .set(stats.segment_count as f64);
+    }
+}
+
 async fn get_metrics(
     State(state): State<RoutesInnerState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
     for (keyspace_str, index_name_str) in state.metrics.take_dirty_indexes() {
-        let keyspace = crate::KeyspaceName::from(keyspace_str);
-        let index_name = crate::IndexName::from(index_name_str);
-        let key = IndexKey::new(&keyspace, &index_name);
-        if let Some((index, _)) = state.engine.get_vs_index(key.clone()).await
-            && let Ok(count) = index.count(key).await
-        {
-            state
-                .metrics
-                .size
-                .with_label_values(&[keyspace.as_ref(), index_name.as_ref()])
-                .set(count as f64);
-        }
+        let keyspace = KeyspaceName::from(keyspace_str);
+        let index_name = IndexName::from(index_name_str);
+        refresh_index_metrics(&state, keyspace, index_name).await;
     }
     let metric_families = state.metrics.registry.gather();
 
