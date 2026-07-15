@@ -722,7 +722,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remove_vector() {
+    async fn remove_vector_with_none_value() {
         let (tx_db_rows, rx_db_rows) = mpsc::channel(10);
         let (tx_index, mut rx_index) = mpsc::channel::<VsIndex>(10);
         let metrics: Arc<Metrics> = Arc::new(Metrics::new());
@@ -758,6 +758,67 @@ mod tests {
                 DbIndexedRow {
                     primary_key,
                     operation: DbIndexedOperation::Upsert(values),
+                },
+                AsyncInProgress::None,
+            ))
+            .await
+            .unwrap();
+
+        let Some(VsIndex::RemoveVector {
+            partition_id,
+            primary_id,
+            ..
+        }) = rx_index.recv().await
+        else {
+            unreachable!();
+        };
+        assert_eq!(primary_id, 5.into());
+        assert_eq!(partition_id, 6.into());
+
+        drop(tx_db_rows);
+        assert!(rx_index.recv().await.is_none());
+        assert_modified_metric_counts(&metrics, 0., 0., 1.);
+    }
+
+    #[tokio::test]
+    async fn remove_vector_with_delete() {
+        let (tx_db_rows, rx_db_rows) = mpsc::channel(10);
+        let (tx_index, mut rx_index) = mpsc::channel::<VsIndex>(10);
+        let metrics: Arc<Metrics> = Arc::new(Metrics::new());
+        let table = Arc::new(RwLock::new(MockTableModify::new()));
+        let index_key = IndexKey::new(&"vector".to_string().into(), &"store".to_string().into());
+        let _actor = new(
+            index_key.clone(),
+            Arc::clone(&table),
+            rx_db_rows,
+            tx_index,
+            Arc::clone(&metrics),
+        )
+        .await
+        .unwrap();
+
+        let primary_key: PrimaryKey = [CqlValue::Int(1)].into();
+        table
+            .write()
+            .unwrap()
+            .expect_delete()
+            .with(
+                eq(index_key),
+                eq(primary_key.clone()),
+                eq(Timestamp::from_millis(10)),
+            )
+            .once()
+            .returning(|_, _, _| {
+                Ok(vec![Operation::RemoveValue {
+                    primary_id: 5.into(),
+                    partition_id: 6.into(),
+                }])
+            });
+        tx_db_rows
+            .send((
+                DbIndexedRow {
+                    primary_key,
+                    operation: DbIndexedOperation::Delete(Timestamp::from_millis(10)),
                 },
                 AsyncInProgress::None,
             ))
