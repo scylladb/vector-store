@@ -7,11 +7,13 @@ use crate::Timestamp;
 use prometheus::Histogram;
 use tokio::sync::mpsc;
 
+#[derive(Debug)]
 pub struct CdcInProgress {
     histogram: Histogram,
     timestamp: Timestamp,
 }
 
+#[derive(Debug)]
 pub enum AsyncInProgress {
     None,
     Fullscan(mpsc::Sender<()>),

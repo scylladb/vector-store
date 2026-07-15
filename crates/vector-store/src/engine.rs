@@ -232,6 +232,7 @@ async fn add_index(
         primary_key_columns.clone(),
         partition_key_count,
         partition_key_columns,
+        metadata.target_columns.len(),
         &metadata.filtering_columns,
         table_columns,
     ) {

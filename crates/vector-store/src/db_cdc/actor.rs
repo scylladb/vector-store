@@ -122,7 +122,7 @@ pub(crate) fn new(
     let mut reader = CdcReaderState::new(
         name,
         params_fn,
-        metrics,
+        Arc::clone(&metrics),
         metadata.keyspace_name.clone(),
         metadata.index_name.clone(),
     );
@@ -439,7 +439,12 @@ async fn create_cdc_reader(
     scylla_cdc::log_reader::CDCLogReader,
     impl std::future::Future<Output = anyhow::Result<()>>,
 )> {
-    let consumer_factory = CdcConsumerFactory::new(Arc::clone(&session), &metadata, tx_embeddings)?;
+    let consumer_factory = CdcConsumerFactory::new(
+        Arc::clone(&session),
+        &metadata,
+        Arc::clone(&metrics),
+        tx_embeddings,
+    )?;
 
     let cdc_start = start - CHECKPOINT_TIMESTAMP_OFFSET;
     info!(

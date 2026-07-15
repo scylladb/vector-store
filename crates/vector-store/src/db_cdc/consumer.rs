@@ -7,10 +7,14 @@ use crate::AsyncInProgress;
 use crate::ColumnName;
 use crate::DbIndexedRow;
 use crate::DbIndexedValue;
+use crate::IndexKey;
 use crate::IndexKind;
 use crate::IndexMetadata;
+use crate::Metrics;
 use crate::NonemptyArc;
+use crate::NonemptyBox;
 use crate::NonemptyIteratorExt;
+use crate::Timestamped;
 use crate::db_index_backend::CdcValueStatus;
 use crate::db_index_backend::DbIndexBackend;
 use anyhow::anyhow;
@@ -41,10 +45,12 @@ fn extract_indexed_value(
 }
 
 struct CdcConsumerData {
+    index_key: IndexKey,
     primary_key_columns: NonemptyArc<ColumnName>,
     backend: DbIndexBackend,
     kind: IndexKind,
     tx: mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
+    metrics: Arc<Metrics>,
 }
 
 struct CdcConsumer(Arc<CdcConsumerData>);
@@ -109,10 +115,15 @@ impl Consumer for CdcConsumer {
             .send((
                 DbIndexedRow {
                     primary_key,
-                    value,
-                    timestamp,
+                    values: NonemptyBox::new([Timestamped::new(timestamp, value)]).unwrap(),
                 },
-                AsyncInProgress::None,
+                AsyncInProgress::cdc(
+                    self.0.metrics.indexing_lag.with_label_values(&[
+                        self.0.index_key.keyspace().as_ref(),
+                        self.0.index_key.index().as_ref(),
+                    ]),
+                    timestamp,
+                ),
             ))
             .await;
         Ok(())
@@ -132,6 +143,7 @@ impl CdcConsumerFactory {
     pub(super) fn new(
         session: Arc<Session>,
         metadata: &IndexMetadata,
+        metrics: Arc<Metrics>,
         tx: mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
     ) -> anyhow::Result<Self> {
         let cluster_state = session.get_cluster_state();
@@ -154,10 +166,12 @@ impl CdcConsumerFactory {
         let backend = DbIndexBackend::from(metadata);
 
         Ok(Self(Arc::new(CdcConsumerData {
+            index_key: metadata.key(),
             primary_key_columns,
             backend,
             kind: metadata.kind.clone(),
             tx,
+            metrics,
         })))
     }
 }
