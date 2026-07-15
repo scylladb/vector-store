@@ -5,6 +5,7 @@
 
 use crate::db_basic;
 use crate::db_basic::DbBasic;
+use crate::fts;
 use crate::usearch;
 use crate::wait_for;
 use httpclient::HttpClient;
@@ -81,6 +82,32 @@ async fn deleted_index_labels_absent_from_metrics_endpoint() {
     wait_for(
         || async { !client.get_metrics_text().await.contains(&expected_labels) },
         "Waiting for deleted index labels to disappear from /metrics",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn fts_index_metrics_present_in_metrics_endpoint() {
+    crate::enable_tracing();
+
+    let (client, keyspace_name, index_name, _hold) = fts::setup_fts_and_wait(
+        [
+            (vec![CqlValue::Int(1)], "hello world", 10),
+            (vec![CqlValue::Int(2)], "foo bar", 20),
+        ],
+        2,
+    )
+    .await;
+
+    let expected_labels = format!(r#"index_name="{index_name}",keyspace="{keyspace_name}""#);
+
+    wait_for(
+        || async {
+            let metrics = client.get_metrics_text().await;
+            metrics.contains(&format!("fts_index_size_bytes{{{expected_labels}}}"))
+                && metrics.contains(&format!("fts_segment_count{{{expected_labels}}}"))
+        },
+        "Waiting for fts index metrics to appear in /metrics",
     )
     .await;
 }

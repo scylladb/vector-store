@@ -25,6 +25,8 @@ pub struct Metrics {
     pub cdc_handler_errors_total: CounterVec,
     pub cdc_reader_restarts_total: CounterVec,
     pub cdc_last_processed_timestamp_seconds: GaugeVec,
+    pub fts_index_size_bytes: GaugeVec,
+    pub fts_segment_count: GaugeVec,
     dirty_indexes: Arc<DashSet<(String, String)>>,
 }
 
@@ -139,6 +141,24 @@ impl Metrics {
         )
         .unwrap();
 
+        let fts_index_size_bytes = GaugeVec::new(
+            prometheus::Opts::new(
+                "fts_index_size_bytes",
+                "Total size of a full-text search index (bytes)",
+            ),
+            &["keyspace", "index_name"],
+        )
+        .unwrap();
+
+        let fts_segment_count = GaugeVec::new(
+            prometheus::Opts::new(
+                "fts_segment_count",
+                "Number of segments in a full-text search index",
+            ),
+            &["keyspace", "index_name"],
+        )
+        .unwrap();
+
         registry.register(Box::new(latency.clone())).unwrap();
         registry.register(Box::new(size.clone())).unwrap();
         registry.register(Box::new(modified.clone())).unwrap();
@@ -153,6 +173,12 @@ impl Metrics {
         registry
             .register(Box::new(cdc_last_processed_timestamp_seconds.clone()))
             .unwrap();
+        registry
+            .register(Box::new(fts_index_size_bytes.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(fts_segment_count.clone()))
+            .unwrap();
 
         Self {
             registry,
@@ -164,6 +190,8 @@ impl Metrics {
             cdc_handler_errors_total,
             cdc_reader_restarts_total,
             cdc_last_processed_timestamp_seconds,
+            fts_index_size_bytes,
+            fts_segment_count,
             dirty_indexes: Arc::new(DashSet::new()),
         }
     }
@@ -190,6 +218,12 @@ impl Metrics {
         let _ = self.size.remove_label_values(&[keyspace, index_name]);
         let _ = self
             .indexing_lag
+            .remove_label_values(&[keyspace, index_name]);
+        let _ = self
+            .fts_index_size_bytes
+            .remove_label_values(&[keyspace, index_name]);
+        let _ = self
+            .fts_segment_count
             .remove_label_values(&[keyspace, index_name]);
         for op in OPERATIONS {
             let _ = self
@@ -488,6 +522,68 @@ mod tests {
         assert!(
             output.contains(r#"reader="fine""#),
             "the fine reader's CDC metric series must be unaffected, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn fts_index_size_bytes_is_exported() {
+        let metrics = Metrics::new();
+
+        metrics
+            .fts_index_size_bytes
+            .with_label_values(&["ks", "idx"])
+            .set(1024.0);
+
+        let output = metric_families_text(&metrics);
+        assert!(
+            output.contains("# TYPE fts_index_size_bytes gauge"),
+            "fts_index_size_bytes gauge missing from export:\n{output}"
+        );
+        assert!(
+            output.contains(r#"fts_index_size_bytes{index_name="idx",keyspace="ks"} 1024"#),
+            "expected observed value in export:\n{output}"
+        );
+    }
+
+    #[test]
+    fn fts_segment_count_is_exported() {
+        let metrics = Metrics::new();
+
+        metrics
+            .fts_segment_count
+            .with_label_values(&["ks", "idx"])
+            .set(3.0);
+
+        let output = metric_families_text(&metrics);
+        assert!(
+            output.contains("# TYPE fts_segment_count gauge"),
+            "fts_segment_count gauge missing from export:\n{output}"
+        );
+        assert!(
+            output.contains(r#"fts_segment_count{index_name="idx",keyspace="ks"} 3"#),
+            "expected observed value in export:\n{output}"
+        );
+    }
+
+    #[test]
+    fn remove_index_labels_clears_fts_metrics() {
+        let metrics = Metrics::new();
+
+        metrics
+            .fts_index_size_bytes
+            .with_label_values(&["ks", "idx"])
+            .set(1024.0);
+        metrics
+            .fts_segment_count
+            .with_label_values(&["ks", "idx"])
+            .set(3.0);
+
+        metrics.remove_index_labels("ks", "idx");
+
+        let output = metric_families_text(&metrics);
+        assert!(
+            !output.contains(r#"keyspace="ks""#),
+            "metric output should not contain labels for deleted index, got:\n{output}"
         );
     }
 }

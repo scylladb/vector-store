@@ -149,7 +149,7 @@ async fn fts_index_returns_proper_count() {
     .await;
 }
 
-async fn setup_fts_and_wait(
+pub(crate) async fn setup_fts_and_wait(
     documents: impl IntoIterator<Item = (Vec<CqlValue>, &str, u64)>,
     expected_count: usize,
 ) -> (

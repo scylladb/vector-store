@@ -5,6 +5,8 @@
 
 use crate::Filter;
 use crate::IndexKey;
+use crate::IndexName;
+use crate::KeyspaceName;
 use crate::Progress;
 use crate::Quantization;
 use crate::Restriction;
@@ -372,23 +374,54 @@ async fn get_index_status(
     }
 }
 
+async fn refresh_index_metrics(
+    state: &RoutesInnerState,
+    keyspace: KeyspaceName,
+    index_name: IndexName,
+) {
+    let key = IndexKey::new(&keyspace, &index_name);
+    let labels = [keyspace.as_ref(), index_name.as_ref()];
+
+    if let Some((index, _)) = state.engine.get_vs_index(key.clone()).await {
+        if let Ok(count) = index.count(key).await {
+            state
+                .metrics
+                .size
+                .with_label_values(&labels)
+                .set(count as f64);
+        }
+        return;
+    }
+
+    if let Some((index, _)) = state.engine.get_fts_index(key.clone()).await
+        && let Ok(stats) = index.stats(key).await
+    {
+        state
+            .metrics
+            .size
+            .with_label_values(&labels)
+            .set(stats.num_docs as f64);
+        state
+            .metrics
+            .fts_index_size_bytes
+            .with_label_values(&labels)
+            .set(stats.size_bytes as f64);
+        state
+            .metrics
+            .fts_segment_count
+            .with_label_values(&labels)
+            .set(stats.segment_count as f64);
+    }
+}
+
 async fn get_metrics(
     State(state): State<RoutesInnerState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
     for (keyspace_str, index_name_str) in state.metrics.take_dirty_indexes() {
-        let keyspace = crate::KeyspaceName::from(keyspace_str);
-        let index_name = crate::IndexName::from(index_name_str);
-        let key = IndexKey::new(&keyspace, &index_name);
-        if let Some((index, _)) = state.engine.get_vs_index(key.clone()).await
-            && let Ok(count) = index.count(key).await
-        {
-            state
-                .metrics
-                .size
-                .with_label_values(&[keyspace.as_ref(), index_name.as_ref()])
-                .set(count as f64);
-        }
+        let keyspace = KeyspaceName::from(keyspace_str);
+        let index_name = IndexName::from(index_name_str);
+        refresh_index_metrics(&state, keyspace, index_name).await;
     }
     let metric_families = state.metrics.registry.gather();
 
@@ -761,11 +794,19 @@ async fn post_index_bm25(
         return resp;
     }
 
+    let timer = state
+        .metrics
+        .latency
+        .with_label_values(&[keyspace.as_ref(), index_name.as_ref()])
+        .start_timer();
+
     let index_key = IndexKey::new(&keyspace, &index_name);
 
     let (fts_sender, primary_key_columns) = {
         let indexes = state.indexes.read().unwrap();
         let Some(entry) = indexes.get_fts(&index_key) else {
+            timer.observe_duration();
+
             let msg = format!("missing index: {keyspace}.{index_name}");
             debug!("post_index_bm25: {msg}");
             return (StatusCode::NOT_FOUND, msg).into_response();
@@ -773,6 +814,8 @@ async fn post_index_bm25(
         if entry.status() != crate::node_state::IndexStatus::Serving {
             match entry.progress() {
                 Progress::InProgress(percentage) => {
+                    timer.observe_duration();
+
                     let msg = format!(
                         "Index {keyspace}.{index_name} is not available yet as it is still being constructed, progress: {:.3}%",
                         percentage.get()
@@ -781,6 +824,8 @@ async fn post_index_bm25(
                     return (StatusCode::SERVICE_UNAVAILABLE, msg).into_response();
                 }
                 Progress::Done => {
+                    timer.observe_duration();
+
                     let msg = format!(
                         "Index {keyspace}.{index_name} is not serving, but full scan did finish."
                     );
@@ -795,6 +840,8 @@ async fn post_index_bm25(
     let search_result = fts_sender
         .search(index_key, request.query, request.limit.into())
         .await;
+
+    timer.observe_duration();
 
     match search_result {
         Err(err) => {

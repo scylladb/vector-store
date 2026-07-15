@@ -14,6 +14,7 @@ use crate::db::Db;
 use crate::db::DbExt;
 use crate::db_index::DbIndex;
 use crate::db_index::DbIndexExt;
+use crate::fts_index::FtsIndex;
 use crate::fts_index::FtsIndexFactory;
 use crate::indexes::Indexes;
 use crate::memory;
@@ -44,6 +45,7 @@ use tracing::trace;
 type GetVsIndexKeysR = Vec<(IndexKey, crate::IndexOptionsVs)>;
 type AddIndexR = anyhow::Result<()>;
 type GetVsIndexR = Option<(mpsc::Sender<VsIndex>, mpsc::Sender<DbIndex>)>;
+type GetFtsIndexR = Option<(mpsc::Sender<FtsIndex>, mpsc::Sender<DbIndex>)>;
 
 pub(crate) enum Engine {
     GetVsIndexKeys {
@@ -60,6 +62,10 @@ pub(crate) enum Engine {
         key: IndexKey,
         tx: oneshot::Sender<GetVsIndexR>,
     },
+    GetFtsIndex {
+        key: IndexKey,
+        tx: oneshot::Sender<GetFtsIndexR>,
+    },
 }
 
 pub(crate) trait EngineExt {
@@ -67,6 +73,7 @@ pub(crate) trait EngineExt {
     async fn add_index(&self, metadata: IndexMetadata) -> AddIndexR;
     async fn del_index(&self, key: IndexKey);
     async fn get_vs_index(&self, key: IndexKey) -> GetVsIndexR;
+    async fn get_fts_index(&self, key: IndexKey) -> GetFtsIndexR;
 }
 
 impl EngineExt for mpsc::Sender<Engine> {
@@ -101,6 +108,15 @@ impl EngineExt for mpsc::Sender<Engine> {
             .expect("EngineExt::get_vs_index: internal actor should receive request");
         rx.await
             .expect("EngineExt::get_vs_index: internal actor should send response")
+    }
+
+    async fn get_fts_index(&self, key: IndexKey) -> GetFtsIndexR {
+        let (tx, rx) = oneshot::channel();
+        self.send(Engine::GetFtsIndex { key, tx })
+            .await
+            .expect("EngineExt::get_fts_index: internal actor should receive request");
+        rx.await
+            .expect("EngineExt::get_fts_index: internal actor should send response")
     }
 }
 
@@ -163,6 +179,10 @@ pub(crate) async fn new(
                             Engine::DelIndex { key } => del_index(key, &indexes, &metrics).await,
 
                             Engine::GetVsIndex { key, tx } => get_vs_index(key, tx, &indexes).await,
+
+                            Engine::GetFtsIndex { key, tx } => {
+                                get_fts_index(key, tx, &indexes).await
+                            }
 
                         }
                     }
@@ -359,6 +379,20 @@ async fn get_vs_index(key: IndexKey, tx: oneshot::Sender<GetVsIndexR>, indexes: 
     );
 }
 
+async fn get_fts_index(
+    key: IndexKey,
+    tx: oneshot::Sender<GetFtsIndexR>,
+    indexes: &RwLock<Indexes>,
+) {
+    _ = tx.send(
+        indexes
+            .read()
+            .unwrap()
+            .get_fts(&key)
+            .map(|entry| (entry.index().clone(), entry.db_index())),
+    );
+}
+
 async fn update_indexes(node_state: &Sender<NodeState>, indexes: &RwLock<Indexes>) {
     let actual_indexes: Vec<_> = {
         let indexes = indexes.read().unwrap();
@@ -429,6 +463,12 @@ pub(crate) mod tests {
             key: IndexKey,
             tx: oneshot::Sender<GetVsIndexR>,
         ) -> impl Future<Output = ()> + Send + 'static;
+
+        fn get_fts_index(
+            &self,
+            key: IndexKey,
+            tx: oneshot::Sender<GetFtsIndexR>,
+        ) -> impl Future<Output = ()> + Send + 'static;
     }
 
     pub(crate) fn new(sim: impl SimEngine + Send + 'static) -> mpsc::Sender<Engine> {
@@ -451,6 +491,7 @@ pub(crate) mod tests {
                         Engine::AddIndex { metadata, tx } => sim.add_index(metadata, tx).await,
                         Engine::DelIndex { key } => sim.del_index(key).await,
                         Engine::GetVsIndex { key, tx } => sim.get_vs_index(key, tx).await,
+                        Engine::GetFtsIndex { key, tx } => sim.get_fts_index(key, tx).await,
                     }
                 }
 
