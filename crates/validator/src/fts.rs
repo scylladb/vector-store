@@ -12,6 +12,7 @@ use httpclient::HttpClient;
 use scylla::client::session::Session;
 use scylla::response::query_result::QueryRowsResult;
 use std::sync::Arc;
+use std::sync::RwLock;
 use tracing::info;
 
 e2etest::group!(name = fts, fixtures = (Cluster), parent = crate::validator);
@@ -37,17 +38,21 @@ struct Fixture {
     session: Arc<Session>,
     keyspace: KeyspaceName,
     table: TableName,
+    clients: Vec<HttpClient>,
+    index: RwLock<Arc<IndexInfo>>,
 }
 
 impl e2etest::Fixture for Fixture {
     async fn setup(setup: &mut impl e2etest::Setup) -> Self {
         setup.setup::<Cluster>().await;
         let actors = setup.get::<TestActors>().await.unwrap();
-        let (session, _clients, keyspace, table, _index) = Self::init_fts_table(&actors).await;
+        let (session, clients, keyspace, table, index) = Self::init_fts_table(&actors).await;
         Self {
             session,
             keyspace,
             table,
+            clients,
+            index: RwLock::new(Arc::new(index)),
         }
     }
 
@@ -57,6 +62,7 @@ impl e2etest::Fixture for Fixture {
 }
 
 impl Fixture {
+    #[framed]
     async fn insert_documents(&self, docs: &[(i32, &str)]) {
         for (pk, content) in docs {
             self.session
@@ -69,6 +75,7 @@ impl Fixture {
         }
     }
 
+    #[framed]
     async fn delete_document(&self, pk: i32) {
         self.session
             .query_unpaged(format!("DELETE FROM {} WHERE pk = ?", self.table), (pk,))
@@ -78,38 +85,86 @@ impl Fixture {
 
     #[framed]
     async fn bm25_search(&self, query: &str, expected_count: usize) -> QueryRowsResult {
-        let cql = self.bm25_select_query_with_limit(query, 100);
-        let session = &self.session;
+        self.bm25_search_impl(
+            query,
+            100,
+            expected_count,
+            format!("BM25 query '{query}' to return {expected_count} documents"),
+        )
+        .await
+    }
+
+    async fn bm25_search_with_limit(&self, query: &str, limit: usize) -> QueryRowsResult {
+        self.bm25_search_impl(
+            query,
+            limit,
+            limit,
+            format!("BM25 query '{query}' with LIMIT {limit} to return {limit} rows"),
+        )
+        .await
+    }
+
+    #[framed]
+    async fn bm25_search_impl(
+        &self,
+        query: &str,
+        cql_limit: usize,
+        expected_count: usize,
+        wait_description: String,
+    ) -> QueryRowsResult {
+        let cql = self.bm25_select_query(query, cql_limit);
         wait_for_value(
             || async {
-                let result = get_opt_query_results(&cql, session).await;
-                result.filter(|r| r.rows_num() == expected_count)
+                get_opt_query_results(&cql, &self.session)
+                    .await
+                    .filter(|r| r.rows_num() == expected_count)
             },
-            format!("BM25 query '{query}' to return {expected_count} documents"),
+            wait_description,
             DEFAULT_OPERATION_TIMEOUT,
         )
         .await
     }
 
-    fn bm25_select_query_with_limit(&self, query: &str, limit: usize) -> String {
-        let table = &self.table;
+    async fn bm25_search_pks(&self, query: &str, expected_count: usize) -> Vec<i32> {
+        let result = self.bm25_search(query, expected_count).await;
+        Self::extract_pks(&result)
+    }
+
+    #[framed]
+    async fn create_index(&self) {
+        let index = create_fts_index(&self.session, &self.clients, &self.table).await;
+        for client in &self.clients {
+            wait_for_index(client, &index).await;
+        }
+        *self.index.write().unwrap() = Arc::new(index);
+    }
+
+    #[framed]
+    async fn drop_index(&self) {
+        let index = Arc::clone(&self.index.read().unwrap());
+        self.session
+            .query_unpaged(format!("DROP INDEX {}", index.index), ())
+            .await
+            .expect("failed to drop index");
+        for client in &self.clients {
+            wait_for_no_index(client, &index).await;
+        }
+    }
+
+    fn bm25_select_query(&self, query: &str, limit: usize) -> String {
         format!(
-            "SELECT pk FROM {table} WHERE BM25(content, '{query}') > 0 \
-             ORDER BY BM25(content, '{query}') LIMIT {limit}"
+            "SELECT pk FROM {} WHERE BM25(content, '{query}') > 0 \
+             ORDER BY BM25(content, '{query}') LIMIT {limit}",
+            self.table
         )
     }
 
-    fn extract_pks(&self, result: &QueryRowsResult) -> Vec<i32> {
+    fn extract_pks(result: &QueryRowsResult) -> Vec<i32> {
         result
             .rows::<(i32,)>()
             .expect("failed to get rows")
             .map(|row| row.expect("failed to get row").0)
             .collect()
-    }
-
-    async fn bm25_search_pks(&self, query: &str, expected_count: usize) -> Vec<i32> {
-        let result = self.bm25_search(query, expected_count).await;
-        self.extract_pks(&result)
     }
 
     #[framed]
@@ -127,14 +182,21 @@ impl Fixture {
         let keyspace = create_keyspace(&session).await;
         let table = create_table(&session, "pk INT PRIMARY KEY, content TEXT", None).await;
 
-        let index = create_index(
-            CreateIndexQuery::new(&session, &clients, &table, "content")
-                .index_type("fulltext_index"),
-        )
-        .await;
+        let index = create_fts_index(&session, &clients, &table).await;
 
         (session, clients, keyspace, table, index)
     }
+}
+
+async fn create_fts_index(
+    session: &Session,
+    clients: &[HttpClient],
+    table: &TableName,
+) -> IndexInfo {
+    create_index(
+        CreateIndexQuery::new(session, clients, table, "content").index_type("fulltext_index"),
+    )
+    .await
 }
 
 #[framed]
@@ -155,10 +217,7 @@ async fn fts_index_lifecycle(actors: Arc<TestActors>) {
     let table = create_table(&session, "pk INT PRIMARY KEY, content TEXT", None).await;
 
     info!("Creating fulltext index");
-    let index = create_index(
-        CreateIndexQuery::new(&session, &clients, &table, "content").index_type("fulltext_index"),
-    )
-    .await;
+    let index = create_fts_index(&session, &clients, &table).await;
 
     info!("Verifying index is SERVING on all nodes");
     for client in &clients {
@@ -363,6 +422,242 @@ async fn bm25_empty_results_for_nonexistent_term(fixture: Arc<Fixture>) {
     let pks = fixture.bm25_search_pks("xyznonexistent", 0).await;
 
     assert!(pks.is_empty(), "expected no results for non-existent term");
+
+    info!("finished");
+}
+
+#[e2etest::test(group = fts)]
+async fn bm25_case_insensitive_search(fixture: Arc<Fixture>) {
+    info!("started");
+
+    fixture
+        .insert_documents(&[
+            (1, "the quick brown fox jumps over the lazy dog"),
+            (2, "a slow turtle walks through the garden"),
+            (3, "the fox runs across the meadow"),
+        ])
+        .await;
+
+    let uppercase_pks = fixture.bm25_search_pks("FOX", 2).await;
+
+    assert!(
+        uppercase_pks.contains(&1) && uppercase_pks.contains(&3),
+        "uppercase 'FOX' should match pks 1 and 3, got {uppercase_pks:?}"
+    );
+
+    info!("finished");
+}
+
+#[e2etest::test(group = fts)]
+async fn bm25_stop_word_filtering(fixture: Arc<Fixture>) {
+    info!("started");
+
+    fixture
+        .insert_documents(&[
+            (1, "the quick brown fox jumps over the lazy dog"),
+            (2, "a slow turtle walks through the garden"),
+            (3, "the fox runs across the meadow"),
+        ])
+        .await;
+
+    let with_stop_word_pks = fixture.bm25_search_pks("the fox", 2).await;
+
+    assert!(
+        with_stop_word_pks.contains(&1),
+        "stop word 'the' should not change the result set for 'the fox'"
+    );
+    assert!(
+        with_stop_word_pks.contains(&3),
+        "stop word 'the' should not change the result set for 'the fox'"
+    );
+
+    info!("finished");
+}
+
+#[e2etest::test(group = fts)]
+async fn bm25_tokenizes_by_punctuation(fixture: Arc<Fixture>) {
+    info!("started");
+
+    fixture
+        .insert_documents(&[(1, "fox-runs fast, or: jumps!")])
+        .await;
+
+    let fox_pks = fixture.bm25_search_pks("fox", 1).await;
+    let runs_pks = fixture.bm25_search_pks("runs", 1).await;
+    let jumps_pks = fixture.bm25_search_pks("jumps", 1).await;
+
+    assert_eq!(fox_pks, vec![1], "term 'fox' should be tokenized out");
+    assert_eq!(runs_pks, vec![1], "term 'runs' should be tokenized out");
+    assert_eq!(jumps_pks, vec![1], "term 'jumps' should be tokenized out");
+
+    info!("finished");
+}
+
+#[e2etest::test(group = fts)]
+async fn bm25_relevance_ranking_order(fixture: Arc<Fixture>) {
+    info!("started");
+
+    fixture
+        .insert_documents(&[
+            (1, "fox fox fox jumps"),
+            (2, "fox runs across the meadow"),
+            (3, "a slow turtle walks through the garden"),
+        ])
+        .await;
+
+    let pks = fixture.bm25_search_pks("fox", 2).await;
+
+    assert_eq!(
+        pks,
+        vec![1, 2],
+        "document with higher term frequency should rank first"
+    );
+
+    info!("finished");
+}
+
+#[e2etest::test(group = fts)]
+async fn bm25_limit_restricts_result_count(fixture: Arc<Fixture>) {
+    info!("started");
+
+    let docs: Vec<(i32, &str)> = (1..=10)
+        .map(|pk| (pk, "searchable document about databases"))
+        .collect();
+    fixture.insert_documents(&docs).await;
+    // Wait for all documents to be indexed
+    fixture.bm25_search("databases", 10).await;
+
+    let result = fixture.bm25_search_with_limit("databases", 3).await;
+
+    assert_eq!(
+        result.rows_num(),
+        3,
+        "LIMIT 3 should restrict results to 3 rows"
+    );
+
+    info!("finished");
+}
+
+#[e2etest::test(group = fts)]
+async fn bm25_grouped_boolean_query(fixture: Arc<Fixture>) {
+    info!("started");
+
+    fixture
+        .insert_documents(&[
+            (1, "the quick brown fox jumps over the lazy dog"),
+            (2, "a slow turtle walks through the meadow"),
+            (3, "the fox runs across the meadow"),
+        ])
+        .await;
+
+    let pks = fixture
+        .bm25_search_pks("(fox OR turtle) AND meadow", 2)
+        .await;
+
+    assert!(
+        pks.contains(&2),
+        "expected pk 2 (turtle + meadow) in results"
+    );
+    assert!(pks.contains(&3), "expected pk 3 (fox + meadow) in results");
+    assert!(
+        !pks.contains(&1),
+        "pk 1 has no 'meadow' and must be excluded"
+    );
+
+    info!("finished");
+}
+
+#[e2etest::test(group = fts)]
+async fn fts_recreate_index_serves_existing_data(fixture: Arc<Fixture>) {
+    info!("started");
+
+    info!("Inserting documents");
+    fixture
+        .insert_documents(&[
+            (1, "the quick brown fox jumps over the lazy dog"),
+            (2, "a fox walks through the garden"),
+            (3, "the fox runs across the meadow"),
+        ])
+        .await;
+
+    fixture.bm25_search("fox", 3).await;
+
+    info!("Dropping fulltext index");
+    fixture.drop_index().await;
+
+    info!("Recreating fulltext index on the same table");
+    fixture.create_index().await;
+
+    info!("Verifying existing data is searchable after recreate");
+    let pks = fixture.bm25_search_pks("fox", 3).await;
+
+    assert!(pks.contains(&1), "expected pk 1 after index recreate");
+    assert!(pks.contains(&2), "expected pk 2 after index recreate");
+    assert!(pks.contains(&3), "expected pk 3 after index recreate");
+
+    info!("finished");
+}
+
+#[e2etest::test(group = fts)]
+async fn fts_query_without_limit_returns_error(fixture: Arc<Fixture>) {
+    info!("started");
+
+    fixture
+        .insert_documents(&[
+            (1, "the quick brown fox jumps over the lazy dog"),
+            (2, "the fox runs across the meadow"),
+        ])
+        .await;
+
+    fixture.bm25_search("fox", 2).await;
+
+    let err = fixture
+        .session
+        .query_unpaged(
+            format!(
+                "SELECT pk FROM {} WHERE BM25(content, 'fox') > 0 \
+         ORDER BY BM25(content, 'fox')",
+                fixture.table
+            ),
+            (),
+        )
+        .await
+        .expect_err("BM25 ordered query without LIMIT should fail");
+
+    assert!(
+        err.to_string()
+            .contains("Full-text search queries require a LIMIT"),
+        "unexpected error message: {err}"
+    );
+
+    info!("finished");
+}
+
+#[e2etest::test(group = fts)]
+async fn fts_index_on_int_column_returns_error(actors: Arc<TestActors>) {
+    info!("started");
+
+    let (session, _clients) = prepare_connection(&actors).await;
+
+    let keyspace = create_keyspace(&session).await;
+    let table = create_table(&session, "pk INT PRIMARY KEY, num INT", None).await;
+
+    let index = unique_index_name();
+    let err = session
+        .query_unpaged(
+            format!("CREATE CUSTOM INDEX {index} ON {table}(num) USING 'fulltext_index'"),
+            (),
+        )
+        .await
+        .expect_err("fulltext_index on an INT column should fail");
+
+    assert!(
+        err.to_string()
+            .contains("Fulltext index is only supported on text, varchar, or ascii columns"),
+        "unexpected error message: {err}"
+    );
+
+    drop_fts_keyspace(&session, &keyspace).await;
 
     info!("finished");
 }
