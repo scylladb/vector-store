@@ -1311,6 +1311,153 @@ mod tests {
     }
 
     #[test]
+    fn global_add_remove_multiple_add() {
+        let pk1 = PrimaryKey::from([CqlValue::Int(1)]);
+        let pk2 = PrimaryKey::from([CqlValue::Int(2)]);
+        let vector_orig: Vector = vec![1.0, 2.0, 3.0].into();
+        let db_row_add = |pk: &PrimaryKey, ts| DbIndexedRow {
+            primary_key: pk.clone(),
+            values: NonemptyBox::new([Timestamped::new(
+                Timestamp::from_millis(ts),
+                Some(DbIndexedValue::Vector(vector_orig.clone())),
+            )])
+            .unwrap(),
+        };
+        let db_row_del = |pk: &PrimaryKey, ts| DbIndexedRow {
+            primary_key: pk.clone(),
+            values: NonemptyBox::new([Timestamped::new(Timestamp::from_millis(ts), None)]).unwrap(),
+        };
+
+        let index_key = IndexKey::new(&"ks".into(), &"idx".into());
+        let mut table = Table::new(
+            index_key.clone(),
+            NonemptyArc::new(["p"]).unwrap(),
+            1,
+            None,
+            NonZeroUsize::new(1).unwrap(),
+            &[],
+            Arc::new([("p".into(), NativeType::Int)].into_iter().collect()),
+        )
+        .unwrap();
+
+        // insert the vector pk1
+        let mut operations = table.add(&index_key, db_row_add(&pk1, 1)).unwrap();
+        assert_eq!(operations.len(), 1);
+        let (primary_id1, partition_id1) = match operations.remove(0) {
+            Operation::AddVector {
+                primary_id,
+                partition_id,
+                vector,
+                is_update: false,
+            } => {
+                assert_eq!(&vector, &vector_orig);
+                (primary_id, partition_id)
+            }
+            _ => panic!("Expected AddVector operation"),
+        };
+        assert_eq!(
+            &table.primary_key(partition_id1, primary_id1).unwrap(),
+            &pk1
+        );
+
+        // insert the vector pk2
+        let mut operations = table.add(&index_key, db_row_add(&pk2, 2)).unwrap();
+        assert_eq!(operations.len(), 1);
+        let (primary_id2, partition_id2) = match operations.remove(0) {
+            Operation::AddVector {
+                primary_id,
+                partition_id,
+                vector,
+                is_update: false,
+            } => {
+                assert_eq!(&vector, &vector_orig);
+                (primary_id, partition_id)
+            }
+            _ => panic!("Expected AddVector operation"),
+        };
+        assert_ne!(primary_id1, primary_id2);
+        assert_eq!(partition_id1, partition_id2);
+        assert_eq!(
+            &table.primary_key(partition_id2, primary_id2).unwrap(),
+            &pk2
+        );
+
+        // remove the vector by nulling the value
+        let mut operations = table.add(&index_key, db_row_del(&pk2, 3)).unwrap();
+        assert_eq!(operations.len(), 1);
+        match operations.remove(0) {
+            Operation::RemoveValue {
+                primary_id,
+                partition_id,
+            } => {
+                assert_eq!(primary_id, primary_id2);
+                assert_eq!(partition_id, partition_id2);
+            }
+            _ => panic!("Expected RemoveValue operation"),
+        };
+        assert!(table.primary_key(partition_id2, primary_id2).is_none());
+
+        // insert the vector pk2
+        let mut operations = table.add(&index_key, db_row_add(&pk2, 4)).unwrap();
+        assert_eq!(operations.len(), 1);
+        let (primary_id3, partition_id3) = match operations.remove(0) {
+            Operation::AddVector {
+                primary_id,
+                partition_id,
+                vector,
+                is_update: false,
+            } => {
+                assert_eq!(&vector, &vector_orig);
+                (primary_id, partition_id)
+            }
+            _ => panic!("Expected AddVector operation"),
+        };
+        assert_ne!(primary_id2, primary_id3);
+        assert_eq!(partition_id2, partition_id3);
+        assert_eq!(
+            &table.primary_key(partition_id3, primary_id3).unwrap(),
+            &pk2
+        );
+
+        let mut primary_id_prev = primary_id3;
+        for it in 0..10 {
+            // upsert the vector with a new value
+            let mut operations = table.add(&index_key, db_row_add(&pk2, 5 + it)).unwrap();
+            assert_eq!(operations.len(), 2);
+            match operations.remove(0) {
+                Operation::RemoveBeforeAddValue {
+                    primary_id,
+                    partition_id,
+                } => {
+                    assert_eq!(primary_id, primary_id_prev);
+                    assert_eq!(partition_id, partition_id3);
+                }
+                _ => panic!("Expected RemoveBeforeAddValue operation"),
+            };
+            let (primary_id4, partition_id4) = match operations.remove(0) {
+                Operation::AddVector {
+                    primary_id,
+                    partition_id,
+                    vector,
+                    is_update: true,
+                } => {
+                    assert_eq!(&vector, &vector_orig);
+                    (primary_id, partition_id)
+                }
+                _ => panic!("Expected AddValue operation"),
+            };
+            assert_ne!(primary_id_prev, primary_id4);
+            assert_eq!(partition_id3, partition_id4);
+            assert!(table.primary_key(partition_id3, primary_id_prev).is_none());
+            assert_eq!(
+                &table.primary_key(partition_id4, primary_id4).unwrap(),
+                &pk2
+            );
+            primary_id_prev = primary_id4;
+        }
+    }
+
+    #[test]
     fn cql_cmp_integers() {
         assert_eq!(
             cql_cmp(&CqlValue::Int(1), &CqlValue::Int(2)),

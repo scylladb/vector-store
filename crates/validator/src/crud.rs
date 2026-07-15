@@ -7,6 +7,8 @@ use crate::TestActors;
 use crate::common::*;
 use httpapi::IndexStatus;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::time;
 use tracing::info;
 
 e2etest::group!(name = crud, fixtures = (Fixture), parent = crate::validator);
@@ -300,6 +302,148 @@ async fn null_vector_is_not_indexed(actors: Arc<TestActors>) {
         );
     }
 
+    session
+        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
+        .await
+        .expect("failed to drop a keyspace");
+
+    info!("finished");
+}
+
+/// Test that adding the same row multiple times after deleting it works correctly.
+///
+/// This is an attempt the reproduction of failed scenario (failed once in the developer
+/// environment):
+///
+/// CREATE KEYSPACE ks;
+/// CREATE TABLE ks.tbl (p int primary key, v vector<float, 3>);
+/// INSERT INTO ks.tbl (p, v) VALUES (1, [1.0, 2.0, 3.0]);
+/// INSERT INTO ks.tbl (p, v) VALUES (2, [1.0, 2.0, 3.0]);
+/// CREATE INDEX ON ks.tbl (v) USING 'vector_index';
+/// DELETE FROM ks.tbl WHERE p = 2;
+///
+/// INSERT INTO ks.tbl (p, v) VALUES (2, [1.0, 2.0, 3.0]); <- this increases index size indefinitely and makes SELECT to return no rows
+#[e2etest::test(group = crud)]
+async fn global_add_remove_multiple_add(actors: Arc<TestActors>) {
+    info!("started");
+
+    let (session, clients) = prepare_connection(&actors).await;
+
+    let keyspace = create_keyspace(&session).await;
+    let table = create_table(&session, "p INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None).await;
+
+    info!("Insert two rows");
+    session
+        .query_unpaged(
+            format!("INSERT INTO {table} (p, v) VALUES (?, ?)"),
+            (1i32, &vec![1.0f32, 2.0f32, 3.0f32]),
+        )
+        .await
+        .expect("failed to insert row with vector");
+    session
+        .query_unpaged(
+            format!("INSERT INTO {table} (p, v) VALUES (?, ?)"),
+            (2i32, &vec![1.0f32, 2.0f32, 3.0f32]),
+        )
+        .await
+        .expect("failed to insert row with vector");
+
+    let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
+
+    info!("Wait for the full scan to complete");
+    for client in &clients {
+        wait_for_index(client, &index).await;
+        let index_status = client
+            .index_status(&index.keyspace, &index.index)
+            .await
+            .expect("failed to get index status");
+        assert_eq!(index_status.count, 2);
+    }
+
+    info!("Delete a row");
+    session
+        .query_unpaged(format!("DELETE FROM {table} WHERE p = ?"), (2,))
+        .await
+        .expect("failed to delete row");
+
+    for client in &clients {
+        wait_for(
+            || async {
+                let index_status = client
+                    .index_status(&index.keyspace, &index.index)
+                    .await
+                    .expect("failed to get index status");
+                index_status.count == 1
+            },
+            "Waiting for index count to be updated after deletion",
+            DEFAULT_OPERATION_TIMEOUT,
+        )
+        .await;
+    }
+
+    let rows = get_query_results(
+        format!("SELECT p FROM {table} ORDER BY v ANN OF [1.0, 2.0, 3.0] LIMIT 5"),
+        &session,
+    )
+    .await;
+    let rows = rows.rows::<(i32,)>().expect("failed to get rows");
+    assert_eq!(
+        rows.rows_remaining(),
+        1,
+        "Expected 1 rows in the result after adding the same row multiple times"
+    );
+
+    info!("Add same row several times");
+    for _ in 0..10 {
+        session
+            .query_unpaged(
+                format!("INSERT INTO {table} (p, v) VALUES (?, ?)"),
+                (2i32, &vec![1.0f32, 2.0f32, 3.0f32]),
+            )
+            .await
+            .expect("failed to insert row with vector");
+    }
+
+    info!("Wait for the CDC to be processed and the index to be updated");
+    const CDC_PROCESSING_WAIT_TIME: Duration = Duration::from_secs(5);
+    time::sleep(CDC_PROCESSING_WAIT_TIME).await;
+
+    info!("Run query ann and check that only 2 rows are returned");
+    let rows = get_query_results(
+        format!("SELECT p FROM {table} ORDER BY v ANN OF [1.0, 2.0, 3.0] LIMIT 5"),
+        &session,
+    )
+    .await;
+    let rows = rows.rows::<(i32,)>().expect("failed to get rows");
+    assert_eq!(
+        rows.rows_remaining(),
+        2,
+        "Expected 2 rows in the result after adding the same row multiple times"
+    );
+
+    info!("Check index count of indexed rows");
+    for client in &clients {
+        let index_status = client
+            .index_status(&index.keyspace, &index.index)
+            .await
+            .expect("failed to get index status");
+        assert_eq!(index_status.count, 2);
+    }
+
+    info!("Run query ann and check that only 2 rows are returned");
+    let rows = get_query_results(
+        format!("SELECT p FROM {table} ORDER BY v ANN OF [1.0, 2.0, 3.0] LIMIT 5"),
+        &session,
+    )
+    .await;
+    let rows = rows.rows::<(i32,)>().expect("failed to get rows");
+    assert_eq!(
+        rows.rows_remaining(),
+        2,
+        "Expected 2 rows in the result after adding the same row multiple times"
+    );
+
+    info!("Drop keyspace");
     session
         .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
         .await
