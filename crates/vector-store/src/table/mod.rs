@@ -330,7 +330,7 @@ fn partition_key(
 #[derive(Debug)]
 pub struct Table {
     primary_key_columns: NonemptyArc<ColumnName>,
-    partition_key_count: usize,
+    partition_primary_key_count: usize,
     needs_ck_normalization: bool,
     primary_ids: BTreeMap<PrimaryKey, PrimaryId>,
     free_primary_ids: FreePrimaryIds,
@@ -349,13 +349,14 @@ impl Table {
     pub(crate) fn new(
         index_key: IndexKey,
         primary_key_columns: NonemptyArc<ColumnName>,
-        partition_key_count: usize,
+        partition_primary_key_count: usize,
         partition_key_columns: Option<NonemptyArc<ColumnName>>,
         column_targets_count: NonZeroUsize,
         filtering_columns: &[ColumnName],
         table_columns: Arc<HashMap<ColumnName, NativeType>>,
     ) -> anyhow::Result<Self> {
-        let partition_key_count = partition_key_count.min(primary_key_columns.len().get());
+        let partition_primary_key_count =
+            partition_primary_key_count.min(primary_key_columns.len().get());
         let mut index_id_generator = IndexIdGenerator::new();
         let mut indexes = BTreeMap::new();
         let mut index_ids = BTreeMap::new();
@@ -398,7 +399,7 @@ impl Table {
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
         columns.extend(column_with_values);
-        let needs_ck_normalization = primary_key_columns.as_slice()[partition_key_count..]
+        let needs_ck_normalization = primary_key_columns.as_slice()[partition_primary_key_count..]
             .iter()
             .any(|col| matches!(table_columns.get(col), Some(NativeType::Decimal)));
         let mut table = Self {
@@ -406,7 +407,7 @@ impl Table {
             free_primary_ids: FreePrimaryIds(VecDeque::new()),
             primary_keys: ColumnVec::new(),
             primary_key_columns,
-            partition_key_count,
+            partition_primary_key_count,
             needs_ck_normalization,
             columns,
             _index_id_generator: index_id_generator,
@@ -433,7 +434,7 @@ impl Table {
         let normalized: PrimaryKey = (0..key.len())
             .map(|idx| {
                 let value = key.get(idx).expect("primary key column exists");
-                if idx >= self.partition_key_count {
+                if idx >= self.partition_primary_key_count {
                     normalize(value)
                 } else {
                     value
