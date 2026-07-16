@@ -4,9 +4,15 @@
  */
 
 use crate::AsyncInProgress;
+use crate::DbIndexedOperation;
 use crate::DbIndexedRow;
+use crate::DbIndexedValue;
 use crate::IndexKey;
 use crate::Metrics;
+use crate::NonemptyBox;
+use crate::PrimaryKey;
+use crate::Timestamp;
+use crate::Timestamped;
 use crate::Vector;
 use crate::fts_index::FtsIndex;
 use crate::fts_index::FtsIndexExt;
@@ -17,7 +23,7 @@ use crate::perf;
 use crate::table::Operation;
 use crate::table::PartitionId;
 use crate::table::PrimaryId;
-use crate::table::TableAdd;
+use crate::table::TableModify;
 use crate::vs_index::VsIndex;
 use crate::vs_index::VsIndexExt;
 use std::future::Future;
@@ -119,8 +125,8 @@ pub(crate) enum MonitorItems {}
 
 pub(crate) async fn new<T>(
     key: IndexKey,
-    table: Arc<RwLock<impl TableAdd + Send + Sync + 'static>>,
-    mut embeddings: Receiver<(DbIndexedRow, AsyncInProgress)>,
+    table: Arc<RwLock<impl TableModify + Send + Sync + 'static>>,
+    mut db_rows: Receiver<(DbIndexedRow, AsyncInProgress)>,
     index: mpsc::Sender<T>,
     metrics: Arc<Metrics>,
 ) -> anyhow::Result<Sender<MonitorItems>>
@@ -137,11 +143,19 @@ where
 
             while !rx.is_closed() {
                 tokio::select! {
-                    embedding = embeddings.recv() => {
-                        let Some((embedding, in_progress)) = embedding else {
+                    db_row = db_rows.recv() => {
+                        let Some((db_row, in_progress)) = db_row else {
                             break;
                         };
-                        add(&table, &index, embedding, in_progress, &metrics, &key).await;
+                        let primary_key = db_row.primary_key;
+                        match db_row.operation {
+                            DbIndexedOperation::Upsert(values) => {
+                                upsert(&table, &index, primary_key, values, in_progress, &metrics, &key).await;
+                            }
+                            DbIndexedOperation::Delete(timestamp) => {
+                                delete(&table, &index, primary_key, timestamp, in_progress, &metrics, &key).await;
+                            }
+                        }
                     }
                     _ = rx.recv() => { }
                 }
@@ -154,24 +168,57 @@ where
     Ok(tx)
 }
 
-async fn add<I: IndexDispatch>(
-    table: &Arc<RwLock<impl TableAdd>>,
+async fn upsert<I: IndexDispatch>(
+    table: &Arc<RwLock<impl TableModify>>,
     index: &I,
-    embedding: DbIndexedRow,
-    mut in_progress: AsyncInProgress,
+    primary_key: PrimaryKey,
+    values: NonemptyBox<Timestamped<DbIndexedValue>>,
+    in_progress: AsyncInProgress,
     metrics: &Metrics,
-    key: &IndexKey,
+    index_key: &IndexKey,
 ) {
     let Ok(operations) = table
         .write()
         .unwrap()
-        .add(key, embedding)
+        .upsert(index_key, primary_key, values)
         .inspect_err(|err| {
-            error!("failed to add embedding to table: {err}");
+            error!("failed to upsert values to a table: {err}");
         })
     else {
         return;
     };
+    process_operations(operations, index, in_progress, metrics, index_key).await;
+}
+
+async fn delete<I: IndexDispatch>(
+    table: &Arc<RwLock<impl TableModify>>,
+    index: &I,
+    primary_key: PrimaryKey,
+    timestamp: Timestamp,
+    in_progress: AsyncInProgress,
+    metrics: &Metrics,
+    index_key: &IndexKey,
+) {
+    let Ok(operations) = table
+        .write()
+        .unwrap()
+        .delete(index_key, primary_key, timestamp)
+        .inspect_err(|err| {
+            error!("failed to delete row from a table: {err}");
+        })
+    else {
+        return;
+    };
+    process_operations(operations, index, in_progress, metrics, index_key).await;
+}
+
+async fn process_operations<I: IndexDispatch>(
+    operations: Vec<Operation>,
+    index: &I,
+    mut in_progress: AsyncInProgress,
+    metrics: &Metrics,
+    index_key: &IndexKey,
+) {
     let in_progress = &mut in_progress;
     for operation in operations.into_iter() {
         match operation {
@@ -187,7 +234,11 @@ async fn add<I: IndexDispatch>(
                     .await;
                 metrics
                     .modified
-                    .with_label_values(&[key.keyspace().as_ref(), key.index().as_ref(), op_label])
+                    .with_label_values(&[
+                        index_key.keyspace().as_ref(),
+                        index_key.index().as_ref(),
+                        op_label,
+                    ])
                     .inc();
             }
             Operation::AddDocument {
@@ -202,7 +253,11 @@ async fn add<I: IndexDispatch>(
                     .await;
                 metrics
                     .modified
-                    .with_label_values(&[key.keyspace().as_ref(), key.index().as_ref(), op_label])
+                    .with_label_values(&[
+                        index_key.keyspace().as_ref(),
+                        index_key.index().as_ref(),
+                        op_label,
+                    ])
                     .inc();
             }
             Operation::RemoveBeforeAddValue {
@@ -222,7 +277,11 @@ async fn add<I: IndexDispatch>(
                     .await;
                 metrics
                     .modified
-                    .with_label_values(&[key.keyspace().as_ref(), key.index().as_ref(), OP_REMOVE])
+                    .with_label_values(&[
+                        index_key.keyspace().as_ref(),
+                        index_key.index().as_ref(),
+                        OP_REMOVE,
+                    ])
                     .inc();
             }
             Operation::RemovePartition { partition_id } => {
@@ -231,18 +290,19 @@ async fn add<I: IndexDispatch>(
         }
     }
 
-    metrics.mark_dirty(key.keyspace().as_ref(), key.index().as_ref());
+    metrics.mark_dirty(index_key.keyspace().as_ref(), index_key.index().as_ref());
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DbIndexedOperation;
     use crate::DbIndexedValue;
     use crate::NonemptyBox;
     use crate::Timestamp;
     use crate::Timestamped;
     use crate::metrics::Metrics;
-    use crate::table::MockTableAdd;
+    use crate::table::MockTableModify;
     use crate::vs_index::VsIndex;
     use anyhow::anyhow;
     use mockall::predicate::*;
@@ -282,78 +342,80 @@ mod tests {
 
     #[tokio::test]
     async fn do_nothing_on_error() {
-        let (tx_embeddings, rx_embeddings) = mpsc::channel(10);
+        let (tx_db_rows, rx_db_rows) = mpsc::channel(10);
         let (tx_index, mut rx_index) = mpsc::channel::<VsIndex>(10);
         let metrics: Arc<Metrics> = Arc::new(Metrics::new());
-        let table = Arc::new(RwLock::new(MockTableAdd::new()));
+        let table = Arc::new(RwLock::new(MockTableModify::new()));
         let index_key = IndexKey::new(&"vector".to_string().into(), &"store".to_string().into());
         let _actor = new(
             index_key.clone(),
             Arc::clone(&table),
-            rx_embeddings,
+            rx_db_rows,
             tx_index,
             metrics,
         )
         .await
         .unwrap();
 
-        let embedding = DbIndexedRow {
-            primary_key: [CqlValue::Int(1)].into(),
-            values: NonemptyBox::new([Timestamped::new(
-                Timestamp::from_millis(10),
-                Some(DbIndexedValue::Vector(vec![1.].into())),
-            )])
-            .unwrap(),
-        };
+        let primary_key: PrimaryKey = [CqlValue::Int(1)].into();
+        let values = NonemptyBox::new([Timestamped::new(
+            Timestamp::from_millis(10),
+            Some(DbIndexedValue::Vector(vec![1.].into())),
+        )])
+        .unwrap();
         table
             .write()
             .unwrap()
-            .expect_add()
-            .with(eq(index_key), eq(embedding.clone()))
+            .expect_upsert()
+            .with(eq(index_key), eq(primary_key.clone()), eq(values.clone()))
             .once()
-            .returning(|_, _| Err(anyhow!("some error")));
-        tx_embeddings
-            .send((embedding, AsyncInProgress::None))
+            .returning(|_, _, _| Err(anyhow!("some error")));
+        tx_db_rows
+            .send((
+                DbIndexedRow {
+                    primary_key,
+                    operation: DbIndexedOperation::Upsert(values),
+                },
+                AsyncInProgress::None,
+            ))
             .await
             .unwrap();
 
-        drop(tx_embeddings);
+        drop(tx_db_rows);
         assert!(rx_index.recv().await.is_none());
     }
 
     #[tokio::test]
     async fn add_vector_with_progress() {
-        let (tx_embeddings, rx_embeddings) = mpsc::channel(10);
+        let (tx_db_rows, rx_db_rows) = mpsc::channel(10);
         let (tx_index, mut rx_index) = mpsc::channel::<VsIndex>(10);
         let metrics: Arc<Metrics> = Arc::new(Metrics::new());
-        let table = Arc::new(RwLock::new(MockTableAdd::new()));
+        let table = Arc::new(RwLock::new(MockTableModify::new()));
         let index_key = IndexKey::new(&"vector".to_string().into(), &"store".to_string().into());
         let _actor = new(
             index_key.clone(),
             Arc::clone(&table),
-            rx_embeddings,
+            rx_db_rows,
             tx_index,
             Arc::clone(&metrics),
         )
         .await
         .unwrap();
 
-        let embedding = DbIndexedRow {
-            primary_key: [CqlValue::Int(1)].into(),
-            values: NonemptyBox::new([Timestamped::new(
-                Timestamp::from_millis(10),
-                Some(DbIndexedValue::Vector(vec![1.].into())),
-            )])
-            .unwrap(),
-        };
+        let primary_key: PrimaryKey = [CqlValue::Int(1)].into();
+        let values = NonemptyBox::new([Timestamped::new(
+            Timestamp::from_millis(10),
+            Some(DbIndexedValue::Vector(vec![1.].into())),
+        )])
+        .unwrap();
         let (tx_progress, _rx_progress) = mpsc::channel(1);
         table
             .write()
             .unwrap()
-            .expect_add()
-            .with(eq(index_key), eq(embedding.clone()))
+            .expect_upsert()
+            .with(eq(index_key), eq(primary_key.clone()), eq(values.clone()))
             .once()
-            .returning(|_, _| {
+            .returning(|_, _, _| {
                 Ok(vec![Operation::AddVector {
                     primary_id: 2.into(),
                     partition_id: 3.into(),
@@ -361,8 +423,14 @@ mod tests {
                     is_update: false,
                 }])
             });
-        tx_embeddings
-            .send((embedding, AsyncInProgress::Fullscan(tx_progress)))
+        tx_db_rows
+            .send((
+                DbIndexedRow {
+                    primary_key,
+                    operation: DbIndexedOperation::Upsert(values),
+                },
+                AsyncInProgress::Fullscan(tx_progress),
+            ))
             .await
             .unwrap();
         let VsIndex::AddVector {
@@ -379,7 +447,7 @@ mod tests {
         assert_eq!(embedding, vec![4.].into());
         assert!(matches!(in_progress, AsyncInProgress::Fullscan(_)));
 
-        drop(tx_embeddings);
+        drop(tx_db_rows);
         assert!(rx_index.recv().await.is_none());
         assert_modified_metric_counts(&metrics, 1., 0., 0.);
         assert_eq!(
@@ -391,36 +459,34 @@ mod tests {
 
     #[tokio::test]
     async fn add_vector_with_cdc_progress() {
-        let (tx_embeddings, rx_embeddings) = mpsc::channel(10);
+        let (tx_db_rows, rx_db_rows) = mpsc::channel(10);
         let (tx_index, mut rx_index) = mpsc::channel::<VsIndex>(10);
         let metrics: Arc<Metrics> = Arc::new(Metrics::new());
-        let table = Arc::new(RwLock::new(MockTableAdd::new()));
+        let table = Arc::new(RwLock::new(MockTableModify::new()));
         let index_key = IndexKey::new(&"vector".to_string().into(), &"store".to_string().into());
         let _actor = new(
             index_key.clone(),
             Arc::clone(&table),
-            rx_embeddings,
+            rx_db_rows,
             tx_index,
             Arc::clone(&metrics),
         )
         .await
         .unwrap();
 
-        let embedding = DbIndexedRow {
-            primary_key: [CqlValue::Int(1)].into(),
-            values: NonemptyBox::new([Timestamped::new(
-                Timestamp::from_millis(10),
-                Some(DbIndexedValue::Vector(vec![1.].into())),
-            )])
-            .unwrap(),
-        };
+        let primary_key: PrimaryKey = [CqlValue::Int(1)].into();
+        let values = NonemptyBox::new([Timestamped::new(
+            Timestamp::from_millis(10),
+            Some(DbIndexedValue::Vector(vec![1.].into())),
+        )])
+        .unwrap();
         table
             .write()
             .unwrap()
-            .expect_add()
-            .with(eq(index_key), eq(embedding.clone()))
+            .expect_upsert()
+            .with(eq(index_key), eq(primary_key.clone()), eq(values.clone()))
             .once()
-            .returning(|_, _| {
+            .returning(|_, _, _| {
                 Ok(vec![Operation::AddVector {
                     primary_id: 2.into(),
                     partition_id: 3.into(),
@@ -428,9 +494,12 @@ mod tests {
                     is_update: false,
                 }])
             });
-        tx_embeddings
+        tx_db_rows
             .send((
-                embedding,
+                DbIndexedRow {
+                    primary_key,
+                    operation: DbIndexedOperation::Upsert(values),
+                },
                 AsyncInProgress::cdc(
                     metrics.indexing_lag.with_label_values(&["vector", "store"]),
                     Timestamp::now(),
@@ -452,7 +521,7 @@ mod tests {
         assert_eq!(embedding, vec![4.].into());
         drop(in_progress);
 
-        drop(tx_embeddings);
+        drop(tx_db_rows);
         assert!(rx_index.recv().await.is_none());
         assert_modified_metric_counts(&metrics, 1., 0., 0.);
         assert_eq!(
@@ -464,36 +533,34 @@ mod tests {
 
     #[tokio::test]
     async fn update_vector() {
-        let (tx_embeddings, rx_embeddings) = mpsc::channel(10);
+        let (tx_db_rows, rx_db_rows) = mpsc::channel(10);
         let (tx_index, mut rx_index) = mpsc::channel::<VsIndex>(10);
         let metrics: Arc<Metrics> = Arc::new(Metrics::new());
-        let table = Arc::new(RwLock::new(MockTableAdd::new()));
+        let table = Arc::new(RwLock::new(MockTableModify::new()));
         let index_key = IndexKey::new(&"vector".to_string().into(), &"store".to_string().into());
         let _actor = new(
             index_key.clone(),
             Arc::clone(&table),
-            rx_embeddings,
+            rx_db_rows,
             tx_index,
             Arc::clone(&metrics),
         )
         .await
         .unwrap();
 
-        let embedding = DbIndexedRow {
-            primary_key: [CqlValue::Int(1)].into(),
-            values: NonemptyBox::new([Timestamped::new(
-                Timestamp::from_millis(10),
-                Some(DbIndexedValue::Vector(vec![1.].into())),
-            )])
-            .unwrap(),
-        };
+        let primary_key: PrimaryKey = [CqlValue::Int(1)].into();
+        let values = NonemptyBox::new([Timestamped::new(
+            Timestamp::from_millis(10),
+            Some(DbIndexedValue::Vector(vec![1.].into())),
+        )])
+        .unwrap();
         table
             .write()
             .unwrap()
-            .expect_add()
-            .with(eq(index_key), eq(embedding.clone()))
+            .expect_upsert()
+            .with(eq(index_key), eq(primary_key.clone()), eq(values.clone()))
             .once()
-            .returning(|_, _| {
+            .returning(|_, _, _| {
                 Ok(vec![
                     Operation::RemoveBeforeAddValue {
                         primary_id: 2.into(),
@@ -507,8 +574,14 @@ mod tests {
                     },
                 ])
             });
-        tx_embeddings
-            .send((embedding, AsyncInProgress::None))
+        tx_db_rows
+            .send((
+                DbIndexedRow {
+                    primary_key,
+                    operation: DbIndexedOperation::Upsert(values),
+                },
+                AsyncInProgress::None,
+            ))
             .await
             .unwrap();
 
@@ -536,43 +609,41 @@ mod tests {
         assert_eq!(partition_id, 3.into());
         assert_eq!(embedding, vec![4.].into());
 
-        drop(tx_embeddings);
+        drop(tx_db_rows);
         assert!(rx_index.recv().await.is_none());
         assert_modified_metric_counts(&metrics, 0., 1., 0.);
     }
 
     #[tokio::test]
     async fn insert_and_update_in_single_batch() {
-        let (tx_embeddings, rx_embeddings) = mpsc::channel(10);
+        let (tx_db_rows, rx_db_rows) = mpsc::channel(10);
         let (tx_index, mut rx_index) = mpsc::channel::<VsIndex>(10);
         let metrics: Arc<Metrics> = Arc::new(Metrics::new());
-        let table = Arc::new(RwLock::new(MockTableAdd::new()));
+        let table = Arc::new(RwLock::new(MockTableModify::new()));
         let index_key = IndexKey::new(&"vector".to_string().into(), &"store".to_string().into());
         let _actor = new(
             index_key.clone(),
             Arc::clone(&table),
-            rx_embeddings,
+            rx_db_rows,
             tx_index,
             Arc::clone(&metrics),
         )
         .await
         .unwrap();
 
-        let embedding = DbIndexedRow {
-            primary_key: [CqlValue::Int(1)].into(),
-            values: NonemptyBox::new([Timestamped::new(
-                Timestamp::from_millis(10),
-                Some(DbIndexedValue::Vector(vec![1.].into())),
-            )])
-            .unwrap(),
-        };
+        let primary_key: PrimaryKey = [CqlValue::Int(1)].into();
+        let values = NonemptyBox::new([Timestamped::new(
+            Timestamp::from_millis(10),
+            Some(DbIndexedValue::Vector(vec![1.].into())),
+        )])
+        .unwrap();
         table
             .write()
             .unwrap()
-            .expect_add()
-            .with(eq(index_key), eq(embedding.clone()))
+            .expect_upsert()
+            .with(eq(index_key), eq(primary_key.clone()), eq(values.clone()))
             .once()
-            .returning(|_, _| {
+            .returning(|_, _, _| {
                 Ok(vec![
                     // Plain insert
                     Operation::AddVector {
@@ -594,8 +665,14 @@ mod tests {
                     },
                 ])
             });
-        tx_embeddings
-            .send((embedding, AsyncInProgress::None))
+        tx_db_rows
+            .send((
+                DbIndexedRow {
+                    primary_key,
+                    operation: DbIndexedOperation::Upsert(values),
+                },
+                AsyncInProgress::None,
+            ))
             .await
             .unwrap();
 
@@ -639,46 +716,51 @@ mod tests {
         assert_eq!(partition_id, 4.into());
         assert_eq!(embedding, vec![20.].into());
 
-        drop(tx_embeddings);
+        drop(tx_db_rows);
         assert!(rx_index.recv().await.is_none());
         assert_modified_metric_counts(&metrics, 1., 1., 0.);
     }
 
     #[tokio::test]
-    async fn remove_vector() {
-        let (tx_embeddings, rx_embeddings) = mpsc::channel(10);
+    async fn remove_vector_with_none_value() {
+        let (tx_db_rows, rx_db_rows) = mpsc::channel(10);
         let (tx_index, mut rx_index) = mpsc::channel::<VsIndex>(10);
         let metrics: Arc<Metrics> = Arc::new(Metrics::new());
-        let table = Arc::new(RwLock::new(MockTableAdd::new()));
+        let table = Arc::new(RwLock::new(MockTableModify::new()));
         let index_key = IndexKey::new(&"vector".to_string().into(), &"store".to_string().into());
         let _actor = new(
             index_key.clone(),
             Arc::clone(&table),
-            rx_embeddings,
+            rx_db_rows,
             tx_index,
             Arc::clone(&metrics),
         )
         .await
         .unwrap();
 
-        let embedding = DbIndexedRow {
-            primary_key: [CqlValue::Int(1)].into(),
-            values: NonemptyBox::new([Timestamped::new(Timestamp::from_millis(10), None)]).unwrap(),
-        };
+        let primary_key: PrimaryKey = [CqlValue::Int(1)].into();
+        let values =
+            NonemptyBox::new([Timestamped::new(Timestamp::from_millis(10), None)]).unwrap();
         table
             .write()
             .unwrap()
-            .expect_add()
-            .with(eq(index_key), eq(embedding.clone()))
+            .expect_upsert()
+            .with(eq(index_key), eq(primary_key.clone()), eq(values.clone()))
             .once()
-            .returning(|_, _| {
+            .returning(|_, _, _| {
                 Ok(vec![Operation::RemoveValue {
                     primary_id: 5.into(),
                     partition_id: 6.into(),
                 }])
             });
-        tx_embeddings
-            .send((embedding, AsyncInProgress::None))
+        tx_db_rows
+            .send((
+                DbIndexedRow {
+                    primary_key,
+                    operation: DbIndexedOperation::Upsert(values),
+                },
+                AsyncInProgress::None,
+            ))
             .await
             .unwrap();
 
@@ -693,45 +775,114 @@ mod tests {
         assert_eq!(primary_id, 5.into());
         assert_eq!(partition_id, 6.into());
 
-        drop(tx_embeddings);
+        drop(tx_db_rows);
         assert!(rx_index.recv().await.is_none());
         assert_modified_metric_counts(&metrics, 0., 0., 1.);
     }
 
     #[tokio::test]
-    async fn remove_partition() {
-        let (tx_embeddings, rx_embeddings) = mpsc::channel(10);
+    async fn remove_vector_with_delete() {
+        let (tx_db_rows, rx_db_rows) = mpsc::channel(10);
         let (tx_index, mut rx_index) = mpsc::channel::<VsIndex>(10);
         let metrics: Arc<Metrics> = Arc::new(Metrics::new());
-        let table = Arc::new(RwLock::new(MockTableAdd::new()));
+        let table = Arc::new(RwLock::new(MockTableModify::new()));
         let index_key = IndexKey::new(&"vector".to_string().into(), &"store".to_string().into());
         let _actor = new(
             index_key.clone(),
             Arc::clone(&table),
-            rx_embeddings,
+            rx_db_rows,
             tx_index,
             Arc::clone(&metrics),
         )
         .await
         .unwrap();
 
-        let embedding = DbIndexedRow {
-            primary_key: [CqlValue::Int(1)].into(),
-            values: NonemptyBox::new([Timestamped::new(Timestamp::from_millis(10), None)]).unwrap(),
-        };
+        let primary_key: PrimaryKey = [CqlValue::Int(1)].into();
         table
             .write()
             .unwrap()
-            .expect_add()
-            .with(eq(index_key), eq(embedding.clone()))
+            .expect_delete()
+            .with(
+                eq(index_key),
+                eq(primary_key.clone()),
+                eq(Timestamp::from_millis(10)),
+            )
             .once()
-            .returning(|_, _| {
+            .returning(|_, _, _| {
+                Ok(vec![Operation::RemoveValue {
+                    primary_id: 5.into(),
+                    partition_id: 6.into(),
+                }])
+            });
+        tx_db_rows
+            .send((
+                DbIndexedRow {
+                    primary_key,
+                    operation: DbIndexedOperation::Delete(Timestamp::from_millis(10)),
+                },
+                AsyncInProgress::None,
+            ))
+            .await
+            .unwrap();
+
+        let Some(VsIndex::RemoveVector {
+            partition_id,
+            primary_id,
+            ..
+        }) = rx_index.recv().await
+        else {
+            unreachable!();
+        };
+        assert_eq!(primary_id, 5.into());
+        assert_eq!(partition_id, 6.into());
+
+        drop(tx_db_rows);
+        assert!(rx_index.recv().await.is_none());
+        assert_modified_metric_counts(&metrics, 0., 0., 1.);
+    }
+
+    #[tokio::test]
+    async fn remove_partition() {
+        let (tx_db_rows, rx_db_rows) = mpsc::channel(10);
+        let (tx_index, mut rx_index) = mpsc::channel::<VsIndex>(10);
+        let metrics: Arc<Metrics> = Arc::new(Metrics::new());
+        let table = Arc::new(RwLock::new(MockTableModify::new()));
+        let index_key = IndexKey::new(&"vector".to_string().into(), &"store".to_string().into());
+        let _actor = new(
+            index_key.clone(),
+            Arc::clone(&table),
+            rx_db_rows,
+            tx_index,
+            Arc::clone(&metrics),
+        )
+        .await
+        .unwrap();
+
+        let primary_key: PrimaryKey = [CqlValue::Int(1)].into();
+        let values = NonemptyBox::new([Timestamped::<DbIndexedValue>::new(
+            Timestamp::from_millis(10),
+            None,
+        )])
+        .unwrap();
+        table
+            .write()
+            .unwrap()
+            .expect_upsert()
+            .with(eq(index_key), eq(primary_key.clone()), eq(values.clone()))
+            .once()
+            .returning(|_, _, _| {
                 Ok(vec![Operation::RemovePartition {
                     partition_id: 6.into(),
                 }])
             });
-        tx_embeddings
-            .send((embedding, AsyncInProgress::None))
+        tx_db_rows
+            .send((
+                DbIndexedRow {
+                    primary_key,
+                    operation: DbIndexedOperation::Upsert(values),
+                },
+                AsyncInProgress::None,
+            ))
             .await
             .unwrap();
 
@@ -740,7 +891,7 @@ mod tests {
         };
         assert_eq!(partition_id, 6.into());
 
-        drop(tx_embeddings);
+        drop(tx_db_rows);
         assert!(rx_index.recv().await.is_none());
         assert_modified_metric_counts(&metrics, 0., 0., 0.);
     }

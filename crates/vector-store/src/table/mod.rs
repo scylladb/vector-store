@@ -12,7 +12,6 @@ mod primary_id;
 mod vec_chunks;
 
 use crate::ColumnName;
-use crate::DbIndexedRow;
 use crate::DbIndexedValue;
 use crate::IndexKey;
 use crate::NonemptyArc;
@@ -20,6 +19,7 @@ use crate::NonemptyBox;
 use crate::PartitionKey;
 use crate::PrimaryKey;
 use crate::Restriction;
+use crate::Timestamp;
 use crate::Vector;
 use crate::primary_key::normalize;
 use crate::table::chunk_timestamps::ChunkTimestampsExclusive;
@@ -155,6 +155,8 @@ struct Index {
 
     data: IndexData,
 
+    filtering_columns: Arc<[ColumnName]>,
+
     /// All column names that are used in this index (key columns + filtering columns)
     _available_columns: BTreeSet<ColumnName>,
 
@@ -169,7 +171,7 @@ impl Index {
         index_id: IndexId,
         primary_key_columns: NonemptyArc<ColumnName>,
         column_targets_count: NonZeroUsize,
-        filtering_columns: &[ColumnName],
+        filtering_columns: Arc<[ColumnName]>,
     ) -> Self {
         Self {
             index_id,
@@ -179,6 +181,7 @@ impl Index {
                 .chain(filtering_columns.iter())
                 .cloned()
                 .collect(),
+            filtering_columns,
             values_timestamps: ColumnVecChunks::new(ChunkTimestamps::new(column_targets_count)),
         }
     }
@@ -187,7 +190,7 @@ impl Index {
         index_id: IndexId,
         key_columns: NonemptyArc<ColumnName>,
         column_targets_count: NonZeroUsize,
-        filtering_columns: &[ColumnName],
+        filtering_columns: Arc<[ColumnName]>,
     ) -> Self {
         Self {
             index_id,
@@ -196,6 +199,7 @@ impl Index {
                 .chain(filtering_columns.iter())
                 .cloned()
                 .collect(),
+            filtering_columns,
             values_timestamps: ColumnVecChunks::new(ChunkTimestamps::new(column_targets_count)),
             data: IndexData::Local {
                 key_columns,
@@ -330,7 +334,7 @@ fn partition_key(
 #[derive(Debug)]
 pub struct Table {
     primary_key_columns: NonemptyArc<ColumnName>,
-    partition_key_count: usize,
+    partition_primary_key_count: usize,
     needs_ck_normalization: bool,
     primary_ids: BTreeMap<PrimaryKey, PrimaryId>,
     free_primary_ids: FreePrimaryIds,
@@ -349,13 +353,14 @@ impl Table {
     pub(crate) fn new(
         index_key: IndexKey,
         primary_key_columns: NonemptyArc<ColumnName>,
-        partition_key_count: usize,
+        partition_primary_key_count: usize,
         partition_key_columns: Option<NonemptyArc<ColumnName>>,
         column_targets_count: NonZeroUsize,
-        filtering_columns: &[ColumnName],
+        filtering_columns: Arc<[ColumnName]>,
         table_columns: Arc<HashMap<ColumnName, NativeType>>,
     ) -> anyhow::Result<Self> {
-        let partition_key_count = partition_key_count.min(primary_key_columns.len().get());
+        let partition_primary_key_count =
+            partition_primary_key_count.min(primary_key_columns.len().get());
         let mut index_id_generator = IndexIdGenerator::new();
         let mut indexes = BTreeMap::new();
         let mut index_ids = BTreeMap::new();
@@ -365,14 +370,14 @@ impl Table {
                 index_id,
                 partition_key_columns.clone(),
                 column_targets_count,
-                filtering_columns,
+                Arc::clone(&filtering_columns),
             )
         } else {
             Index::new_global(
                 index_id,
                 primary_key_columns.clone(),
                 column_targets_count,
-                filtering_columns,
+                Arc::clone(&filtering_columns),
             )
         };
         indexes.insert(index_id, index);
@@ -398,7 +403,7 @@ impl Table {
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
         columns.extend(column_with_values);
-        let needs_ck_normalization = primary_key_columns.as_slice()[partition_key_count..]
+        let needs_ck_normalization = primary_key_columns.as_slice()[partition_primary_key_count..]
             .iter()
             .any(|col| matches!(table_columns.get(col), Some(NativeType::Decimal)));
         let mut table = Self {
@@ -406,7 +411,7 @@ impl Table {
             free_primary_ids: FreePrimaryIds(VecDeque::new()),
             primary_keys: ColumnVec::new(),
             primary_key_columns,
-            partition_key_count,
+            partition_primary_key_count,
             needs_ck_normalization,
             columns,
             _index_id_generator: index_id_generator,
@@ -433,7 +438,7 @@ impl Table {
         let normalized: PrimaryKey = (0..key.len())
             .map(|idx| {
                 let value = key.get(idx).expect("primary key column exists");
-                if idx >= self.partition_key_count {
+                if idx >= self.partition_primary_key_count {
                     normalize(value)
                 } else {
                     value
@@ -561,6 +566,28 @@ fn update_timestamps(
         })
 }
 
+fn update_filtering_columns(
+    columns: &mut BTreeMap<ColumnName, Column>,
+    primary_id: PrimaryId,
+    filtering_columns: &[ColumnName],
+    filtering: Box<[(Timestamp, Option<CqlValue>)]>,
+) -> anyhow::Result<()> {
+    filtering
+        .into_iter()
+        .zip(filtering_columns.iter())
+        .try_for_each(|((timestamp, value), column_name)| {
+            let column = columns
+                .get_mut(column_name)
+                .ok_or_else(|| anyhow!("Column {column_name} not found in table columns"))?;
+            if let Some(value) = value {
+                column.insert(primary_id, timestamp, value)
+            } else {
+                column.remove(primary_id, timestamp)
+            }
+        })
+}
+
+#[derive(Debug, PartialEq)]
 enum SplittingValues {
     Vector(Vector),
     Document(String),
@@ -569,10 +596,13 @@ enum SplittingValues {
 struct SplitValuesFiltering {
     values: Option<SplittingValues>,
     timestamps: NonemptyBox<Timestamped<()>>,
+    filtering: Box<[(Timestamp, Option<CqlValue>)]>,
 }
 
-fn split_values_filtering(db_row: DbIndexedRow) -> anyhow::Result<SplitValuesFiltering> {
-    let mut row_values = db_row.values.into_iter();
+fn split_values_filtering(
+    values: NonemptyBox<Timestamped<DbIndexedValue>>,
+) -> anyhow::Result<SplitValuesFiltering> {
+    let mut row_values = values.into_iter();
 
     let (values, timestamps) = {
         let Some(value) = row_values.next() else {
@@ -587,34 +617,151 @@ fn split_values_filtering(db_row: DbIndexedRow) -> anyhow::Result<SplitValuesFil
         };
         let timestamps = NonemptyBox::new([timestamped]).unwrap();
 
-        let values = value.into_value().map(|value| match value {
+        let values = value.into_value().map(|value| Ok(match value {
             DbIndexedValue::Vector(vector) => SplittingValues::Vector(vector),
             DbIndexedValue::Document(document) => SplittingValues::Document(document),
-        });
+            DbIndexedValue::Filtering(_) => {
+                bail!("Expected vector or document value for first column, got filtering value")
+            }
+        })).transpose()?;
         (values, timestamps)
     };
 
-    Ok(SplitValuesFiltering { values, timestamps })
+    let filtering = row_values
+        .map(|value| (value.timestamp(), value.into_value()))
+        .map(|(timestamp, value)| {
+            let filtering_value = match value {
+                Some(DbIndexedValue::Filtering(filtering_value)) => Some(filtering_value),
+                Some(DbIndexedValue::Vector(_)) | Some(DbIndexedValue::Document(_)) => {
+                    bail!("Expected filtering value for column, got vector or document value");
+                }
+                None => None,
+            };
+            Ok((timestamp, filtering_value))
+        })
+        .collect::<Result<Box<_>, _>>()?;
+
+    Ok(SplitValuesFiltering {
+        values,
+        timestamps,
+        filtering,
+    })
+}
+
+fn update_index(
+    primary_id: PrimaryId,
+    partition_id: PartitionId,
+    index: &mut Index,
+    columns: &mut BTreeMap<ColumnName, Column>,
+    splitting_values_filtering: SplitValuesFiltering,
+) -> anyhow::Result<Vec<Operation>> {
+    let mut operations = vec![];
+
+    let Some(mut values_timestamps) = index.values_timestamps.get_mut(primary_id) else {
+        bail!(
+            "Failed to update value: missing value timestamp \
+            for index_id {index_id:?} and primary_id {primary_id:?}",
+            index_id = index.index_id,
+        )
+    };
+
+    let SplitValuesFiltering {
+        values,
+        timestamps,
+        filtering,
+    } = splitting_values_filtering;
+
+    let filtering_columns = Arc::clone(&index.filtering_columns);
+    update_filtering_columns(columns, primary_id, &filtering_columns, filtering)?;
+    let epoch = values_timestamps.epoch();
+    let CompareTimestamps {
+        is_cur_tombstone,
+        is_new_tombstone,
+        is_newer,
+    } = compare_timestamps(&values_timestamps, timestamps.as_slice())?;
+    if !is_newer {
+        return Ok(operations);
+    }
+
+    let primary_id = primary_id.new_epoch(epoch);
+    if !is_new_tombstone {
+        let values = values.ok_or_else(|| {
+            anyhow!("Expected vector or document value for first column, got None")
+        })?;
+        if !is_cur_tombstone {
+            operations.push(Operation::RemoveBeforeAddValue {
+                primary_id,
+                partition_id,
+            });
+        }
+
+        let primary_id = primary_id.next_epoch();
+        values_timestamps.set_epoch(primary_id.epoch());
+        update_timestamps(values_timestamps, timestamps)?;
+
+        let is_update = !is_cur_tombstone;
+        let operation = match values {
+            SplittingValues::Vector(vector) => Operation::AddVector {
+                primary_id,
+                partition_id,
+                vector,
+                is_update,
+            },
+            SplittingValues::Document(document) => Operation::AddDocument {
+                primary_id,
+                partition_id,
+                document,
+                is_update,
+            },
+        };
+        operations.push(operation);
+    } else {
+        let epoch = primary_id.epoch().next();
+        values_timestamps.set_epoch(epoch);
+        update_timestamps(values_timestamps, timestamps)?;
+
+        if !is_cur_tombstone {
+            operations.push(Operation::RemoveValue {
+                primary_id,
+                partition_id,
+            });
+            if index.data.remove_row(primary_id) {
+                operations.push(Operation::RemovePartition { partition_id });
+            }
+        }
+    }
+
+    Ok(operations)
 }
 
 /// A trait that defines the add operation for the table.
 #[cfg_attr(test, mockall::automock)]
-pub(crate) trait TableAdd {
-    fn add(&mut self, index_key: &IndexKey, db_row: DbIndexedRow)
-    -> anyhow::Result<Vec<Operation>>;
-}
-
-impl TableAdd for Table {
-    #[hotpath::measure]
-    fn add(
+pub(crate) trait TableModify {
+    fn upsert(
         &mut self,
         index_key: &IndexKey,
-        db_row: DbIndexedRow,
+        primary_key: PrimaryKey,
+        values: NonemptyBox<Timestamped<DbIndexedValue>>,
+    ) -> anyhow::Result<Vec<Operation>>;
+
+    fn delete(
+        &mut self,
+        index_key: &IndexKey,
+        primary_key: PrimaryKey,
+        timestamp: Timestamp,
+    ) -> anyhow::Result<Vec<Operation>>;
+}
+
+impl TableModify for Table {
+    #[hotpath::measure]
+    fn upsert(
+        &mut self,
+        index_key: &IndexKey,
+        primary_key: PrimaryKey,
+        values: NonemptyBox<Timestamped<DbIndexedValue>>,
     ) -> anyhow::Result<Vec<Operation>> {
         self.reserve_primary_ids()?;
         self.reserve_partition_ids()?;
-
-        let mut operations = vec![];
 
         let index_id = self
             .index_ids
@@ -622,7 +769,7 @@ impl TableAdd for Table {
             .copied()
             .ok_or_else(|| anyhow!("Index key {index_key:?} not found"))?;
 
-        let primary_id = self.add_primary_key(&db_row.primary_key)?;
+        let primary_id = self.add_primary_key(&primary_key)?;
 
         let index = self
             .indexes
@@ -632,76 +779,63 @@ impl TableAdd for Table {
         let partition_id = index.add_partition_key(
             index_id,
             primary_id,
-            &db_row.primary_key,
+            &primary_key,
             self.primary_key_columns.as_slice(),
         )?;
 
-        let Some(mut values_timestamps) = index.values_timestamps.get_mut(primary_id) else {
-            bail!(
-                "Failed to update value: missing value timestamp \
-                for index_id {index_id:?} and primary_id {primary_id:?}"
-            )
-        };
+        update_index(
+            primary_id,
+            partition_id,
+            index,
+            &mut self.columns,
+            split_values_filtering(values)?,
+        )
+    }
 
-        let SplitValuesFiltering { values, timestamps } = split_values_filtering(db_row)?;
-        let epoch = values_timestamps.epoch();
-        let CompareTimestamps {
-            is_cur_tombstone,
-            is_new_tombstone,
-            is_newer,
-        } = compare_timestamps(&values_timestamps, timestamps.as_slice())?;
-        if !is_newer {
-            return Ok(operations);
-        }
+    #[hotpath::measure]
+    fn delete(
+        &mut self,
+        index_key: &IndexKey,
+        primary_key: PrimaryKey,
+        timestamp: Timestamp,
+    ) -> anyhow::Result<Vec<Operation>> {
+        let index_id = self
+            .index_ids
+            .get(index_key)
+            .copied()
+            .ok_or_else(|| anyhow!("Index key {index_key:?} not found"))?;
 
-        let primary_id = primary_id.new_epoch(epoch);
-        if !is_new_tombstone {
-            let values = values.ok_or_else(|| {
-                anyhow!("Expected vector or document value for first column, got None")
-            })?;
-            if !is_cur_tombstone {
-                operations.push(Operation::RemoveBeforeAddValue {
-                    primary_id,
-                    partition_id,
-                });
-            }
+        let primary_id = self.add_primary_key(&primary_key)?;
 
-            let primary_id = primary_id.next_epoch();
-            values_timestamps.set_epoch(primary_id.epoch());
-            update_timestamps(values_timestamps, timestamps)?;
+        let index = self
+            .indexes
+            .get_mut(&index_id)
+            .ok_or_else(|| anyhow!("Index id {index_id:?} not found"))?;
 
-            let is_update = !is_cur_tombstone;
-            let operation = match values {
-                SplittingValues::Vector(vector) => Operation::AddVector {
-                    primary_id,
-                    partition_id,
-                    vector,
-                    is_update,
-                },
-                SplittingValues::Document(document) => Operation::AddDocument {
-                    primary_id,
-                    partition_id,
-                    document,
-                    is_update,
-                },
-            };
-            operations.push(operation);
-        } else {
-            let epoch = primary_id.epoch().next();
-            values_timestamps.set_epoch(epoch);
-            update_timestamps(values_timestamps, timestamps)?;
+        let partition_id = index.add_partition_key(
+            index_id,
+            primary_id,
+            &primary_key,
+            self.primary_key_columns.as_slice(),
+        )?;
 
-            if !is_cur_tombstone {
-                operations.push(Operation::RemoveValue {
-                    primary_id,
-                    partition_id,
-                });
-                if index.data.remove_row(primary_id) {
-                    operations.push(Operation::RemovePartition { partition_id });
-                }
-            }
-        }
-        Ok(operations)
+        let filtering = index
+            .filtering_columns
+            .iter()
+            .map(|_| (timestamp, None))
+            .collect();
+
+        update_index(
+            primary_id,
+            partition_id,
+            index,
+            &mut self.columns,
+            SplitValuesFiltering {
+                values: None,
+                timestamps: NonemptyBox::new([Timestamped::new_tombstone(timestamp)]).unwrap(),
+                filtering,
+            },
+        )
     }
 }
 
@@ -1005,7 +1139,6 @@ pub(crate) enum Operation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Timestamp;
     use scylla::value::CqlDecimal;
 
     #[test]
@@ -1018,7 +1151,7 @@ mod tests {
                 1,
                 partition_key_columns.clone(),
                 NonZeroUsize::new(1).unwrap(),
-                &[],
+                Arc::new([]),
                 Arc::new(
                     [
                         ("pk".into(), NativeType::Int),
@@ -1032,16 +1165,14 @@ mod tests {
 
             // insert first vector
             let operations = table
-                .add(
+                .upsert(
                     &index_key,
-                    DbIndexedRow {
-                        primary_key: [CqlValue::Int(1), CqlValue::Int(1)].into(),
-                        values: NonemptyBox::new([Timestamped::new(
-                            Timestamp::from_millis(100),
-                            Some(DbIndexedValue::Vector(vec![0.1, 0.2, 0.3].into())),
-                        )])
-                        .unwrap(),
-                    },
+                    [CqlValue::Int(1), CqlValue::Int(1)].into(),
+                    NonemptyBox::new([Timestamped::new(
+                        Timestamp::from_millis(100),
+                        Some(DbIndexedValue::Vector(vec![0.1, 0.2, 0.3].into())),
+                    )])
+                    .unwrap(),
                 )
                 .unwrap();
             assert_eq!(operations.len(), 1);
@@ -1060,16 +1191,14 @@ mod tests {
 
             // insert second vector
             let operations = table
-                .add(
+                .upsert(
                     &index_key,
-                    DbIndexedRow {
-                        primary_key: [CqlValue::Int(1), CqlValue::Int(2)].into(),
-                        values: NonemptyBox::new([Timestamped::new(
-                            Timestamp::from_millis(100),
-                            Some(DbIndexedValue::Vector(vec![0.2, 0.2, 0.3].into())),
-                        )])
-                        .unwrap(),
-                    },
+                    [CqlValue::Int(1), CqlValue::Int(2)].into(),
+                    NonemptyBox::new([Timestamped::new(
+                        Timestamp::from_millis(100),
+                        Some(DbIndexedValue::Vector(vec![0.2, 0.2, 0.3].into())),
+                    )])
+                    .unwrap(),
                 )
                 .unwrap();
             assert_eq!(operations.len(), 1);
@@ -1090,16 +1219,14 @@ mod tests {
 
             // insert third vector
             let operations = table
-                .add(
+                .upsert(
                     &index_key,
-                    DbIndexedRow {
-                        primary_key: [CqlValue::Int(1), CqlValue::Int(3)].into(),
-                        values: NonemptyBox::new([Timestamped::new(
-                            Timestamp::from_millis(100),
-                            Some(DbIndexedValue::Vector(vec![0.3, 0.2, 0.3].into())),
-                        )])
-                        .unwrap(),
-                    },
+                    [CqlValue::Int(1), CqlValue::Int(3)].into(),
+                    NonemptyBox::new([Timestamped::new(
+                        Timestamp::from_millis(100),
+                        Some(DbIndexedValue::Vector(vec![0.3, 0.2, 0.3].into())),
+                    )])
+                    .unwrap(),
                 )
                 .unwrap();
             assert_eq!(operations.len(), 1);
@@ -1160,32 +1287,28 @@ mod tests {
 
             // insert second vector with older timestamp - should not update the vector
             let operations = table
-                .add(
+                .upsert(
                     &index_key,
-                    DbIndexedRow {
-                        primary_key: [CqlValue::Int(1), CqlValue::Int(2)].into(),
-                        values: NonemptyBox::new([Timestamped::new(
-                            Timestamp::from_millis(50),
-                            Some(DbIndexedValue::Vector(vec![0.2, 0.2, 0.3].into())),
-                        )])
-                        .unwrap(),
-                    },
+                    [CqlValue::Int(1), CqlValue::Int(2)].into(),
+                    NonemptyBox::new([Timestamped::new(
+                        Timestamp::from_millis(50),
+                        Some(DbIndexedValue::Vector(vec![0.2, 0.2, 0.3].into())),
+                    )])
+                    .unwrap(),
                 )
                 .unwrap();
             assert_eq!(operations.len(), 0);
 
             // insert second vector with newer timestamp - should update the vector
             let operations = table
-                .add(
+                .upsert(
                     &index_key,
-                    DbIndexedRow {
-                        primary_key: [CqlValue::Int(1), CqlValue::Int(2)].into(),
-                        values: NonemptyBox::new([Timestamped::new(
-                            Timestamp::from_millis(150),
-                            Some(DbIndexedValue::Vector(vec![0.5, 0.5, 0.3].into())),
-                        )])
-                        .unwrap(),
-                    },
+                    [CqlValue::Int(1), CqlValue::Int(2)].into(),
+                    NonemptyBox::new([Timestamped::new(
+                        Timestamp::from_millis(150),
+                        Some(DbIndexedValue::Vector(vec![0.5, 0.5, 0.3].into())),
+                    )])
+                    .unwrap(),
                 )
                 .unwrap();
             assert_eq!(operations.len(), 2);
@@ -1221,16 +1344,11 @@ mod tests {
 
             // remove first vector
             let operations = table
-                .add(
+                .upsert(
                     &index_key,
-                    DbIndexedRow {
-                        primary_key: [CqlValue::Int(1), CqlValue::Int(1)].into(),
-                        values: NonemptyBox::new([Timestamped::new(
-                            Timestamp::from_millis(200),
-                            None,
-                        )])
+                    [CqlValue::Int(1), CqlValue::Int(1)].into(),
+                    NonemptyBox::new([Timestamped::new(Timestamp::from_millis(200), None)])
                         .unwrap(),
-                    },
                 )
                 .unwrap();
             assert_eq!(operations.len(), 1);
@@ -1247,16 +1365,11 @@ mod tests {
 
             // remove second vector
             let operations = table
-                .add(
+                .upsert(
                     &index_key,
-                    DbIndexedRow {
-                        primary_key: [CqlValue::Int(1), CqlValue::Int(2)].into(),
-                        values: NonemptyBox::new([Timestamped::new(
-                            Timestamp::from_millis(200),
-                            None,
-                        )])
+                    [CqlValue::Int(1), CqlValue::Int(2)].into(),
+                    NonemptyBox::new([Timestamped::new(Timestamp::from_millis(200), None)])
                         .unwrap(),
-                    },
                 )
                 .unwrap();
             assert_eq!(operations.len(), 1);
@@ -1273,16 +1386,11 @@ mod tests {
 
             // remove third vector
             let operations = table
-                .add(
+                .upsert(
                     &index_key,
-                    DbIndexedRow {
-                        primary_key: [CqlValue::Int(1), CqlValue::Int(3)].into(),
-                        values: NonemptyBox::new([Timestamped::new(
-                            Timestamp::from_millis(200),
-                            None,
-                        )])
+                    [CqlValue::Int(1), CqlValue::Int(3)].into(),
+                    NonemptyBox::new([Timestamped::new(Timestamp::from_millis(200), None)])
                         .unwrap(),
-                    },
                 )
                 .unwrap();
             if partition_key_columns.is_none() {
@@ -1315,17 +1423,12 @@ mod tests {
         let pk1 = PrimaryKey::from([CqlValue::Int(1)]);
         let pk2 = PrimaryKey::from([CqlValue::Int(2)]);
         let vector_orig: Vector = vec![1.0, 2.0, 3.0].into();
-        let db_row_add = |pk: &PrimaryKey, ts| DbIndexedRow {
-            primary_key: pk.clone(),
-            values: NonemptyBox::new([Timestamped::new(
+        let values = |ts| {
+            NonemptyBox::new([Timestamped::new(
                 Timestamp::from_millis(ts),
                 Some(DbIndexedValue::Vector(vector_orig.clone())),
             )])
-            .unwrap(),
-        };
-        let db_row_del = |pk: &PrimaryKey, ts| DbIndexedRow {
-            primary_key: pk.clone(),
-            values: NonemptyBox::new([Timestamped::new(Timestamp::from_millis(ts), None)]).unwrap(),
+            .unwrap()
         };
 
         let index_key = IndexKey::new(&"ks".into(), &"idx".into());
@@ -1335,13 +1438,13 @@ mod tests {
             1,
             None,
             NonZeroUsize::new(1).unwrap(),
-            &[],
+            Arc::new([]),
             Arc::new([("p".into(), NativeType::Int)].into_iter().collect()),
         )
         .unwrap();
 
         // insert the vector pk1
-        let mut operations = table.add(&index_key, db_row_add(&pk1, 1)).unwrap();
+        let mut operations = table.upsert(&index_key, pk1.clone(), values(1)).unwrap();
         assert_eq!(operations.len(), 1);
         let (primary_id1, partition_id1) = match operations.remove(0) {
             Operation::AddVector {
@@ -1361,7 +1464,7 @@ mod tests {
         );
 
         // insert the vector pk2
-        let mut operations = table.add(&index_key, db_row_add(&pk2, 2)).unwrap();
+        let mut operations = table.upsert(&index_key, pk2.clone(), values(2)).unwrap();
         assert_eq!(operations.len(), 1);
         let (primary_id2, partition_id2) = match operations.remove(0) {
             Operation::AddVector {
@@ -1382,8 +1485,10 @@ mod tests {
             &pk2
         );
 
-        // remove the vector by nulling the value
-        let mut operations = table.add(&index_key, db_row_del(&pk2, 3)).unwrap();
+        // remove the vector
+        let mut operations = table
+            .delete(&index_key, pk2.clone(), Timestamp::from_millis(3))
+            .unwrap();
         assert_eq!(operations.len(), 1);
         match operations.remove(0) {
             Operation::RemoveValue {
@@ -1398,7 +1503,7 @@ mod tests {
         assert!(table.primary_key(partition_id2, primary_id2).is_none());
 
         // insert the vector pk2
-        let mut operations = table.add(&index_key, db_row_add(&pk2, 4)).unwrap();
+        let mut operations = table.upsert(&index_key, pk2.clone(), values(4)).unwrap();
         assert_eq!(operations.len(), 1);
         let (primary_id3, partition_id3) = match operations.remove(0) {
             Operation::AddVector {
@@ -1422,7 +1527,9 @@ mod tests {
         let mut primary_id_prev = primary_id3;
         for it in 0..10 {
             // upsert the vector with a new value
-            let mut operations = table.add(&index_key, db_row_add(&pk2, 5 + it)).unwrap();
+            let mut operations = table
+                .upsert(&index_key, pk2.clone(), values(5 + it))
+                .unwrap();
             assert_eq!(operations.len(), 2);
             match operations.remove(0) {
                 Operation::RemoveBeforeAddValue {
@@ -1455,6 +1562,287 @@ mod tests {
             );
             primary_id_prev = primary_id4;
         }
+    }
+
+    #[test]
+    fn upsert_delete_filtering_column() {
+        let vector_orig: Vector = vec![1.0].into();
+        let filtering = CqlValue::Int(2);
+        let values = |ts1, ts2| {
+            NonemptyBox::new([
+                Timestamped::new(
+                    Timestamp::from_millis(ts1),
+                    Some(DbIndexedValue::Vector(vector_orig.clone())),
+                ),
+                Timestamped::new(
+                    Timestamp::from_millis(ts2),
+                    Some(DbIndexedValue::Filtering(filtering.clone())),
+                ),
+            ])
+            .unwrap()
+        };
+
+        for (pk, primary_key_columns, partition_key_columns) in [
+            (
+                PrimaryKey::from([CqlValue::Int(1)]),
+                NonemptyArc::new([ColumnName::from("p")]).unwrap(),
+                None,
+            ),
+            (
+                PrimaryKey::from([CqlValue::Int(1), CqlValue::Int(1)]),
+                NonemptyArc::new([ColumnName::from("p"), ColumnName::from("c")]).unwrap(),
+                Some(NonemptyArc::new([ColumnName::from("p")]).unwrap()),
+            ),
+        ] {
+            dbg!(&primary_key_columns);
+            let index_key = IndexKey::new(&"ks".into(), &"idx".into());
+            let mut table = Table::new(
+                index_key.clone(),
+                primary_key_columns,
+                1,
+                partition_key_columns,
+                NonZeroUsize::new(1).unwrap(),
+                Arc::new(["f".into()]),
+                Arc::new(
+                    [
+                        ("p".into(), NativeType::Int),
+                        ("c".into(), NativeType::Int),
+                        ("f".into(), NativeType::Int),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+            )
+            .unwrap();
+
+            // insert the vector pk1
+            let mut operations = table
+                .upsert(&index_key, pk.clone(), values(10, 20))
+                .unwrap();
+            assert_eq!(operations.len(), 1);
+            let (primary_id, partition_id) = match operations.remove(0) {
+                Operation::AddVector {
+                    primary_id,
+                    partition_id,
+                    vector,
+                    is_update: false,
+                } => {
+                    assert_eq!(&vector, &vector_orig);
+                    (primary_id, partition_id)
+                }
+                _ => panic!("Expected AddVector operation"),
+            };
+            assert_eq!(&table.primary_key(partition_id, primary_id).unwrap(), &pk);
+            assert_eq!(
+                table
+                    .columns
+                    .get(&"f".into())
+                    .unwrap()
+                    .get(primary_id, &table.primary_keys),
+                Some(filtering.clone())
+            );
+
+            // remove the vector with timestamp in the past - should not remove the filtering value
+            _ = table
+                .delete(&index_key, pk.clone(), Timestamp::from_millis(3))
+                .unwrap();
+            assert_eq!(&table.primary_key(partition_id, primary_id).unwrap(), &pk);
+            assert_eq!(
+                table
+                    .columns
+                    .get(&"f".into())
+                    .unwrap()
+                    .get(primary_id, &table.primary_keys),
+                Some(filtering.clone())
+            );
+
+            // remove the vector with timestamp in the future - should remove the filtering value
+            _ = table
+                .delete(&index_key, pk.clone(), Timestamp::from_millis(300))
+                .unwrap();
+            assert!(
+                table
+                    .columns
+                    .get(&"f".into())
+                    .unwrap()
+                    .get(primary_id, &table.primary_keys)
+                    .is_none(),
+            );
+        }
+    }
+
+    #[test]
+    fn upsert_and_delete_unordered() {
+        let vector_orig: Vector = vec![1.0].into();
+        let values = |ts| {
+            NonemptyBox::new([Timestamped::new(
+                Timestamp::from_millis(ts),
+                Some(DbIndexedValue::Vector(vector_orig.clone())),
+            )])
+            .unwrap()
+        };
+
+        for (pk, primary_key_columns, partition_key_columns) in [
+            (
+                PrimaryKey::from([CqlValue::Int(1)]),
+                NonemptyArc::new([ColumnName::from("p")]).unwrap(),
+                None,
+            ),
+            (
+                PrimaryKey::from([CqlValue::Int(1), CqlValue::Int(1)]),
+                NonemptyArc::new([ColumnName::from("p"), ColumnName::from("c")]).unwrap(),
+                Some(NonemptyArc::new([ColumnName::from("p")]).unwrap()),
+            ),
+        ] {
+            dbg!(&primary_key_columns);
+            let index_key = IndexKey::new(&"ks".into(), &"idx".into());
+            let mut table = Table::new(
+                index_key.clone(),
+                primary_key_columns,
+                1,
+                partition_key_columns,
+                NonZeroUsize::new(1).unwrap(),
+                Arc::new([]),
+                Arc::new(
+                    [("p".into(), NativeType::Int), ("c".into(), NativeType::Int)]
+                        .into_iter()
+                        .collect(),
+                ),
+            )
+            .unwrap();
+
+            // delete the vector
+            let operations = table
+                .delete(&index_key, pk.clone(), Timestamp::from_millis(20))
+                .unwrap();
+            assert_eq!(operations.len(), 0);
+
+            // insert the vector with timestamp in the past - should'n update the vector
+            let operations = table.upsert(&index_key, pk.clone(), values(10)).unwrap();
+            assert_eq!(operations.len(), 0);
+
+            // delete the vector in the future
+            let operations = table
+                .delete(&index_key, pk.clone(), Timestamp::from_millis(40))
+                .unwrap();
+            assert_eq!(operations.len(), 0);
+
+            // insert the vector with timestamp in between the two deletes - should'n update the
+            // vector
+            let operations = table.upsert(&index_key, pk.clone(), values(30)).unwrap();
+            assert_eq!(operations.len(), 0);
+
+            // insert the vector with timestamp after the last delete - should update the
+            // vector
+            let operations = table.upsert(&index_key, pk.clone(), values(50)).unwrap();
+            assert_eq!(operations.len(), 1);
+
+            // delete the vector before the last upsert - should not delete the vector
+            let operations = table
+                .delete(&index_key, pk.clone(), Timestamp::from_millis(45))
+                .unwrap();
+            assert_eq!(operations.len(), 0);
+        }
+    }
+
+    #[test]
+    fn split_values_filtering_only_values_vector() {
+        let value = Timestamped::new(
+            Timestamp::from_millis(1),
+            Some(DbIndexedValue::Vector(vec![1.0].into())),
+        );
+        let values = NonemptyBox::new([value]).unwrap();
+        let split = split_values_filtering(values).unwrap();
+        assert_eq!(
+            split.values,
+            Some(SplittingValues::Vector(vec![1.0].into()))
+        );
+        assert_eq!(split.timestamps.len().get(), 1);
+        assert_eq!(
+            split.timestamps.first().timestamp(),
+            Timestamp::from_millis(1)
+        );
+        assert!(split.timestamps.first().is_valid());
+        assert!(split.filtering.is_empty());
+    }
+
+    #[test]
+    fn split_values_filtering_only_values_tombstone() {
+        let value = Timestamped::new(Timestamp::from_millis(2), None);
+        let values = NonemptyBox::new([value]).unwrap();
+        let split = split_values_filtering(values).unwrap();
+        assert!(split.values.is_none());
+        assert_eq!(split.timestamps.len().get(), 1);
+        assert_eq!(
+            split.timestamps.first().timestamp(),
+            Timestamp::from_millis(2)
+        );
+        assert!(split.timestamps.first().is_tombstone());
+        assert!(split.filtering.is_empty());
+    }
+
+    #[test]
+    fn split_values_filtering_values_and_filtering() {
+        let value = Timestamped::new(
+            Timestamp::from_millis(3),
+            Some(DbIndexedValue::Vector(vec![2.0].into())),
+        );
+        let filtering = Timestamped::new(
+            Timestamp::from_millis(4),
+            Some(DbIndexedValue::Filtering(CqlValue::Int(42))),
+        );
+        let values = NonemptyBox::new([value, filtering]).unwrap();
+        let split = split_values_filtering(values).unwrap();
+        assert_eq!(
+            split.values,
+            Some(SplittingValues::Vector(vec![2.0].into()))
+        );
+        assert_eq!(split.timestamps.len().get(), 1);
+        assert_eq!(
+            split.timestamps.first().timestamp(),
+            Timestamp::from_millis(3)
+        );
+        assert!(split.timestamps.first().is_valid());
+        assert_eq!(split.filtering.len(), 1);
+        assert_eq!(
+            split.filtering.first().unwrap(),
+            &(Timestamp::from_millis(4), Some(CqlValue::Int(42)))
+        );
+    }
+
+    #[test]
+    fn split_values_filtering_errors() {
+        // Filtering in the values place is not allowed
+        let value = Timestamped::new(
+            Timestamp::from_millis(5),
+            Some(DbIndexedValue::Filtering(CqlValue::Int(1))),
+        );
+        let values = NonemptyBox::new([value]).unwrap();
+        assert!(split_values_filtering(values).is_err());
+
+        // Vector in the filtering place is not allowed
+        let value1 = Timestamped::new(
+            Timestamp::from_millis(5),
+            Some(DbIndexedValue::Vector(vec![1.0].into())),
+        );
+        let value2 = Timestamped::new(
+            Timestamp::from_millis(5),
+            Some(DbIndexedValue::Vector(vec![2.0].into())),
+        );
+        let values = NonemptyBox::new([value1, value2]).unwrap();
+        assert!(split_values_filtering(values).is_err());
+
+        // Document in the filtering place is not allowed
+        let value1 = Timestamped::new(
+            Timestamp::from_millis(5),
+            Some(DbIndexedValue::Document("doc1".to_string())),
+        );
+        let value2 = Timestamped::new(
+            Timestamp::from_millis(5),
+            Some(DbIndexedValue::Document("doc2".to_string())),
+        );
+        let values = NonemptyBox::new([value1, value2]).unwrap();
+        assert!(split_values_filtering(values).is_err());
     }
 
     #[test]
