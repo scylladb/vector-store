@@ -17,6 +17,7 @@ use crate::SpaceType;
 use crate::distance;
 use crate::engine::Engine;
 use crate::engine::EngineExt;
+use crate::fts_index::FtsIndex;
 use crate::fts_index::FtsIndexExt;
 use crate::indexes;
 use crate::indexes::Indexes;
@@ -29,7 +30,8 @@ use crate::node_state::NodeStateExt;
 use crate::perf;
 use crate::vector;
 use crate::vs_index;
-use crate::vs_index::VsIndexExt;
+use crate::vs_index::VsIndexSearch;
+use crate::vs_index::VsIndexSearchExt;
 use anyhow::anyhow;
 use anyhow::bail;
 use axum::Router;
@@ -407,8 +409,8 @@ async fn get_index_status(
     let index_key = IndexKey::new(&keyspace_name, &index_name);
 
     enum IndexSender {
-        Vs(Sender<crate::vs_index::VsIndex>),
-        Fts(Sender<crate::fts_index::FtsIndex>),
+        Vs(Sender<VsIndexSearch>),
+        Fts(Sender<FtsIndex>),
     }
 
     let (index, status, progress) = {

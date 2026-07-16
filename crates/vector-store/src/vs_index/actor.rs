@@ -2,6 +2,7 @@
  * Copyright 2025-present ScyllaDB
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
+
 use crate::AsyncInProgress;
 use crate::Distance;
 use crate::Filter;
@@ -17,7 +18,7 @@ use tokio::sync::oneshot;
 pub(crate) type AnnR = anyhow::Result<(Vec<PrimaryKey>, Vec<Distance>)>;
 pub(crate) type CountR = anyhow::Result<usize>;
 
-pub enum VsIndex {
+pub enum VsIndexModify {
     AddVector {
         partition_id: PartitionId,
         primary_id: PrimaryId,
@@ -32,6 +33,9 @@ pub enum VsIndex {
     RemovePartition {
         partition_id: PartitionId,
     },
+}
+
+pub enum VsIndexSearch {
     Ann {
         index_key: IndexKey,
         embedding: Vector,
@@ -51,7 +55,12 @@ pub enum VsIndex {
     },
 }
 
-pub(crate) trait VsIndexExt {
+pub(super) enum Message {
+    Modify(VsIndexModify),
+    Search(VsIndexSearch),
+}
+
+pub(crate) trait VsIndexModifyExt {
     async fn add_vector(
         &self,
         partition_id: PartitionId,
@@ -66,6 +75,9 @@ pub(crate) trait VsIndexExt {
         in_progress: AsyncInProgress,
     );
     async fn remove_partition(&self, partition_id: PartitionId);
+}
+
+pub(crate) trait VsIndexSearchExt {
     async fn ann(&self, index_key: IndexKey, embedding: Vector, limit: Limit) -> AnnR;
     async fn filtered_ann(
         &self,
@@ -77,7 +89,7 @@ pub(crate) trait VsIndexExt {
     async fn count(&self, index_key: IndexKey) -> CountR;
 }
 
-impl VsIndexExt for mpsc::Sender<VsIndex> {
+impl VsIndexModifyExt for mpsc::Sender<VsIndexModify> {
     #[hotpath::measure]
     async fn add_vector(
         &self,
@@ -86,7 +98,7 @@ impl VsIndexExt for mpsc::Sender<VsIndex> {
         embedding: Vector,
         in_progress: AsyncInProgress,
     ) {
-        self.send(VsIndex::AddVector {
+        self.send(VsIndexModify::AddVector {
             partition_id,
             primary_id,
             embedding,
@@ -103,7 +115,7 @@ impl VsIndexExt for mpsc::Sender<VsIndex> {
         primary_id: PrimaryId,
         in_progress: AsyncInProgress,
     ) {
-        self.send(VsIndex::RemoveVector {
+        self.send(VsIndexModify::RemoveVector {
             partition_id,
             primary_id,
             in_progress,
@@ -114,15 +126,17 @@ impl VsIndexExt for mpsc::Sender<VsIndex> {
 
     #[hotpath::measure]
     async fn remove_partition(&self, partition_id: PartitionId) {
-        self.send(VsIndex::RemovePartition { partition_id })
+        self.send(VsIndexModify::RemovePartition { partition_id })
             .await
             .expect("internal actor should receive request");
     }
+}
 
+impl VsIndexSearchExt for mpsc::Sender<VsIndexSearch> {
     #[hotpath::measure]
     async fn ann(&self, index_key: IndexKey, embedding: Vector, limit: Limit) -> AnnR {
         let (tx, rx) = oneshot::channel();
-        self.send(VsIndex::Ann {
+        self.send(VsIndexSearch::Ann {
             index_key,
             embedding,
             limit,
@@ -141,7 +155,7 @@ impl VsIndexExt for mpsc::Sender<VsIndex> {
         limit: Limit,
     ) -> AnnR {
         let (tx, rx) = oneshot::channel();
-        self.send(VsIndex::FilteredAnn {
+        self.send(VsIndexSearch::FilteredAnn {
             index_key,
             embedding,
             filter,
@@ -155,7 +169,7 @@ impl VsIndexExt for mpsc::Sender<VsIndex> {
     #[hotpath::measure]
     async fn count(&self, index_key: IndexKey) -> CountR {
         let (tx, rx) = oneshot::channel();
-        self.send(VsIndex::Count { index_key, tx }).await?;
+        self.send(VsIndexSearch::Count { index_key, tx }).await?;
         rx.await?
     }
 }

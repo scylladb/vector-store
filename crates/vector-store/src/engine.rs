@@ -22,9 +22,9 @@ use crate::node_state::NodeState;
 use crate::node_state::NodeStateExt;
 use crate::perf;
 use crate::table::Table;
-use crate::vs_index::VsIndex;
 use crate::vs_index::VsIndexConfiguration;
 use crate::vs_index::VsIndexFactory;
+use crate::vs_index::VsIndexSearch;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Duration;
@@ -40,7 +40,7 @@ use tracing::info;
 use tracing::trace;
 
 type AddIndexR = anyhow::Result<()>;
-type GetVsIndexR = Option<(mpsc::Sender<VsIndex>, mpsc::Sender<DbIndex>)>;
+type GetVsIndexR = Option<(mpsc::Sender<VsIndexSearch>, mpsc::Sender<DbIndex>)>;
 type GetFtsIndexR = Option<(mpsc::Sender<FtsIndex>, mpsc::Sender<DbIndex>)>;
 
 #[allow(clippy::enum_variant_names)]
@@ -275,7 +275,7 @@ async fn add_index_vs(ctx: AddIndexContext<'_>) -> anyhow::Result<()> {
         .metadata
         .vs()
         .ok_or_else(|| anyhow::anyhow!("add_index_vs must be called with a vector-search index"))?;
-    let vs_sender = ctx.index_factories.vs.create_index(
+    let (vs_modify, vs_search) = ctx.index_factories.vs.create_index(
         VsIndexConfiguration {
             key: ctx.key.clone(),
             dimensions: options.dimensions,
@@ -292,13 +292,13 @@ async fn add_index_vs(ctx: AddIndexContext<'_>) -> anyhow::Result<()> {
         ctx.key.clone(),
         ctx.table,
         ctx.embeddings_stream,
-        vs_sender.clone(),
+        vs_modify,
         ctx.metrics,
     )
     .await?;
 
     let entry =
-        crate::indexes::VsIndexEntry::new(vs_sender, monitor_actor, ctx.db_index, ctx.metadata)
+        crate::indexes::VsIndexEntry::new(vs_search, monitor_actor, ctx.db_index, ctx.metadata)
             .await?;
     ctx.indexes.write().unwrap().insert_vs(ctx.key, entry);
     Ok(())

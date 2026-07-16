@@ -21,10 +21,13 @@ use crate::perf;
 use crate::table::IndexId;
 use crate::table::Table;
 use crate::table::TableSearch;
-use crate::vs_index::actor::AnnR;
-use crate::vs_index::actor::CountR;
-use crate::vs_index::actor::VsIndex;
-use crate::vs_index::factory::VsIndexConfiguration;
+use crate::vs_index;
+use crate::vs_index::AnnR;
+use crate::vs_index::CountR;
+use crate::vs_index::Message;
+use crate::vs_index::VsIndexConfiguration;
+use crate::vs_index::VsIndexModify;
+use crate::vs_index::VsIndexSearch;
 use crate::vs_index::validator;
 use crate::worker::Worker;
 use anyhow::Context;
@@ -76,7 +79,7 @@ impl VsIndexFactory for DiskannIndexFactory {
         &self,
         index: VsIndexConfiguration,
         table: Arc<RwLock<Table>>,
-    ) -> anyhow::Result<mpsc::Sender<VsIndex>> {
+    ) -> anyhow::Result<(mpsc::Sender<VsIndexModify>, mpsc::Sender<VsIndexSearch>)> {
         let params = DiskannParams::new(&index, self.alpha, MAX_POINTS)
             .context("failed to create DiskANN parameters")?;
 
@@ -109,8 +112,9 @@ fn new(
     memory: mpsc::Sender<Memory>,
     table: Arc<RwLock<impl TableSearch + Send + Sync + 'static>>,
     params: DiskannParams,
-) -> anyhow::Result<mpsc::Sender<VsIndex>> {
-    let (tx, mut rx) = mpsc::channel(perf::channel_size().into());
+) -> anyhow::Result<(mpsc::Sender<VsIndexModify>, mpsc::Sender<VsIndexSearch>)> {
+    let (tx_modify, mut rx_modify) = mpsc::channel(perf::channel_size().into());
+    let (tx_search, mut rx_search) = mpsc::channel(perf::channel_size().into());
 
     let span_key = index_key.clone();
 
@@ -124,48 +128,48 @@ fn new(
                 let mut allocate_prev = Allocate::Can;
                 let allocate_rx = memory.subscribe_allocate().await;
 
-                while let Some(msg) = rx.recv().await {
+                while let Some(msg) = vs_index::recv(&mut rx_search, &mut rx_modify).await {
                     if !check_memory_allocation(&msg, &allocate_rx, &mut allocate_prev, &index_key)
                     {
                         continue;
                     }
 
                     match msg {
-                        VsIndex::AddVector {
+                        Message::Modify(VsIndexModify::AddVector {
                             partition_id,
                             primary_id,
                             embedding,
                             in_progress: _in_progress,
-                        } => {
+                        }) => {
                             state.add_vector(partition_id, primary_id, embedding).await;
                         }
-                        VsIndex::RemoveVector {
+                        Message::Modify(VsIndexModify::RemoveVector {
                             partition_id,
                             primary_id,
                             in_progress: _in_progress,
-                        } => {
+                        }) => {
                             state.remove_vector(partition_id, primary_id).await;
                         }
-                        VsIndex::RemovePartition { partition_id } => {
+                        Message::Modify(VsIndexModify::RemovePartition { partition_id }) => {
                             state.remove_partition(partition_id);
                         }
-                        VsIndex::Ann {
+                        Message::Search(VsIndexSearch::Ann {
                             index_key,
                             embedding,
                             limit,
                             tx,
-                        } => {
+                        }) => {
                             if let Some(tx) = validate_dimensions(tx, &embedding, state.params.dim)
                             {
                                 _ = tx.send(state.ann(index_key, embedding, limit).await);
                             }
                         }
-                        VsIndex::FilteredAnn { tx, .. } => {
+                        Message::Search(VsIndexSearch::FilteredAnn { tx, .. }) => {
                             _ = tx.send(Err(anyhow::anyhow!(
                                 "DiskANN index does not support filtered search"
                             )));
                         }
-                        VsIndex::Count { index_key, tx } => {
+                        Message::Search(VsIndexSearch::Count { index_key, tx }) => {
                             _ = tx.send(state.count(&index_key));
                         }
                     }
@@ -177,7 +181,7 @@ fn new(
         .instrument(debug_span!("diskann", "{span_key}")),
     ));
 
-    Ok(tx)
+    Ok((tx_modify, tx_search))
 }
 
 fn create_diskann_index(
@@ -411,12 +415,12 @@ fn validate_dimensions(
 
 #[hotpath::measure]
 fn check_memory_allocation(
-    msg: &VsIndex,
+    msg: &Message,
     rx_allocate: &watch::Receiver<Allocate>,
     allocate_prev: &mut Allocate,
     key: &IndexKey,
 ) -> bool {
-    if !matches!(msg, VsIndex::AddVector { .. }) {
+    if !matches!(msg, Message::Modify(VsIndexModify::AddVector { .. })) {
         return true;
     }
 
