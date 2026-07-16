@@ -157,6 +157,23 @@ impl std::fmt::Display for TableIdentifier {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub struct PositiveFiniteF32(f32);
+
+impl PositiveFiniteF32 {
+    pub fn new(value: f32) -> Option<Self> {
+        if value.is_finite() && value > 0.0 {
+            Some(Self(value))
+        } else {
+            None
+        }
+    }
+
+    pub fn get(self) -> f32 {
+        self.0
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub vector_store_addr: std::net::SocketAddr,
@@ -167,6 +184,8 @@ pub struct Config {
     pub opensearch_addr: Option<String>,
     pub credentials: Option<Credentials>,
     pub usearch_simulator: Option<Vec<Duration>>,
+    pub diskann_index_path: Option<std::path::PathBuf>,
+    pub diskann_alpha: Option<PositiveFiniteF32>,
     pub alter_index_simulator: bool,
     pub fulltext_indexes: bool,
     pub cql_connection_timeout: Option<Duration>,
@@ -198,6 +217,8 @@ impl Default for Config {
             opensearch_addr: None,
             credentials: None,
             usearch_simulator: None,
+            diskann_index_path: None,
+            diskann_alpha: None,
             alter_index_simulator: false,
             fulltext_indexes: true,
             disable_colors: false,
@@ -765,6 +786,12 @@ pub fn new_index_factory_opensearch(
     Ok(Box::new(vs_index::opensearch::new_opensearch(
         &addr, config_rx,
     )?))
+}
+
+pub fn new_index_factory_diskann(
+    config_rx: watch::Receiver<Arc<Config>>,
+) -> anyhow::Result<Box<dyn VsIndexFactory + Send + Sync>> {
+    Ok(Box::new(vs_index::diskann::new_diskann(config_rx)?))
 }
 
 pub fn openapi() -> OpenApi {

@@ -5,6 +5,7 @@
 
 use crate::Config;
 use crate::Credentials;
+use crate::PositiveFiniteF32;
 use crate::file_monitor::TlsFilesMonitor;
 use crate::tls;
 use crate::tls::TlsServerConfig;
@@ -14,6 +15,7 @@ use itertools::Itertools;
 use secrecy::ExposeSecret;
 use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
@@ -435,6 +437,39 @@ pub async fn load_config(env: impl Fn(&str) -> anyhow::Result<String>) -> anyhow
         .map(|v| v.split(':').map(|s| s.parse::<humantime::Duration>()).map_ok(|v| v.into()).collect::<Result<Vec<_>, _>>().map_err(|err| {
             anyhow!("Unable to parse VECTOR_STORE_USEARCH_SIMULATOR env (search_us:add_us:delete_us:...): {err}")
         })).transpose()?;
+
+    if let Ok(raw_diskann_index_path) = env("VECTOR_STORE_DISKANN_INDEX_PATH") {
+        let raw_diskann_index_path = raw_diskann_index_path.trim();
+        if !raw_diskann_index_path.is_empty() {
+            let diskann_index_path = PathBuf::from(raw_diskann_index_path);
+            if !diskann_index_path.exists() {
+                bail!(
+                    "DiskANN index path specified in VECTOR_STORE_DISKANN_INDEX_PATH does not exist: {:?}",
+                    diskann_index_path
+                );
+            }
+            if !diskann_index_path.is_dir() {
+                bail!(
+                    "DiskANN index path specified in VECTOR_STORE_DISKANN_INDEX_PATH is not a directory: {:?}",
+                    diskann_index_path
+                );
+            }
+            config.diskann_index_path = Some(diskann_index_path);
+        }
+    }
+
+    if let Ok(diskann_alpha) = env("VECTOR_STORE_DISKANN_ALPHA") {
+        let alpha = diskann_alpha
+            .trim()
+            .parse::<f32>()
+            .map_err(|_| anyhow!("Unable to parse VECTOR_STORE_DISKANN_ALPHA env (float)"))?;
+        if !alpha.is_finite() || alpha <= 0.0 {
+            anyhow::bail!(
+                "VECTOR_STORE_DISKANN_ALPHA must be a finite positive float; got {alpha}"
+            );
+        }
+        config.diskann_alpha = Some(PositiveFiniteF32::new(alpha).unwrap());
+    }
 
     config.alter_index_simulator = env("VECTOR_STORE_ALTER_INDEX_SIMULATOR")
         .unwrap_or("false".into())

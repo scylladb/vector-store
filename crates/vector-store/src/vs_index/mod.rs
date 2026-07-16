@@ -11,7 +11,6 @@ pub(crate) use actor::VsIndex;
 pub(crate) use actor::VsIndexExt;
 pub(crate) use validator::Error;
 
-#[allow(dead_code)]
 pub(crate) mod diskann;
 pub(crate) mod opensearch;
 pub(crate) mod usearch;
