@@ -1156,7 +1156,7 @@ where
             })
         })
         .collect_vec();
-    stream::iter(tasks.into_iter())
+    stream::iter(tasks)
         .then(|task| async move { task.await.unwrap() })
         .fold(Duration::ZERO, |acc, x| async move { acc + x })
         .await
