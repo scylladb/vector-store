@@ -5,6 +5,8 @@
 
 use crate::Config;
 use crate::Dimensions;
+use crate::IndexKey;
+use crate::PositiveFiniteF32;
 use crate::SpaceType;
 use crate::VsIndexFactory;
 use crate::memory::Memory;
@@ -16,10 +18,13 @@ use anyhow::Context;
 use diskann::graph::Config as DiskannConfig;
 use diskann::graph::config::Builder;
 use diskann::graph::config::MaxDegree;
+use diskann::graph::config::defaults::ALPHA as DISKANN_DEFAULT_ALPHA;
 use diskann::utils::ONE;
 use diskann_providers::model::configuration::IndexConfiguration;
 use diskann_vector::distance::Metric;
 use std::num::NonZeroUsize;
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::RwLock;
 use tokio::sync::mpsc;
@@ -31,7 +36,12 @@ use tracing::warn;
 
 const NUM_THREADS: usize = 1;
 
-pub struct DiskannIndexFactory;
+pub struct DiskannIndexFactory {
+    diskann_index_path: PathBuf,
+    #[allow(dead_code)]
+    // alpha is wired into the DiskANN config, but events are not implemented yet
+    alpha: PositiveFiniteF32,
+}
 
 impl VsIndexFactory for DiskannIndexFactory {
     fn create_index(
@@ -40,7 +50,7 @@ impl VsIndexFactory for DiskannIndexFactory {
         _table: Arc<RwLock<Table>>,
         _memory: mpsc::Sender<Memory>,
     ) -> anyhow::Result<mpsc::Sender<VsIndex>> {
-        new(index.key)
+        new(index.key, &self.diskann_index_path)
     }
 
     fn index_engine_version(&self) -> String {
@@ -49,18 +59,47 @@ impl VsIndexFactory for DiskannIndexFactory {
 }
 
 pub fn new_diskann(
-    _config_rx: watch::Receiver<Arc<Config>>,
+    mut config_rx: watch::Receiver<Arc<Config>>,
 ) -> anyhow::Result<DiskannIndexFactory> {
-    Ok(DiskannIndexFactory)
+    let config = config_rx.borrow_and_update();
+
+    let diskann_index_path = config
+        .diskann_index_path
+        .clone()
+        .ok_or(anyhow::anyhow!("DiskANN index path should be set"))?;
+
+    Ok(DiskannIndexFactory {
+        diskann_index_path,
+        alpha: config
+            .diskann_alpha
+            .unwrap_or(PositiveFiniteF32::new(DISKANN_DEFAULT_ALPHA).unwrap()),
+    })
 }
 
-fn new(index_key: crate::IndexKey) -> anyhow::Result<mpsc::Sender<VsIndex>> {
+fn new(index_key: IndexKey, diskann_index_path: &Path) -> anyhow::Result<mpsc::Sender<VsIndex>> {
+    let index_dir = diskann_index_path.join(index_key.as_ref());
+
     let (tx, mut rx) = mpsc::channel(perf::channel_size().into());
 
     tokio::spawn(perf::hotpath_async(
         {
             async move {
                 debug!("starting");
+
+                async {
+                    if tokio::fs::try_exists(&index_dir).await.unwrap_or(false) {
+                        let mut dir = tokio::fs::read_dir(&index_dir).await?;
+                        if dir.next_entry().await?.is_some() {
+                            anyhow::bail!("DiskANN index directory is non-empty: {index_dir:?}");
+                        }
+                    }
+
+                    tokio::fs::create_dir_all(&index_dir)
+                        .await
+                        .context("failed to create DiskANN index directory")
+                }
+                .await
+                .unwrap_or_else(|e| warn!("Failed to initialize DiskANN index directory: {:?}", e));
 
                 while let Some(msg) = rx.recv().await {
                     match msg {
