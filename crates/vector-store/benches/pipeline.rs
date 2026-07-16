@@ -143,7 +143,12 @@ fn default_index_metadata(
 
 async fn default_config() -> Arc<Config> {
     fn env(key: &str) -> anyhow::Result<String> {
-        Ok(dotenvy::var(key)?)
+        Ok(match key {
+            "VECTOR_STORE_USEARCH_SIMULATOR" => {
+                dotenvy::var(key).unwrap_or("1us:1us:1us".to_string())
+            }
+            _ => dotenvy::var(key)?,
+        })
     }
     Arc::new(vector_store::load_config(env).await.unwrap())
 }
