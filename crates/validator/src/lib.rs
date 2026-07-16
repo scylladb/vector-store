@@ -7,6 +7,7 @@ mod alternator;
 mod ann;
 mod auth;
 mod cdc;
+mod coexisting_indexes;
 mod common;
 mod connection_timeout;
 mod crud;
