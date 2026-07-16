@@ -101,10 +101,7 @@ pub(crate) async fn dimension(path: Arc<PathBuf>, config: Arc<Config>) -> usize 
     .await
     .unwrap()
     .pipe(|builder| {
-        let mask = ProjectionMask::columns(
-            builder.parquet_schema(),
-            [&*config.embedding_column].into_iter(),
-        );
+        let mask = ProjectionMask::columns(builder.parquet_schema(), [&*config.embedding_column]);
         builder.with_projection(mask)
     })
     .build()
@@ -184,7 +181,7 @@ pub(crate) async fn ids_stream(path: Arc<PathBuf>, config: Arc<Config>) -> BoxSt
                         .pipe(|builder| {
                             let mask = ProjectionMask::columns(
                                 builder.parquet_schema(),
-                                [&*config.id_column].into_iter(),
+                                [&*config.id_column],
                             );
                             builder.with_projection(mask)
                         })
@@ -225,7 +222,7 @@ pub(crate) async fn vector_stream(
                         .pipe(|builder| {
                             let mask = ProjectionMask::columns(
                                 builder.parquet_schema(),
-                                [&*config.id_column, &*config.embedding_column].into_iter(),
+                                [&*config.id_column, &*config.embedding_column],
                             );
                             builder.with_projection(mask)
                         })
@@ -292,7 +289,7 @@ pub(crate) async fn queries(
     .pipe(|builder| {
         let mask = ProjectionMask::columns(
             builder.parquet_schema(),
-            [&*config.id_column, &*config.embedding_column].into_iter(),
+            [&*config.id_column, &*config.embedding_column],
         );
         builder.with_projection(mask)
     })
@@ -340,7 +337,7 @@ pub(crate) async fn queries(
     .pipe(|builder| {
         let mask = ProjectionMask::columns(
             builder.parquet_schema(),
-            [&*config.id_column, &*config.neighbors_id_column].into_iter(),
+            [&*config.id_column, &*config.neighbors_id_column],
         );
         builder.with_projection(mask)
     })

@@ -175,10 +175,7 @@ async fn read_buckets(path: &Path) -> BTreeMap<i64, u8> {
     };
     let mut buckets_reader = BufReader::new(file);
     let mut buckets = BTreeMap::new();
-    loop {
-        let Ok(id) = buckets_reader.read_i64().await else {
-            break;
-        };
+    while let Ok(id) = buckets_reader.read_i64().await {
         let Ok(bucket) = buckets_reader.read_u8().await else {
             break;
         };
