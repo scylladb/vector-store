@@ -7,7 +7,9 @@ use crate::Config;
 use crate::Dimensions;
 use crate::IndexKey;
 use crate::PositiveFiniteF32;
+use crate::PrimaryId;
 use crate::SpaceType;
+use crate::Vector;
 use crate::VsIndexFactory;
 use crate::memory::Memory;
 use crate::perf;
@@ -32,9 +34,12 @@ use tokio::sync::watch;
 use tracing::Instrument;
 use tracing::debug;
 use tracing::debug_span;
+use tracing::error;
 use tracing::warn;
 
 const NUM_THREADS: usize = 1;
+const BUILD_DATASET_POINTS: usize = 1024;
+const MAX_POINTS: NonZeroUsize = NonZeroUsize::new(1_000_000).unwrap();
 
 pub struct DiskannIndexFactory {
     diskann_index_path: PathBuf,
@@ -50,7 +55,9 @@ impl VsIndexFactory for DiskannIndexFactory {
         _table: Arc<RwLock<Table>>,
         _memory: mpsc::Sender<Memory>,
     ) -> anyhow::Result<mpsc::Sender<VsIndex>> {
-        new(index.key, &self.diskann_index_path)
+        let params = DiskannParams::try_from((&index, self.alpha, MAX_POINTS))?;
+
+        new(params, index.key, &self.diskann_index_path)
     }
 
     fn index_engine_version(&self) -> String {
@@ -76,7 +83,11 @@ pub fn new_diskann(
     })
 }
 
-fn new(index_key: IndexKey, diskann_index_path: &Path) -> anyhow::Result<mpsc::Sender<VsIndex>> {
+fn new(
+    params: DiskannParams,
+    index_key: IndexKey,
+    diskann_index_path: &Path,
+) -> anyhow::Result<mpsc::Sender<VsIndex>> {
     let index_dir = diskann_index_path.join(index_key.as_ref());
 
     let (tx, mut rx) = mpsc::channel(perf::channel_size().into());
@@ -85,7 +96,6 @@ fn new(index_key: IndexKey, diskann_index_path: &Path) -> anyhow::Result<mpsc::S
         {
             async move {
                 debug!("starting");
-
                 async {
                     if tokio::fs::try_exists(&index_dir).await.unwrap_or(false) {
                         let mut dir = tokio::fs::read_dir(&index_dir).await?;
@@ -101,22 +111,10 @@ fn new(index_key: IndexKey, diskann_index_path: &Path) -> anyhow::Result<mpsc::S
                 .await
                 .unwrap_or_else(|e| warn!("Failed to initialize DiskANN index directory: {:?}", e));
 
+                let mut state = DiskannState::Collecting(Collector::new(params));
+
                 while let Some(msg) = rx.recv().await {
-                    match msg {
-                        VsIndex::AddVector { .. }
-                        | VsIndex::RemoveVector { .. }
-                        | VsIndex::RemovePartition { .. } => {
-                            warn!("not implemented yet");
-                        }
-                        VsIndex::Ann { tx, .. } | VsIndex::FilteredAnn { tx, .. } => {
-                            _ = tx
-                                .send(Err(anyhow::anyhow!("DiskANN index is not implemented yet")));
-                        }
-                        VsIndex::Count { tx, .. } => {
-                            _ = tx
-                                .send(Err(anyhow::anyhow!("DiskANN index is not implemented yet")));
-                        }
-                    }
+                    process_message(&mut state, msg).await;
                 }
 
                 debug!("finished");
@@ -126,6 +124,124 @@ fn new(index_key: IndexKey, diskann_index_path: &Path) -> anyhow::Result<mpsc::S
     ));
 
     Ok(tx)
+}
+
+struct Collector {
+    params: DiskannParams,
+    vectors: Vec<(PrimaryId, Vector)>,
+}
+
+impl Collector {
+    fn new(params: DiskannParams) -> Self {
+        Self {
+            params,
+            vectors: Vec::with_capacity(BUILD_DATASET_POINTS),
+        }
+    }
+}
+
+/// State machine for the DiskANN index lifecycle.
+/// It is needed because creating a DiskANN index requires a dataset of vectors which are taken from the initial full scan.
+///
+/// - `Collecting`: Accumulates vectors until the dataset threshold is reached, then triggers a build.
+/// - `Serving`: The index has been built successfully and is ready to handle queries.
+/// - `Fail`: An unrecoverable error occurred; all subsequent requests will receive this error.
+enum DiskannState {
+    Collecting(Collector),
+    Serving,
+    Fail(String),
+}
+
+async fn process_message(state: &mut DiskannState, msg: VsIndex) {
+    let new_state = match std::mem::replace(state, DiskannState::Serving) {
+        DiskannState::Collecting(collector) => process_collecting(msg, collector).await,
+        DiskannState::Serving => {
+            process_serving(msg);
+            DiskannState::Serving
+        }
+        DiskannState::Fail(err) => {
+            process_fail(&err, msg);
+            DiskannState::Fail(err)
+        }
+    };
+    *state = new_state;
+}
+
+async fn process_collecting(msg: VsIndex, collector: Collector) -> DiskannState {
+    let mut collector = collector;
+    match msg {
+        VsIndex::AddVector {
+            primary_id,
+            embedding,
+            in_progress: _in_progress,
+            ..
+        } => {
+            if embedding.dim() != Some(collector.params.dim) {
+                let err = format!(
+                    "DiskANN collector vector dimensions mismatch: expected {}, got {}",
+                    usize::from(collector.params.dim.0),
+                    embedding.len()
+                );
+                error!("{err}");
+                return DiskannState::Fail(err);
+            }
+
+            collector.vectors.push((primary_id, embedding));
+            if collector.vectors.len() == BUILD_DATASET_POINTS {
+                warn!("Not implemented yet");
+            }
+        }
+        VsIndex::RemoveVector { .. } | VsIndex::RemovePartition { .. } => {
+            warn!("not implemented yet");
+        }
+        VsIndex::Ann { tx, .. } | VsIndex::FilteredAnn { tx, .. } => {
+            _ = tx.send(Err(anyhow::anyhow!(
+                "DiskANN index still collecting vectors ({}/{})",
+                collector.vectors.len(),
+                BUILD_DATASET_POINTS
+            )));
+        }
+        VsIndex::Count { tx, .. } => {
+            _ = tx.send(Err(anyhow::anyhow!(
+                "DiskANN index still collecting vectors ({}/{})",
+                collector.vectors.len(),
+                BUILD_DATASET_POINTS
+            )));
+        }
+    }
+
+    DiskannState::Collecting(collector)
+}
+fn process_serving(msg: VsIndex) {
+    match msg {
+        VsIndex::AddVector { .. }
+        | VsIndex::RemoveVector { .. }
+        | VsIndex::RemovePartition { .. } => {
+            warn!("not implemented yet");
+        }
+        VsIndex::Ann { tx, .. } | VsIndex::FilteredAnn { tx, .. } => {
+            _ = tx.send(Err(anyhow::anyhow!("DiskANN index is not implemented yet")));
+        }
+        VsIndex::Count { tx, .. } => {
+            _ = tx.send(Err(anyhow::anyhow!("DiskANN index is not implemented yet")));
+        }
+    }
+}
+
+fn process_fail(err: &str, msg: VsIndex) {
+    match msg {
+        VsIndex::Ann { tx, .. } | VsIndex::FilteredAnn { tx, .. } => {
+            _ = tx.send(Err(anyhow::anyhow!("{err}")));
+        }
+        VsIndex::Count { tx, .. } => {
+            _ = tx.send(Err(anyhow::anyhow!("{err}")));
+        }
+        VsIndex::AddVector { .. }
+        | VsIndex::RemoveVector { .. }
+        | VsIndex::RemovePartition { .. } => {
+            warn!("DiskANN index failed: {err}");
+        }
+    }
 }
 
 #[derive(Clone)]
