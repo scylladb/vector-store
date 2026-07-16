@@ -54,6 +54,7 @@ const BUILD_DATASET_POINTS: usize = 1_000;
 const BUILD_MEMORY_LIMIT_GB: f64 = 2.0;
 const MAX_POINTS: NonZeroUsize = NonZeroUsize::new(1_000_000).unwrap();
 
+#[derive(Debug)]
 pub struct DiskannIndexFactory {
     diskann_index_path: PathBuf,
     #[allow(dead_code)]
@@ -469,7 +470,16 @@ mod tests {
     use crate::IndexName;
     use crate::KeyspaceName;
     use crate::Quantization;
+    use crate::vs_index::VsIndexExt;
+    use diskann_providers::storage::get_compressed_pq_file;
+    use diskann_providers::storage::get_disk_index_file;
+    use diskann_providers::storage::get_pq_pivot_file;
     use std::num::NonZeroUsize;
+    use std::path::Path;
+    use tempfile::tempdir;
+    use tokio::task;
+    use tokio::time;
+    use tokio::time::Duration;
 
     const MAX_POINTS: NonZeroUsize = NonZeroUsize::new(1_000_000).unwrap();
 
@@ -486,6 +496,29 @@ mod tests {
             space_type: SpaceType::Euclidean,
             quantization: Quantization::F32,
         }
+    }
+
+    fn setup_collecting_actor() -> (mpsc::Sender<VsIndex>, IndexKey, tempfile::TempDir) {
+        let tmp_dir = tempdir().unwrap();
+        let cfg = test_index();
+        let index_key = cfg.key.clone();
+        let params = DiskannParams::try_from((
+            &cfg,
+            PositiveFiniteF32::new(DISKANN_DEFAULT_ALPHA).unwrap(),
+            MAX_POINTS,
+        ))
+        .unwrap();
+
+        let actor = new(params, index_key.clone(), tmp_dir.path()).unwrap();
+
+        (actor, index_key, tmp_dir)
+    }
+
+    fn collecting_error_message(collected: usize) -> String {
+        format!(
+            "DiskANN index still collecting vectors ({collected}/{})",
+            BUILD_DATASET_POINTS
+        )
     }
 
     #[test]
@@ -516,5 +549,109 @@ mod tests {
         assert_eq!(params.l_search_default, NonZeroUsize::new(32).unwrap());
         assert_eq!(params.config.l_build(), NonZeroUsize::new(64).unwrap());
         assert_eq!(params.metric, Metric::L2);
+    }
+
+    #[tokio::test]
+    async fn new_materializes_disk_provider_files() {
+        let (actor, index_key, tmp_dir) = setup_collecting_actor();
+
+        let index_dir = tmp_dir.path().join(index_key.as_ref());
+        let index_prefix = index_dir.join("index");
+        let index_prefix = index_prefix.to_str().unwrap();
+
+        time::timeout(Duration::from_secs(5), async {
+            while !index_dir.exists() {
+                task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        for id in 0..BUILD_DATASET_POINTS {
+            actor
+                .add_vector(
+                    crate::table::PartitionId::global(crate::table::IndexId::from(1)),
+                    PrimaryId::from(id as u64),
+                    vec![id as f32, id as f32 + 1.0, id as f32 + 2.0].into(),
+                    crate::AsyncInProgress::None,
+                )
+                .await;
+        }
+
+        time::timeout(Duration::from_secs(5), async {
+            loop {
+                if Path::new(&get_disk_index_file(index_prefix)).exists()
+                    && Path::new(&get_pq_pivot_file(index_prefix)).exists()
+                    && Path::new(&get_compressed_pq_file(index_prefix)).exists()
+                {
+                    break;
+                }
+                task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn count_fails_while_collecting() {
+        let (actor, index_key, _tmp_dir) = setup_collecting_actor();
+
+        let err = actor.count(index_key).await.unwrap_err();
+        assert_eq!(err.to_string(), collecting_error_message(0));
+    }
+
+    #[tokio::test]
+    async fn dimension_mismatch_transitions_to_fail() {
+        let (actor, index_key, _tmp_dir) = setup_collecting_actor();
+
+        actor
+            .add_vector(
+                crate::table::PartitionId::global(crate::table::IndexId::from(1)),
+                PrimaryId::from(1),
+                vec![1.0, 2.0].into(),
+                crate::AsyncInProgress::None,
+            )
+            .await;
+
+        let err = actor.count(index_key).await.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "DiskANN collector vector dimensions mismatch: expected 3, got 2"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_fails_while_collecting() {
+        let (actor, index_key, _tmp_dir) = setup_collecting_actor();
+
+        let err = actor
+            .ann(
+                index_key,
+                vec![1.0, 2.0, 3.0].into(),
+                NonZeroUsize::new(10).unwrap().into(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), collecting_error_message(0));
+    }
+
+    #[tokio::test]
+    async fn search_filtered_fails_while_collecting() {
+        let (actor, index_key, _tmp_dir) = setup_collecting_actor();
+
+        let err = actor
+            .filtered_ann(
+                index_key,
+                vec![1.0, 2.0, 3.0].into(),
+                crate::Filter {
+                    restrictions: vec![],
+                    allow_filtering: true,
+                },
+                NonZeroUsize::new(10).unwrap().into(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), collecting_error_message(0));
     }
 }
