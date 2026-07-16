@@ -22,8 +22,19 @@ use diskann::graph::config::Builder;
 use diskann::graph::config::MaxDegree;
 use diskann::graph::config::defaults::ALPHA as DISKANN_DEFAULT_ALPHA;
 use diskann::utils::ONE;
+use diskann_disk::DiskIndexBuildParameters;
+use diskann_disk::QuantizationType;
+use diskann_disk::build::builder::build::DiskIndexBuilder;
+use diskann_disk::data_model::AdHoc;
+use diskann_disk::disk_index_build_parameter::DISK_SECTOR_LEN;
+use diskann_disk::disk_index_build_parameter::MemoryBudget;
+use diskann_disk::disk_index_build_parameter::NumPQChunks;
+use diskann_disk::storage::DiskIndexWriter;
 use diskann_providers::model::configuration::IndexConfiguration;
+use diskann_providers::storage::FileStorageProvider;
 use diskann_vector::distance::Metric;
+use std::fs::File;
+use std::io::Write;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::path::PathBuf;
@@ -38,7 +49,9 @@ use tracing::error;
 use tracing::warn;
 
 const NUM_THREADS: usize = 1;
-const BUILD_DATASET_POINTS: usize = 1024;
+const BUILD_PQ_CHUNKS: usize = 1;
+const BUILD_DATASET_POINTS: usize = 1_000;
+const BUILD_MEMORY_LIMIT_GB: f64 = 2.0;
 const MAX_POINTS: NonZeroUsize = NonZeroUsize::new(1_000_000).unwrap();
 
 pub struct DiskannIndexFactory {
@@ -111,7 +124,7 @@ fn new(
                 .await
                 .unwrap_or_else(|e| warn!("Failed to initialize DiskANN index directory: {:?}", e));
 
-                let mut state = DiskannState::Collecting(Collector::new(params));
+                let mut state = DiskannState::Collecting(Collector::new(params, index_dir));
 
                 while let Some(msg) = rx.recv().await {
                     process_message(&mut state, msg).await;
@@ -128,13 +141,15 @@ fn new(
 
 struct Collector {
     params: DiskannParams,
+    index_dir: PathBuf,
     vectors: Vec<(PrimaryId, Vector)>,
 }
 
 impl Collector {
-    fn new(params: DiskannParams) -> Self {
+    fn new(params: DiskannParams, index_dir: PathBuf) -> Self {
         Self {
             params,
+            index_dir,
             vectors: Vec::with_capacity(BUILD_DATASET_POINTS),
         }
     }
@@ -188,7 +203,7 @@ async fn process_collecting(msg: VsIndex, collector: Collector) -> DiskannState 
 
             collector.vectors.push((primary_id, embedding));
             if collector.vectors.len() == BUILD_DATASET_POINTS {
-                warn!("Not implemented yet");
+                return spawn_build(collector).await;
             }
         }
         VsIndex::RemoveVector { .. } | VsIndex::RemovePartition { .. } => {
@@ -212,6 +227,43 @@ async fn process_collecting(msg: VsIndex, collector: Collector) -> DiskannState 
 
     DiskannState::Collecting(collector)
 }
+
+async fn spawn_build(collector: Collector) -> DiskannState {
+    let Collector {
+        params,
+        index_dir,
+        vectors,
+    } = collector;
+
+    let result = tokio::task::spawn_blocking({
+        move || {
+            let build_result = build_disk_index(params, vectors, &index_dir);
+            match build_result {
+                Ok(()) => {
+                    debug!("DiskANN index built from collected vectors");
+                    DiskannState::Serving
+                }
+                Err(err) => {
+                    let err = err.to_string();
+                    error!("DiskANN index build failed: {err}");
+                    if let Err(e) = std::fs::remove_dir_all(&index_dir) {
+                        error!(
+                            "failed to clean up DiskANN index directory after build failure: {e}"
+                        );
+                    }
+                    DiskannState::Fail(err)
+                }
+            }
+        }
+    })
+    .await;
+
+    match result {
+        Ok(next_state) => next_state,
+        Err(err) => DiskannState::Fail(format!("DiskANN index build task panicked: {err}")),
+    }
+}
+
 fn process_serving(msg: VsIndex) {
     match msg {
         VsIndex::AddVector { .. }
@@ -242,6 +294,92 @@ fn process_fail(err: &str, msg: VsIndex) {
             warn!("DiskANN index failed: {err}");
         }
     }
+}
+
+fn build_disk_index(
+    params: DiskannParams,
+    vectors: Vec<(PrimaryId, Vector)>,
+    index_dir: &Path,
+) -> anyhow::Result<()> {
+    let storage_provider = FileStorageProvider;
+
+    // TODO: make these DiskANN build constants configurable./
+    let disk_index_build_parameters = DiskIndexBuildParameters::new(
+        MemoryBudget::try_from_gb(BUILD_MEMORY_LIMIT_GB)
+            .context("failed to create DiskANN build memory budget")?,
+        QuantizationType::default(),
+        NumPQChunks::new_with(BUILD_PQ_CHUNKS, usize::from(params.dim.0))
+            .context("failed to create DiskANN PQ chunk configuration")?,
+    );
+
+    let dataset_path = index_dir.join("dataset.bin");
+    let prefix_path = index_dir.join("index");
+
+    let dataset_file_str = dataset_path
+        .to_str()
+        .ok_or(anyhow::anyhow!(
+            "DiskANN dataset path is not valid UTF-8: {dataset_path:?}"
+        ))?
+        .to_string();
+    let index_path_prefix_str = prefix_path
+        .to_str()
+        .ok_or(anyhow::anyhow!(
+            "DiskANN index prefix path is not valid UTF-8: {prefix_path:?}"
+        ))?
+        .to_string();
+
+    write_dataset(&dataset_path, &params, &vectors)?;
+
+    let index_configuration = IndexConfiguration::from(params);
+
+    let index_writer = DiskIndexWriter::new(
+        dataset_file_str,
+        index_path_prefix_str,
+        None, // No associated data file
+        DISK_SECTOR_LEN,
+    )
+    .context("failed to create a DiskIndexWriter")?;
+
+    let mut builder = DiskIndexBuilder::<'_, AdHoc<f32, u32>, _>::new(
+        &storage_provider,
+        disk_index_build_parameters,
+        index_configuration,
+        index_writer,
+    )
+    .map_err(|e| anyhow::anyhow!("failed to create DiskANN index builder: {}", e))?;
+
+    builder.build().context("failed to build DiskANN index")?;
+
+    Ok(())
+}
+
+fn write_dataset(
+    dataset_path: &Path,
+    params: &DiskannParams,
+    vectors: &[(PrimaryId, Vector)],
+) -> anyhow::Result<()> {
+    let dataset = File::create(dataset_path).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to create DiskANN dataset at {:?}: {}",
+            dataset_path,
+            e
+        )
+    })?;
+    let mut dataset = std::io::BufWriter::new(dataset);
+    let dimensions_u32 = u32::try_from(usize::from(params.dim.0))
+        .context("DiskANN dataset dimensions do not fit in u32")?;
+    let vector_count = u32::try_from(vectors.len()).context("DiskANN dataset is too large")?;
+
+    dataset.write_all(&vector_count.to_le_bytes())?;
+    dataset.write_all(&dimensions_u32.to_le_bytes())?;
+
+    for (_, vector) in vectors {
+        for value in vector.as_slice() {
+            dataset.write_all(&value.to_le_bytes())?;
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Clone)]
