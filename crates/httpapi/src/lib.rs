@@ -151,6 +151,25 @@ pub struct IndexStatusResponse {
     pub count: usize,
 }
 
+#[derive(Debug, PartialEq, serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
+#[serde(tag = "reason", rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum IndexNotReadyReason {
+    NodeBootstrapping,
+    IndexBuilding { message: String },
+}
+
+/// The 503 response shared by the ANN and BM25 search endpoints when the index
+/// is not ready to serve requests.
+#[derive(utoipa::ToResponse)]
+#[response(
+    description = "Service Unavailable. The index is not ready to serve requests. \
+The body is a JSON object with a 'reason' field: \
+'NODE_BOOTSTRAPPING' when the node has not yet finished its startup sequence; \
+'INDEX_BUILDING' (with a 'message' field) when the node is healthy but this index is still being constructed.",
+    content_type = "application/json"
+)]
+pub struct IndexNotReadyResponse(#[allow(dead_code)] IndexNotReadyReason);
+
 #[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
 pub struct InfoResponse {
     /// Information about the underlying search engine.

@@ -9,6 +9,7 @@ use crate::db_basic::DbBasic;
 use crate::db_basic::ScanFn;
 use crate::db_basic::Table;
 use crate::wait_for;
+use httpapi::IndexNotReadyReason;
 use httpapi::IndexStatus;
 use httpclient::HttpClient;
 use reqwest::StatusCode;
@@ -29,8 +30,22 @@ use vector_store::IndexMetadata;
 use vector_store::IndexOptionsFts;
 use vector_store::NonemptyArc;
 use vector_store::NonemptyIteratorExt;
+use vector_store::Percentage;
 use vector_store::Timestamp;
 use vector_store::node_state::NodeState;
+
+fn fts_index_metadata(filtering_columns: impl IntoIterator<Item = ColumnName>) -> IndexMetadata {
+    IndexMetadata {
+        keyspace_name: "fts_ks".into(),
+        table_name: "documents".into(),
+        index_name: "fts_idx".into(),
+        target_columns: NonemptyArc::new(["content"]).unwrap(),
+        partitioning: DbIndexPartitioning::Global,
+        filtering_columns: filtering_columns.into_iter().collect(),
+        version: Uuid::new_v4().into(),
+        kind: IndexKind::Fts(IndexOptionsFts {}),
+    }
+}
 
 async fn setup_fts_store(
     primary_keys: impl IntoIterator<Item = ColumnName>,
@@ -55,16 +70,7 @@ async fn setup_fts_store(
     let (db_actor, db) = db_basic::new(node_state.clone());
 
     let columns: Arc<HashMap<_, _>> = Arc::new(columns.into_iter().collect());
-    let index = IndexMetadata {
-        keyspace_name: "fts_ks".into(),
-        table_name: "documents".into(),
-        index_name: "fts_idx".into(),
-        target_columns: NonemptyArc::new(["content"]).unwrap(),
-        partitioning: DbIndexPartitioning::Global,
-        filtering_columns: columns.keys().cloned().collect(),
-        version: Uuid::new_v4().into(),
-        kind: IndexKind::Fts(IndexOptionsFts {}),
-    };
+    let index = fts_index_metadata(columns.keys().cloned());
 
     db.add_table(
         index.keyspace_name.clone(),
@@ -156,6 +162,7 @@ pub(crate) async fn setup_fts_and_wait(
     HttpClient,
     httpapi::KeyspaceName,
     httpapi::IndexName,
+    DbBasic,
     impl Sized,
 ) {
     let docs: Vec<_> = documents
@@ -199,7 +206,8 @@ pub(crate) async fn setup_fts_and_wait(
         client,
         keyspace_name,
         index_name,
-        (server, config_tx, db, node_state),
+        db,
+        (server, config_tx, node_state),
     )
 }
 
@@ -207,7 +215,7 @@ pub(crate) async fn setup_fts_and_wait(
 async fn fts_bm25_search_returns_matching_docs() {
     crate::enable_tracing();
 
-    let (client, keyspace_name, index_name, _hold) = setup_fts_and_wait(
+    let (client, keyspace_name, index_name, _db, _hold) = setup_fts_and_wait(
         [
             (vec![CqlValue::Int(1)], "the quick brown fox", 10),
             (vec![CqlValue::Int(2)], "lazy dog sleeps all day", 20),
@@ -238,7 +246,7 @@ async fn fts_bm25_search_returns_matching_docs() {
 async fn fts_bm25_search_returns_empty_for_no_match() {
     crate::enable_tracing();
 
-    let (client, keyspace_name, index_name, _hold) =
+    let (client, keyspace_name, index_name, _db, _hold) =
         setup_fts_and_wait([(vec![CqlValue::Int(1)], "hello world", 10)], 1).await;
 
     let (primary_keys, scores) = client
@@ -258,7 +266,7 @@ async fn fts_bm25_search_returns_empty_for_no_match() {
 async fn fts_bm25_search_respects_limit() {
     crate::enable_tracing();
 
-    let (client, keyspace_name, index_name, _hold) = setup_fts_and_wait(
+    let (client, keyspace_name, index_name, _db, _hold) = setup_fts_and_wait(
         [
             (vec![CqlValue::Int(1)], "rust programming language", 10),
             (vec![CqlValue::Int(2)], "rust systems programming", 20),
@@ -287,7 +295,7 @@ async fn fts_bm25_search_respects_limit() {
 async fn fts_bm25_search_not_found_returns_404() {
     crate::enable_tracing();
 
-    let (client, keyspace_name, index_name, _hold) =
+    let (client, keyspace_name, index_name, _db, _hold) =
         setup_fts_and_wait([(vec![CqlValue::Int(1)], "hello world", 10)], 1).await;
 
     let _ = (keyspace_name, index_name);
@@ -304,28 +312,22 @@ async fn fts_bm25_search_not_found_returns_404() {
 }
 
 #[tokio::test]
-async fn fts_bm25_search_not_serving_returns_503() {
+async fn fts_bm25_search_returns_503_and_node_bootstrapping_reason_when_index_is_building_during_node_bootstrapping()
+ {
     crate::enable_tracing();
 
-    let fullscan_fn = |_| {
-        use futures::FutureExt;
-        async move {
-            // wait indefinitely to simulate a long-running indexing operation (Bootstrapping)
-            std::future::pending::<()>().await;
-        }
-        .boxed()
-    };
     let (run, index, _db, _node_state) = setup_fts_store(
         ["pk".into()],
         1,
         [("pk".to_string().into(), NativeType::Int)],
-        Some(Box::new(fullscan_fn)),
+        Some(db_basic::pending_scan_fn()),
         None,
     )
     .await;
     let (client, _server, _config_tx) = run.await;
-    let keyspace_name: httpapi::KeyspaceName = index.keyspace_name.clone().into();
-    let index_name: httpapi::IndexName = index.index_name.clone().into();
+
+    let keyspace_name = index.keyspace_name.clone().into();
+    let index_name = index.index_name.clone().into();
 
     wait_for(
         || async {
@@ -348,13 +350,73 @@ async fn fts_bm25_search_not_serving_returns_503() {
         .await;
 
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let reason: IndexNotReadyReason = response.json().await.unwrap();
+    assert_eq!(reason, IndexNotReadyReason::NodeBootstrapping);
+}
+
+#[tokio::test]
+async fn fts_bm25_search_returns_503_and_index_building_reason_when_index_is_building_while_node_is_serving()
+ {
+    crate::enable_tracing();
+
+    let (client, _keyspace_name, _index_name, db, _hold) =
+        setup_fts_and_wait([(vec![CqlValue::Int(1)], "hello world", 10)], 1).await;
+
+    // The node is already serving its first index. A second index added now is
+    // non-initial, so it stays bootstrapping while the node keeps serving.
+    let index = IndexMetadata {
+        index_name: "fts_idx_building".into(),
+        ..fts_index_metadata([ColumnName::from("pk")])
+    };
+    db.add_index(index.clone(), Some(db_basic::pending_scan_fn()), None)
+        .unwrap();
+    db.set_next_full_scan_progress(vector_store::Progress::InProgress(
+        Percentage::try_from(75.0).unwrap(),
+    ));
+
+    let keyspace_name = index.keyspace_name.clone().into();
+    let index_name = index.index_name.clone().into();
+
+    wait_for(
+        || async {
+            client
+                .index_status(&keyspace_name, &index_name)
+                .await
+                .is_ok_and(|status| status.status == IndexStatus::Bootstrapping)
+        },
+        "Waiting for FTS index to be bootstrapping",
+    )
+    .await;
+
+    let response = client
+        .post_bm25(
+            &keyspace_name,
+            &index_name,
+            "hello".into(),
+            NonZeroUsize::new(10).unwrap().into(),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let reason: IndexNotReadyReason = response.json().await.unwrap();
+    let IndexNotReadyReason::IndexBuilding { message } = reason else {
+        panic!("expected IndexBuilding, got {reason:?}");
+    };
+    assert!(
+        message.contains(&format!("{keyspace_name}.{index_name}")),
+        "unexpected message: {message}"
+    );
+    assert!(
+        message.contains("progress: 75.000%"),
+        "unexpected message: {message}"
+    );
 }
 
 #[tokio::test]
 async fn fts_empty_index_has_zero_count() {
     crate::enable_tracing();
 
-    let (client, keyspace_name, index_name, _hold) = setup_fts_and_wait([], 0).await;
+    let (client, keyspace_name, index_name, _db, _hold) = setup_fts_and_wait([], 0).await;
 
     let status = client
         .index_status(&keyspace_name, &index_name)
@@ -369,7 +431,7 @@ async fn fts_empty_index_has_zero_count() {
 async fn fts_empty_index_returns_empty_bm25_results() {
     crate::enable_tracing();
 
-    let (client, keyspace_name, index_name, _hold) = setup_fts_and_wait([], 0).await;
+    let (client, keyspace_name, index_name, _db, _hold) = setup_fts_and_wait([], 0).await;
 
     let (primary_keys, scores) = client
         .bm25(
@@ -388,7 +450,7 @@ async fn fts_empty_index_returns_empty_bm25_results() {
 async fn fts_index_appears_in_indexes_list() {
     crate::enable_tracing();
 
-    let (client, keyspace_name, index_name, _hold) =
+    let (client, keyspace_name, index_name, _db, _hold) =
         setup_fts_and_wait([(vec![CqlValue::Int(1)], "hello world", 10)], 1).await;
 
     let indexes = client.indexes().await;

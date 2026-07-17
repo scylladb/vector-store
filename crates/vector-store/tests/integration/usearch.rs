@@ -11,6 +11,7 @@ use crate::db_basic::ScanFn;
 use crate::db_basic::Table;
 use crate::wait_for;
 use crate::wait_for_value;
+use httpapi::IndexNotReadyReason;
 use httpapi::IndexStatus;
 use httpapi::PostIndexAnnFilter;
 use httpapi::PostIndexAnnResponse;
@@ -518,7 +519,7 @@ async fn ann_returns_bad_request_when_filtering_required_but_not_allowed() {
 }
 
 #[tokio::test]
-async fn ann_fail_while_building() {
+async fn ann_fail_while_building_when_node_is_bootstrapping() {
     crate::enable_tracing();
     let (run, index, db, _node_state) = setup_store(
         test_config(),
@@ -529,9 +530,7 @@ async fn ann_fail_while_building() {
             ("pk".to_string().into(), NativeType::Int),
             ("ck".to_string().into(), NativeType::Text),
         ],
-        Some(Box::new(|_tx| {
-            futures::FutureExt::boxed(std::future::pending::<()>())
-        })),
+        Some(db_basic::pending_scan_fn()),
         None,
     )
     .await;
@@ -565,9 +564,89 @@ async fn ann_fail_while_building() {
         .await;
 
     assert_eq!(result.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(
-        result.text().await.unwrap(),
-        "Index vector.ann is not available yet as it is still being constructed, progress: 33.333%"
+    let reason: IndexNotReadyReason = result.json().await.unwrap();
+    assert_eq!(reason, IndexNotReadyReason::NodeBootstrapping);
+}
+
+#[tokio::test]
+async fn ann_fail_while_building_when_node_is_serving() {
+    crate::enable_tracing();
+
+    let (serving_index, client, db, _server, _node_state) = setup_store_and_wait_for_index(
+        DbIndexPartitioning::Global,
+        ["pk".into()],
+        1,
+        [("pk".to_string().into(), NativeType::Int)],
+        Some(db_basic::scan_fn_vectors([(
+            [CqlValue::Int(1)].into(),
+            Some(vec![1., 1., 1.].into()),
+            [].into(),
+            Timestamp::from_millis(10),
+        )])),
+        None,
+        Some(1),
+    )
+    .await;
+
+    let index: IndexMetadata = IndexMetadata {
+        index_name: "ann_building".into(),
+        target_columns: NonemptyArc::new(["embedding2"]).unwrap(),
+        version: uuid::Uuid::new_v4().into(),
+        ..serving_index
+    };
+    // Add new column to the table so that the new index will be created on a new column.
+    // This allows the routing mechanism to always route to this index.
+    // Otherwise, when both indexes are on the same column, the routing mechanism will always route to the serving index.
+    db.add_vector_column(
+        index.keyspace_name.clone(),
+        index.table_name.clone(),
+        index.target_columns.first().clone(),
+        index.vs().unwrap().dimensions,
+    )
+    .unwrap();
+    // Add second index that is Bootstrapping (pending_scan_fn). So now we have node Serving and this index Bootstrapping - a good state to test desired scenario.
+    db.add_index(index.clone(), Some(db_basic::pending_scan_fn()), None)
+        .unwrap();
+    db.set_next_full_scan_progress(vector_store::Progress::InProgress(
+        Percentage::try_from(75.0).unwrap(),
+    ));
+
+    let keyspace_name: httpapi::KeyspaceName = index.keyspace_name.into();
+    let index_name: httpapi::IndexName = index.index_name.into();
+
+    wait_for(
+        || async {
+            client
+                .index_status(&keyspace_name, &index_name)
+                .await
+                .is_ok_and(|status| status.status == IndexStatus::Bootstrapping)
+        },
+        "Waiting for index to be bootstrapping",
+    )
+    .await;
+
+    let result = client
+        .post_ann(
+            &keyspace_name,
+            &index_name,
+            vec![1.0, 2.0, 3.0].into(),
+            None,
+            NonZeroUsize::new(1).unwrap().into(),
+        )
+        .await;
+
+    assert_eq!(result.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let reason: IndexNotReadyReason = result.json().await.unwrap();
+    let IndexNotReadyReason::IndexBuilding { message } = reason else {
+        panic!("expected IndexBuilding, got {reason:?}");
+    };
+    assert!(
+        message.contains(&format!("{keyspace_name}.{index_name}")),
+        "unexpected message: {message}"
+    );
+    assert!(
+        message.contains("progress: 75.000%"),
+        "unexpected message: {message}"
     );
 }
 

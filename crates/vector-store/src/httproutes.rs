@@ -107,7 +107,11 @@ use utoipa_swagger_ui::SwaggerUi;
     components(
         schemas(
             httpapi::KeyspaceName,
-            httpapi::IndexName
+            httpapi::IndexName,
+            httpapi::IndexNotReadyReason
+        ),
+        responses(
+            httpapi::IndexNotReadyResponse
         )
     ),
 )]
@@ -544,9 +548,7 @@ If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
         ),
         (
             status = 503,
-            description = "Service Unavailable. Indicates that a full scan of the index is in progress and the search cannot be performed at this time.",
-            content_type = "application/json",
-            body = ErrorMessage
+            response = httpapi::IndexNotReadyResponse
         )
     )
 )]
@@ -574,12 +576,14 @@ async fn post_index_ann(
         let index_key = IndexKey::new(&keyspace, &index_name);
         let (equality_cols, range_cols) = restriction_columns(&request.filter);
         let allow_filtering = request.filter.as_ref().is_some_and(|f| f.allow_filtering);
-        let (routed_key, index, primary_key_columns, filtering_columns, table_columns) = match state
-            .indexes
-            .read()
-            .unwrap()
-            .best_index(&index_key, &equality_cols, &range_cols)
-        {
+        let best_index_state =
+            state
+                .indexes
+                .read()
+                .unwrap()
+                .best_index(&index_key, &equality_cols, &range_cols);
+        let (routed_key, index, primary_key_columns, filtering_columns, table_columns) =
+            match best_index_state {
             indexes::BestIndexState::Serving {
                 key: routed_key,
                 index,
@@ -620,13 +624,18 @@ async fn post_index_ann(
 
                 match progress {
                     Progress::InProgress(percentage) => {
-                        let msg = format!(
-                            "Index {keyspace}.{index_name} is not available yet \
-                            as it is still being constructed, progress: {:.3}%",
-                            percentage.get()
+                        let reason = index_not_ready_reason(
+                            &state.node_state,
+                            &keyspace,
+                            &index_name,
+                            percentage,
+                        )
+                        .await;
+                        debug!(
+                            "post_index_ann: index {keyspace}.{index_name} not ready: {reason:?}"
                         );
-                        debug!("post_index_ann: {msg}");
-                        return (StatusCode::SERVICE_UNAVAILABLE, msg).into_response();
+                        return (StatusCode::SERVICE_UNAVAILABLE, response::Json(reason))
+                            .into_response();
                     }
                     Progress::Done => {
                         let msg = format!(
@@ -783,9 +792,7 @@ If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
         ),
         (
             status = 503,
-            description = "Service Unavailable. Indicates that a full scan of the index is in progress and the search cannot be performed at this time.",
-            content_type = "application/json",
-            body = ErrorMessage
+            response = httpapi::IndexNotReadyResponse
         )
     )
 )]
@@ -809,7 +816,7 @@ async fn post_index_bm25(
 
     let index_key = IndexKey::new(&keyspace, &index_name);
 
-    let (fts_sender, primary_key_columns) = {
+    let serving_or_progress = {
         let indexes = state.indexes.read().unwrap();
         let Some(entry) = indexes.get_fts(&index_key) else {
             timer.observe_duration();
@@ -818,30 +825,31 @@ async fn post_index_bm25(
             debug!("post_index_bm25: {msg}");
             return (StatusCode::NOT_FOUND, msg).into_response();
         };
-        if entry.status() != crate::node_state::IndexStatus::Serving {
-            match entry.progress() {
-                Progress::InProgress(percentage) => {
-                    timer.observe_duration();
-
-                    let msg = format!(
-                        "Index {keyspace}.{index_name} is not available yet as it is still being constructed, progress: {:.3}%",
-                        percentage.get()
-                    );
-                    debug!("post_index_bm25: {msg}");
-                    return (StatusCode::SERVICE_UNAVAILABLE, msg).into_response();
-                }
-                Progress::Done => {
-                    timer.observe_duration();
-
-                    let msg = format!(
-                        "Index {keyspace}.{index_name} is not serving, but full scan did finish."
-                    );
-                    debug!("post_index_bm25: {msg}");
-                    return (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response();
-                }
-            }
+        if entry.status() == crate::node_state::IndexStatus::Serving {
+            Ok((entry.index().clone(), entry.primary_key_columns().clone()))
+        } else {
+            Err(entry.progress())
         }
-        (entry.index().clone(), entry.primary_key_columns().clone())
+    };
+
+    let (fts_sender, primary_key_columns) = match serving_or_progress {
+        Ok(serving) => serving,
+        Err(Progress::InProgress(percentage)) => {
+            timer.observe_duration();
+
+            let reason =
+                index_not_ready_reason(&state.node_state, &keyspace, &index_name, percentage).await;
+            debug!("post_index_bm25: index {keyspace}.{index_name} not ready: {reason:?}");
+            return (StatusCode::SERVICE_UNAVAILABLE, response::Json(reason)).into_response();
+        }
+        Err(Progress::Done) => {
+            timer.observe_duration();
+
+            let msg =
+                format!("Index {keyspace}.{index_name} is not serving, but full scan did finish.");
+            debug!("post_index_bm25: {msg}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response();
+        }
     };
 
     let search_result = fts_sender
@@ -1358,6 +1366,25 @@ async fn get_status(State(state): State<RoutesInnerState>) -> Response {
         )),
     )
         .into_response()
+}
+
+async fn index_not_ready_reason(
+    node_state: &Sender<NodeState>,
+    keyspace: &crate::KeyspaceName,
+    index_name: &crate::IndexName,
+    percentage: crate::Percentage,
+) -> httpapi::IndexNotReadyReason {
+    if node_state.get_status().await == crate::node_state::NodeStatus::Serving {
+        httpapi::IndexNotReadyReason::IndexBuilding {
+            message: format!(
+                "Index {keyspace}.{index_name} is not available yet \
+                as it is still being constructed, progress: {:.3}%",
+                percentage.get()
+            ),
+        }
+    } else {
+        httpapi::IndexNotReadyReason::NodeBootstrapping
+    }
 }
 
 fn new_internals() -> Router<RoutesInnerState> {
