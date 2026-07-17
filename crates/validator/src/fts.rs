@@ -672,3 +672,74 @@ async fn fts_index_on_int_column_returns_error(actors: Arc<TestActors>) {
 
     info!("finished");
 }
+
+#[e2etest::test(group = fts)]
+async fn fts_large_document_set(fixture: Arc<Fixture>) {
+    info!("started");
+
+    let needle_pks = [1234, 5678, 9012];
+    const LARGE_DATASET_SIZE: i32 = 10_000;
+    const MAX_SEARCH_LIMIT: usize = 1000;
+
+    info!("Inserting {LARGE_DATASET_SIZE} documents");
+    let docs = (1..=LARGE_DATASET_SIZE).map(|pk| {
+        let content = if needle_pks.contains(&pk) {
+            format!("haystack needle document number {pk}")
+        } else {
+            format!("haystack document number {pk}")
+        };
+        (pk, content)
+    });
+    fixture.insert_documents(docs).await;
+
+    info!("Creating fulltext index over {LARGE_DATASET_SIZE} documents");
+    measure_duration(
+        format!("Index build for {LARGE_DATASET_SIZE} documents"),
+        || fixture.create_fts_index(),
+    )
+    .await;
+
+    info!("Step 1: Verifying rare term matches only the expected documents");
+    let rare_hits_pks = measure_duration(
+        format!("BM25 needle search over {LARGE_DATASET_SIZE} documents"),
+        || fixture.bm25_search_pks("needle"),
+    )
+    .await;
+    let needle_pks_len = needle_pks.len();
+    let rare_hits_pks_len = rare_hits_pks.len();
+
+    assert_eq!(
+        rare_hits_pks_len, needle_pks_len,
+        "Expected exactly {needle_pks_len} rare-term results, got {rare_hits_pks_len}"
+    );
+    assert!(
+        rare_hits_pks.contains(&needle_pks[0]),
+        "expected pk {} in results",
+        needle_pks[0]
+    );
+    assert!(
+        rare_hits_pks.contains(&needle_pks[1]),
+        "expected pk {} in results",
+        needle_pks[1]
+    );
+    assert!(
+        rare_hits_pks.contains(&needle_pks[2]),
+        "expected pk {} in results",
+        needle_pks[2]
+    );
+
+    info!("Step 2: Verifying common term matches all documents, but is capped by LIMIT");
+    let common_hits = measure_duration(
+        format!("BM25 haystack search over {LARGE_DATASET_SIZE} documents"),
+        || fixture.bm25_search_with_limit("haystack", MAX_SEARCH_LIMIT),
+    )
+    .await;
+    let common_hits_rows_num = common_hits.rows_num();
+
+    assert_eq!(
+        common_hits_rows_num, MAX_SEARCH_LIMIT,
+        "Expected common-term results capped at {MAX_SEARCH_LIMIT}, got {common_hits_rows_num}"
+    );
+
+    info!("finished");
+}
