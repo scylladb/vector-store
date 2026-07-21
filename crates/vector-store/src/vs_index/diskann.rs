@@ -6,6 +6,10 @@
 use crate::Config;
 use crate::Dimensions;
 use crate::DiskannAlpha;
+use crate::Distance;
+use crate::IndexKey;
+use crate::Limit;
+use crate::PartitionId;
 use crate::SpaceType;
 use crate::Vector;
 use crate::VsIndexFactory;
@@ -13,15 +17,22 @@ use crate::memory::Memory;
 use crate::perf;
 use crate::table::PrimaryId;
 use crate::table::Table;
+use crate::table::TableSearch;
+use crate::vs_index::actor::AnnR;
 use crate::vs_index::actor::VsIndex;
 use crate::vs_index::factory::VsIndexConfiguration;
+use crate::vs_index::validator;
 use anyhow::Context;
 use diskann::graph::Config as DiskannConfig;
 use diskann::graph::DiskANNIndex;
 use diskann::graph::config::Builder;
 use diskann::graph::config::MaxDegree;
 use diskann::graph::config::defaults::ALPHA as DISKANN_DEFAULT_ALPHA;
+use diskann::graph::index::SearchStats;
+use diskann::graph::search::Knn;
 use diskann::graph::strategy::FullPrecision;
+use diskann::neighbor::BackInserter;
+use diskann::neighbor::Neighbor;
 use diskann::provider::DefaultContext;
 use diskann::provider::Delete;
 use diskann_providers::model::graph::provider::async_::FastMemoryVectorProviderAsync;
@@ -32,15 +43,18 @@ use diskann_providers::model::graph::provider::async_::inmem::CreateFullPrecisio
 use diskann_providers::model::graph::provider::async_::inmem::DefaultProvider;
 use diskann_providers::model::graph::provider::async_::inmem::DefaultProviderParameters;
 use diskann_vector::distance::Metric;
+use itertools::Itertools;
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::RwLock;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tracing::Instrument;
 use tracing::debug;
 use tracing::debug_span;
+use tracing::trace;
 use tracing::warn;
 
 const MAX_POINTS: NonZeroUsize = NonZeroUsize::new(1_000_000).unwrap();
@@ -56,7 +70,7 @@ impl VsIndexFactory for DiskannIndexFactory {
     fn create_index(
         &self,
         index: VsIndexConfiguration,
-        _table: Arc<RwLock<Table>>,
+        table: Arc<RwLock<Table>>,
         _memory: mpsc::Sender<Memory>,
     ) -> anyhow::Result<mpsc::Sender<VsIndex>> {
         let params = DiskannParams::new(&index, self.alpha, MAX_POINTS)?;
@@ -75,9 +89,9 @@ impl VsIndexFactory for DiskannIndexFactory {
         )
         .context("failed to create DiskANN provider")?;
 
-        let diskann_index = DiskANNIndex::new(params.config, provider, None);
+        let diskann_index = DiskANNIndex::new(params.config.clone(), provider, None);
 
-        new(index.key, diskann_index)
+        new(index.key, diskann_index, params, table)
     }
 
     fn index_engine_version(&self) -> String {
@@ -98,17 +112,20 @@ pub fn new_diskann(
 }
 
 fn new(
-    index_key: crate::IndexKey,
+    index_key: IndexKey,
     index: DiskANNIndex<DiskannProvider>,
+    params: DiskannParams,
+    table: Arc<RwLock<impl TableSearch + Send + Sync + 'static>>,
 ) -> anyhow::Result<mpsc::Sender<VsIndex>> {
     let (tx, mut rx) = mpsc::channel(perf::channel_size().into());
 
+    let span_key = index_key.clone();
     tokio::spawn(perf::hotpath_async(
         {
             async move {
                 debug!("starting");
 
-                let mut state = State::new(index);
+                let mut state = State::new(index, index_key, params, table);
 
                 while let Some(msg) = rx.recv().await {
                     match msg {
@@ -130,9 +147,21 @@ fn new(
                         VsIndex::RemovePartition { .. } => {
                             warn!("not implemented yet");
                         }
-                        VsIndex::Ann { tx, .. } | VsIndex::FilteredAnn { tx, .. } => {
-                            _ = tx
-                                .send(Err(anyhow::anyhow!("DiskANN index is not implemented yet")));
+                        VsIndex::Ann {
+                            embedding,
+                            limit,
+                            tx,
+                            ..
+                        } => {
+                            if let Some(tx) = validate_dimensions(tx, &embedding, state.params.dim)
+                            {
+                                _ = tx.send(state.ann(embedding, limit).await);
+                            }
+                        }
+                        VsIndex::FilteredAnn { tx, .. } => {
+                            _ = tx.send(Err(anyhow::anyhow!(
+                                "DiskANN index does not support filtered search"
+                            )));
                         }
                         VsIndex::Count { tx, .. } => {
                             _ = tx
@@ -144,7 +173,7 @@ fn new(
                 debug!("finished");
             }
         }
-        .instrument(debug_span!("diskann", "{index_key}")),
+        .instrument(debug_span!("diskann", "{span_key}")),
     ));
 
     Ok(tx)
@@ -193,15 +222,26 @@ impl IdMap {
 }
 
 /// Mutable actor state for the DiskANN index.
-struct State {
+struct State<T: TableSearch + Send + Sync + 'static> {
     index: DiskANNIndex<DiskannProvider>,
+    index_key: IndexKey,
+    params: DiskannParams,
+    table: Arc<RwLock<T>>,
     id_map: IdMap,
 }
 
-impl State {
-    fn new(index: DiskANNIndex<DiskannProvider>) -> Self {
+impl<T: TableSearch + Send + Sync + 'static> State<T> {
+    fn new(
+        index: DiskANNIndex<DiskannProvider>,
+        index_key: IndexKey,
+        params: DiskannParams,
+        table: Arc<RwLock<T>>,
+    ) -> Self {
         Self {
             index,
+            index_key,
+            params,
+            table,
             id_map: IdMap::default(),
         }
     }
@@ -235,14 +275,110 @@ impl State {
 
         self.id_map.remove(&primary_id);
     }
+
+    async fn search(
+        &self,
+        embedding: &Vector,
+        k: usize,
+    ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<(PrimaryId, Distance)>>> {
+        let space_type = self.params.space_type;
+        let dimensions = embedding.dim();
+
+        let l_value = self.params.l_default.get().max(k);
+        let k = k.min(self.params.max_points.get());
+        let params = Knn::new(k, l_value, Some(self.params.beam_width.get()))
+            .context("failed to build DiskANN search parameters")?;
+
+        let mut neighbors = vec![Neighbor::<u32>::default(); params.k_value().get()];
+        let SearchStats { result_count, .. } = self
+            .index
+            .search(
+                params,
+                &FullPrecision,
+                &DefaultContext,
+                embedding.as_slice(),
+                &mut BackInserter::new(neighbors.as_mut_slice()),
+            )
+            .await?;
+
+        neighbors.truncate(result_count as usize);
+        Ok(neighbors.into_iter().filter_map(move |neighbor| {
+            let primary_id = self.id_map.resolve(neighbor.id)?;
+            let raw_distance = match space_type {
+                SpaceType::DotProduct => neighbor.distance + 1.0,
+                _ => neighbor.distance,
+            };
+            Some(
+                Distance::try_from((raw_distance, space_type, dimensions))
+                    .map(|distance| (primary_id, distance)),
+            )
+        }))
+    }
+
+    async fn ann(&self, embedding: Vector, limit: Limit) -> AnnR {
+        let partition_id: PartitionId = {
+            let table = self.table.read().unwrap();
+            if let Some((partition_id, _)) = table.partition_id(&self.index_key, None) {
+                partition_id
+            } else {
+                warn!(
+                    "partition id not found for index key {} during ann",
+                    self.index_key
+                );
+                return Ok((vec![], vec![]));
+            }
+        };
+
+        let matches = self
+            .search(&embedding, limit.0.get())
+            .await
+            .context("ann search failed")?;
+
+        let table = self.table.read().unwrap();
+        let (primary_keys, distances) = itertools::process_results(
+            matches.filter_map_ok(|(primary_id, distance)| {
+                table
+                    .primary_key(partition_id, primary_id)
+                    .or_else(|| {
+                        debug!(
+                            "not defined primary key for partition_id {partition_id:?} \
+                                        and primary_id {primary_id:?}",
+                        );
+                        None
+                    })
+                    .map(|primary_key| (primary_key, distance))
+            }),
+            |it| it.unzip(),
+        )?;
+        Ok((primary_keys, distances))
+    }
+}
+
+#[hotpath::measure]
+fn validate_dimensions(
+    tx_ann: oneshot::Sender<AnnR>,
+    embedding: &Vector,
+    dimensions: Dimensions,
+) -> Option<oneshot::Sender<AnnR>> {
+    if let Err(err) = validator::embedding_dimensions(embedding, dimensions) {
+        tx_ann
+            .send(Err(err))
+            .unwrap_or_else(|_| trace!("validate_dimensions: unable to send response"));
+        None
+    } else {
+        Some(tx_ann)
+    }
 }
 
 #[derive(Clone)]
 struct DiskannParams {
     config: DiskannConfig,
     metric: Metric,
+    space_type: SpaceType,
     dim: Dimensions,
     max_points: NonZeroUsize,
+    l_default: NonZeroUsize,
+    beam_width: NonZeroUsize,
 }
 
 impl DiskannParams {
@@ -266,11 +402,19 @@ impl DiskannParams {
             .build()
             .context("failed to build DiskANN configuration")?;
 
+        let l_default = NonZeroUsize::new(cfg.expansion_search.0)
+            .context("expansion_search (DiskANN query search list size L) must be non-zero")?;
+        let beam_width = NonZeroUsize::new(cfg.expansion_search.0)
+            .context("expansion_search (DiskANN beam width) must be non-zero")?;
+
         Ok(Self {
             config,
             metric,
+            space_type: cfg.space_type,
             dim: cfg.dimensions,
             max_points,
+            l_default,
+            beam_width,
         })
     }
 }
@@ -341,6 +485,9 @@ mod tests {
         assert_eq!(usize::from(params.dim.0), 3);
         assert_eq!(params.config.l_build(), NonZeroUsize::new(64).unwrap());
         assert_eq!(params.metric, Metric::L2);
+        assert_eq!(params.l_default, NonZeroUsize::new(32).unwrap());
+        assert_eq!(params.beam_width, NonZeroUsize::new(32).unwrap());
+        assert_eq!(params.space_type, SpaceType::Euclidean);
     }
 
     #[test]
