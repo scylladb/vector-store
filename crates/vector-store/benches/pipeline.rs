@@ -298,7 +298,7 @@ fn scan_fn_mpsc(
     })
 }
 
-fn fullscan_add(c: &mut Criterion) {
+fn fullscan_insert(c: &mut Criterion) {
     init();
 
     const DIMENSIONS: usize = 128;
@@ -345,7 +345,7 @@ fn fullscan_add(c: &mut Criterion) {
 
     let next_pk = Arc::new(AtomicI64::new(0));
     group.bench_with_input(
-        BenchmarkId::new("fullscan-add", concurrency),
+        BenchmarkId::new("fullscan-insert", concurrency),
         &concurrency,
         |b, concurrency| {
             let fixture = fixture.borrow();
@@ -503,7 +503,7 @@ fn search(c: &mut Criterion) {
     }
 }
 
-fn cdc_add(c: &mut Criterion) {
+fn cdc_insert(c: &mut Criterion) {
     init();
 
     const DIMENSIONS: usize = 128;
@@ -550,7 +550,7 @@ fn cdc_add(c: &mut Criterion) {
 
     let next_pk = Arc::new(AtomicI64::new(0));
     group.bench_with_input(
-        BenchmarkId::new("cdc-add", concurrency),
+        BenchmarkId::new("cdc-insert", concurrency),
         &concurrency,
         |b, concurrency| {
             let fixture = fixture.borrow();
@@ -1169,9 +1169,9 @@ where
 
 criterion_group!(
     benches,
-    fullscan_add,
+    fullscan_insert,
     search,
-    cdc_add,
+    cdc_insert,
     cdc_update,
     search_while_updating,
     search_while_inserting,
