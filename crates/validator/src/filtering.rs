@@ -573,11 +573,18 @@ async fn ann_filter_by_vector_column_fails(actors: Arc<TestActors>) {
     info!("finished");
 }
 
-/// Test that filtering by a non-primary-key column in a WHERE clause fails.
+/// Test filtering on a non-indexed column with a global index.
 ///
-/// `WHERE f = 1` on a non-indexed column should be rejected.
+/// Steps:
+/// 1. Create a table with a vector column and a non-indexed integer column.
+/// 2. Create a global index on the vector column, specifying the integer column as a filtering
+///    column.
+/// 3. Insert rows with different values for the integer column.
+/// 4. Query the table with a WHERE clause filtering on the integer column and verify that only
+///   the rows matching the filter are returned.
+/// 5. Drop the keyspace.
 #[e2etest::test(group = filtering)]
-async fn ann_filter_by_non_indexed_column_fails(actors: Arc<TestActors>) {
+async fn global_index_filter_by_filtering_columns(actors: Arc<TestActors>) {
     info!("started");
 
     let (session, clients) = prepare_connection(&actors).await;
@@ -585,35 +592,154 @@ async fn ann_filter_by_non_indexed_column_fails(actors: Arc<TestActors>) {
     let keyspace = create_keyspace(&session).await;
     let table = create_table(
         &session,
-        "pk INT, f INT, v VECTOR<FLOAT, 3>, PRIMARY KEY (pk)",
+        "pk INT, ck INT, f INT, v VECTOR<FLOAT, 3>, PRIMARY KEY (pk, ck)",
         None,
     )
     .await;
 
-    for pk in 0..5 {
+    for pk in 0..10 {
         session
             .query_unpaged(
-                format!("INSERT INTO {table} (pk, f, v) VALUES (?, ?, ?)"),
-                (pk, pk % 2, &vec![pk as f32, 0.0, 0.0]),
+                format!("INSERT INTO {table} (pk, ck, f, v) VALUES (?, ?, ?, ?)"),
+                (pk, pk % 4, pk % 2, &vec![pk as f32, 0.0, 0.0]),
             )
             .await
             .expect("failed to insert data");
     }
 
-    let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
+    let index =
+        create_index(CreateIndexQuery::new(&session, &clients, &table, "v").filter_columns(["f"]))
+            .await;
 
     for client in &clients {
         let index_status = wait_for_index(client, &index).await;
-        assert_eq!(index_status.count, 5, "Expected 5 vectors to be indexed");
+        assert_eq!(
+            index_status.count, 10,
+            "Expected 10 vectors to be indexed in the index"
+        );
     }
 
+    info!("Querying index for f = 0");
+    let results: HashSet<_> = get_query_results(
+        format!("SELECT pk FROM {table} WHERE f = 0 ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10 ALLOW FILTERING"),
+        &session,
+    )
+    .await
+        .rows::<(i32,)>()
+        .expect("failed to get rows")
+        .map(|row| row.expect("failed to get row"))
+        .collect();
+    assert_eq!(results, HashSet::from([(0,), (2,), (4,), (6,), (8,)]));
+
+    info!("Querying index for pk = 3 AND f = 1");
+    let results: HashSet<_> = get_query_results(
+        format!("SELECT pk FROM {table} WHERE pk = 3 AND f = 1 ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10 ALLOW FILTERING"),
+        &session,
+    )
+    .await
+        .rows::<(i32,)>()
+        .expect("failed to get rows")
+        .map(|row| row.expect("failed to get row"))
+        .collect();
+    assert_eq!(results, HashSet::from([(3,)]));
+
+    info!("Querying index for ck = 2 AND f = 0");
+    let results: HashSet<_> = get_query_results(
+        format!("SELECT pk FROM {table} WHERE ck = 2 AND f = 0 ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10 ALLOW FILTERING"),
+        &session,
+    )
+    .await
+        .rows::<(i32,)>()
+        .expect("failed to get rows")
+        .map(|row| row.expect("failed to get row"))
+        .collect();
+    assert_eq!(results, HashSet::from([(2,), (6,)]));
+
     session
-        .query_unpaged(
-            format!("SELECT pk FROM {table} WHERE f = 1 ORDER BY v ANN OF [1.0, 0.0, 0.0] LIMIT 5 ALLOW FILTERING"),
-            (),
-        )
+        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
         .await
-        .expect_err("WHERE on non-primary-key column should fail");
+        .expect("failed to drop a keyspace");
+
+    info!("finished");
+}
+
+/// Test filtering on a non-indexed column with a local index.
+///
+/// Steps:
+/// 1. Create a table with a vector column and a non-indexed integer column.
+/// 2. Create a local index on the vector column, specifying the integer column as a filtering
+///    column.
+/// 3. Insert rows with different values for the integer column.
+/// 4. Query the table with a WHERE clause filtering on the integer column and verify that only
+///   the rows matching the filter are returned.
+/// 5. Drop the keyspace.
+#[e2etest::test(group = filtering)]
+async fn local_index_filter_by_filtering_columns(actors: Arc<TestActors>) {
+    info!("started");
+
+    let (session, clients) = prepare_connection(&actors).await;
+
+    let keyspace = create_keyspace(&session).await;
+    let table = create_table(
+        &session,
+        "pk INT, ck INT, f INT, v VECTOR<FLOAT, 3>, PRIMARY KEY (pk, ck)",
+        None,
+    )
+    .await;
+
+    for pk in 0..10 {
+        for ck in 0..10 {
+            session
+                .query_unpaged(
+                    format!("INSERT INTO {table} (pk, ck, f, v) VALUES (?, ?, ?, ?)"),
+                    (pk, ck, ck % 2, &vec![pk as f32, ck as f32, 0.0]),
+                )
+                .await
+                .expect("failed to insert data");
+        }
+    }
+
+    let index = create_index(
+        CreateIndexQuery::new(&session, &clients, &table, "v")
+            .partition_columns(["pk"])
+            .filter_columns(["f"]),
+    )
+    .await;
+
+    for client in &clients {
+        let index_status = wait_for_index(client, &index).await;
+        assert_eq!(
+            index_status.count, 100,
+            "Expected 100 vectors to be indexed in the index"
+        );
+    }
+
+    info!("Querying index for pk = 3 AND f = 1");
+    let results: HashSet<_> = get_query_results(
+        format!("SELECT pk, ck FROM {table} WHERE pk = 3 AND f = 1 ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10 ALLOW FILTERING"),
+        &session,
+    )
+    .await
+        .rows::<(i32, i32,)>()
+        .expect("failed to get rows")
+        .map(|row| row.expect("failed to get row"))
+        .collect();
+    assert_eq!(
+        results,
+        HashSet::from([(3, 1), (3, 3), (3, 5), (3, 7), (3, 9)])
+    );
+
+    info!("Querying index for pk = 7 AND ck = 2 AND f = 0");
+    let results: HashSet<_> = get_query_results(
+        format!("SELECT pk, ck FROM {table} WHERE pk = 7 AND ck = 2 AND f = 0 ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10 ALLOW FILTERING"),
+        &session,
+    )
+    .await
+        .rows::<(i32, i32)>()
+        .expect("failed to get rows")
+        .map(|row| row.expect("failed to get row"))
+        .collect();
+    assert_eq!(results, HashSet::from([(7, 2),]));
 
     session
         .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())

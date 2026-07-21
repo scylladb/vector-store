@@ -27,6 +27,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::SystemTime;
 use tokio::sync::Notify;
+use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::watch;
@@ -104,6 +105,7 @@ impl CdcReaderConfig {
 }
 
 /// Spawns a CDC actor that watches for session changes and manages a CDC reader.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn new(
     config_rx: watch::Receiver<Arc<Config>>,
     mut session_rx: watch::Receiver<Option<Arc<Session>>>,
@@ -111,6 +113,7 @@ pub(crate) fn new(
     internals: Sender<Internals>,
     metrics: Arc<Metrics>,
     tx_embeddings: mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
+    semaphore: Arc<Semaphore>,
     config: CdcReaderConfig,
 ) -> mpsc::Sender<DbCdc> {
     let (tx, mut rx) = mpsc::channel::<DbCdc>(perf::channel_size().into());
@@ -125,6 +128,7 @@ pub(crate) fn new(
         Arc::clone(&metrics),
         metadata.keyspace_name.clone(),
         metadata.index_name.clone(),
+        semaphore,
     );
     let name = reader.name;
     let actor_key = metadata.key();
@@ -200,6 +204,7 @@ struct CdcReaderState {
     handler_task: Option<tokio::task::JoinHandle<Duration>>,
     shutdown_notify: Arc<Notify>,
     error_notify: Arc<Notify>,
+    semaphore: Arc<Semaphore>,
     start: Duration,
     name: &'static str,
     params_fn: fn(&Config) -> CdcReaderParams,
@@ -215,12 +220,14 @@ impl CdcReaderState {
         metrics: Arc<Metrics>,
         keyspace: KeyspaceName,
         index_name: IndexName,
+        semaphore: Arc<Semaphore>,
     ) -> Self {
         let state = Self {
             reader: None,
             handler_task: None,
             shutdown_notify: Arc::new(Notify::new()),
             error_notify: Arc::new(Notify::new()),
+            semaphore,
             start: cdc_now(),
             name,
             params_fn,
@@ -289,6 +296,7 @@ impl CdcReaderState {
             Arc::clone(session),
             metadata.clone(),
             tx_embeddings.clone(),
+            Arc::clone(&self.semaphore),
             Arc::clone(&self.metrics),
             self.name,
         )
@@ -427,12 +435,14 @@ fn drain_pending_notifications(notify: &Notify) {
 }
 
 /// Creates a CDC log reader with the given parameters.
+#[allow(clippy::too_many_arguments)]
 async fn create_cdc_reader(
     start: Duration,
     params: CdcReaderParams,
     session: Arc<Session>,
     metadata: IndexMetadata,
     tx_embeddings: mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
+    semaphore: Arc<Semaphore>,
     metrics: Arc<Metrics>,
     reader_name: &str,
 ) -> anyhow::Result<(
@@ -444,7 +454,9 @@ async fn create_cdc_reader(
         &metadata,
         Arc::clone(&metrics),
         tx_embeddings,
-    )?;
+        semaphore,
+    )
+    .await?;
 
     let cdc_start = start - CHECKPOINT_TIMESTAMP_OFFSET;
     info!(
@@ -539,6 +551,7 @@ mod tests {
             metrics,
             "ks".into(),
             "idx".into(),
+            Semaphore::new(1).into(),
         )
     }
 

@@ -128,15 +128,17 @@ async fn global_index_with_filtering_columns(actors: Arc<TestActors>) {
 
     wait_for_index(&clients, &index).await;
 
-    // TODO: Re-enable this test after SCYLLADB-635 is solved.
-    // info!("Query the index");
-    // let results = common::get_query_results(
-    //     format!("SELECT pk FROM {table} ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10"),
-    //     &session,
-    // )
-    // .await;
-    // let rows = results.rows::<(i32,)>().expect("failed to get rows");
-    // assert_eq!(rows.rows_remaining(), 10);
+    info!("Query the index");
+    common::wait_for(
+        || async {
+            let results = common::get_query_results(
+                format!("SELECT pk FROM {table} WHERE f = 1 ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 100 ALLOW FILTERING"),
+                &session,
+            )
+                .await;
+            let rows = results.rows::<(i32,)>().expect("failed to get rows");
+            rows.rows_remaining() > 10
+        }, "Wait for the query to result more than 10 items", common::DEFAULT_OPERATION_TIMEOUT).await;
 
     cleanup_keyspace(&actors, &keyspace).await;
 
@@ -195,6 +197,14 @@ async fn local_index_with_filtering_columns(actors: Arc<TestActors>) {
     .await;
     let rows = results.rows::<(i32,)>().expect("failed to get rows");
     assert_eq!(rows.rows_remaining(), 10);
+
+    let results = common::get_query_results(
+        format!("SELECT ck FROM {table} WHERE pk = 1 AND f = 10 ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10 ALLOW FILTERING"),
+        &session,
+    )
+    .await;
+    let rows = results.rows::<(i32,)>().expect("failed to get rows");
+    assert_eq!(rows.rows_remaining(), 1);
 
     cleanup_keyspace(&actors, &keyspace).await;
 

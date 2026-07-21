@@ -9,7 +9,9 @@ use futures::FutureExt;
 use futures::future::BoxFuture;
 use scylla::cluster::metadata::NativeType;
 use scylla::value::CqlTimeuuid;
+use scylla::value::CqlValue;
 use std::collections::HashMap;
+use std::iter;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicBool;
@@ -68,19 +70,32 @@ fn make_scan_fn(rows: impl Iterator<Item = DbIndexedRow> + Send + Sync + 'static
 
 pub(crate) fn scan_fn_vectors<I>(items: I) -> ScanFn
 where
-    I: IntoIterator<Item = (PrimaryKey, Option<Vector>, Timestamp)>,
+    I: IntoIterator<
+        Item = (
+            PrimaryKey,
+            Option<Vector>,
+            Box<[Option<CqlValue>]>,
+            Timestamp,
+        ),
+    >,
     I::IntoIter: Send + Sync + 'static,
 {
     make_scan_fn(
         items
             .into_iter()
-            .map(|(primary_key, embedding, timestamp)| DbIndexedRow {
+            .map(|(primary_key, vector, filtering, timestamp)| DbIndexedRow {
                 primary_key,
                 operation: DbIndexedOperation::Upsert(
-                    NonemptyBox::new([Timestamped::new(
-                        timestamp,
-                        embedding.map(DbIndexedValue::Vector),
-                    )])
+                    NonemptyBox::new(
+                        iter::once(vector)
+                            .map(|vector| vector.map(DbIndexedValue::Vector))
+                            .chain(
+                                filtering
+                                    .into_iter()
+                                    .map(|filtering| filtering.map(DbIndexedValue::Filtering)),
+                            )
+                            .map(|value| Timestamped::new(timestamp, value)),
+                    )
                     .unwrap(),
                 ),
             }),
