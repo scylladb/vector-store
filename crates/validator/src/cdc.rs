@@ -1107,3 +1107,122 @@ async fn cdc_indexing_lag_metric_exported(actors: Arc<TestActors>) {
 
     info!("finished");
 }
+
+#[e2etest::test(group = cdc_direct)]
+async fn insert_and_remove(actors: Arc<TestActors>) {
+    info!("started");
+
+    let (session, clients) = prepare_connection_single_vs(&actors).await;
+    let client = clients.first().unwrap();
+    let keyspace = create_keyspace(&session).await;
+    let table = create_table(
+        &session,
+        "pk INT, ck INT, rc INT, v VECTOR<FLOAT, 1>, PRIMARY KEY (pk, ck)",
+        None,
+    )
+    .await;
+
+    for column in ["pk", "ck", "rc"] {
+        info!("Testing index with partition column {column}");
+
+        let index = create_index(
+            CreateIndexQuery::new(&session, &clients, &table, "v")
+                .options([("similarity_function", "euclidean")])
+                .partition_columns([column]),
+        )
+        .await;
+
+        let status = wait_for_index(client, &index).await;
+        assert_eq!(
+            status.count, 0,
+            "Index should have 0 vectors after full scan"
+        );
+
+        const DATASET_SIZE: usize = 10;
+
+        info!("Inserting {DATASET_SIZE}x{DATASET_SIZE} rows to the table for CDC");
+        for pk in 1..=DATASET_SIZE {
+            for ck in 1..=DATASET_SIZE {
+                session
+                    .query_unpaged(
+                        format!(
+                            "INSERT INTO {table} (pk, ck, rc, v) VALUES ({pk}, {ck}, {ck}, [{ck}])"
+                        ),
+                        (),
+                    )
+                    .await
+                    .expect("failed to insert data");
+            }
+        }
+
+        wait_for(
+            || async {
+                let status = client.index_status(&index.keyspace, &index.index).await;
+                matches!(status, Ok(s) if s.count == DATASET_SIZE * DATASET_SIZE)
+            },
+            "Waiting for all rows to be indexed",
+            DEFAULT_OPERATION_TIMEOUT,
+        )
+        .await;
+
+        info!("Removing {DATASET_SIZE} rows by removing vector columns");
+        for pk in 1..=DATASET_SIZE {
+            session
+                .query_unpaged(
+                    format!("DELETE v FROM {table} WHERE pk = {pk} AND ck = 1"),
+                    (),
+                )
+                .await
+                .expect("failed to remove vector data");
+        }
+
+        wait_for(
+            || async {
+                let status = client.index_status(&index.keyspace, &index.index).await;
+                matches!(status, Ok(s) if s.count == DATASET_SIZE * (DATASET_SIZE - 1))
+            },
+            format!("Waiting for {DATASET_SIZE} rows to be removed from index"),
+            DEFAULT_OPERATION_TIMEOUT,
+        )
+        .await;
+
+        info!("Removing all rows by removing rows");
+        for pk in 1..=DATASET_SIZE {
+            for ck in 2..=DATASET_SIZE {
+                session
+                    .query_unpaged(
+                        format!("DELETE FROM {table} WHERE pk = {pk} AND ck = {ck}"),
+                        (),
+                    )
+                    .await
+                    .expect("failed to remove vector data");
+            }
+        }
+
+        wait_for(
+            || async {
+                let status = client.index_status(&index.keyspace, &index.index).await;
+                matches!(status, Ok(s) if s.count == 0)
+            },
+            "Waiting for all rows to be removed from index",
+            DEFAULT_OPERATION_TIMEOUT,
+        )
+        .await;
+
+        info!("Dropping index {index}", index = index.index.as_ref());
+        session
+            .query_unpaged(
+                format!("DROP INDEX {index}", index = index.index.as_ref()),
+                (),
+            )
+            .await
+            .expect("failed to drop keyspace");
+    }
+
+    session
+        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
+        .await
+        .expect("failed to drop keyspace");
+
+    info!("finished");
+}

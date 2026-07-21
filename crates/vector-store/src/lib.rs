@@ -600,6 +600,8 @@ pub struct IndexMetadata {
     pub keyspace_name: KeyspaceName,
     pub index_name: IndexName,
     pub table_name: TableName,
+    pub primary_key_columns: NonemptyArc<ColumnName>,
+    pub partition_key_count: NonZeroUsize,
     pub target_columns: NonemptyArc<ColumnName>,
     pub partitioning: DbIndexPartitioning,
     pub filtering_columns: Arc<[ColumnName]>,
@@ -621,6 +623,17 @@ impl IndexMetadata {
         copy.version = IndexVersion(Uuid::nil());
         copy
     }
+
+    fn nonpk_partition_key_columns(&self) -> Option<impl Iterator<Item = &ColumnName>> {
+        match &self.partitioning {
+            DbIndexPartitioning::Global => None,
+            DbIndexPartitioning::Local(pk_columns) => Some(
+                pk_columns
+                    .iter()
+                    .filter(|col| !self.primary_key_columns.contains(col)),
+            ),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -641,6 +654,8 @@ pub struct DbCustomIndex {
     pub keyspace: KeyspaceName,
     pub index: IndexName,
     pub table: TableName,
+    pub primary_key_columns: NonemptyArc<ColumnName>,
+    pub partition_key_count: NonZeroUsize,
     pub target_columns: NonemptyArc<ColumnName>,
     pub partitioning: DbIndexPartitioning,
     pub filtering_columns: Arc<[ColumnName]>,

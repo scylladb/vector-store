@@ -154,9 +154,10 @@ impl VsIndexEntry {
                 anyhow::anyhow!("add_index_vs must be called with a vector-search index")
             })?
             .clone();
-        let primary_key_columns = db_index.get_primary_key_columns().await;
-        let filtering_columns = primary_key_columns
+        let filtering_columns = metadata
+            .primary_key_columns
             .iter()
+            .chain(metadata.nonpk_partition_key_columns().into_iter().flatten())
             .chain(metadata.filtering_columns.iter())
             .cloned()
             .collect_nonempty_arc()
@@ -169,7 +170,7 @@ impl VsIndexEntry {
             db_index,
             status: IndexStatus::Initializing,
             progress,
-            primary_key_columns,
+            primary_key_columns: metadata.primary_key_columns,
             data: VsIndexData {
                 routing_group,
                 partitioning: metadata.partitioning,
@@ -234,11 +235,11 @@ impl VsIndexEntry {
 
 impl FtsIndexEntry {
     pub(crate) async fn new(
+        metadata: IndexMetadata,
         index: mpsc::Sender<FtsIndex>,
         monitor: mpsc::Sender<MonitorItems>,
         db_index: mpsc::Sender<DbIndex>,
     ) -> Self {
-        let primary_key_columns = db_index.get_primary_key_columns().await;
         let progress = db_index.full_scan_progress().await;
         Self {
             index,
@@ -246,7 +247,7 @@ impl FtsIndexEntry {
             db_index,
             status: IndexStatus::Initializing,
             progress,
-            primary_key_columns,
+            primary_key_columns: metadata.primary_key_columns,
             data: (),
         }
     }
