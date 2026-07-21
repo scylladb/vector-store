@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use tantivy::IndexWriter;
+use tantivy::ReloadPolicy;
 use tantivy::TantivyDocument;
 use tantivy::collector::TopDocs;
 use tantivy::indexer::IndexWriterOptions;
@@ -149,7 +150,9 @@ impl IndexState {
             .writer_with_options(options)
             .map_err(|e| anyhow!("fts: failed to create writer: {e}"))?;
         let reader = index
-            .reader()
+            .reader_builder()
+            .reload_policy(ReloadPolicy::Manual)
+            .try_into()
             .map_err(|e| anyhow!("fts: failed to create reader: {e}"))?;
         Ok(Self {
             index,
