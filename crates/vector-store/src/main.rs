@@ -77,10 +77,14 @@ fn main() -> anyhow::Result<()> {
 
         let config_rx = config_receivers.config.clone();
         let opensearch_addr = config_rx.borrow().opensearch_addr.clone();
+        let use_diskann = config_rx.borrow().use_diskann;
 
         let index_factory = if let Some(addr) = opensearch_addr {
             tracing::info!("Using OpenSearch index factory at {addr}");
             vector_store::new_index_factory_opensearch(addr, config_rx.clone())?
+        } else if use_diskann {
+            tracing::info!("Using DiskANN index factory");
+            vector_store::new_index_factory_diskann(config_rx.clone())?
         } else {
             tracing::info!("Using Usearch index factory");
             vector_store::new_index_factory_usearch(config_rx.clone())?

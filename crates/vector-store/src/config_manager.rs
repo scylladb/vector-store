@@ -5,6 +5,7 @@
 
 use crate::Config;
 use crate::Credentials;
+use crate::DiskannAlpha;
 use crate::file_monitor::TlsFilesMonitor;
 use crate::tls;
 use crate::tls::TlsServerConfig;
@@ -435,6 +436,23 @@ pub async fn load_config(env: impl Fn(&str) -> anyhow::Result<String>) -> anyhow
         .map(|v| v.split(':').map(|s| s.parse::<humantime::Duration>()).map_ok(|v| v.into()).collect::<Result<Vec<_>, _>>().map_err(|err| {
             anyhow!("Unable to parse VECTOR_STORE_USEARCH_SIMULATOR env (search_us:add_us:delete_us:...): {err}")
         })).transpose()?;
+
+    if let Ok(diskann_alpha) = env("VECTOR_STORE_DISKANN_ALPHA") {
+        let alpha = diskann_alpha
+            .trim()
+            .parse::<f32>()
+            .map_err(|_| anyhow!("Unable to parse VECTOR_STORE_DISKANN_ALPHA env (float)"))?;
+        config.diskann_alpha = Some(
+            DiskannAlpha::new(alpha)
+                .map_err(|e| anyhow!("Invalid VECTOR_STORE_DISKANN_ALPHA: {e}"))?,
+        );
+    }
+
+    config.use_diskann = env("VECTOR_STORE_USE_DISKANN")
+        .unwrap_or("false".into())
+        .trim()
+        .parse()
+        .map_err(|_| anyhow!("Unable to parse VECTOR_STORE_USE_DISKANN env (bool)"))?;
 
     config.alter_index_simulator = env("VECTOR_STORE_ALTER_INDEX_SIMULATOR")
         .unwrap_or("false".into())
@@ -878,6 +896,22 @@ mod tests {
                 .to_string()
                 .contains("Unable to parse VECTOR_STORE_FULLTEXT_INDEXES")
         );
+    }
+
+    #[tokio::test]
+    async fn load_config_diskann() {
+        let env = mock_env(HashMap::new());
+        let config = load_config(env).await.unwrap();
+        assert!(config.diskann_alpha.is_none());
+        assert!(!config.use_diskann);
+
+        let env = mock_env(HashMap::from([
+            ("VECTOR_STORE_DISKANN_ALPHA", "1.2".into()),
+            ("VECTOR_STORE_USE_DISKANN", "true".into()),
+        ]));
+        let config = load_config(env).await.unwrap();
+        assert_eq!(config.diskann_alpha, Some(DiskannAlpha::new(1.2).unwrap()));
+        assert!(config.use_diskann);
     }
 
     #[test]
