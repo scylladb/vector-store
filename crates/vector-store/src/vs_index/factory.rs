@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use tokio::sync::mpsc;
 
-pub struct VsIndexConfiguration {
+pub(crate) struct VsIndexConfiguration {
     pub key: IndexKey,
     pub dimensions: Dimensions,
     pub connectivity: Connectivity,
@@ -27,7 +27,7 @@ pub struct VsIndexConfiguration {
     pub quantization: Quantization,
 }
 
-pub trait VsIndexFactory {
+pub(crate) trait VsIndexFactory {
     fn create_index(
         &self,
         index: VsIndexConfiguration,

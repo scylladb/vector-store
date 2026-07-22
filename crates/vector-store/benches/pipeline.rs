@@ -199,9 +199,6 @@ async fn run_vector_store(
     node_state: mpsc::Sender<NodeState>,
     db: mpsc::Sender<Db>,
 ) -> (impl Sized, Arc<TestClient>) {
-    let internals = vector_store::new_internals();
-    let index_factory = vector_store::new_index_factory_usearch(config.clone()).unwrap();
-
     let addr = config.borrow().vector_store_addr;
     let (http_tx, http_rx) = watch::channel(Some(Arc::new(HttpServerConfig { addr, tls: None })));
     let (_mtls_tx, mtls_http_rx) = watch::channel(None);
@@ -211,16 +208,9 @@ async fn run_vector_store(
         mtls_http: mtls_http_rx,
     };
 
-    let (server, _mtls) = vector_store::run(
-        node_state,
-        db,
-        internals,
-        index_factory,
-        receivers,
-        vector_store::new_metrics(),
-    )
-    .await
-    .unwrap();
+    let (server, _mtls) = vector_store::run(Some(node_state), Some(db), receivers)
+        .await
+        .unwrap();
 
     let client = Arc::new(TestClient::new(server.router().await.unwrap()));
     ((http_tx, server), client)

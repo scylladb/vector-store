@@ -8,7 +8,7 @@ use crate::IndexKey;
 use crate::Limit;
 use crate::PrimaryKey;
 use crate::table::PrimaryId;
-use crate::vs_index::actor::CountR;
+use crate::vs_index::CountR;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 

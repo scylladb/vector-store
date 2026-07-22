@@ -3,14 +3,38 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
-pub mod actor;
-pub mod factory;
-pub mod validator;
+mod actor;
+mod diskann;
+mod factory;
+mod opensearch;
+mod usearch;
+mod validator;
 
+use crate::Config;
+pub(crate) use actor::CountR;
 pub(crate) use actor::VsIndex;
 pub(crate) use actor::VsIndexExt;
+pub(crate) use factory::VsIndexConfiguration;
+pub(crate) use factory::VsIndexFactory;
+use std::sync::Arc;
+use tokio::sync::watch;
 pub(crate) use validator::Error;
 
-pub(crate) mod diskann;
-pub(crate) mod opensearch;
-pub(crate) mod usearch;
+pub(crate) fn new_index_factory_usearch(
+    config_tx: watch::Receiver<Arc<Config>>,
+) -> anyhow::Result<Box<dyn VsIndexFactory + Send + Sync>> {
+    Ok(Box::new(usearch::new_usearch(config_tx)?))
+}
+
+pub(crate) fn new_index_factory_opensearch(
+    addr: String,
+    config_rx: watch::Receiver<Arc<Config>>,
+) -> anyhow::Result<Box<dyn VsIndexFactory + Send + Sync>> {
+    Ok(Box::new(opensearch::new_opensearch(&addr, config_rx)?))
+}
+
+pub(crate) fn new_index_factory_diskann(
+    config_rx: watch::Receiver<Arc<Config>>,
+) -> anyhow::Result<Box<dyn VsIndexFactory + Send + Sync>> {
+    Ok(Box::new(diskann::new_diskann(config_rx)?))
+}

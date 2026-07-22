@@ -73,42 +73,7 @@ fn main() -> anyhow::Result<()> {
         // Start SIGHUP handler now that we're in the Tokio runtime
         config_manager.start(dotenvy_to_std_var);
 
-        let node_state = vector_store::new_node_state().await;
-
-        let config_rx = config_receivers.config.clone();
-        let opensearch_addr = config_rx.borrow().opensearch_addr.clone();
-        let use_diskann = config_rx.borrow().use_diskann;
-
-        let index_factory = if let Some(addr) = opensearch_addr {
-            tracing::info!("Using OpenSearch index factory at {addr}");
-            vector_store::new_index_factory_opensearch(addr, config_rx.clone())?
-        } else if use_diskann {
-            tracing::info!("Using DiskANN index factory");
-            vector_store::new_index_factory_diskann(config_rx.clone())?
-        } else {
-            tracing::info!("Using Usearch index factory");
-            vector_store::new_index_factory_usearch(config_rx.clone())?
-        };
-
-        let internals = vector_store::new_internals();
-        let metrics = vector_store::new_metrics();
-        let db_actor = vector_store::new_db(
-            node_state.clone(),
-            internals.clone(),
-            config_rx,
-            metrics.clone(),
-        )
-        .await?;
-
-        let (server, _mtls) = vector_store::run(
-            node_state,
-            db_actor,
-            internals,
-            index_factory,
-            config_receivers,
-            metrics,
-        )
-        .await?;
+        let (server, _mtls) = vector_store::run(None, None, config_receivers).await?;
         let addr = (*server.address().await.borrow())
             .ok_or_else(|| anyhow!("failed to get server address"))?;
         tracing::info!("listening on {addr}");

@@ -15,8 +15,8 @@ use scylla::cluster::metadata::NativeType;
 use scylla::value::CqlValue;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
-use tokio::sync::watch;
 use uuid::Uuid;
+use vector_store::Config;
 use vector_store::DbIndexPartitioning;
 use vector_store::HttpServerExt;
 use vector_store::IndexKind;
@@ -29,7 +29,6 @@ use vector_store::Timestamp;
 async fn simple_create_search_delete_index() {
     crate::enable_tracing();
     let node_state = vector_store::new_node_state().await;
-    let internals = vector_store::new_internals();
     let (db_actor, db) = db_basic::new(node_state.clone());
 
     let index = IndexMetadata {
@@ -53,21 +52,14 @@ async fn simple_create_search_delete_index() {
     };
     let server = mock_opensearch::TestOpenSearchServer::start().await;
 
-    let (_, config_rx_factory) = watch::channel(Arc::new(vector_store::Config::default()));
-    let index_factory =
-        vector_store::new_index_factory_opensearch(server.base_url(), config_rx_factory).unwrap();
-
-    let (receivers, _senders) = create_config_channels(test_config()).await;
-    let (server, _mtls) = vector_store::run(
-        node_state,
-        db_actor,
-        internals,
-        index_factory,
-        receivers,
-        vector_store::new_metrics(),
-    )
-    .await
-    .unwrap();
+    let (receivers, _senders) = create_config_channels(Config {
+        opensearch_addr: Some(server.base_url()),
+        ..test_config()
+    })
+    .await;
+    let (server, _mtls) = vector_store::run(Some(node_state), Some(db_actor), receivers)
+        .await
+        .unwrap();
     let addr = (*server.address().await.borrow()).unwrap();
 
     let client = HttpClient::new(addr);

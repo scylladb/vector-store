@@ -3,11 +3,15 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
-pub(crate) mod actor;
-pub(crate) mod factory;
-pub(crate) mod tantivy;
+mod actor;
+mod factory;
+mod tantivy;
 
 pub(crate) use actor::FtsIndex;
 pub(crate) use actor::FtsIndexExt;
 pub(crate) use factory::FtsIndexFactory;
-pub(crate) use tantivy::TantivyIndexFactory;
+use tantivy::TantivyIndexFactory;
+
+pub(crate) fn new_fts_index_factory_tantivy() -> Box<dyn FtsIndexFactory + Send + Sync> {
+    Box::new(TantivyIndexFactory::new())
+}

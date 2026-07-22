@@ -51,7 +51,6 @@ async fn memory_limit_during_index_build() {
     crate::enable_tracing();
 
     let node_state = vector_store::new_node_state().await;
-    let internals = vector_store::new_internals();
 
     let (db_actor, db) = db_basic::new(node_state.clone());
 
@@ -136,19 +135,11 @@ async fn memory_limit_during_index_build() {
     };
 
     let (receivers, senders) = create_config_channels(config.clone()).await;
-    let index_factory = vector_store::new_index_factory_usearch(receivers.config.clone()).unwrap();
 
     let node_state = node_state.clone();
-    let (server, _mtls) = vector_store::run(
-        node_state,
-        db_actor,
-        internals,
-        index_factory,
-        receivers,
-        vector_store::new_metrics(),
-    )
-    .await
-    .unwrap();
+    let (server, _mtls) = vector_store::run(Some(node_state), Some(db_actor), receivers)
+        .await
+        .unwrap();
     let addr = (*server.address().await.borrow()).unwrap();
 
     let client = HttpClient::new(addr);
