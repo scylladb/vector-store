@@ -10,7 +10,6 @@ use crate::ExpansionSearch;
 use crate::IndexKey;
 use crate::Quantization;
 use crate::SpaceType;
-use crate::memory::Memory;
 use crate::table::Table;
 use crate::vs_index::actor::VsIndex;
 use std::sync::Arc;
@@ -32,7 +31,6 @@ pub(crate) trait VsIndexFactory {
         &self,
         index: VsIndexConfiguration,
         table: Arc<RwLock<Table>>,
-        memory: mpsc::Sender<Memory>,
     ) -> anyhow::Result<mpsc::Sender<VsIndex>>;
     fn index_engine_version(&self) -> String;
 }

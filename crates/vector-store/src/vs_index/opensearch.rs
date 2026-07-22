@@ -14,7 +14,6 @@ use crate::PartitionId;
 use crate::SpaceType;
 use crate::Vector;
 use crate::VsIndexFactory;
-use crate::memory::Memory;
 use crate::perf;
 use crate::table::IndexIdGenerator;
 use crate::table::PrimaryId;
@@ -89,7 +88,6 @@ impl VsIndexFactory for OpenSearchIndexFactory {
         &self,
         index: VsIndexConfiguration,
         table: Arc<RwLock<Table>>,
-        _: mpsc::Sender<Memory>,
     ) -> anyhow::Result<mpsc::Sender<VsIndex>> {
         new(
             index.key,

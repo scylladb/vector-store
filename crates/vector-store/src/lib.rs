@@ -48,7 +48,6 @@ pub use crate::httpserver::HttpServerExt;
 pub use crate::index_key::IndexKey;
 use crate::indexes::Indexes;
 pub use crate::info::Info;
-use crate::internals::Internals;
 use crate::metrics::Metrics;
 use crate::node_state::NodeState;
 pub use crate::nonempty::NonemptyArc;
@@ -745,18 +744,21 @@ pub async fn run(
     let opensearch_addr = config_rx.borrow().opensearch_addr.clone();
     let use_diskann = config_rx.borrow().use_diskann;
 
+    let internals = internals::new();
+    let memory = memory::new(internals.clone(), config_rx.clone());
+    let worker = worker::new();
+
     let vs_index_factory = if let Some(addr) = opensearch_addr {
         tracing::info!("Using OpenSearch index factory at {addr}");
         vs_index::new_index_factory_opensearch(addr, config_rx.clone())?
     } else if use_diskann {
         tracing::info!("Using DiskANN index factory");
-        vs_index::new_index_factory_diskann(config_rx.clone())?
+        vs_index::new_index_factory_diskann(config_rx.clone(), worker.clone(), memory.clone())?
     } else {
         tracing::info!("Using Usearch index factory");
-        vs_index::new_index_factory_usearch(config_rx.clone())?
+        vs_index::new_index_factory_usearch(config_rx.clone(), worker.clone(), memory.clone())?
     };
 
-    let internals = internals::new();
     let metrics = Arc::new(Metrics::new());
     let db_actor = if let Some(db_actor) = db_actor {
         db_actor
@@ -772,7 +774,7 @@ pub async fn run(
 
     let index_engine_version = vs_index_factory.index_engine_version();
     let indexes = Arc::new(RwLock::new(Indexes::new()));
-    let fts_index_factory = fts_index::new_fts_index_factory_tantivy();
+    let fts_index_factory = fts_index::new_fts_index_factory_tantivy(worker, memory);
     let engine = engine::new(
         db_actor,
         engine::IndexFactories {
@@ -782,7 +784,6 @@ pub async fn run(
         node_state.clone(),
         metrics.clone(),
         Arc::clone(&indexes),
-        internals.clone(),
         config_receivers.config,
     )
     .await?;

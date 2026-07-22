@@ -26,7 +26,6 @@ use crate::vs_index::actor::AnnR;
 use crate::vs_index::actor::VsIndex;
 use crate::vs_index::factory::VsIndexConfiguration;
 use crate::vs_index::validator;
-use crate::worker;
 use crate::worker::Worker;
 use crate::worker::WorkerExt;
 use anyhow::anyhow;
@@ -57,6 +56,7 @@ use usearch::b1x8;
 
 pub struct UsearchIndexFactory {
     worker: async_channel::Sender<Worker>,
+    memory: mpsc::Sender<Memory>,
     mode: Mode,
 }
 
@@ -65,7 +65,6 @@ impl VsIndexFactory for UsearchIndexFactory {
         &self,
         index: VsIndexConfiguration,
         table: Arc<RwLock<Table>>,
-        memory: mpsc::Sender<Memory>,
     ) -> anyhow::Result<mpsc::Sender<VsIndex>> {
         match &self.mode {
             Mode::Usearch => {
@@ -85,7 +84,7 @@ impl VsIndexFactory for UsearchIndexFactory {
                     index.dimensions,
                     table,
                     self.worker.clone(),
-                    memory,
+                    self.memory.clone(),
                 )
             }
             Mode::Simulator { config, config_rx } => new(
@@ -99,7 +98,7 @@ impl VsIndexFactory for UsearchIndexFactory {
                 index.dimensions,
                 table,
                 self.worker.clone(),
-                memory,
+                self.memory.clone(),
             ),
         }
     }
@@ -114,10 +113,13 @@ impl VsIndexFactory for UsearchIndexFactory {
 
 pub fn new_usearch(
     mut config_rx: watch::Receiver<Arc<Config>>,
+    worker: async_channel::Sender<Worker>,
+    memory: mpsc::Sender<Memory>,
 ) -> anyhow::Result<UsearchIndexFactory> {
     let config = config_rx.borrow_and_update().clone();
     Ok(UsearchIndexFactory {
-        worker: worker::new(),
+        worker,
+        memory,
         mode: if config.usearch_simulator.is_none() {
             Mode::Usearch
         } else {
@@ -1206,6 +1208,7 @@ mod tests {
     use crate::table::IndexIdGenerator;
     use crate::table::MockTableSearch;
     use crate::vs_index::VsIndexExt;
+    use crate::worker;
     use mockall::predicate::*;
     use scylla::value::CqlValue;
     use std::num::NonZeroUsize;

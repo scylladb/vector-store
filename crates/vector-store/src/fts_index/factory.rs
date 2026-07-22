@@ -5,17 +5,11 @@
 
 use crate::IndexKey;
 use crate::fts_index::actor::FtsIndex;
-use crate::memory::Memory;
 use crate::table::Table;
 use std::sync::Arc;
 use std::sync::RwLock;
 use tokio::sync::mpsc;
 
 pub(crate) trait FtsIndexFactory {
-    fn create_index(
-        &self,
-        key: IndexKey,
-        table: Arc<RwLock<Table>>,
-        memory: mpsc::Sender<Memory>,
-    ) -> mpsc::Sender<FtsIndex>;
+    fn create_index(&self, key: IndexKey, table: Arc<RwLock<Table>>) -> mpsc::Sender<FtsIndex>;
 }

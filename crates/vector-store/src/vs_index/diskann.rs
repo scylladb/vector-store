@@ -13,6 +13,7 @@ use crate::perf;
 use crate::table::Table;
 use crate::vs_index::actor::VsIndex;
 use crate::vs_index::factory::VsIndexConfiguration;
+use crate::worker::Worker;
 use anyhow::Context;
 use diskann::graph::Config as DiskannConfig;
 use diskann::graph::DiskANNIndex;
@@ -43,6 +44,8 @@ type DiskannProvider =
     DefaultProvider<FastMemoryVectorProviderAsync<f32>, NoStore, TableDeleteProviderAsync>;
 
 pub struct DiskannIndexFactory {
+    _worker: async_channel::Sender<Worker>,
+    _memory: mpsc::Sender<Memory>,
     alpha: DiskannAlpha,
 }
 
@@ -51,7 +54,6 @@ impl VsIndexFactory for DiskannIndexFactory {
         &self,
         index: VsIndexConfiguration,
         _table: Arc<RwLock<Table>>,
-        _memory: mpsc::Sender<Memory>,
     ) -> anyhow::Result<mpsc::Sender<VsIndex>> {
         let params = DiskannParams::new(&index, self.alpha, MAX_POINTS)?;
         let provider_params = DefaultProviderParameters::simple(
@@ -81,10 +83,14 @@ impl VsIndexFactory for DiskannIndexFactory {
 
 pub fn new_diskann(
     mut config_rx: watch::Receiver<Arc<Config>>,
+    worker: async_channel::Sender<Worker>,
+    memory: mpsc::Sender<Memory>,
 ) -> anyhow::Result<DiskannIndexFactory> {
     let config = config_rx.borrow_and_update();
 
     Ok(DiskannIndexFactory {
+        _worker: worker,
+        _memory: memory,
         alpha: config
             .diskann_alpha
             .unwrap_or(DiskannAlpha::new(DISKANN_DEFAULT_ALPHA).unwrap()),
