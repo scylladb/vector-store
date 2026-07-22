@@ -760,6 +760,7 @@ pub async fn run(
     let config_rx = config_receivers.config.clone();
     let opensearch_addr = config_rx.borrow().opensearch_addr.clone();
     let use_diskann = config_rx.borrow().use_diskann;
+    let use_gpu = config_rx.borrow().use_gpu;
 
     let internals = internals::new();
     let memory = memory::new(internals.clone(), config_rx.clone());
@@ -768,6 +769,9 @@ pub async fn run(
     let vs_index_factory = if let Some(addr) = opensearch_addr {
         tracing::info!("Using OpenSearch index factory at {addr}");
         vs_index::new_index_factory_opensearch(addr, config_rx.clone())?
+    } else if use_gpu {
+        tracing::info!("Using cuVS (GPU) index factory");
+        vs_index::new_index_factory_cuvs(config_rx.clone())?
     } else if use_diskann {
         tracing::info!("Using DiskANN index factory");
         vs_index::new_index_factory_diskann(config_rx.clone(), worker.clone(), memory.clone())?
