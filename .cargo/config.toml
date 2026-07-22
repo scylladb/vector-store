@@ -1,2 +1,8 @@
 [alias]
 openapi = "run --features dev-tools --bin generate-openapi -- api/openapi.json"
+
+[env]
+CMAKE_PREFIX_PATH = "/opt/vector-store-cuvs-gpu/env"
+
+[target.'cfg(target_os = "linux")']
+rustflags = ["-C", "link-arg=-Wl,-rpath,/opt/vector-store-cuvs-gpu/env/lib"]

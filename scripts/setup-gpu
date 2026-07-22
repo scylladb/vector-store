@@ -1,0 +1,155 @@
+#!/bin/bash
+#
+# Sets up a local conda env with `libcuvs` for building vector-store with `--features gpu`.
+# Usage: sudo ./scripts/setup-gpu [--verify]
+
+set -euo pipefail
+
+log() { echo "==> $*" >&2; }
+err() { echo "error: $*" >&2; }
+
+filter_conda_noise() {
+    sed -e '/^#/d' -e '/To enable CUDA support, UCX requires/,/have been installed for you\.$/d' -e '/^$/d'
+}
+
+repo=$(realpath "$(dirname "${BASH_SOURCE[0]}")/..")
+PREFIX="${VECTOR_STORE_CUVS_GPU_PREFIX:-/opt/vector-store-cuvs-gpu}"
+MINIFORGE_PREFIX="$PREFIX/miniforge"
+ENV_PREFIX="$PREFIX/env"
+
+if [[ $EUID -ne 0 ]] || [[ -z "${SUDO_USER:-}" ]]; then
+    err "run with sudo, as your normal user."
+    exit 1
+fi
+
+if ! command -v nvidia-smi &>/dev/null || ! nvidia-smi &>/dev/null; then
+    err "working NVIDIA driver (nvidia-smi) required."
+    exit 1
+fi
+log "NVIDIA driver OK"
+
+command -v python3 &>/dev/null || { err "python3 is required (used to resolve conda package metadata)."; exit 1; }
+
+# .cargo/config.toml is checked in with a fixed CMAKE_PREFIX_PATH/rpath so a plain
+# `cargo build --features gpu` just works with no exporting/sourcing.
+# When a non-default prefix is requested, rewrite those two lines in place to match,
+# so the build actually looks in $ENV_PREFIX instead of silently keeping the checked-in default.
+cargo_config="$repo/.cargo/config.toml"
+if ! grep -qF "CMAKE_PREFIX_PATH = \"$ENV_PREFIX\"" "$cargo_config"; then
+    log "Pointing $cargo_config at $ENV_PREFIX"
+    sed -i -E "s#^CMAKE_PREFIX_PATH = \".*\"#CMAKE_PREFIX_PATH = \"$ENV_PREFIX\"#" "$cargo_config"
+    sed -i -E "s#-rpath,[^\"]*/lib#-rpath,$ENV_PREFIX/lib#" "$cargo_config"
+    if [[ "$PREFIX" != /opt/vector-store-cuvs-gpu ]]; then
+        log "NOTE: $cargo_config now points at a non-default, local-only prefix — avoid committing it."
+    fi
+fi
+
+cuvs_sys_version=$(awk '/^name = "cuvs-sys"$/{getline; print; exit}' "$repo/Cargo.lock" | sed -n 's/^version = "\(.*\)"$/\1/p')
+[[ -n "$cuvs_sys_version" ]] || { err "cuvs-sys version not found in Cargo.lock"; exit 1; }
+major_minor=$(echo "$cuvs_sys_version" | cut -d. -f1-2)
+log "cuvs-sys is resolved to version $cuvs_sys_version (need libcuvs $major_minor.x)"
+
+if [[ ! -x "$MINIFORGE_PREFIX/bin/conda" ]]; then
+    arch=$(uname -m)
+    case "$arch" in
+        x86_64 | aarch64) ;;
+        *)
+            err "unsupported architecture: $arch (Miniforge only auto-installs for x86_64/aarch64)"
+            exit 1
+            ;;
+    esac
+
+    log "Resolving the latest Miniforge Linux/$arch release"
+    read -r installer_name installer_url checksum_url <<<"$(python3 - "$arch" <<'PY'
+import json, sys, urllib.request
+arch = sys.argv[1]
+data = json.load(urllib.request.urlopen(
+    "https://api.github.com/repos/conda-forge/miniforge/releases/latest", timeout=60))
+assets = {a["name"]: a["browser_download_url"] for a in data["assets"]}
+suffix = f"-Linux-{arch}.sh"
+name = next(n for n in assets if n.startswith("Miniforge3-") and n.endswith(suffix) and n + ".sha256" in assets)
+print(name, assets[name], assets[name + ".sha256"])
+PY
+)" || { err "could not resolve the latest Miniforge release for $arch."; exit 1; }
+
+    log "Installing Miniforge ($installer_name) into $MINIFORGE_PREFIX"
+    mkdir -p "$PREFIX"
+    tmp_dir=$(mktemp -d)
+    trap 'rm -rf "$tmp_dir"' EXIT
+    tmp_installer="$tmp_dir/$installer_name"
+    curl -fL --progress-bar "$installer_url" -o "$tmp_installer"
+    curl -fL "$checksum_url" -o "$tmp_installer.sha256"
+
+    expected_sha256=$(awk '{print $1}' "$tmp_installer.sha256")
+    actual_sha256=$(sha256sum "$tmp_installer" | awk '{print $1}')
+    if [[ -z "$expected_sha256" ]] || [[ "$expected_sha256" != "$actual_sha256" ]]; then
+        err "Miniforge installer checksum mismatch (expected $expected_sha256, got $actual_sha256)"
+        exit 1
+    fi
+
+    bash "$tmp_installer" -b -p "$MINIFORGE_PREFIX"
+    rm -rf "$tmp_dir"
+    trap - EXIT
+fi
+export PATH="$MINIFORGE_PREFIX/bin:$PATH"
+
+log "Resolving the latest libcuvs $major_minor.x package"
+resolved=$(python3 - "$major_minor" <<'PY'
+import json, re, sys, urllib.request
+
+mm = sys.argv[1]
+found_channel_data = False
+
+for c in ("rapidsai", "rapidsai-nightly"):
+    try:
+        data = json.load(urllib.request.urlopen(
+            f"https://conda.anaconda.org/{c}/linux-64/repodata.json", timeout=60))
+    except Exception as e:
+        print(f"warning: failed to fetch {c} repodata: {e}", file=sys.stderr)
+        continue
+    found_channel_data = True
+
+    pkgs = {**data.get("packages", {}), **data.get("packages.conda", {})}
+    cands = [
+        meta for meta in pkgs.values()
+        if meta.get("name") == "libcuvs" and meta.get("version", "").startswith(mm + ".")
+    ]
+    if not cands:
+        continue
+
+    latest_ts = max(meta["timestamp"] for meta in cands)
+    best = sorted(
+        [meta for meta in cands if meta["timestamp"] == latest_ts],
+        key=lambda meta: 0 if "cuda12" in meta["build"] else 1,
+    )[0]
+    cv = re.search(r"cuda(\d+)", best["build"])
+    print(f"{c} libcuvs {best['version']} {best['build']} {cv.group(1) if cv else '12'}")
+    sys.exit(0)
+
+if not found_channel_data:
+    print("no channel repodata could be fetched (network/DNS issue?)", file=sys.stderr)
+sys.exit(1)
+PY
+) || { err "libcuvs $major_minor.x not found on rapidsai/rapidsai-nightly (see warnings above)."; exit 1; }
+
+read -r channel pkg_name pkg_version pkg_build cuda_version <<< "$resolved"
+log "Resolved: $channel::$pkg_name=$pkg_version=$pkg_build (cuda $cuda_version)"
+
+conda_action="create"
+[[ -d "$ENV_PREFIX/conda-meta" ]] && conda_action="install"
+log "$([[ "$conda_action" == create ]] && echo Creating || echo Installing) conda env at $ENV_PREFIX"
+
+conda "$conda_action" -y --solver=libmamba -p "$ENV_PREFIX" -c "$channel" -c conda-forge -c nvidia \
+    "$pkg_name=$pkg_version=$pkg_build" "cuda-version=$cuda_version.*" \
+    "cuda-cudart=$cuda_version.*" cmake pkg-config 2>&1 | filter_conda_noise
+
+chmod -R a+rX "$PREFIX"
+
+if [[ "${1:-}" == "--verify" ]]; then
+    log "Verifying: cargo check -p vector-store --features gpu"
+    runuser -u "$SUDO_USER" -- bash -lc "cd '$repo' && cargo check -p vector-store --features gpu" \
+        || { err "Verification failed"; exit 1; }
+    log "Verification succeeded"
+fi
+
+log "Done."
