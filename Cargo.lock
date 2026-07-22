@@ -4660,9 +4660,9 @@ checksum = "d68f2ec51b097e4c1a75b681a8bec621909b5e91f15bb7b840c4f2f7b01148b2"
 
 [[package]]
 name = "scylla"
-version = "1.7.0"
+version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4febc4a3c0b2b6a6ab0b25670a28015a7b87f6998b01ad324be19bb583237ad9"
+checksum = "7ab73aaea18839882f43c08bc6367dfd1d4e9d285a2ab6ac4335b9dc06b63c19"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -4677,7 +4677,6 @@ dependencies = [
  "rand_pcg",
  "rustls",
  "scylla-cql",
- "scylla-cql-core",
  "smallvec",
  "socket2 0.5.10",
  "thiserror 2.0.18",
@@ -4708,9 +4707,9 @@ dependencies = [
 
 [[package]]
 name = "scylla-cql"
-version = "1.7.0"
+version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7898c851387b20e0996b33d6d98426c432cc0b45ed9af3cb4bd8b4d540ad7ade"
+checksum = "87834c927e9336270725aac24fada6e86f9d14aa04a8c8f93223b002e86f3891"
 dependencies = [
  "bigdecimal",
  "byteorder",
@@ -4719,7 +4718,7 @@ dependencies = [
  "itertools 0.14.0",
  "lz4_flex 0.11.6",
  "num-bigint 0.4.6",
- "scylla-cql-core",
+ "scylla-macros",
  "snap",
  "stable_deref_trait",
  "thiserror 2.0.18",
@@ -4730,28 +4729,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "scylla-cql-core"
-version = "1.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e609d59933b27489fb329e0e290469f0a027fd75a598f8d219b1479ed6213d0"
-dependencies = [
- "bigdecimal",
- "byteorder",
- "bytes",
- "chrono",
- "itertools 0.14.0",
- "num-bigint 0.4.6",
- "scylla-macros",
- "thiserror 2.0.18",
- "time",
- "uuid",
-]
-
-[[package]]
 name = "scylla-macros"
-version = "1.7.0"
+version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "275a0290cc00fc50a46b302ad09490ccce2eff1203d648addab1bd8ae833b96e"
+checksum = "ad97e5f7ccd8a1d41e631e361c9851c21b093e15ff5dcd08861f6ac83215d434"
 dependencies = [
  "darling 0.20.11",
  "proc-macro2",
