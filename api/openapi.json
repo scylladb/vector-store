@@ -122,14 +122,7 @@
             }
           },
           "503": {
-            "description": "Service Unavailable. Indicates that a full scan of the index is in progress and the search cannot be performed at this time.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorMessage"
-                }
-              }
-            }
+            "$ref": "#/components/responses/IndexNotReadyResponse"
           }
         }
       }
@@ -223,14 +216,7 @@
             }
           },
           "503": {
-            "description": "Service Unavailable. Indicates that a full scan of the index is in progress and the search cannot be performed at this time.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorMessage"
-                }
-              }
-            }
+            "$ref": "#/components/responses/IndexNotReadyResponse"
           }
         }
       }
@@ -395,6 +381,42 @@
       "IndexName": {
         "type": "string",
         "description": "A name of the vector index in a db."
+      },
+      "IndexNotReadyReason": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "NODE_BOOTSTRAPPING"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "message",
+              "reason"
+            ],
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "INDEX_BUILDING"
+                ]
+              }
+            }
+          }
+        ]
       },
       "IndexStatus": {
         "type": "string",
@@ -931,6 +953,18 @@
           "format": "float"
         },
         "description": "The vector to use for the Approximate Nearest Neighbor search. The format of data must match the data_type of the index."
+      }
+    },
+    "responses": {
+      "IndexNotReadyResponse": {
+        "description": "Service Unavailable. The index is not ready to serve requests. The body is a JSON object with a 'reason' field: 'NODE_BOOTSTRAPPING' when the node has not yet finished its startup sequence; 'INDEX_BUILDING' (with a 'message' field) when the node is healthy but this index is still being constructed.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/IndexNotReadyReason"
+            }
+          }
+        }
       }
     }
   },

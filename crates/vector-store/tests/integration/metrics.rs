@@ -91,7 +91,7 @@ async fn deleted_index_labels_absent_from_metrics_endpoint() {
 async fn fts_index_metrics_present_in_metrics_endpoint() {
     crate::enable_tracing();
 
-    let (client, keyspace_name, index_name, _hold) = fts::setup_fts_and_wait(
+    let (client, keyspace_name, index_name, _db, _hold) = fts::setup_fts_and_wait(
         [
             (vec![CqlValue::Int(1)], "hello world", 10),
             (vec![CqlValue::Int(2)], "foo bar", 20),

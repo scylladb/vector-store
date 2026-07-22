@@ -68,6 +68,10 @@ fn make_scan_fn(rows: impl Iterator<Item = DbIndexedRow> + Send + Sync + 'static
     })
 }
 
+pub(crate) fn pending_scan_fn() -> ScanFn {
+    Box::new(|_tx| std::future::pending::<()>().boxed())
+}
+
 pub(crate) fn scan_fn_vectors<I>(items: I) -> ScanFn
 where
     I: IntoIterator<
@@ -207,6 +211,26 @@ impl DbBasic {
             bail!("a table {table_name} already exists in a keyspace");
         }
         keyspace.tables.insert(table_name, table);
+
+        db.create_new_schema_version();
+        Ok(())
+    }
+
+    pub(crate) fn add_vector_column(
+        &self,
+        keyspace_name: KeyspaceName,
+        table_name: TableName,
+        column_name: ColumnName,
+        dimensions: Dimensions,
+    ) -> anyhow::Result<()> {
+        let mut db = self.0.write().unwrap();
+
+        let table = db
+            .keyspaces
+            .get_mut(&keyspace_name)
+            .and_then(|keyspace| keyspace.tables.get_mut(&table_name))
+            .ok_or_else(|| anyhow!("a table {table_name} does not exist"))?;
+        table.dimensions.insert(column_name, dimensions);
 
         db.create_new_schema_version();
         Ok(())
