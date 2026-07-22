@@ -37,10 +37,12 @@ done
 
 echo generate Cargo SBOM for version $vector_store_version
 cp Cargo.toml Cargo.toml.bak
-trap 'mv Cargo.toml.bak Cargo.toml' EXIT
+cp Cargo.lock Cargo.lock.bak
+trap 'mv Cargo.toml.bak Cargo.toml; mv Cargo.lock.bak Cargo.lock' EXIT
 sed -i "s/version = \"0.0.0-dev\"/version = \"$vector_store_version\"/" Cargo.toml
 cargo cyclonedx --manifest-path crates/vector-store/Cargo.toml --format json
 mv Cargo.toml.bak Cargo.toml
+mv Cargo.lock.bak Cargo.lock
 trap - EXIT
 cargo_sbom=crates/vector-store/vector-store.cdx.json
 [[ -f $cargo_sbom ]] || { echo "error: SBOM was not generated at $cargo_sbom"; exit 1; }
