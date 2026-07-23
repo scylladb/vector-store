@@ -113,6 +113,11 @@ impl<T> NonemptyBox<T> {
     pub fn take_first(self) -> T {
         self.0.into_iter().next().unwrap()
     }
+
+    /// Returns a reference to the first value.
+    pub fn first_mut(&mut self) -> &mut T {
+        &mut self.0[0]
+    }
 }
 
 #[cfg(test)]
