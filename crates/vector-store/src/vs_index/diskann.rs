@@ -19,6 +19,7 @@ use crate::table::PrimaryId;
 use crate::table::Table;
 use crate::table::TableSearch;
 use crate::vs_index::actor::AnnR;
+use crate::vs_index::actor::CountR;
 use crate::vs_index::actor::VsIndex;
 use crate::vs_index::factory::VsIndexConfiguration;
 use crate::vs_index::validator;
@@ -164,8 +165,7 @@ fn new(
                             )));
                         }
                         VsIndex::Count { tx, .. } => {
-                            _ = tx
-                                .send(Err(anyhow::anyhow!("DiskANN index is not implemented yet")));
+                            _ = tx.send(state.count());
                         }
                     }
                 }
@@ -351,6 +351,10 @@ impl<T: TableSearch + Send + Sync + 'static> State<T> {
             |it| it.unzip(),
         )?;
         Ok((primary_keys, distances))
+    }
+
+    fn count(&self) -> CountR {
+        Ok(self.id_map.len())
     }
 }
 
