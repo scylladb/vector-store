@@ -681,6 +681,137 @@ async fn cql_per_row_ttl_expires_from_index(actors: Arc<TestActors>) {
     info!("finished");
 }
 
+/// Test the "existing user" scenario: a table already serving a working vector
+/// index, on which per-row TTL is introduced only afterwards.
+///
+/// This differs from [`cql_per_row_ttl_expires_from_index`], where rows carry a
+/// TTL from the moment they are first inserted. Here the index is fully built
+/// and queryable over permanent rows before any expiration is set, then a TTL
+/// is added to a subset of the already-indexed rows.
+///
+/// 1. Create a table with a TTL column and insert 5 rows *without* expiration.
+/// 2. Create an index and verify all 5 rows are queryable via ANN.
+/// 3. Add a near-future per-row TTL to 3 of the already-indexed rows.
+/// 4. Wait for the expiration service to delete the expired rows (via CDC).
+/// 5. Verify the index count drops to 2 and ANN returns only the rows that
+///    were never given a TTL.
+#[e2etest::test(group = cdc_direct)]
+async fn cql_per_row_ttl_added_to_indexed_rows_expires(actors: Arc<TestActors>) {
+    info!("started");
+
+    let (session, clients) = prepare_connection(&actors).await;
+
+    let keyspace = create_keyspace(&session).await;
+    let table = create_table(
+        &session,
+        "pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>, expiration BIGINT TTL",
+        None,
+    )
+    .await;
+
+    info!("Insert 5 rows without expiration - all permanent for now");
+    for pk in 0..5 {
+        session
+            .query_unpaged(
+                format!(
+                    "INSERT INTO {table} (pk, v) VALUES ({pk}, [{v}, 0.0, 0.0])",
+                    v = pk as f32,
+                ),
+                (),
+            )
+            .await
+            .expect("failed to insert data without TTL");
+    }
+
+    let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
+
+    for client in &clients {
+        let index_status = wait_for_index(client, &index).await;
+        assert_eq!(
+            index_status.count, 5,
+            "Expected 5 vectors to be indexed before adding TTL"
+        );
+    }
+
+    info!("Verify all 5 rows are returned before adding TTL");
+    let result = wait_for_value(
+        || async {
+            let result = get_opt_query_results(
+                format!("SELECT pk FROM {table} ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10"),
+                &session,
+            )
+            .await;
+            result.filter(|r| r.rows_num() == 5)
+        },
+        "Waiting for ANN query to return all 5 rows",
+        DEFAULT_OPERATION_TIMEOUT,
+    )
+    .await;
+    assert_eq!(result.rows_num(), 5, "Expected 5 rows before adding TTL");
+
+    // Add a per-row TTL to 3 of the already-indexed rows. Compute the deadline
+    // only now, once the index is confirmed serving, so the rows do not expire
+    // before the update lands. The other 2 rows (pk=3,4) keep no TTL.
+    let expire_at = now_epoch_secs() + 5;
+    info!("Add per-row TTL to 3 already-indexed rows (pk=0,1,2)");
+    for pk in 0..3 {
+        session
+            .query_unpaged(
+                format!("UPDATE {table} SET expiration = {expire_at} WHERE pk = {pk}"),
+                (),
+            )
+            .await
+            .expect("failed to add TTL to existing row");
+    }
+
+    info!("Wait for index count to drop after the added TTL expires");
+    for client in &clients {
+        wait_for(
+            || async {
+                let status = client.index_status(&index.keyspace, &index.index).await;
+                matches!(status, Ok(s) if s.count == 2)
+            },
+            "Waiting for newly-expired rows to be removed from index",
+            TTL_EXPIRATION_TIMEOUT,
+        )
+        .await;
+    }
+
+    info!("Verify ANN query returns only the rows that were never given a TTL");
+    let result = wait_for_value(
+        || async {
+            let result = get_opt_query_results(
+                format!("SELECT pk FROM {table} ORDER BY v ANN OF [4.0, 0.0, 0.0] LIMIT 10"),
+                &session,
+            )
+            .await;
+            result.filter(|r| r.rows_num() == 2)
+        },
+        "Waiting for ANN query to return only non-expired rows",
+        DEFAULT_OPERATION_TIMEOUT,
+    )
+    .await;
+    let rows: Vec<i32> = result
+        .rows::<(i32,)>()
+        .expect("failed to get rows")
+        .map(|row| row.expect("failed to get row").0)
+        .collect();
+    assert_eq!(rows.len(), 2, "Expected 2 rows after expiration");
+    for pk in &rows {
+        assert!(
+            *pk >= 3 && *pk < 5,
+            "Expected only rows that kept no TTL (pk=3,4), got pk={pk}"
+        );
+    }
+
+    session
+        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
+        .await
+        .expect("failed to drop a keyspace");
+
+    info!("finished");
+}
+
 /// Check if null clustering keys are skipped by the index.
 ///
 /// Use static columns as updating a static column gives a CDC's row with null clustering key.
