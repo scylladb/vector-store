@@ -39,20 +39,20 @@ struct Fixture {
     keyspace: KeyspaceName,
     table: TableName,
     clients: Vec<HttpClient>,
-    index: RwLock<Arc<IndexInfo>>,
+    index: RwLock<Option<Arc<IndexInfo>>>,
 }
 
 impl e2etest::Fixture for Fixture {
     async fn setup(setup: &mut impl e2etest::Setup) -> Self {
         setup.setup::<Cluster>().await;
         let actors = setup.get::<TestActors>().await.unwrap();
-        let (session, clients, keyspace, table, index) = Self::init_fts_table(&actors).await;
+        let (session, clients, keyspace, table) = Self::init_fts_table(&actors).await;
         Self {
             session,
             keyspace,
             table,
             clients,
-            index: RwLock::new(Arc::new(index)),
+            index: RwLock::new(None),
         }
     }
 
@@ -63,13 +63,18 @@ impl e2etest::Fixture for Fixture {
 
 impl Fixture {
     #[framed]
-    async fn insert_documents(&self, docs: &[(i32, &str)]) {
+    async fn insert_documents<S: Into<String>>(&self, docs: impl IntoIterator<Item = (i32, S)>) {
+        let stmt = self
+            .session
+            .prepare(format!(
+                "INSERT INTO {} (pk, content) VALUES (?, ?)",
+                self.table
+            ))
+            .await
+            .expect("failed to prepare insert statement");
         for (pk, content) in docs {
             self.session
-                .query_unpaged(
-                    format!("INSERT INTO {} (pk, content) VALUES (?, ?)", self.table),
-                    (pk, content),
-                )
+                .execute_unpaged(&stmt, (pk, content.into()))
                 .await
                 .expect("failed to insert data");
         }
@@ -83,65 +88,50 @@ impl Fixture {
             .expect("failed to delete data");
     }
 
-    #[framed]
-    async fn bm25_search(&self, query: &str, expected_count: usize) -> QueryRowsResult {
-        self.bm25_search_impl(
-            query,
-            100,
-            expected_count,
-            format!("BM25 query '{query}' to return {expected_count} documents"),
-        )
-        .await
-    }
-
-    async fn bm25_search_with_limit(&self, query: &str, limit: usize) -> QueryRowsResult {
-        self.bm25_search_impl(
-            query,
-            limit,
-            limit,
-            format!("BM25 query '{query}' with LIMIT {limit} to return {limit} rows"),
-        )
-        .await
-    }
-
-    #[framed]
-    async fn bm25_search_impl(
-        &self,
-        query: &str,
-        cql_limit: usize,
-        expected_count: usize,
-        wait_description: String,
-    ) -> QueryRowsResult {
-        let cql = self.bm25_select_query(query, cql_limit);
-        wait_for_value(
-            || async {
-                get_opt_query_results(&cql, &self.session)
-                    .await
-                    .filter(|r| r.rows_num() == expected_count)
-            },
-            wait_description,
-            DEFAULT_OPERATION_TIMEOUT,
-        )
-        .await
-    }
-
-    async fn bm25_search_pks(&self, query: &str, expected_count: usize) -> Vec<i32> {
-        let result = self.bm25_search(query, expected_count).await;
+    async fn bm25_search_pks(&self, query: &str) -> Vec<i32> {
+        let result = self.bm25_search(query).await;
         Self::extract_pks(&result)
     }
 
     #[framed]
-    async fn create_index(&self) {
+    async fn bm25_search(&self, query: &str) -> QueryRowsResult {
+        self.bm25_search_impl(query, 100).await
+    }
+
+    async fn bm25_search_with_limit(&self, query: &str, limit: usize) -> QueryRowsResult {
+        self.bm25_search_impl(query, limit).await
+    }
+
+    #[framed]
+    async fn bm25_search_impl(&self, query: &str, cql_limit: usize) -> QueryRowsResult {
+        let cql = self.bm25_select_query(query, cql_limit);
+        get_opt_query_results(&cql, &self.session)
+            .await
+            .unwrap_or_else(|| panic!("BM25 query '{query}' failed to return results"))
+    }
+
+    #[framed]
+    async fn create_fts_index(&self) {
         let index = create_fts_index(&self.session, &self.clients, &self.table).await;
         for client in &self.clients {
             wait_for_index(client, &index).await;
         }
-        *self.index.write().unwrap() = Arc::new(index);
+        *self.index.write().unwrap() = Some(Arc::new(index));
+    }
+
+    fn index(&self) -> Arc<IndexInfo> {
+        Arc::clone(
+            self.index
+                .read()
+                .unwrap()
+                .as_ref()
+                .expect("fts index has not been created yet, call create_fts_index() first"),
+        )
     }
 
     #[framed]
     async fn drop_index(&self) {
-        let index = Arc::clone(&self.index.read().unwrap());
+        let index = self.index();
         self.session
             .query_unpaged(format!("DROP INDEX {}", index.index), ())
             .await
@@ -170,21 +160,13 @@ impl Fixture {
     #[framed]
     async fn init_fts_table(
         actors: &TestActors,
-    ) -> (
-        Arc<Session>,
-        Vec<HttpClient>,
-        KeyspaceName,
-        TableName,
-        IndexInfo,
-    ) {
+    ) -> (Arc<Session>, Vec<HttpClient>, KeyspaceName, TableName) {
         let (session, clients) = prepare_connection(actors).await;
 
         let keyspace = create_keyspace(&session).await;
         let table = create_table(&session, "pk INT PRIMARY KEY, content TEXT", None).await;
 
-        let index = create_fts_index(&session, &clients, &table).await;
-
-        (session, clients, keyspace, table, index)
+        (session, clients, keyspace, table)
     }
 }
 
@@ -245,15 +227,17 @@ async fn bm25_search_returns_matching_docs(fixture: Arc<Fixture>) {
     info!("started");
 
     fixture
-        .insert_documents(&[
+        .insert_documents([
             (1, "the quick brown fox jumps over the lazy dog"),
             (2, "a slow turtle walks through the garden"),
             (3, "the fox runs across the meadow"),
         ])
         .await;
+    fixture.create_fts_index().await;
 
-    let pks = fixture.bm25_search_pks("fox", 2).await;
+    let pks = fixture.bm25_search_pks("fox").await;
 
+    assert_eq!(pks.len(), 2, "expected exactly 2 results for 'fox'");
     assert!(pks.contains(&1), "expected pk 1 in results");
     assert!(pks.contains(&3), "expected pk 3 in results");
 
@@ -265,14 +249,15 @@ async fn bm25_boolean_and_query(fixture: Arc<Fixture>) {
     info!("started");
 
     fixture
-        .insert_documents(&[
+        .insert_documents([
             (1, "the quick brown fox jumps over the lazy dog"),
             (2, "a slow turtle walks through the garden"),
             (3, "the fox runs across the meadow"),
         ])
         .await;
+    fixture.create_fts_index().await;
 
-    let pks = fixture.bm25_search_pks("fox AND meadow", 1).await;
+    let pks = fixture.bm25_search_pks("fox AND meadow").await;
 
     assert_eq!(pks, vec![3], "expected only pk 3 for 'fox AND meadow'");
 
@@ -284,15 +269,21 @@ async fn bm25_boolean_or_query(fixture: Arc<Fixture>) {
     info!("started");
 
     fixture
-        .insert_documents(&[
+        .insert_documents([
             (1, "the quick brown fox jumps over the lazy dog"),
             (2, "a slow turtle walks through the garden"),
             (3, "the fox runs across the meadow"),
         ])
         .await;
+    fixture.create_fts_index().await;
 
-    let pks = fixture.bm25_search_pks("fox OR turtle", 3).await;
+    let pks = fixture.bm25_search_pks("fox OR turtle").await;
 
+    assert_eq!(
+        pks.len(),
+        3,
+        "expected exactly 3 results for 'fox OR turtle'"
+    );
     assert!(pks.contains(&1), "expected pk 1 in results");
     assert!(pks.contains(&2), "expected pk 2 in results");
     assert!(pks.contains(&3), "expected pk 3 in results");
@@ -305,14 +296,15 @@ async fn bm25_boolean_not_query(fixture: Arc<Fixture>) {
     info!("started");
 
     fixture
-        .insert_documents(&[
+        .insert_documents([
             (1, "the quick brown fox jumps over the lazy dog"),
             (2, "a slow turtle walks through the garden"),
             (3, "the fox runs across the meadow"),
         ])
         .await;
+    fixture.create_fts_index().await;
 
-    let pks = fixture.bm25_search_pks("fox NOT meadow", 1).await;
+    let pks = fixture.bm25_search_pks("fox NOT meadow").await;
 
     assert_eq!(pks, vec![1], "expected only pk 1 for 'fox NOT meadow'");
 
@@ -324,14 +316,15 @@ async fn bm25_phrase_query(fixture: Arc<Fixture>) {
     info!("started");
 
     fixture
-        .insert_documents(&[
+        .insert_documents([
             (1, "the quick brown fox jumps over the lazy dog"),
             (2, "a slow turtle walks through the garden"),
             (3, "the fox runs across the meadow"),
         ])
         .await;
+    fixture.create_fts_index().await;
 
-    let pks = fixture.bm25_search_pks(r#""quick brown fox""#, 1).await;
+    let pks = fixture.bm25_search_pks(r#""quick brown fox""#).await;
 
     assert_eq!(
         pks,
@@ -346,13 +339,17 @@ async fn bm25_phrase_query(fixture: Arc<Fixture>) {
 async fn fts_crud_insert(fixture: Arc<Fixture>) {
     info!("started");
 
+    fixture.create_fts_index().await;
     fixture
-        .insert_documents(&[(1, "searchable document about databases")])
+        .insert_documents([(1, "searchable document about databases")])
         .await;
 
-    let pks = fixture.bm25_search_pks("databases", 1).await;
-
-    assert_eq!(pks, vec![1], "inserted document should be searchable");
+    wait_for(
+        || async { fixture.bm25_search_pks("databases").await == vec![1] },
+        "index to reflect inserted document",
+        DEFAULT_OPERATION_TIMEOUT,
+    )
+    .await;
 
     info!("finished");
 }
@@ -361,22 +358,28 @@ async fn fts_crud_insert(fixture: Arc<Fixture>) {
 async fn fts_crud_update(fixture: Arc<Fixture>) {
     info!("started");
 
+    fixture.create_fts_index().await;
     fixture
-        .insert_documents(&[(1, "original content about alpha")])
+        .insert_documents([(1, "original content about alpha")])
         .await;
 
-    info!("Updating document content");
     fixture
-        .insert_documents(&[(1, "updated content about beta")])
+        .insert_documents([(1, "updated content about beta")])
         .await;
 
-    let pks = fixture.bm25_search_pks("beta", 1).await;
+    wait_for(
+        || async { fixture.bm25_search_pks("alpha").await.is_empty() },
+        "index to stop matching old term 'alpha'",
+        DEFAULT_OPERATION_TIMEOUT,
+    )
+    .await;
 
-    assert_eq!(pks, vec![1], "updated term 'beta' should be searchable");
-
-    let pks = fixture.bm25_search_pks("alpha", 0).await;
-
-    assert!(pks.is_empty(), "old term 'alpha' should no longer match");
+    wait_for(
+        || async { fixture.bm25_search_pks("beta").await == vec![1] },
+        "index to reflect updated term 'beta'",
+        DEFAULT_OPERATION_TIMEOUT,
+    )
+    .await;
 
     info!("finished");
 }
@@ -386,21 +389,22 @@ async fn fts_crud_delete(fixture: Arc<Fixture>) {
     info!("started");
 
     fixture
-        .insert_documents(&[
+        .insert_documents([
             (1, "the quick brown fox jumps over the lazy dog"),
             (2, "a slow turtle walks through the garden"),
             (3, "the fox runs across the meadow"),
         ])
         .await;
+    fixture.create_fts_index().await;
 
-    fixture.bm25_search("fox", 2).await;
-
-    info!("Deleting document pk=1");
     fixture.delete_document(1).await;
 
-    let pks = fixture.bm25_search_pks("fox", 1).await;
-
-    assert_eq!(pks, vec![3], "only pk 3 should remain after deleting pk 1");
+    wait_for(
+        || async { fixture.bm25_search_pks("fox").await == vec![3] },
+        "index to reflect deletion of pk 1",
+        DEFAULT_OPERATION_TIMEOUT,
+    )
+    .await;
 
     info!("finished");
 }
@@ -410,16 +414,15 @@ async fn bm25_empty_results_for_nonexistent_term(fixture: Arc<Fixture>) {
     info!("started");
 
     fixture
-        .insert_documents(&[
+        .insert_documents([
             (1, "the quick brown fox jumps over the lazy dog"),
             (2, "a slow turtle walks through the garden"),
             (3, "the fox runs across the meadow"),
         ])
         .await;
+    fixture.create_fts_index().await;
 
-    fixture.bm25_search("fox", 2).await;
-
-    let pks = fixture.bm25_search_pks("xyznonexistent", 0).await;
+    let pks = fixture.bm25_search_pks("xyznonexistent").await;
 
     assert!(pks.is_empty(), "expected no results for non-existent term");
 
@@ -431,18 +434,28 @@ async fn bm25_case_insensitive_search(fixture: Arc<Fixture>) {
     info!("started");
 
     fixture
-        .insert_documents(&[
+        .insert_documents([
             (1, "the quick brown fox jumps over the lazy dog"),
             (2, "a slow turtle walks through the garden"),
             (3, "the fox runs across the meadow"),
         ])
         .await;
+    fixture.create_fts_index().await;
 
-    let uppercase_pks = fixture.bm25_search_pks("FOX", 2).await;
+    let uppercase_pks = fixture.bm25_search_pks("FOX").await;
 
+    assert_eq!(
+        uppercase_pks.len(),
+        2,
+        "expected exactly 2 results for 'FOX', got {uppercase_pks:?}"
+    );
     assert!(
-        uppercase_pks.contains(&1) && uppercase_pks.contains(&3),
-        "uppercase 'FOX' should match pks 1 and 3, got {uppercase_pks:?}"
+        uppercase_pks.contains(&1),
+        "uppercase 'FOX' should match pk 1, got {uppercase_pks:?}"
+    );
+    assert!(
+        uppercase_pks.contains(&3),
+        "uppercase 'FOX' should match pk 3, got {uppercase_pks:?}"
     );
 
     info!("finished");
@@ -453,15 +466,21 @@ async fn bm25_stop_word_filtering(fixture: Arc<Fixture>) {
     info!("started");
 
     fixture
-        .insert_documents(&[
+        .insert_documents([
             (1, "the quick brown fox jumps over the lazy dog"),
             (2, "a slow turtle walks through the garden"),
             (3, "the fox runs across the meadow"),
         ])
         .await;
+    fixture.create_fts_index().await;
 
-    let with_stop_word_pks = fixture.bm25_search_pks("the fox", 2).await;
+    let with_stop_word_pks = fixture.bm25_search_pks("the fox").await;
 
+    assert_eq!(
+        with_stop_word_pks.len(),
+        2,
+        "expected exactly 2 results for 'the fox'"
+    );
     assert!(
         with_stop_word_pks.contains(&1),
         "stop word 'the' should not change the result set for 'the fox'"
@@ -479,12 +498,13 @@ async fn bm25_tokenizes_by_punctuation(fixture: Arc<Fixture>) {
     info!("started");
 
     fixture
-        .insert_documents(&[(1, "fox-runs fast, or: jumps!")])
+        .insert_documents([(1, "fox-runs fast, or: jumps!")])
         .await;
+    fixture.create_fts_index().await;
 
-    let fox_pks = fixture.bm25_search_pks("fox", 1).await;
-    let runs_pks = fixture.bm25_search_pks("runs", 1).await;
-    let jumps_pks = fixture.bm25_search_pks("jumps", 1).await;
+    let fox_pks = fixture.bm25_search_pks("fox").await;
+    let runs_pks = fixture.bm25_search_pks("runs").await;
+    let jumps_pks = fixture.bm25_search_pks("jumps").await;
 
     assert_eq!(fox_pks, vec![1], "term 'fox' should be tokenized out");
     assert_eq!(runs_pks, vec![1], "term 'runs' should be tokenized out");
@@ -498,14 +518,15 @@ async fn bm25_relevance_ranking_order(fixture: Arc<Fixture>) {
     info!("started");
 
     fixture
-        .insert_documents(&[
+        .insert_documents([
             (1, "fox fox fox jumps"),
             (2, "fox runs across the meadow"),
             (3, "a slow turtle walks through the garden"),
         ])
         .await;
+    fixture.create_fts_index().await;
 
-    let pks = fixture.bm25_search_pks("fox", 2).await;
+    let pks = fixture.bm25_search_pks("fox").await;
 
     assert_eq!(
         pks,
@@ -520,12 +541,10 @@ async fn bm25_relevance_ranking_order(fixture: Arc<Fixture>) {
 async fn bm25_limit_restricts_result_count(fixture: Arc<Fixture>) {
     info!("started");
 
-    let docs: Vec<(i32, &str)> = (1..=10)
-        .map(|pk| (pk, "searchable document about databases"))
-        .collect();
-    fixture.insert_documents(&docs).await;
-    // Wait for all documents to be indexed
-    fixture.bm25_search("databases", 10).await;
+    fixture
+        .insert_documents((1..=10).map(|pk| (pk, "searchable document about databases")))
+        .await;
+    fixture.create_fts_index().await;
 
     let result = fixture.bm25_search_with_limit("databases", 3).await;
 
@@ -543,16 +562,15 @@ async fn bm25_grouped_boolean_query(fixture: Arc<Fixture>) {
     info!("started");
 
     fixture
-        .insert_documents(&[
+        .insert_documents([
             (1, "the quick brown fox jumps over the lazy dog"),
             (2, "a slow turtle walks through the meadow"),
             (3, "the fox runs across the meadow"),
         ])
         .await;
+    fixture.create_fts_index().await;
 
-    let pks = fixture
-        .bm25_search_pks("(fox OR turtle) AND meadow", 2)
-        .await;
+    let pks = fixture.bm25_search_pks("(fox OR turtle) AND meadow").await;
 
     assert!(
         pks.contains(&2),
@@ -573,23 +591,18 @@ async fn fts_recreate_index_serves_existing_data(fixture: Arc<Fixture>) {
 
     info!("Inserting documents");
     fixture
-        .insert_documents(&[
+        .insert_documents([
             (1, "the quick brown fox jumps over the lazy dog"),
             (2, "a fox walks through the garden"),
             (3, "the fox runs across the meadow"),
         ])
         .await;
+    fixture.create_fts_index().await;
 
-    fixture.bm25_search("fox", 3).await;
-
-    info!("Dropping fulltext index");
     fixture.drop_index().await;
+    fixture.create_fts_index().await;
 
-    info!("Recreating fulltext index on the same table");
-    fixture.create_index().await;
-
-    info!("Verifying existing data is searchable after recreate");
-    let pks = fixture.bm25_search_pks("fox", 3).await;
+    let pks = fixture.bm25_search_pks("fox").await;
 
     assert!(pks.contains(&1), "expected pk 1 after index recreate");
     assert!(pks.contains(&2), "expected pk 2 after index recreate");
@@ -603,13 +616,12 @@ async fn fts_query_without_limit_returns_error(fixture: Arc<Fixture>) {
     info!("started");
 
     fixture
-        .insert_documents(&[
+        .insert_documents([
             (1, "the quick brown fox jumps over the lazy dog"),
             (2, "the fox runs across the meadow"),
         ])
         .await;
-
-    fixture.bm25_search("fox", 2).await;
+    fixture.create_fts_index().await;
 
     let err = fixture
         .session
@@ -638,11 +650,10 @@ async fn fts_index_on_int_column_returns_error(actors: Arc<TestActors>) {
     info!("started");
 
     let (session, _clients) = prepare_connection(&actors).await;
-
     let keyspace = create_keyspace(&session).await;
     let table = create_table(&session, "pk INT PRIMARY KEY, num INT", None).await;
-
     let index = unique_index_name();
+
     let err = session
         .query_unpaged(
             format!("CREATE CUSTOM INDEX {index} ON {table}(num) USING 'fulltext_index'"),
@@ -658,6 +669,77 @@ async fn fts_index_on_int_column_returns_error(actors: Arc<TestActors>) {
     );
 
     drop_fts_keyspace(&session, &keyspace).await;
+
+    info!("finished");
+}
+
+#[e2etest::test(group = fts)]
+async fn fts_large_document_set(fixture: Arc<Fixture>) {
+    info!("started");
+
+    let needle_pks = [1234, 5678, 9012];
+    const LARGE_DATASET_SIZE: i32 = 10_000;
+    const MAX_SEARCH_LIMIT: usize = 1000;
+
+    info!("Inserting {LARGE_DATASET_SIZE} documents");
+    let docs = (1..=LARGE_DATASET_SIZE).map(|pk| {
+        let content = if needle_pks.contains(&pk) {
+            format!("haystack needle document number {pk}")
+        } else {
+            format!("haystack document number {pk}")
+        };
+        (pk, content)
+    });
+    fixture.insert_documents(docs).await;
+
+    info!("Creating fulltext index over {LARGE_DATASET_SIZE} documents");
+    measure_duration(
+        format!("Index build for {LARGE_DATASET_SIZE} documents"),
+        || fixture.create_fts_index(),
+    )
+    .await;
+
+    info!("Step 1: Verifying rare term matches only the expected documents");
+    let rare_hits_pks = measure_duration(
+        format!("BM25 needle search over {LARGE_DATASET_SIZE} documents"),
+        || fixture.bm25_search_pks("needle"),
+    )
+    .await;
+    let needle_pks_len = needle_pks.len();
+    let rare_hits_pks_len = rare_hits_pks.len();
+
+    assert_eq!(
+        rare_hits_pks_len, needle_pks_len,
+        "Expected exactly {needle_pks_len} rare-term results, got {rare_hits_pks_len}"
+    );
+    assert!(
+        rare_hits_pks.contains(&needle_pks[0]),
+        "expected pk {} in results",
+        needle_pks[0]
+    );
+    assert!(
+        rare_hits_pks.contains(&needle_pks[1]),
+        "expected pk {} in results",
+        needle_pks[1]
+    );
+    assert!(
+        rare_hits_pks.contains(&needle_pks[2]),
+        "expected pk {} in results",
+        needle_pks[2]
+    );
+
+    info!("Step 2: Verifying common term matches all documents, but is capped by LIMIT");
+    let common_hits = measure_duration(
+        format!("BM25 haystack search over {LARGE_DATASET_SIZE} documents"),
+        || fixture.bm25_search_with_limit("haystack", MAX_SEARCH_LIMIT),
+    )
+    .await;
+    let common_hits_rows_num = common_hits.rows_num();
+
+    assert_eq!(
+        common_hits_rows_num, MAX_SEARCH_LIMIT,
+        "Expected common-term results capped at {MAX_SEARCH_LIMIT}, got {common_hits_rows_num}"
+    );
 
     info!("finished");
 }

@@ -32,6 +32,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+use std::time::Instant;
 use tap::Pipe;
 use tokio::time;
 use tracing::info;
@@ -471,6 +472,18 @@ where
     })
     .await
     .unwrap_or_else(|_| panic!("Timeout on: {msg}", msg = msg.as_ref()))
+}
+
+#[framed]
+pub async fn measure_duration<F, Fut, T>(label: impl std::fmt::Display, f: F) -> T
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    let start = Instant::now();
+    let result = f().await;
+    info!("{label} took {:?}", start.elapsed());
+    result
 }
 
 #[framed]
