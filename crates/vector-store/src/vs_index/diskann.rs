@@ -7,9 +7,11 @@ use crate::Config;
 use crate::Dimensions;
 use crate::DiskannAlpha;
 use crate::SpaceType;
+use crate::Vector;
 use crate::VsIndexFactory;
 use crate::memory::Memory;
 use crate::perf;
+use crate::table::PrimaryId;
 use crate::table::Table;
 use crate::vs_index::actor::VsIndex;
 use crate::vs_index::factory::VsIndexConfiguration;
@@ -19,6 +21,9 @@ use diskann::graph::DiskANNIndex;
 use diskann::graph::config::Builder;
 use diskann::graph::config::MaxDegree;
 use diskann::graph::config::defaults::ALPHA as DISKANN_DEFAULT_ALPHA;
+use diskann::graph::strategy::FullPrecision;
+use diskann::provider::DefaultContext;
+use diskann::provider::Delete;
 use diskann_providers::model::graph::provider::async_::FastMemoryVectorProviderAsync;
 use diskann_providers::model::graph::provider::async_::TableDeleteProviderAsync;
 use diskann_providers::model::graph::provider::async_::common::NoStore;
@@ -27,6 +32,7 @@ use diskann_providers::model::graph::provider::async_::inmem::CreateFullPrecisio
 use diskann_providers::model::graph::provider::async_::inmem::DefaultProvider;
 use diskann_providers::model::graph::provider::async_::inmem::DefaultProviderParameters;
 use diskann_vector::distance::Metric;
+use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -102,11 +108,26 @@ fn new(
             async move {
                 debug!("starting");
 
+                let mut state = State::new(index);
+
                 while let Some(msg) = rx.recv().await {
                     match msg {
-                        VsIndex::AddVector { .. }
-                        | VsIndex::RemoveVector { .. }
-                        | VsIndex::RemovePartition { .. } => {
+                        VsIndex::AddVector {
+                            primary_id,
+                            embedding,
+                            in_progress: _in_progress,
+                            ..
+                        } => {
+                            state.add_vector(primary_id, embedding).await;
+                        }
+                        VsIndex::RemoveVector {
+                            primary_id,
+                            in_progress: _in_progress,
+                            ..
+                        } => {
+                            state.remove_vector(primary_id).await;
+                        }
+                        VsIndex::RemovePartition { .. } => {
                             warn!("not implemented yet");
                         }
                         VsIndex::Ann { tx, .. } | VsIndex::FilteredAnn { tx, .. } => {
@@ -119,7 +140,6 @@ fn new(
                         }
                     }
                 }
-                drop(index);
 
                 debug!("finished");
             }
@@ -128,6 +148,93 @@ fn new(
     ));
 
     Ok(tx)
+}
+
+/// Mapping between PrimaryId <-> u32 label used by DiskANN.
+///
+/// The mapping is bidirectional but ids are NOT reused once freed,
+/// because the underlying DiskANN `delete()` is a soft delete
+#[derive(Default)]
+struct IdMap {
+    forward: BTreeMap<PrimaryId, u32>,
+    reverse: BTreeMap<u32, PrimaryId>,
+    next_id: u32,
+}
+
+impl IdMap {
+    fn insert(&mut self, primary_id: PrimaryId) -> Option<u32> {
+        if self.forward.contains_key(&primary_id) {
+            return None;
+        }
+        let id = self.next_id;
+        self.next_id = self.next_id.checked_add(1)?;
+        self.forward.insert(primary_id, id);
+        self.reverse.insert(id, primary_id);
+        Some(id)
+    }
+
+    fn remove(&mut self, primary_id: &PrimaryId) -> Option<u32> {
+        let id = self.forward.remove(primary_id)?;
+        self.reverse.remove(&id);
+        Some(id)
+    }
+
+    fn get(&self, primary_id: &PrimaryId) -> Option<u32> {
+        self.forward.get(primary_id).copied()
+    }
+
+    fn resolve(&self, id: u32) -> Option<PrimaryId> {
+        self.reverse.get(&id).copied()
+    }
+
+    fn len(&self) -> usize {
+        self.forward.len()
+    }
+}
+
+/// Mutable actor state for the DiskANN index.
+struct State {
+    index: DiskANNIndex<DiskannProvider>,
+    id_map: IdMap,
+}
+
+impl State {
+    fn new(index: DiskANNIndex<DiskannProvider>) -> Self {
+        Self {
+            index,
+            id_map: IdMap::default(),
+        }
+    }
+
+    async fn add_vector(&mut self, primary_id: PrimaryId, embedding: Vector) {
+        let Some(id) = self.id_map.insert(primary_id) else {
+            warn!("add_vector: failed to insert primary_id {primary_id:?}");
+            return;
+        };
+
+        if let Err(err) = self
+            .index
+            .insert(&FullPrecision, &DefaultContext, &id, embedding.as_slice())
+            .await
+        {
+            warn!("add_vector: failed to insert vector: {err}");
+            self.id_map.remove(&primary_id);
+        }
+    }
+
+    async fn remove_vector(&mut self, primary_id: PrimaryId) {
+        let Some(id) = self.id_map.get(&primary_id) else {
+            warn!("remove_vector: primary_id {primary_id:?} not found");
+            return;
+        };
+
+        if let Err(err) = self.index.data_provider.delete(&DefaultContext, &id).await {
+            warn!("remove_vector: failed to delete vector: {err}");
+            return;
+        }
+
+        self.id_map.remove(&primary_id);
+    }
 }
 
 #[derive(Clone)]
@@ -234,5 +341,19 @@ mod tests {
         assert_eq!(usize::from(params.dim.0), 3);
         assert_eq!(params.config.l_build(), NonZeroUsize::new(64).unwrap());
         assert_eq!(params.metric, Metric::L2);
+    }
+
+    #[test]
+    fn id_map_insert_remove_resolve_round_trip() {
+        let mut map = IdMap::default();
+        let pid = PrimaryId::from(42u64);
+
+        let id = map.insert(pid).unwrap();
+        assert_eq!(map.resolve(id), Some(pid));
+        assert_eq!(map.len(), 1);
+
+        assert_eq!(map.remove(&pid), Some(id));
+        assert_eq!(map.resolve(id), None);
+        assert_eq!(map.len(), 0);
     }
 }
