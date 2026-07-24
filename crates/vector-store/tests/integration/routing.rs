@@ -33,7 +33,7 @@ use vector_store::Timestamp;
 
 const ANN_LIMIT: usize = 5;
 
-fn ordered_timeuuid(time: u32) -> Uuid {
+pub(crate) fn ordered_timeuuid(time: u32) -> Uuid {
     let mut bytes = [0u8; 16];
     bytes[0..4].copy_from_slice(&time.to_be_bytes());
     bytes[6] = 0x10;
@@ -42,11 +42,11 @@ fn ordered_timeuuid(time: u32) -> Uuid {
 }
 
 /// A scan function that never completes, keeping the index bootstrapping.
-fn blocking_scan_fn() -> ScanFn {
+pub(crate) fn blocking_scan_fn() -> ScanFn {
     Box::new(|_tx| std::future::pending::<()>().boxed())
 }
 
-fn single_row_scan(pks: impl IntoIterator<Item = CqlValue> + Send + Sync + 'static) -> ScanFn {
+pub(crate) fn single_row_scan(pks: impl IntoIterator<Item = CqlValue> + Send + Sync + 'static) -> ScanFn {
     db_basic::scan_fn_vectors([(
         pks.into_iter().collect::<Vec<_>>().into(),
         Some(vec![1.0, 2.0, 3.0].into()),
@@ -55,7 +55,7 @@ fn single_row_scan(pks: impl IntoIterator<Item = CqlValue> + Send + Sync + 'stat
     )])
 }
 
-fn make_index(
+pub(crate) fn make_index(
     name: &str,
     column: &str,
     partitioning: DbIndexPartitioning,
@@ -84,7 +84,7 @@ fn make_index(
     }
 }
 
-async fn setup() -> (HttpClient, DbBasic, impl Sized) {
+pub(crate) async fn setup() -> (HttpClient, DbBasic, impl Sized) {
     let node_state = vector_store::new_node_state().await;
     let internals = vector_store::new_internals();
     let (db_actor, db) = db_basic::new(node_state.clone());
@@ -104,7 +104,7 @@ async fn setup() -> (HttpClient, DbBasic, impl Sized) {
     (HttpClient::new(addr), db, (server, senders))
 }
 
-fn add_table(
+pub(crate) fn add_table(
     db: &DbBasic,
     primary_keys: impl IntoIterator<Item = ColumnName>,
     partition_key_count: usize,
@@ -276,6 +276,11 @@ async fn ann_routes_to_serving_index_while_replacement_is_bootstrapping() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
+// While the initial full table scan that backfills an index is paused (held
+// open via blocking_scan_fn, simulating a paused/slow scan), the index status
+// endpoint must report it as BOOTSTRAPPING and surface the build progress
+// percentage reported by the database. Once the scan finishes the index
+// becomes SERVING with build_progress == 100.
 #[tokio::test]
 #[ntest::timeout(10_000)]
 #[cfg_attr(not(feature = "slow-test-hooks"), ignore = "requires slow-test-hooks")]

@@ -344,12 +344,20 @@ async fn get_index_status(
         Fts(Sender<crate::fts_index::FtsIndex>),
     }
 
-    let (index, status) = {
+    let (index, status, progress) = {
         let indexes = state.indexes.read().unwrap();
         if let Some(entry) = indexes.get_vs(&index_key) {
-            (IndexSender::Vs(entry.index().clone()), entry.status())
+            (
+                IndexSender::Vs(entry.index().clone()),
+                entry.status(),
+                entry.progress(),
+            )
         } else if let Some(entry) = indexes.get_fts(&index_key) {
-            (IndexSender::Fts(entry.index().clone()), entry.status())
+            (
+                IndexSender::Fts(entry.index().clone()),
+                entry.status(),
+                entry.progress(),
+            )
         } else {
             let msg = format!("missing index: {keyspace_name}.{index_name}");
             debug!("get_index_status: {msg}");
@@ -372,10 +380,7 @@ async fn get_index_status(
             response::Json(httpapi::IndexStatusResponse {
                 status: status.into(),
                 count,
-                // Placeholder; the real full-scan progress is wired up in a
-                // follow-up commit. Defaults to 100.0 so the field is always
-                // populated and `status` remains authoritative.
-                build_progress: 100.0,
+                build_progress: progress_to_percentage(progress),
             }),
         )
             .into_response(),
@@ -419,6 +424,15 @@ async fn refresh_index_metrics(
             .fts_segment_count
             .with_label_values(&labels)
             .set(stats.segment_count as f64);
+    }
+}
+
+/// Convert a build [`Progress`] into a percentage in the range `0.0..=100.0`.
+/// A finished full scan (`Progress::Done`) maps to `100.0`.
+fn progress_to_percentage(progress: Progress) -> f64 {
+    match progress {
+        Progress::Done => 100.0,
+        Progress::InProgress(percentage) => percentage.get(),
     }
 }
 
@@ -2132,6 +2146,19 @@ mod tests {
         assert_eq!(
             httpapi::IndexStatus::from(crate::node_state::IndexStatus::Serving),
             httpapi::IndexStatus::Serving
+        );
+    }
+
+    #[test]
+    fn progress_to_percentage_conversion() {
+        assert_eq!(super::progress_to_percentage(Progress::Done), 100.0);
+        assert_eq!(
+            super::progress_to_percentage(Progress::InProgress(42.0.try_into().unwrap())),
+            42.0
+        );
+        assert_eq!(
+            super::progress_to_percentage(Progress::InProgress(0.0.try_into().unwrap())),
+            0.0
         );
     }
 }
