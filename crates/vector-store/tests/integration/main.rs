@@ -7,6 +7,7 @@ mod db_basic;
 mod fts;
 mod https;
 mod info;
+mod index_status;
 mod memory_limit;
 mod metrics;
 mod mock_opensearch;
