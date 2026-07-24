@@ -1,6 +1,13 @@
 //! Quality metrics for vector-search workloads (format-agnostic).
 
-/// recall@k — the fraction of a query's true nearest neighbours that the search found.
+/// recall@k — the fraction of a query's true k-nearest neighbours that the
+/// ANN search returned.
+///
+/// Unlike the full-text-search version (which compares against ALL relevant
+/// documents), this variant targets the TRUE top-k nearest neighbours only
+/// (the first k entries of ground_truth, which is pre-sorted by distance).
+/// The metric is therefore qrels-ordering-independent: ground_truth is always
+/// sorted nearest-first.
 ///
 ///   recall@k = |returned ∩ true_top_k| / min(k, |ground_truth|)
 ///

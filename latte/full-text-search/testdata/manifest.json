@@ -1,0 +1,12 @@
+{
+  "dataset": "smoke-test-fixture",
+  "description": "Tiny smoke-test fixture for FTS benchmark development. 10 documents across varied topics, 8 natural queries, graded qrels.",
+  "documents": 10,
+  "queries_natural": 8,
+  "qrels_natural": 10,
+  "has_qrels": true,
+  "scale_factor": 1,
+  "original_doc_count": 10,
+  "synthetic_queries": false,
+  "created_by": "PLAN.md Step 1"
+}
