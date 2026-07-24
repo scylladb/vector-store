@@ -91,7 +91,7 @@ use utoipa_swagger_ui::SwaggerUi;
             name = "LicenseRef-ScyllaDB-Source-Available-1.0"
         ),
         // version should be updated manually when there are changes in API
-        version = "2.0.0"
+        version = "2.1.0"
     ),
     tags(
         (
@@ -372,6 +372,10 @@ async fn get_index_status(
             response::Json(httpapi::IndexStatusResponse {
                 status: status.into(),
                 count,
+                // Placeholder; the real full-scan progress is wired up in a
+                // follow-up commit. Defaults to 100.0 so the field is always
+                // populated and `status` remains authoritative.
+                build_progress: 100.0,
             }),
         )
             .into_response(),
