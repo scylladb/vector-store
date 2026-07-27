@@ -4,6 +4,7 @@
  */
 
 mod db_basic;
+mod diskann;
 mod fts;
 mod https;
 mod info;
