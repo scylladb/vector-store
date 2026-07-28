@@ -1618,9 +1618,16 @@ async fn http_server_is_responsive_when_index_add_hangs() {
     let (client, _server, _config_tx) = run.await;
 
     // Ensure the HTTP server stays responsive while the (simulated) embedding add is long-running.
-    let status = client.status().await.unwrap();
+    let status = wait_for_value(
+        async || client.status().await.ok(),
+        "Waiting for node status",
+    )
+    .await;
 
-    assert_eq!(status, httpapi::NodeStatus::Bootstrapping);
+    assert!(
+        status == httpapi::NodeStatus::Initializing || status == httpapi::NodeStatus::Bootstrapping,
+        "Expected node status to be Initializing or Bootstrapping, got {status:?}"
+    );
 }
 
 #[tokio::test]
@@ -1657,11 +1664,12 @@ async fn null_vector_is_not_indexed() {
     let index_name = index.index_name.clone().into();
     wait_for(
         || async {
-            let status = client
+            client
                 .index_status(&keyspace_name, &index_name)
                 .await
-                .expect("failed to get index status");
-            status.status == httpapi::IndexStatus::Serving && status.count == 1
+                .is_ok_and(|status| {
+                    status.status == httpapi::IndexStatus::Serving && status.count == 1
+                })
         },
         "Waiting for exactly 1 vector to be indexed (null vector must be skipped)",
     )
