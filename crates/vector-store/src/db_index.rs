@@ -636,6 +636,7 @@ pub(crate) fn parse_values(
     target_columns_len: NonZeroUsize,
     kind: &IndexKind,
 ) -> anyhow::Result<NonemptyBox<Timestamped<DbIndexedValue>>> {
+    let default_timestamp = default_timestamp.unwrap_or(Timestamp::MIN);
     let values = columns
         .into_iter()
         .chunks(2)
@@ -670,17 +671,9 @@ pub(crate) fn parse_values(
                     }
                 })
                 .transpose()?
-                .or(default_timestamp);
+                .unwrap_or(default_timestamp);
 
             Ok((timestamp, value))
-        })
-        .filter_map(|timestamp_value| {
-            timestamp_value
-                .and_then(|(timestamp, value)| match (timestamp, value) {
-                    (Some(timestamp), value) => Ok(Some((timestamp, value))),
-                    (None, _) => bail!("parse_values: missing timestamp for value"),
-                })
-                .transpose()
         })
         .map_ok(|(timestamp, value)| Timestamped::new(timestamp, value))
         .collect::<anyhow::Result<Box<_>>>()?;
@@ -826,7 +819,7 @@ mod tests {
         let columns = vec![
             Some(CqlValue::Vector(vec![CqlValue::Float(1.0)])),
             Some(CqlValue::BigInt(1234567890)),
-            Some(CqlValue::Vector(vec![CqlValue::Float(2.0)])),
+            Some(CqlValue::Int(1)),
             None, // missing timestamp
         ];
 
@@ -835,22 +828,38 @@ mod tests {
             None,
             NonZeroUsize::new(1).unwrap(),
             &vs_kind(),
+        )
+        .unwrap();
+        let result = result.as_slice();
+        assert_eq!(result.len(), 2);
+
+        assert_eq!(
+            result.first().unwrap().value().unwrap(),
+            &DbIndexedValue::Vector(Vector::from(vec![1.0]))
         );
-        assert!(result.is_err());
-        assert_matches!(
-            result
-                .unwrap_err()
-                .to_string(),
-                err if err.contains("missing timestamp for value")
+        assert_eq!(
+            result.first().unwrap().timestamp(),
+            Timestamp::from_micros(1234567890)
         );
 
+        assert_eq!(
+            result.get(1).unwrap().value().unwrap(),
+            &DbIndexedValue::Filtering(CqlValue::Int(1))
+        );
+        assert_eq!(result.get(1).unwrap().timestamp(), Timestamp::MIN);
+
         let result = parse_values(
-            columns,
+            columns.clone(),
             Some(Timestamp::from_millis(1)),
             NonZeroUsize::new(1).unwrap(),
             &vs_kind(),
+        )
+        .unwrap();
+        let result = result.as_slice();
+        assert_eq!(
+            result.get(1).unwrap().timestamp(),
+            Timestamp::from_millis(1)
         );
-        assert!(result.is_ok());
     }
 
     #[test]
