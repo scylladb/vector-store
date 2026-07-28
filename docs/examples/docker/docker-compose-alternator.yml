@@ -7,7 +7,7 @@
 
 services:
   scylla:
-    image: scylladb/scylla:2026.2.0-rc3
+    image: scylladb/scylla:2026.2.2
     container_name: scylla-alternator
     command: >
       --smp 2
@@ -28,7 +28,7 @@ services:
       - vector-net
 
   vector-store:
-    image: scylladb/vector-store:1.8.0
+    image: scylladb/vector-store:1.9.1
     container_name: vector-store
     environment:
       VECTOR_STORE_URI: "0.0.0.0:6080"
