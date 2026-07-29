@@ -15,7 +15,10 @@ user_cargo_home=$CARGO_HOME
 
 docker_cargo_home=$(docker run --rm $image sh -c 'echo $CARGO_HOME')
 
-[[ -n $user_cargo_home ]] && mount_cargo="-v $user_cargo_home/git:$docker_cargo_home/git -v $user_cargo_home/registry:$docker_cargo_home/registry "
+if [[ -n $user_cargo_home ]] ; then
+    mkdir -p "$user_cargo_home/git" "$user_cargo_home/registry"
+    mount_cargo="-v $user_cargo_home/git:$docker_cargo_home/git -v $user_cargo_home/registry:$docker_cargo_home/registry "
+fi
 
 version=$(git describe --dirty) || { echo "error: no annotated tag found"; exit 1; }
 
