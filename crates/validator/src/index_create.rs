@@ -15,6 +15,9 @@ use scylla::client::session::Session;
 use std::sync::Arc;
 use tracing::info;
 
+const DATASET_SIZE: i32 = 100;
+const OFFSET_F: i32 = DATASET_SIZE * 10;
+
 e2etest::group!(
     name = index_create,
     fixtures = (Fixture),
@@ -53,15 +56,13 @@ async fn init_keyspace_table(
     )
     .await;
 
-    const DATASET_SIZE: i32 = 100;
-
     info!("Insert some vectors into the table");
     for i in 0..DATASET_SIZE {
         for j in 0..DATASET_SIZE {
             session
                 .query_unpaged(
                     format!("INSERT INTO {table} (pk, ck, f, v) VALUES (?, ?, ?, ?)"),
-                    (i, j, j, &vec![i as f32; 3]),
+                    (i, j, j + OFFSET_F, &vec![i as f32; 3]),
                 )
                 .await
                 .expect("failed to insert data");
@@ -122,7 +123,9 @@ async fn global_index_with_filtering_columns(actors: Arc<TestActors>) {
 
     info!("Create an index");
     let index = common::create_index(
-        CreateIndexQuery::new(&session, &clients, &table, "v").filter_columns(["f"]),
+        CreateIndexQuery::new(&session, &clients, &table, "v")
+            .options([("similarity_function", "euclidean")])
+            .filter_columns(["f"]),
     )
     .await;
 
@@ -132,13 +135,21 @@ async fn global_index_with_filtering_columns(actors: Arc<TestActors>) {
     common::wait_for(
         || async {
             let results = common::get_query_results(
-                format!("SELECT pk FROM {table} WHERE f = 1 ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 100 ALLOW FILTERING"),
+                format!(
+                    "SELECT pk FROM {table} WHERE f = {f} \
+                    ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 100 ALLOW FILTERING",
+                    f = OFFSET_F + 1
+                ),
                 &session,
             )
-                .await;
+            .await;
             let rows = results.rows::<(i32,)>().expect("failed to get rows");
             rows.rows_remaining() > 10
-        }, "Wait for the query to result more than 10 items", common::DEFAULT_OPERATION_TIMEOUT).await;
+        },
+        "Wait for the query to result more than 10 items",
+        common::DEFAULT_OPERATION_TIMEOUT,
+    )
+    .await;
 
     cleanup_keyspace(&actors, &keyspace).await;
 
@@ -199,12 +210,75 @@ async fn local_index_with_filtering_columns(actors: Arc<TestActors>) {
     assert_eq!(rows.rows_remaining(), 10);
 
     let results = common::get_query_results(
-        format!("SELECT ck FROM {table} WHERE pk = 1 AND f = 10 ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10 ALLOW FILTERING"),
+        format!(
+            "SELECT ck FROM {table} WHERE pk = 1 AND f = {f} \
+            ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10 ALLOW FILTERING",
+            f = OFFSET_F + 10
+        ),
         &session,
     )
     .await;
     let rows = results.rows::<(i32,)>().expect("failed to get rows");
     assert_eq!(rows.rows_remaining(), 1);
+
+    cleanup_keyspace(&actors, &keyspace).await;
+
+    info!("finished");
+}
+
+#[e2etest::test(group = index_create)]
+async fn local_index_based_on_ck_columns(actors: Arc<TestActors>) {
+    info!("started");
+
+    let (session, clients, keyspace, table) = init_keyspace_table(&actors).await;
+
+    info!("Create an index");
+    let index = common::create_index(
+        CreateIndexQuery::new(&session, &clients, &table, "v").partition_columns(["ck"]),
+    )
+    .await;
+
+    wait_for_index(&clients, &index).await;
+
+    info!("Query the index");
+    let results = common::get_query_results(
+        format!("SELECT f FROM {table} WHERE ck = 1 ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10"),
+        &session,
+    )
+    .await;
+    let rows = results.rows::<(i32,)>().expect("failed to get rows");
+    assert_eq!(rows.rows_remaining(), 10);
+
+    cleanup_keyspace(&actors, &keyspace).await;
+
+    info!("finished");
+}
+
+#[e2etest::test(group = index_create)]
+async fn local_index_based_on_f_columns(actors: Arc<TestActors>) {
+    info!("started");
+
+    let (session, clients, keyspace, table) = init_keyspace_table(&actors).await;
+
+    info!("Create an index");
+    let index = common::create_index(
+        CreateIndexQuery::new(&session, &clients, &table, "v").partition_columns(["f"]),
+    )
+    .await;
+
+    wait_for_index(&clients, &index).await;
+
+    info!("Query the index");
+    let results = common::get_query_results(
+        format!(
+            "SELECT ck FROM {table} WHERE f = {f} ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10",
+            f = OFFSET_F + 1
+        ),
+        &session,
+    )
+    .await;
+    let rows = results.rows::<(i32,)>().expect("failed to get rows");
+    assert_eq!(rows.rows_remaining(), 10);
 
     cleanup_keyspace(&actors, &keyspace).await;
 

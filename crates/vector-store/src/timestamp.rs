@@ -198,6 +198,14 @@ impl<T> Timestamped<T> {
         self.value = value;
     }
 
+    /// Remove the value and set the tombstone flag.
+    pub fn set_tombstone(&mut self) {
+        self.drop_if_valid();
+
+        self.timestamp |= Self::DELETED_FLAG;
+        self.value = MaybeUninit::uninit();
+    }
+
     fn drop_if_valid(&mut self) {
         if self.is_valid() {
             // SAFETY: value is initialized if and only if the deleted flag is not set

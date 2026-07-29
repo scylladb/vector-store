@@ -71,7 +71,6 @@ use tracing::info;
 use tracing::trace;
 use tracing::warn;
 
-type GetPrimaryKeyColumnsR = NonemptyArc<ColumnName>;
 type GetTableColumnsR = Arc<HashMap<ColumnName, NativeType>>;
 type RangeScanResult =
     anyhow::Result<Pin<Box<dyn Stream<Item = DbIndexedRow> + std::marker::Send>>, anyhow::Error>;
@@ -97,12 +96,6 @@ impl From<u64> for Progress {
 }
 
 pub enum DbIndex {
-    GetPrimaryKeyColumns {
-        tx: oneshot::Sender<GetPrimaryKeyColumnsR>,
-    },
-    GetPartitionKeyCount {
-        tx: oneshot::Sender<usize>,
-    },
     GetTableColumns {
         tx: oneshot::Sender<GetTableColumnsR>,
     },
@@ -112,29 +105,11 @@ pub enum DbIndex {
 }
 
 pub(crate) trait DbIndexExt {
-    async fn get_primary_key_columns(&self) -> GetPrimaryKeyColumnsR;
-    async fn get_partition_key_count(&self) -> usize;
     async fn get_table_columns(&self) -> GetTableColumnsR;
     async fn full_scan_progress(&self) -> Progress;
 }
 
 impl DbIndexExt for mpsc::Sender<DbIndex> {
-    async fn get_primary_key_columns(&self) -> GetPrimaryKeyColumnsR {
-        let (tx, rx) = oneshot::channel();
-        self.send(DbIndex::GetPrimaryKeyColumns { tx })
-            .await
-            .expect("internal actor should receive request");
-        rx.await.expect("internal actor should send response")
-    }
-
-    async fn get_partition_key_count(&self) -> usize {
-        let (tx, rx) = oneshot::channel();
-        self.send(DbIndex::GetPartitionKeyCount { tx })
-            .await
-            .expect("internal actor should receive request");
-        rx.await.expect("internal actor should send response")
-    }
-
     async fn get_table_columns(&self) -> GetTableColumnsR {
         let (tx, rx) = oneshot::channel();
         self.send(DbIndex::GetTableColumns { tx })
@@ -288,16 +263,6 @@ pub(crate) async fn new(
 
 async fn process(statements: Arc<Statements>, msg: DbIndex, completed_scan_length: Arc<AtomicU64>) {
     match msg {
-        DbIndex::GetPrimaryKeyColumns { tx } => tx
-            .send(statements.get_primary_key_columns())
-            .unwrap_or_else(|_| {
-                trace!("process: Db::GetPrimaryKeyColumns: unable to send response")
-            }),
-        DbIndex::GetPartitionKeyCount { tx } => {
-            tx.send(statements.partition_key_count).unwrap_or_else(|_| {
-                trace!("process: Db::GetPartitionKeyCount: unable to send response")
-            })
-        }
         DbIndex::GetTableColumns { tx } => tx
             .send(statements.get_table_columns())
             .unwrap_or_else(|_| trace!("process: Db::GetTableColumns: unable to send response")),
@@ -315,8 +280,8 @@ async fn process(statements: Arc<Statements>, msg: DbIndex, completed_scan_lengt
 struct Statements {
     session_rx: tokio::sync::watch::Receiver<Option<Arc<Session>>>,
     primary_key_columns: NonemptyArc<ColumnName>,
-    partition_key_count: usize,
     target_columns: NonemptyArc<ColumnName>,
+    nonpk_partition_key_columns: Box<[ColumnName]>,
     filtering_columns: Arc<[ColumnName]>,
     table_columns: GetTableColumnsR,
     st_range_scan: PreparedStatement,
@@ -342,7 +307,6 @@ impl Statements {
             .get(metadata.table_name.as_ref())
             .ok_or_else(|| anyhow!("table {} does not exist", metadata.table_name))?;
 
-        let partition_key_count = table.partition_key.len();
         let primary_key_columns = table
             .partition_key
             .iter()
@@ -357,6 +321,12 @@ impl Statements {
                     metadata.table_name
                 )
             })?;
+        let nonpk_partition_key_columns: Box<[_]> = metadata
+            .nonpk_partition_key_columns()
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect();
 
         anyhow::ensure!(
             primary_key_columns.len().get() <= InvariantKey::MAX_COLUMNS,
@@ -402,7 +372,10 @@ impl Statements {
         let query = db_index_backend::range_scan_query(
             &keyspace_identifier,
             &table_identifier,
-            target_columns.iter().chain(filtering_columns.iter()),
+            target_columns
+                .iter()
+                .chain(nonpk_partition_key_columns.iter())
+                .chain(filtering_columns.iter()),
             &st_primary_key_list,
             &st_partition_key_list,
         );
@@ -417,7 +390,7 @@ impl Statements {
 
         Ok(Self {
             primary_key_columns,
-            partition_key_count,
+            nonpk_partition_key_columns,
             target_columns,
             filtering_columns,
             table_columns,
@@ -425,10 +398,6 @@ impl Statements {
             session_rx,
             kind: metadata.kind.clone(),
         })
-    }
-
-    fn get_primary_key_columns(&self) -> GetPrimaryKeyColumnsR {
-        self.primary_key_columns.clone()
     }
 
     fn get_table_columns(&self) -> GetTableColumnsR {
@@ -598,7 +567,10 @@ impl Statements {
     ) -> anyhow::Result<BoxStream<'static, DbIndexedRow>> {
         // last values columns are value and writetime
         let columns_len_expected = self.primary_key_columns.len().get()
-            + (self.target_columns.len().get() + self.filtering_columns.len()) * 2;
+            + (self.target_columns.len().get()
+                + self.nonpk_partition_key_columns.len()
+                + self.filtering_columns.len())
+                * 2;
         let target_columns_offset = self.primary_key_columns.len().get();
         let target_columns_len = self.target_columns.len();
         let kind = self.kind.clone();
@@ -664,6 +636,7 @@ pub(crate) fn parse_values(
     target_columns_len: NonZeroUsize,
     kind: &IndexKind,
 ) -> anyhow::Result<NonemptyBox<Timestamped<DbIndexedValue>>> {
+    let default_timestamp = default_timestamp.unwrap_or(Timestamp::MIN);
     let values = columns
         .into_iter()
         .chunks(2)
@@ -698,17 +671,9 @@ pub(crate) fn parse_values(
                     }
                 })
                 .transpose()?
-                .or(default_timestamp);
+                .unwrap_or(default_timestamp);
 
             Ok((timestamp, value))
-        })
-        .filter_map(|timestamp_value| {
-            timestamp_value
-                .and_then(|(timestamp, value)| match (timestamp, value) {
-                    (Some(timestamp), value) => Ok(Some((timestamp, value))),
-                    (None, _) => bail!("parse_values: missing timestamp for value"),
-                })
-                .transpose()
         })
         .map_ok(|(timestamp, value)| Timestamped::new(timestamp, value))
         .collect::<anyhow::Result<Box<_>>>()?;
@@ -854,7 +819,7 @@ mod tests {
         let columns = vec![
             Some(CqlValue::Vector(vec![CqlValue::Float(1.0)])),
             Some(CqlValue::BigInt(1234567890)),
-            Some(CqlValue::Vector(vec![CqlValue::Float(2.0)])),
+            Some(CqlValue::Int(1)),
             None, // missing timestamp
         ];
 
@@ -863,22 +828,38 @@ mod tests {
             None,
             NonZeroUsize::new(1).unwrap(),
             &vs_kind(),
+        )
+        .unwrap();
+        let result = result.as_slice();
+        assert_eq!(result.len(), 2);
+
+        assert_eq!(
+            result.first().unwrap().value().unwrap(),
+            &DbIndexedValue::Vector(Vector::from(vec![1.0]))
         );
-        assert!(result.is_err());
-        assert_matches!(
-            result
-                .unwrap_err()
-                .to_string(),
-                err if err.contains("missing timestamp for value")
+        assert_eq!(
+            result.first().unwrap().timestamp(),
+            Timestamp::from_micros(1234567890)
         );
 
+        assert_eq!(
+            result.get(1).unwrap().value().unwrap(),
+            &DbIndexedValue::Filtering(CqlValue::Int(1))
+        );
+        assert_eq!(result.get(1).unwrap().timestamp(), Timestamp::MIN);
+
         let result = parse_values(
-            columns,
+            columns.clone(),
             Some(Timestamp::from_millis(1)),
             NonZeroUsize::new(1).unwrap(),
             &vs_kind(),
+        )
+        .unwrap();
+        let result = result.as_slice();
+        assert_eq!(
+            result.get(1).unwrap().timestamp(),
+            Timestamp::from_millis(1)
         );
-        assert!(result.is_ok());
     }
 
     #[test]

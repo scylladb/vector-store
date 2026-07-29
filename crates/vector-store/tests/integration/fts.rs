@@ -34,14 +34,20 @@ use vector_store::Percentage;
 use vector_store::Timestamp;
 use vector_store::node_state::NodeState;
 
-fn fts_index_metadata(filtering_columns: impl IntoIterator<Item = ColumnName>) -> IndexMetadata {
+fn fts_index_metadata(primary_key_columns: impl IntoIterator<Item = ColumnName>) -> IndexMetadata {
+    let primary_key_columns = primary_key_columns
+        .into_iter()
+        .collect_nonempty_arc()
+        .unwrap();
     IndexMetadata {
         keyspace_name: "fts_ks".into(),
         table_name: "documents".into(),
         index_name: "fts_idx".into(),
+        partition_key_count: primary_key_columns.len(),
+        primary_key_columns,
         target_columns: NonemptyArc::new(["content"]).unwrap(),
         partitioning: DbIndexPartitioning::Global,
-        filtering_columns: filtering_columns.into_iter().collect(),
+        filtering_columns: Arc::new([]),
         version: Uuid::new_v4().into(),
         kind: IndexKind::Fts(IndexOptionsFts {}),
     }
@@ -70,13 +76,13 @@ async fn setup_fts_store(
     let (db_actor, db) = db_basic::new(node_state.clone());
 
     let columns: Arc<HashMap<_, _>> = Arc::new(columns.into_iter().collect());
-    let index = fts_index_metadata(columns.keys().cloned());
+    let index = fts_index_metadata(primary_keys);
 
     db.add_table(
         index.keyspace_name.clone(),
         index.table_name.clone(),
         Table {
-            primary_keys: primary_keys.into_iter().collect_nonempty_arc().unwrap(),
+            primary_keys: index.primary_key_columns.clone(),
             partition_key_count,
             columns,
             dimensions: HashMap::new(),

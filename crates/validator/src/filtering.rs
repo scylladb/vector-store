@@ -965,6 +965,115 @@ async fn local_index_filter_returns_no_results_when_nothing_matches(actors: Arc<
     info!("finished");
 }
 
+/// Test ANN search filtered by partition key equality or filtering column on a local index built
+/// with pk or ck or regular column.
+#[e2etest::test(group = filtering)]
+async fn local_index_filter_by_partition_key_or_filtering(actors: Arc<TestActors>) {
+    info!("started");
+
+    let (session, clients) = prepare_connection(&actors).await;
+
+    let keyspace = create_keyspace(&session).await;
+    let table = create_table(
+        &session,
+        "pk INT, ck INT, v VECTOR<FLOAT, 1>, rc INT, fp INT, fc INT, PRIMARY KEY (pk, ck)",
+        None,
+    )
+    .await;
+
+    const REPETITIONS: usize = 5;
+    const DATASET_SIZE: usize = REPETITIONS * REPETITIONS;
+
+    for pk in 0..REPETITIONS {
+        for ck in 0..REPETITIONS {
+            session
+                .query_unpaged(
+                    format!(
+                        "INSERT INTO {table} (pk, ck, v, rc, fp, fc) VALUES (?, ?, ?, ?, ?, ?)"
+                    ),
+                    (
+                        pk as i32,
+                        ck as i32,
+                        &vec![pk as f32],
+                        ck as i32,
+                        pk as i32,
+                        ck as i32,
+                    ),
+                )
+                .await
+                .expect("failed to insert data");
+        }
+    }
+
+    for (pc, oc, fc) in [("pk", "ck", "fc"), ("ck", "pk", "fp"), ("rc", "pk", "fp")] {
+        info!("Testing local index with partition column {pc} and filtering column {fc}");
+        let index = create_index(
+            CreateIndexQuery::new(&session, &clients, &table, "v")
+                .options([("similarity_function", "euclidean")])
+                .partition_columns([pc])
+                .filter_columns([fc]),
+        )
+        .await;
+
+        for client in &clients {
+            let index_status = wait_for_index(client, &index).await;
+            assert_eq!(
+                index_status.count, DATASET_SIZE,
+                "Expected {DATASET_SIZE} vectors to be indexed in the index"
+            );
+        }
+
+        info!("Querying index for {pc} = 1");
+        let rows = get_query_results(
+            format!(
+                "SELECT {oc} FROM {table} WHERE {pc} = 1 \
+                ORDER BY v ANN OF [1.0] LIMIT {DATASET_SIZE}"
+            ),
+            &session,
+        )
+        .await;
+        assert_eq!(
+            rows.rows::<(i32,)>()
+                .expect("failed to get rows")
+                .rows_remaining(),
+            REPETITIONS
+        );
+
+        info!("Querying index for {pc} = 1 AND {fc} = 1");
+        let rows = get_query_results(
+            format!(
+                "SELECT {oc} FROM {table} WHERE {pc} = 1 AND {fc} = 1 \
+                ORDER BY v ANN OF [1.0] LIMIT {DATASET_SIZE} ALLOW FILTERING"
+            ),
+            &session,
+        )
+        .await;
+        let rows = rows.rows::<(i32,)>().expect("failed to get rows");
+        assert_eq!(rows.rows_remaining(), 1);
+        assert_eq!(
+            rows.into_iter().next().unwrap().expect("failed to get row"),
+            (1,)
+        );
+
+        info!("Dropping index {index:?}");
+        session
+            .query_unpaged(
+                format!("DROP INDEX IF EXISTS {index}", index = index.index.as_ref()),
+                (),
+            )
+            .await
+            .expect("failed to drop the index");
+    }
+
+    info!("Dropping keyspace {keyspace}");
+    session
+        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
+        .await
+        .expect("failed to drop a keyspace");
+
+    info!("finished");
+}
+
 /// Regression test for VECTOR-609: a global ANN query (one without a full
 /// partition key equality restriction) issued against a column whose only
 /// vector index is local must fail rather than silently returning empty or

@@ -50,10 +50,6 @@ impl PrimaryId {
         self
     }
 
-    pub(super) fn next_epoch(self) -> Self {
-        self.new_epoch(self.epoch().next())
-    }
-
     pub(super) fn epoch(&self) -> Epoch {
         Epoch((self.0 >> Self::EPOCH_SHIFT) as u16)
     }

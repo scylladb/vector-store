@@ -53,6 +53,7 @@ use scylla::statement::prepared::PreparedStatement;
 use scylla::value::CqlTimeuuid;
 use secrecy::ExposeSecret;
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 use tap::Pipe;
@@ -760,6 +761,17 @@ impl Statements {
                         .ok_or_else(|| {
                             anyhow!("table {table_name} does not exist").context(InvalidMetadata)
                         })?;
+                    let primary_key_columns = table
+                        .partition_key
+                        .iter()
+                        .chain(table.clustering_key.iter())
+                        .map(ColumnName::from)
+                        .collect_nonempty_arc()
+                        .ok_or_else(|| {
+                            anyhow!("table {table_name} has no primary key columns")
+                                .context(InvalidMetadata)
+                        })?;
+                    let partition_key_count = NonZeroUsize::new(table.partition_key.len()).unwrap();
                     Ok(options.remove("target").and_then(|target| {
                         let kind = db_index_kind_from_options(&mut options)?;
                         from_target_option(table, target, kind)
@@ -768,6 +780,8 @@ impl Statements {
                                     keyspace: keyspace_name.into(),
                                     index: index_name.clone().into(),
                                     table: table_name.into(),
+                                    primary_key_columns,
+                                    partition_key_count,
                                     target_columns: NonemptyArc::new([target_column])
                                         .expect("target column should be non-empty"),
                                     partitioning,
@@ -1058,9 +1072,9 @@ fn from_target_option(
         if let Some(invalid) = target
             .partition_key_columns
             .iter()
-            .find(|pk_col| !table.partition_key.contains(pk_col))
+            .find(|pk_col| !table.columns.contains_key(*pk_col))
         {
-            bail!("invalid target option: pk column {invalid} is not in the table's partition key");
+            bail!("invalid target option: pk column {invalid} is not in the table's columns");
         }
         DbIndexPartitioning::Local(
             target

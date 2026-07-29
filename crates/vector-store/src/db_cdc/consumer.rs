@@ -47,6 +47,7 @@ struct CdcConsumerData {
     st_select_values: PreparedStatement,
     index_key: IndexKey,
     primary_key_columns: NonemptyArc<ColumnName>,
+    nonpk_partition_key_columns: Box<[ColumnName]>,
     target_columns: NonemptyArc<ColumnName>,
     filtering_columns: Arc<[ColumnName]>,
     kind: IndexKind,
@@ -92,7 +93,10 @@ impl CdcConsumerData {
         };
 
         let target_columns_len = self.target_columns.len();
-        let columns_len_expected = (target_columns_len.get() + self.filtering_columns.len()) * 2;
+        let columns_len_expected = (target_columns_len.get()
+            + self.nonpk_partition_key_columns.len()
+            + self.filtering_columns.len())
+            * 2;
         if row.columns.len() != columns_len_expected {
             let msg = format!(
                 "Unexpected number of columns in row: expected {columns_len_expected}, got {received_len}",
@@ -276,10 +280,20 @@ impl CdcConsumerFactory {
             .cloned()
             .collect();
 
+        let nonpk_partition_key_columns: Box<[_]> = metadata
+            .nonpk_partition_key_columns()
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect();
+
         let query = db_index_backend::request_query(
             &metadata.keyspace_name.as_ref().into(),
             &metadata.table_name.as_ref().into(),
-            target_columns.iter().chain(filtering_columns.iter()),
+            target_columns
+                .iter()
+                .chain(nonpk_partition_key_columns.iter())
+                .chain(filtering_columns.iter()),
             primary_key_columns.iter(),
         );
         let st_select_values =
@@ -297,6 +311,7 @@ impl CdcConsumerFactory {
             st_select_values,
             index_key: metadata.key(),
             primary_key_columns,
+            nonpk_partition_key_columns,
             target_columns,
             filtering_columns,
             kind: metadata.kind.clone(),

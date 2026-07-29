@@ -12,6 +12,7 @@ use scylla::value::CqlTimeuuid;
 use scylla::value::CqlValue;
 use std::collections::HashMap;
 use std::iter;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicBool;
@@ -340,6 +341,19 @@ fn process_db(db: &DbBasic, msg: Db, node_state: Sender<NodeState>) {
                                 keyspace: keyspace_name.clone(),
                                 index: index_name.clone(),
                                 table: index.metadata.table_name.clone(),
+                                primary_key_columns: keyspace
+                                    .tables
+                                    .get(&index.metadata.table_name)
+                                    .map(|table| table.primary_keys.clone())
+                                    .unwrap(),
+                                partition_key_count: NonZeroUsize::new(
+                                    keyspace
+                                        .tables
+                                        .get(&index.metadata.table_name)
+                                        .map(|table| table.partition_key_count)
+                                        .unwrap(),
+                                )
+                                .unwrap(),
                                 target_columns: index.metadata.target_columns.clone(),
                                 partitioning: index.metadata.partitioning.clone(),
                                 filtering_columns: index.metadata.filtering_columns.clone(),
@@ -549,32 +563,6 @@ async fn spawn_process_db_index(
 ) {
     tokio::spawn(async move {
         match msg {
-            DbIndex::GetPrimaryKeyColumns { tx } => tx
-                .send(
-                    db.0.read()
-                        .unwrap()
-                        .keyspaces
-                        .get(&metadata.keyspace_name)
-                        .and_then(|keyspace| keyspace.tables.get(&metadata.table_name))
-                        .map(|table| table.primary_keys.clone())
-                        .unwrap(),
-                )
-                .map_err(|_| anyhow!("DbIndex::GetPrimaryKeyColumns: unable to send response"))
-                .unwrap(),
-
-            DbIndex::GetPartitionKeyCount { tx } => tx
-                .send(
-                    db.0.read()
-                        .unwrap()
-                        .keyspaces
-                        .get(&metadata.keyspace_name)
-                        .and_then(|keyspace| keyspace.tables.get(&metadata.table_name))
-                        .map(|table| table.partition_key_count)
-                        .unwrap_or(1),
-                )
-                .map_err(|_| anyhow!("DbIndex::GetPartitionKeyCount: unable to send response"))
-                .unwrap(),
-
             DbIndex::GetTableColumns { tx } => tx
                 .send(
                     db.0.read()
