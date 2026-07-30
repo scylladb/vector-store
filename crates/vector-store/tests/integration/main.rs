@@ -6,6 +6,7 @@
 mod db_basic;
 mod fts;
 mod https;
+mod index_status;
 mod info;
 mod memory_limit;
 mod metrics;

@@ -149,6 +149,21 @@ pub enum IndexStatus {
 pub struct IndexStatusResponse {
     pub status: IndexStatus,
     pub count: usize,
+    /// Progress of the initial full table scan that backfills the index,
+    /// expressed as a percentage in the range `0.0..=100.0`. This reflects
+    /// only how far the full scan has advanced; it is not a source of truth
+    /// for the index state. The `status` field is authoritative: an index
+    /// reporting `SERVING` is serving regardless of `build_progress`, which
+    /// may not reach `100.0` (e.g. if some scan ranges failed). Defaults to
+    /// `100.0` when omitted, so a new client talking to an older server that
+    /// does not report the field falls back to relying solely on `status`.
+    #[serde(default = "default_build_progress")]
+    #[schema(minimum = 0, maximum = 100)]
+    pub build_progress: f64,
+}
+
+fn default_build_progress() -> f64 {
+    100.0
 }
 
 #[derive(Debug, PartialEq, serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
