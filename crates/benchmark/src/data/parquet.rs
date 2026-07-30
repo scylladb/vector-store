@@ -12,7 +12,6 @@ use arrow_array::types::Int64Type;
 use futures::Stream;
 use futures::StreamExt;
 use futures::stream;
-use futures::stream::BoxStream;
 use itertools::Itertools;
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder;
@@ -167,8 +166,8 @@ fn extract_embedding(
     ids.zip(embs).collect_vec()
 }
 
-pub(crate) async fn ids_stream(path: Arc<PathBuf>, config: Arc<Config>) -> BoxStream<'static, i64> {
-    train_files(path, Arc::clone(&config))
+pub(crate) async fn ids_stream(path: Arc<PathBuf>, config: Arc<Config>) -> mpsc::Receiver<i64> {
+    let mut stream = train_files(path, Arc::clone(&config))
         .await
         .then({
             let config = Arc::clone(&config);
@@ -202,7 +201,19 @@ pub(crate) async fn ids_stream(path: Arc<PathBuf>, config: Arc<Config>) -> BoxSt
             stream::iter(ids)
         })
         .flatten()
-        .boxed()
+        .boxed();
+
+    let workers = Handle::current().metrics().num_workers();
+    const OVERLOAD_FACTOR: usize = 3;
+    let (tx, rx) = mpsc::channel(workers * OVERLOAD_FACTOR);
+    tokio::spawn(async move {
+        while let Some(id) = stream.next().await {
+            if tx.send(id).await.is_err() {
+                return;
+            }
+        }
+    });
+    rx
 }
 
 pub(crate) async fn vector_stream(
