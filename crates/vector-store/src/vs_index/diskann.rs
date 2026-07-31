@@ -7,8 +7,10 @@ use crate::Config;
 use crate::Dimensions;
 use crate::DiskannAlpha;
 use crate::IndexKey;
+use crate::PartitionId;
 use crate::PrimaryId;
 use crate::SpaceType;
+use crate::Vector;
 use crate::VsIndexFactory;
 use crate::memory::Allocate;
 use crate::memory::Memory;
@@ -21,13 +23,18 @@ use crate::worker::Worker;
 use anyhow::Context;
 use diskann::graph::Config as DiskannConfig;
 use diskann::graph::DiskANNIndex;
+use diskann::graph::InplaceDeleteMethod;
 use diskann::graph::config::Builder;
 use diskann::graph::config::MaxDegree;
 use diskann::graph::config::defaults::ALPHA as DISKANN_DEFAULT_ALPHA;
+use diskann_inmem::Context as InmemContext;
 use diskann_inmem::Provider as InmemProvider;
+use diskann_inmem::Strategy as InmemStrategy;
 use diskann_inmem::layers::Full;
 use diskann_inmem::provider::Config as InmemProviderConfig;
 use diskann_vector::distance::Metric;
+use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -43,6 +50,8 @@ const MAX_POINTS: NonZeroUsize = NonZeroUsize::new(1_000_000).unwrap();
 
 type DiskannProvider = InmemProvider<Full<f32>, PrimaryId>;
 
+type DiskannIndex = DiskANNIndex<DiskannProvider>;
+
 pub struct DiskannIndexFactory {
     _worker: async_channel::Sender<Worker>,
     memory: mpsc::Sender<Memory>,
@@ -55,17 +64,10 @@ impl VsIndexFactory for DiskannIndexFactory {
         index: VsIndexConfiguration,
         _table: Arc<RwLock<Table>>,
     ) -> anyhow::Result<mpsc::Sender<VsIndex>> {
-        let params = DiskannParams::new(&index, self.alpha, MAX_POINTS)?;
-        let layer = Full::<f32>::new(usize::from(params.dim.0), params.metric);
-        let cfg = InmemProviderConfig::new(
-            usize::from(params.max_points),
-            params.config.max_degree().get(),
-        );
-        let provider = InmemProvider::<_, PrimaryId>::new(layer, cfg, vec![])
-            .context("failed to create InmemProvider")?;
-        let diskann_index = DiskANNIndex::new(params.config, provider, None);
+        let params = DiskannParams::new(&index, self.alpha, MAX_POINTS)
+            .context("failed to create DiskANN parameters")?;
 
-        new(index.key, diskann_index, self.memory.clone())
+        new(index.key, self.memory.clone(), params)
     }
 
     fn index_engine_version(&self) -> String {
@@ -90,9 +92,9 @@ pub fn new_diskann(
 }
 
 fn new(
-    index_key: crate::IndexKey,
-    index: DiskANNIndex<DiskannProvider>,
+    index_key: IndexKey,
     memory: mpsc::Sender<Memory>,
+    params: DiskannParams,
 ) -> anyhow::Result<mpsc::Sender<VsIndex>> {
     let (tx, mut rx) = mpsc::channel(perf::channel_size().into());
 
@@ -102,6 +104,8 @@ fn new(
         {
             async move {
                 debug!("starting");
+
+                let mut state = State::new(params);
 
                 let mut allocate_prev = Allocate::Can;
                 let allocate_rx = memory.subscribe_allocate().await;
@@ -113,9 +117,22 @@ fn new(
                     }
 
                     match msg {
-                        VsIndex::AddVector { .. }
-                        | VsIndex::RemoveVector { .. }
-                        | VsIndex::RemovePartition { .. } => {
+                        VsIndex::AddVector {
+                            partition_id,
+                            primary_id,
+                            embedding,
+                            in_progress: _in_progress,
+                        } => {
+                            state.add_vector(partition_id, primary_id, embedding).await;
+                        }
+                        VsIndex::RemoveVector {
+                            partition_id,
+                            primary_id,
+                            in_progress: _in_progress,
+                        } => {
+                            state.remove_vector(partition_id, primary_id).await;
+                        }
+                        VsIndex::RemovePartition { .. } => {
                             warn!("not implemented yet");
                         }
                         VsIndex::Ann { tx, .. } | VsIndex::FilteredAnn { tx, .. } => {
@@ -128,7 +145,6 @@ fn new(
                         }
                     }
                 }
-                drop(index);
 
                 debug!("finished");
             }
@@ -137,6 +153,104 @@ fn new(
     ));
 
     Ok(tx)
+}
+
+fn create_diskann_index(
+    params: &DiskannParams,
+    start_point: Option<&[f32]>,
+) -> anyhow::Result<DiskannIndex> {
+    let layer = Full::<f32>::new(usize::from(params.dim.0), params.metric);
+    let cfg = InmemProviderConfig::new(
+        usize::from(params.max_points),
+        params.config.max_degree().get(),
+    );
+    let start_points: Vec<&[f32]> = start_point.into_iter().collect();
+    let provider = InmemProvider::<_, PrimaryId>::new(layer, cfg, start_points)
+        .context("failed to create InmemProvider")?;
+    Ok(DiskANNIndex::new(params.config.clone(), provider, None))
+}
+
+struct Partition {
+    index: DiskANNIndex<DiskannProvider>,
+}
+
+struct State {
+    partitions: BTreeMap<PartitionId, Partition>,
+    params: DiskannParams,
+}
+
+impl State {
+    fn new(params: DiskannParams) -> Self {
+        Self {
+            partitions: BTreeMap::new(),
+            params,
+        }
+    }
+
+    fn get_or_create_partition(
+        &mut self,
+        partition_id: &PartitionId,
+        start_point: Option<&[f32]>,
+    ) -> anyhow::Result<&mut Partition> {
+        match self.partitions.entry(*partition_id) {
+            Entry::Occupied(entry) => Ok(entry.into_mut()),
+            Entry::Vacant(entry) => {
+                let index = create_diskann_index(&self.params, start_point).context(format!(
+                    "failed to create index for partition {partition_id:?}"
+                ))?;
+
+                Ok(entry.insert(Partition { index }))
+            }
+        }
+    }
+
+    async fn add_vector(
+        &mut self,
+        partition_id: PartitionId,
+        primary_id: PrimaryId,
+        embedding: Vector,
+    ) {
+        let partition =
+            match self.get_or_create_partition(&partition_id, Some(embedding.as_slice())) {
+                Ok(partition) => partition,
+                Err(err) => {
+                    warn!("add_vector failed: {err}");
+                    return;
+                }
+            };
+        if let Err(err) = partition
+            .index
+            .insert(
+                &InmemStrategy,
+                &InmemContext,
+                &primary_id,
+                embedding.as_slice(),
+            )
+            .await
+        {
+            warn!("add_vector: failed to insert vector: {err}");
+        }
+    }
+
+    async fn remove_vector(&mut self, partition_id: PartitionId, primary_id: PrimaryId) {
+        let Some(partition) = self.partitions.get_mut(&partition_id) else {
+            debug!("remove_vector: partition {partition_id:?} not found");
+            return;
+        };
+        if let Err(err) = partition
+            .index
+            .inplace_delete(
+                InmemStrategy,
+                &InmemContext,
+                &primary_id,
+                self.params.config.pruned_degree().get(),
+                InplaceDeleteMethod::OneHop,
+            )
+            .await
+        {
+            warn!("remove_vector: failed to delete vector: {err}");
+        }
+    }
 }
 
 #[hotpath::measure]
