@@ -18,9 +18,11 @@ use crate::memory::Allocate;
 use crate::memory::Memory;
 use crate::memory::MemoryExt;
 use crate::perf;
+use crate::table::IndexId;
 use crate::table::Table;
 use crate::table::TableSearch;
 use crate::vs_index::actor::AnnR;
+use crate::vs_index::actor::CountR;
 use crate::vs_index::actor::VsIndex;
 use crate::vs_index::factory::VsIndexConfiguration;
 use crate::vs_index::validator;
@@ -163,9 +165,8 @@ fn new(
                                 "DiskANN index does not support filtered search"
                             )));
                         }
-                        VsIndex::Count { tx, .. } => {
-                            _ = tx
-                                .send(Err(anyhow::anyhow!("DiskANN index is not implemented yet")));
+                        VsIndex::Count { index_key, tx } => {
+                            _ = tx.send(state.count(&index_key));
                         }
                     }
                 }
@@ -203,6 +204,7 @@ where
     T: TableSearch + Send + Sync + 'static,
 {
     partitions: BTreeMap<PartitionId, Partition>,
+    sizes: BTreeMap<IndexId, usize>,
     table: Arc<RwLock<T>>,
     params: DiskannParams,
 }
@@ -214,6 +216,7 @@ where
     fn new(table: Arc<RwLock<T>>, params: DiskannParams) -> Self {
         Self {
             partitions: BTreeMap::new(),
+            sizes: BTreeMap::new(),
             table,
             params,
         }
@@ -230,6 +233,8 @@ where
                 let index = create_diskann_index(&self.params, start_point).context(format!(
                     "failed to create index for partition {partition_id:?}"
                 ))?;
+
+                self.sizes.entry(partition_id.index_id()).or_insert(0);
 
                 Ok(entry.insert(Partition { index }))
             }
@@ -261,6 +266,9 @@ where
             .await
         {
             warn!("add_vector: failed to insert vector: {err}");
+        } else {
+            let size = self.sizes.entry(partition_id.index_id()).or_insert(0);
+            *size = size.saturating_add(1);
         }
     }
 
@@ -281,6 +289,9 @@ where
             .await
         {
             warn!("remove_vector: failed to delete vector: {err}");
+        } else {
+            let size = self.sizes.entry(partition_id.index_id()).or_insert(0);
+            *size = size.saturating_sub(1);
         }
     }
 
@@ -361,6 +372,18 @@ where
             |it| it.unzip(),
         )?;
         Ok((primary_keys, distances))
+    }
+
+    fn count(&self, index_key: &IndexKey) -> CountR {
+        let index_id = {
+            let table = self.table.read().unwrap();
+            let Some(index_id) = table.index_id(index_key) else {
+                anyhow::bail!("index id not found for index key {index_key}");
+            };
+            index_id
+        };
+
+        Ok(self.sizes.get(&index_id).copied().unwrap_or(0))
     }
 }
 
