@@ -146,8 +146,8 @@ fn new(
                         } => {
                             state.remove_vector(partition_id, primary_id).await;
                         }
-                        VsIndex::RemovePartition { .. } => {
-                            warn!("not implemented yet");
+                        VsIndex::RemovePartition { partition_id } => {
+                            state.remove_partition(partition_id);
                         }
                         VsIndex::Ann {
                             index_key,
@@ -372,6 +372,12 @@ where
             |it| it.unzip(),
         )?;
         Ok((primary_keys, distances))
+    }
+
+    fn remove_partition(&mut self, partition_id: PartitionId) {
+        if self.partitions.remove(&partition_id).is_none() {
+            debug!("remove_partition: partition {partition_id:?} not found");
+        }
     }
 
     fn count(&self, index_key: &IndexKey) -> CountR {
