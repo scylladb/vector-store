@@ -37,7 +37,6 @@ criterion = { version = "0.8.2", features = ["async_tokio"] }
 dashmap = "6.1.0"
 derive_more = { version = "2.0.1", features = ["full"] }
 diskann = { git = "https://github.com/microsoft/DiskANN.git", rev = "90f49467a7558bd53e01f61617c294611a96158d" }
-diskann-providers = { git = "https://github.com/microsoft/DiskANN.git", rev = "90f49467a7558bd53e01f61617c294611a96158d" }
 diskann-vector = { git = "https://github.com/microsoft/DiskANN.git", rev = "90f49467a7558bd53e01f61617c294611a96158d" }
 diskann-inmem = { git = "https://github.com/microsoft/DiskANN.git", rev = "90f49467a7558bd53e01f61617c294611a96158d" }
 dotenvy = "0.15.7"

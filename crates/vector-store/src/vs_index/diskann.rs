@@ -6,6 +6,7 @@
 use crate::Config;
 use crate::Dimensions;
 use crate::DiskannAlpha;
+use crate::PrimaryId;
 use crate::SpaceType;
 use crate::VsIndexFactory;
 use crate::memory::Memory;
@@ -20,13 +21,9 @@ use diskann::graph::DiskANNIndex;
 use diskann::graph::config::Builder;
 use diskann::graph::config::MaxDegree;
 use diskann::graph::config::defaults::ALPHA as DISKANN_DEFAULT_ALPHA;
-use diskann_providers::model::graph::provider::async_::FastMemoryVectorProviderAsync;
-use diskann_providers::model::graph::provider::async_::TableDeleteProviderAsync;
-use diskann_providers::model::graph::provider::async_::common::NoStore;
-use diskann_providers::model::graph::provider::async_::common::TableBasedDeletes;
-use diskann_providers::model::graph::provider::async_::inmem::CreateFullPrecision;
-use diskann_providers::model::graph::provider::async_::inmem::DefaultProvider;
-use diskann_providers::model::graph::provider::async_::inmem::DefaultProviderParameters;
+use diskann_inmem::Provider as InmemProvider;
+use diskann_inmem::layers::Full;
+use diskann_inmem::provider::Config as InmemProviderConfig;
 use diskann_vector::distance::Metric;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -40,8 +37,7 @@ use tracing::warn;
 
 const MAX_POINTS: NonZeroUsize = NonZeroUsize::new(1_000_000).unwrap();
 
-type DiskannProvider =
-    DefaultProvider<FastMemoryVectorProviderAsync<f32>, NoStore, TableDeleteProviderAsync>;
+type DiskannProvider = InmemProvider<Full<f32>, PrimaryId>;
 
 pub struct DiskannIndexFactory {
     _worker: async_channel::Sender<Worker>,
@@ -56,21 +52,13 @@ impl VsIndexFactory for DiskannIndexFactory {
         _table: Arc<RwLock<Table>>,
     ) -> anyhow::Result<mpsc::Sender<VsIndex>> {
         let params = DiskannParams::new(&index, self.alpha, MAX_POINTS)?;
-        let provider_params = DefaultProviderParameters::simple(
+        let layer = Full::<f32>::new(usize::from(params.dim.0), params.metric);
+        let cfg = InmemProviderConfig::new(
             usize::from(params.max_points),
-            usize::from(params.dim.0),
-            params.metric,
-            u32::from(params.config.max_degree_u32()),
+            params.config.max_degree().get(),
         );
-
-        let provider: DiskannProvider = DefaultProvider::new_empty(
-            provider_params,
-            CreateFullPrecision::<f32>::new(usize::from(params.dim.0), None),
-            NoStore,
-            TableBasedDeletes,
-        )
-        .context("failed to create DiskANN provider")?;
-
+        let provider = InmemProvider::<_, PrimaryId>::new(layer, cfg, vec![])
+            .context("failed to create InmemProvider")?;
         let diskann_index = DiskANNIndex::new(params.config, provider, None);
 
         new(index.key, diskann_index)

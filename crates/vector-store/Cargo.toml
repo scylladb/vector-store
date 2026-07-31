@@ -41,7 +41,6 @@ console-subscriber = {workspace = true, optional = true}
 dashmap.workspace = true
 derive_more.workspace = true
 diskann.workspace = true
-diskann-providers.workspace = true
 diskann-vector.workspace = true
 diskann-inmem.workspace = true
 dotenvy.workspace = true
