@@ -6,10 +6,13 @@
 use crate::Config;
 use crate::Dimensions;
 use crate::DiskannAlpha;
+use crate::IndexKey;
 use crate::PrimaryId;
 use crate::SpaceType;
 use crate::VsIndexFactory;
+use crate::memory::Allocate;
 use crate::memory::Memory;
+use crate::memory::MemoryExt;
 use crate::perf;
 use crate::table::Table;
 use crate::vs_index::actor::VsIndex;
@@ -33,6 +36,7 @@ use tokio::sync::watch;
 use tracing::Instrument;
 use tracing::debug;
 use tracing::debug_span;
+use tracing::error;
 use tracing::warn;
 
 const MAX_POINTS: NonZeroUsize = NonZeroUsize::new(1_000_000).unwrap();
@@ -41,7 +45,7 @@ type DiskannProvider = InmemProvider<Full<f32>, PrimaryId>;
 
 pub struct DiskannIndexFactory {
     _worker: async_channel::Sender<Worker>,
-    _memory: mpsc::Sender<Memory>,
+    memory: mpsc::Sender<Memory>,
     alpha: DiskannAlpha,
 }
 
@@ -61,7 +65,7 @@ impl VsIndexFactory for DiskannIndexFactory {
             .context("failed to create InmemProvider")?;
         let diskann_index = DiskANNIndex::new(params.config, provider, None);
 
-        new(index.key, diskann_index)
+        new(index.key, diskann_index, self.memory.clone())
     }
 
     fn index_engine_version(&self) -> String {
@@ -78,7 +82,7 @@ pub fn new_diskann(
 
     Ok(DiskannIndexFactory {
         _worker: worker,
-        _memory: memory,
+        memory,
         alpha: config
             .diskann_alpha
             .unwrap_or(DiskannAlpha::new(DISKANN_DEFAULT_ALPHA).unwrap()),
@@ -88,15 +92,26 @@ pub fn new_diskann(
 fn new(
     index_key: crate::IndexKey,
     index: DiskANNIndex<DiskannProvider>,
+    memory: mpsc::Sender<Memory>,
 ) -> anyhow::Result<mpsc::Sender<VsIndex>> {
     let (tx, mut rx) = mpsc::channel(perf::channel_size().into());
+
+    let span_key = index_key.clone();
 
     tokio::spawn(perf::hotpath_async(
         {
             async move {
                 debug!("starting");
 
+                let mut allocate_prev = Allocate::Can;
+                let allocate_rx = memory.subscribe_allocate().await;
+
                 while let Some(msg) = rx.recv().await {
+                    if !check_memory_allocation(&msg, &allocate_rx, &mut allocate_prev, &index_key)
+                    {
+                        continue;
+                    }
+
                     match msg {
                         VsIndex::AddVector { .. }
                         | VsIndex::RemoveVector { .. }
@@ -118,12 +133,34 @@ fn new(
                 debug!("finished");
             }
         }
-        .instrument(debug_span!("diskann", "{index_key}")),
+        .instrument(debug_span!("diskann", "{span_key}")),
     ));
 
     Ok(tx)
 }
 
+#[hotpath::measure]
+fn check_memory_allocation(
+    msg: &VsIndex,
+    rx_allocate: &watch::Receiver<Allocate>,
+    allocate_prev: &mut Allocate,
+    key: &IndexKey,
+) -> bool {
+    if !matches!(msg, VsIndex::AddVector { .. }) {
+        return true;
+    }
+
+    let allocate = *rx_allocate.borrow();
+    if allocate == Allocate::Cannot {
+        if *allocate_prev == Allocate::Can {
+            error!("Unable to add vector for index {key}: not enough memory to reserve more space");
+        }
+        *allocate_prev = allocate;
+        return false;
+    }
+    *allocate_prev = allocate;
+    true
+}
 #[derive(Clone)]
 struct DiskannParams {
     config: DiskannConfig,
