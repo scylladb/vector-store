@@ -1477,6 +1477,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crossbeam-queue"
+version = "0.3.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "803d13fb3b09d88be9f4dbc29062c66b19bf7170867ceb746d2a8689bf6c7a26"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
 name = "crossbeam-utils"
 version = "0.8.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1784,7 +1793,7 @@ dependencies = [
 [[package]]
 name = "diskann"
 version = "0.55.0"
-source = "git+https://github.com/microsoft/DiskANN.git?rev=541472a8d0bbfa4d458ec1b909e1d41a18adaabc#541472a8d0bbfa4d458ec1b909e1d41a18adaabc"
+source = "git+https://github.com/microsoft/DiskANN.git?rev=90f49467a7558bd53e01f61617c294611a96158d#90f49467a7558bd53e01f61617c294611a96158d"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -1802,9 +1811,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "diskann-inmem"
+version = "0.55.0"
+source = "git+https://github.com/microsoft/DiskANN.git?rev=90f49467a7558bd53e01f61617c294611a96158d#90f49467a7558bd53e01f61617c294611a96158d"
+dependencies = [
+ "bytemuck",
+ "crossbeam-queue",
+ "dashmap 6.1.0",
+ "diskann",
+ "diskann-utils",
+ "diskann-vector",
+ "diskann-wide",
+ "half",
+ "parking_lot",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "diskann-providers"
 version = "0.55.0"
-source = "git+https://github.com/microsoft/DiskANN.git?rev=541472a8d0bbfa4d458ec1b909e1d41a18adaabc#541472a8d0bbfa4d458ec1b909e1d41a18adaabc"
+source = "git+https://github.com/microsoft/DiskANN.git?rev=90f49467a7558bd53e01f61617c294611a96158d#90f49467a7558bd53e01f61617c294611a96158d"
 dependencies = [
  "arc-swap",
  "bincode",
@@ -1833,7 +1859,7 @@ dependencies = [
 [[package]]
 name = "diskann-quantization"
 version = "0.55.0"
-source = "git+https://github.com/microsoft/DiskANN.git?rev=541472a8d0bbfa4d458ec1b909e1d41a18adaabc#541472a8d0bbfa4d458ec1b909e1d41a18adaabc"
+source = "git+https://github.com/microsoft/DiskANN.git?rev=90f49467a7558bd53e01f61617c294611a96158d#90f49467a7558bd53e01f61617c294611a96158d"
 dependencies = [
  "bytemuck",
  "cfg-if",
@@ -1849,7 +1875,7 @@ dependencies = [
 [[package]]
 name = "diskann-utils"
 version = "0.55.0"
-source = "git+https://github.com/microsoft/DiskANN.git?rev=541472a8d0bbfa4d458ec1b909e1d41a18adaabc#541472a8d0bbfa4d458ec1b909e1d41a18adaabc"
+source = "git+https://github.com/microsoft/DiskANN.git?rev=90f49467a7558bd53e01f61617c294611a96158d#90f49467a7558bd53e01f61617c294611a96158d"
 dependencies = [
  "bytemuck",
  "cfg-if",
@@ -1865,7 +1891,7 @@ dependencies = [
 [[package]]
 name = "diskann-vector"
 version = "0.55.0"
-source = "git+https://github.com/microsoft/DiskANN.git?rev=541472a8d0bbfa4d458ec1b909e1d41a18adaabc#541472a8d0bbfa4d458ec1b909e1d41a18adaabc"
+source = "git+https://github.com/microsoft/DiskANN.git?rev=90f49467a7558bd53e01f61617c294611a96158d#90f49467a7558bd53e01f61617c294611a96158d"
 dependencies = [
  "cfg-if",
  "diskann-wide",
@@ -1875,7 +1901,7 @@ dependencies = [
 [[package]]
 name = "diskann-wide"
 version = "0.55.0"
-source = "git+https://github.com/microsoft/DiskANN.git?rev=541472a8d0bbfa4d458ec1b909e1d41a18adaabc#541472a8d0bbfa4d458ec1b909e1d41a18adaabc"
+source = "git+https://github.com/microsoft/DiskANN.git?rev=90f49467a7558bd53e01f61617c294611a96158d#90f49467a7558bd53e01f61617c294611a96158d"
 dependencies = [
  "cfg-if",
  "half",
@@ -4117,7 +4143,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27c6023962132f4b30eb4c172c91ce92d933da334c59c23cddee82358ddafb0b"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -6134,6 +6160,7 @@ dependencies = [
  "dashmap 6.1.0",
  "derive_more",
  "diskann",
+ "diskann-inmem",
  "diskann-providers",
  "diskann-vector",
  "dotenvy",

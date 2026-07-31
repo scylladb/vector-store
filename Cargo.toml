@@ -36,9 +36,10 @@ console-subscriber = "0.5.0"
 criterion = { version = "0.8.2", features = ["async_tokio"] }
 dashmap = "6.1.0"
 derive_more = { version = "2.0.1", features = ["full"] }
-diskann = { git = "https://github.com/microsoft/DiskANN.git", rev = "541472a8d0bbfa4d458ec1b909e1d41a18adaabc" }
-diskann-providers = { git = "https://github.com/microsoft/DiskANN.git", rev = "541472a8d0bbfa4d458ec1b909e1d41a18adaabc" }
-diskann-vector = { git = "https://github.com/microsoft/DiskANN.git", rev = "541472a8d0bbfa4d458ec1b909e1d41a18adaabc" }
+diskann = { git = "https://github.com/microsoft/DiskANN.git", rev = "90f49467a7558bd53e01f61617c294611a96158d" }
+diskann-providers = { git = "https://github.com/microsoft/DiskANN.git", rev = "90f49467a7558bd53e01f61617c294611a96158d" }
+diskann-vector = { git = "https://github.com/microsoft/DiskANN.git", rev = "90f49467a7558bd53e01f61617c294611a96158d" }
+diskann-inmem = { git = "https://github.com/microsoft/DiskANN.git", rev = "90f49467a7558bd53e01f61617c294611a96158d" }
 dotenvy = "0.15.7"
 e2etest = "0.2.0"
 e2etest-dns = "0.1.0"
