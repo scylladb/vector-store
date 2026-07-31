@@ -40,7 +40,6 @@ impl MtlsTestServer {
 
 async fn run_server(enable_mtls: bool) -> MtlsTestServer {
     let node_state = vector_store::new_node_state().await;
-    let internals = vector_store::new_internals();
     let (db_actor, _db) = db_basic::new(node_state.clone());
 
     let mtls_addr = core::net::SocketAddr::from(([127, 0, 0, 1], 0));
@@ -61,18 +60,10 @@ async fn run_server(enable_mtls: bool) -> MtlsTestServer {
     };
 
     let (receivers, senders) = create_config_channels(config.clone()).await;
-    let index_factory = vector_store::new_index_factory_usearch(receivers.config.clone()).unwrap();
 
-    let (server, mtls) = vector_store::run(
-        node_state,
-        db_actor,
-        internals,
-        index_factory,
-        receivers,
-        vector_store::new_metrics(),
-    )
-    .await
-    .unwrap();
+    let (server, mtls) = vector_store::run(Some(node_state), Some(db_actor), receivers)
+        .await
+        .unwrap();
     let main_addr = (*server.address().await.borrow()).unwrap();
 
     let mtls_addr = if enable_mtls {

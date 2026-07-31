@@ -37,6 +37,7 @@ mod vector;
 mod vs_index;
 mod worker;
 
+pub use crate::async_in_progress::AsyncInProgress;
 pub use crate::config_manager::ConfigManager;
 pub use crate::config_manager::ConfigReceivers;
 pub use crate::config_manager::HttpServerConfig;
@@ -47,7 +48,6 @@ pub use crate::httpserver::HttpServerExt;
 pub use crate::index_key::IndexKey;
 use crate::indexes::Indexes;
 pub use crate::info::Info;
-use crate::internals::Internals;
 use crate::metrics::Metrics;
 use crate::node_state::NodeState;
 pub use crate::nonempty::NonemptyArc;
@@ -60,6 +60,8 @@ pub use crate::table::PartitionId;
 pub use crate::table::PrimaryId;
 pub use crate::timestamp::Timestamp;
 pub use crate::timestamp::Timestamped;
+pub use crate::vector::Vector;
+use crate::vs_index::VsIndexFactory;
 use db::Db;
 use scylla::cluster::metadata::ColumnType;
 use scylla::serialize::SerializationError;
@@ -79,11 +81,8 @@ use std::time::Duration;
 use tokio::runtime::Builder;
 use tokio::signal;
 use tokio::sync::mpsc::Sender;
-use tokio::sync::watch;
 use utoipa::openapi::OpenApi;
 use uuid::Uuid;
-pub use vector::Vector;
-pub use vs_index::factory::VsIndexFactory;
 
 /// A CQL string literal that is always properly single-quoted when formatted
 /// for use in CQL statements.
@@ -713,8 +712,6 @@ pub struct DbIndexedRow {
     pub operation: DbIndexedOperation,
 }
 
-pub use async_in_progress::AsyncInProgress;
-
 pub fn block_on<Output>(threads: Option<usize>, f: impl AsyncFnOnce() -> Output) -> Output {
     let mut builder = match threads {
         Some(0) | None => Builder::new_multi_thread(),
@@ -733,28 +730,61 @@ pub fn block_on<Output>(threads: Option<usize>, f: impl AsyncFnOnce() -> Output)
 }
 
 pub async fn run(
-    node_state: Sender<NodeState>,
-    db_actor: Sender<Db>,
-    internals: Sender<Internals>,
-    index_factory: Box<dyn VsIndexFactory + Send + Sync>,
-    receivers: ConfigReceivers,
-    metrics: Arc<Metrics>,
+    node_state: Option<Sender<NodeState>>,
+    db_actor: Option<Sender<Db>>,
+    config_receivers: ConfigReceivers,
 ) -> anyhow::Result<(Sender<HttpServer>, Sender<HttpServer>)> {
-    let index_engine_version = index_factory.index_engine_version();
+    let node_state = if let Some(node_state) = node_state {
+        node_state
+    } else {
+        new_node_state().await
+    };
+
+    let config_rx = config_receivers.config.clone();
+    let opensearch_addr = config_rx.borrow().opensearch_addr.clone();
+    let use_diskann = config_rx.borrow().use_diskann;
+
+    let internals = internals::new();
+    let memory = memory::new(internals.clone(), config_rx.clone());
+    let worker = worker::new();
+
+    let vs_index_factory = if let Some(addr) = opensearch_addr {
+        tracing::info!("Using OpenSearch index factory at {addr}");
+        vs_index::new_index_factory_opensearch(addr, config_rx.clone())?
+    } else if use_diskann {
+        tracing::info!("Using DiskANN index factory");
+        vs_index::new_index_factory_diskann(config_rx.clone(), worker.clone(), memory.clone())?
+    } else {
+        tracing::info!("Using Usearch index factory");
+        vs_index::new_index_factory_usearch(config_rx.clone(), worker.clone(), memory.clone())?
+    };
+
+    let metrics = Arc::new(Metrics::new());
+    let db_actor = if let Some(db_actor) = db_actor {
+        db_actor
+    } else {
+        db::new(
+            node_state.clone(),
+            internals.clone(),
+            config_rx,
+            Arc::clone(&metrics),
+        )
+        .await?
+    };
+
+    let index_engine_version = vs_index_factory.index_engine_version();
     let indexes = Arc::new(RwLock::new(Indexes::new()));
-    let fts_index_factory: Box<dyn fts_index::FtsIndexFactory + Send + Sync> =
-        Box::new(fts_index::TantivyIndexFactory::new());
+    let fts_index_factory = fts_index::new_fts_index_factory_tantivy(worker, memory);
     let engine = engine::new(
         db_actor,
         engine::IndexFactories {
-            vs: index_factory,
+            vs: vs_index_factory,
             fts: fts_index_factory,
         },
         node_state.clone(),
         metrics.clone(),
         Arc::clone(&indexes),
-        internals.clone(),
-        receivers.config,
+        config_receivers.config,
     )
     .await?;
 
@@ -765,7 +795,7 @@ pub async fn run(
         metrics.clone(),
         internals.clone(),
         index_engine_version.clone(),
-        receivers.http,
+        config_receivers.http,
     )
     .await?;
 
@@ -776,53 +806,15 @@ pub async fn run(
         metrics,
         internals,
         index_engine_version,
-        receivers.mtls_http,
+        config_receivers.mtls_http,
     )
     .await?;
 
     Ok((main, mtls))
 }
 
-pub async fn new_db(
-    node_state: Sender<NodeState>,
-    internals: Sender<Internals>,
-    config_rx: watch::Receiver<Arc<Config>>,
-    metrics: Arc<Metrics>,
-) -> anyhow::Result<Sender<Db>> {
-    db::new(node_state, internals, config_rx, metrics).await
-}
-
-pub fn new_metrics() -> Arc<Metrics> {
-    Arc::new(Metrics::new())
-}
-
 pub async fn new_node_state() -> Sender<NodeState> {
     node_state::new().await
-}
-
-pub fn new_internals() -> Sender<Internals> {
-    internals::new()
-}
-
-pub fn new_index_factory_usearch(
-    config_tx: watch::Receiver<Arc<Config>>,
-) -> anyhow::Result<Box<dyn VsIndexFactory + Send + Sync>> {
-    Ok(Box::new(vs_index::usearch::new_usearch(config_tx)?))
-}
-
-pub fn new_index_factory_opensearch(
-    addr: String,
-    config_rx: watch::Receiver<Arc<Config>>,
-) -> anyhow::Result<Box<dyn VsIndexFactory + Send + Sync>> {
-    Ok(Box::new(vs_index::opensearch::new_opensearch(
-        &addr, config_rx,
-    )?))
-}
-
-pub fn new_index_factory_diskann(
-    config_rx: watch::Receiver<Arc<Config>>,
-) -> anyhow::Result<Box<dyn VsIndexFactory + Send + Sync>> {
-    Ok(Box::new(vs_index::diskann::new_diskann(config_rx)?))
 }
 
 pub fn openapi() -> OpenApi {

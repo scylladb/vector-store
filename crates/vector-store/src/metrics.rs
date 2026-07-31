@@ -9,13 +9,13 @@ use prometheus::HistogramVec;
 use prometheus::Registry;
 use std::sync::Arc;
 
-pub const OP_INSERT: &str = "insert";
-pub const OP_UPDATE: &str = "update";
-pub const OP_REMOVE: &str = "remove";
-pub const OPERATIONS: &[&str] = &[OP_INSERT, OP_UPDATE, OP_REMOVE];
+pub(crate) const OP_INSERT: &str = "insert";
+pub(crate) const OP_UPDATE: &str = "update";
+pub(crate) const OP_REMOVE: &str = "remove";
+pub(crate) const OPERATIONS: &[&str] = &[OP_INSERT, OP_UPDATE, OP_REMOVE];
 
 #[derive(Clone)]
-pub struct Metrics {
+pub(crate) struct Metrics {
     pub registry: Registry,
     pub latency: HistogramVec,
     pub size: GaugeVec,
@@ -31,7 +31,7 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let registry = Registry::new();
 
         // Custom buckets: 0.1ms to 10s
@@ -196,11 +196,11 @@ impl Metrics {
         }
     }
 
-    pub fn mark_dirty(&self, keyspace: &str, index_name: &str) {
+    pub(crate) fn mark_dirty(&self, keyspace: &str, index_name: &str) {
         self.dirty_indexes
             .insert((keyspace.to_owned(), index_name.to_owned()));
     }
-    pub fn take_dirty_indexes(&self) -> Vec<(String, String)> {
+    pub(crate) fn take_dirty_indexes(&self) -> Vec<(String, String)> {
         // Collect, then remove.
         let keys: Vec<_> = self
             .dirty_indexes
@@ -213,7 +213,7 @@ impl Metrics {
         keys
     }
 
-    pub fn remove_index_labels(&self, keyspace: &str, index_name: &str) {
+    pub(crate) fn remove_index_labels(&self, keyspace: &str, index_name: &str) {
         let _ = self.latency.remove_label_values(&[keyspace, index_name]);
         let _ = self.size.remove_label_values(&[keyspace, index_name]);
         let _ = self
@@ -234,7 +234,7 @@ impl Metrics {
             .remove(&(keyspace.to_owned(), index_name.to_owned()));
     }
 
-    pub fn remove_reader_labels(&self, keyspace: &str, index_name: &str, reader: &str) {
+    pub(crate) fn remove_reader_labels(&self, keyspace: &str, index_name: &str, reader: &str) {
         let _ = self
             .cdc_reader_up
             .remove_label_values(&[keyspace, index_name, reader]);

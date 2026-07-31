@@ -72,7 +72,6 @@ async fn setup_fts_store(
     };
 
     let node_state = vector_store::new_node_state().await;
-    let internals = vector_store::new_internals();
     let (db_actor, db) = db_basic::new(node_state.clone());
 
     let columns: Arc<HashMap<_, _>> = Arc::new(columns.into_iter().collect());
@@ -93,21 +92,13 @@ async fn setup_fts_store(
     db.add_index(index.clone(), fullscan_fn, cdc_fn).unwrap();
 
     let (receivers, senders) = create_config_channels(config).await;
-    let index_factory = vector_store::new_index_factory_usearch(receivers.config.clone()).unwrap();
 
     let run = {
         let node_state = node_state.clone();
         async move {
-            let (server, _mtls) = vector_store::run(
-                node_state,
-                db_actor,
-                internals,
-                index_factory,
-                receivers,
-                vector_store::new_metrics(),
-            )
-            .await
-            .unwrap();
+            let (server, _mtls) = vector_store::run(Some(node_state), Some(db_actor), receivers)
+                .await
+                .unwrap();
             let addr = (*server.address().await.borrow()).unwrap();
 
             (HttpClient::new(addr), server, senders)

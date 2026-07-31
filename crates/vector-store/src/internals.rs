@@ -16,9 +16,9 @@ use tracing::Instrument;
 use tracing::debug;
 use tracing::debug_span;
 
-pub type CountersR = BTreeMap<String, u64>;
+pub(crate) type CountersR = BTreeMap<String, u64>;
 
-pub enum Internals {
+pub(crate) enum Internals {
     StartCounter {
         name: String,
         tx: oneshot::Sender<()>,
@@ -40,7 +40,7 @@ pub enum Internals {
     },
 }
 
-pub trait InternalsExt {
+pub(crate) trait InternalsExt {
     async fn start_counter(&self, name: String);
     async fn increment_counter(&self, name: String);
     async fn clear_counters(&self);

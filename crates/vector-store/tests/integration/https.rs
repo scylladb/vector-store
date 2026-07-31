@@ -13,9 +13,6 @@ use httpapi::PostIndexAnnRequest;
 use reqwest::StatusCode;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::sync::watch;
-use vector_store::Config;
 use vector_store::HttpServerExt;
 
 async fn run_server(
@@ -24,10 +21,7 @@ async fn run_server(
     tls_key_path: Option<PathBuf>,
 ) -> (impl Sized, core::net::SocketAddr, impl Sized) {
     let node_state = vector_store::new_node_state().await;
-    let internals = vector_store::new_internals();
     let (db_actor, _db) = db_basic::new(node_state.clone());
-    let (_, rx) = watch::channel(Arc::new(Config::default()));
-    let index_factory = vector_store::new_index_factory_usearch(rx).unwrap();
 
     let config = vector_store::Config {
         vector_store_addr: addr,
@@ -38,16 +32,9 @@ async fn run_server(
 
     let (receivers, senders) = create_config_channels(config).await;
 
-    let (server, _mtls) = vector_store::run(
-        node_state,
-        db_actor,
-        internals,
-        index_factory,
-        receivers,
-        vector_store::new_metrics(),
-    )
-    .await
-    .unwrap();
+    let (server, _mtls) = vector_store::run(Some(node_state), Some(db_actor), receivers)
+        .await
+        .unwrap();
 
     let addr = (*server.address().await.borrow()).unwrap();
 

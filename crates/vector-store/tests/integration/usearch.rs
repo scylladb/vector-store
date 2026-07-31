@@ -26,7 +26,6 @@ use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
-use tokio::sync::watch;
 use uuid::Uuid;
 use vector_store::ColumnName;
 use vector_store::Config;
@@ -100,7 +99,6 @@ pub(crate) async fn setup_store_with_quantization(
     Sender<NodeState>,
 ) {
     let node_state = vector_store::new_node_state().await;
-    let internals = vector_store::new_internals();
 
     let (db_actor, db) = db_basic::new(node_state.clone());
 
@@ -151,21 +149,13 @@ pub(crate) async fn setup_store_with_quantization(
     db.add_index(index.clone(), fullscan_fn, cdc_fn).unwrap();
 
     let (receivers, senders) = create_config_channels(config).await;
-    let index_factory = vector_store::new_index_factory_usearch(receivers.config.clone()).unwrap();
 
     let run = {
         let node_state = node_state.clone();
         async move {
-            let (server, _mtls) = vector_store::run(
-                node_state,
-                db_actor,
-                internals,
-                index_factory,
-                receivers,
-                vector_store::new_metrics(),
-            )
-            .await
-            .unwrap();
+            let (server, _mtls) = vector_store::run(Some(node_state), Some(db_actor), receivers)
+                .await
+                .unwrap();
             let addr = (*server.address().await.borrow()).unwrap();
 
             (HttpClient::new(addr), server, senders)
@@ -311,7 +301,6 @@ async fn failed_db_index_create() {
     crate::enable_tracing();
 
     let node_state = vector_store::new_node_state().await;
-    let internals = vector_store::new_internals();
     let (db_actor, db) = db_basic::new(node_state.clone());
 
     let index = IndexMetadata {
@@ -334,20 +323,10 @@ async fn failed_db_index_create() {
         }),
     };
 
-    let (_, rx) = watch::channel(Arc::new(Config::default()));
-    let index_factory = vector_store::new_index_factory_usearch(rx).unwrap();
-
     let (receivers, _senders) = create_config_channels(test_config()).await;
-    let (server, _mtls) = vector_store::run(
-        node_state,
-        db_actor,
-        internals,
-        index_factory,
-        receivers,
-        vector_store::new_metrics(),
-    )
-    .await
-    .unwrap();
+    let (server, _mtls) = vector_store::run(Some(node_state), Some(db_actor), receivers)
+        .await
+        .unwrap();
     let addr = (*server.address().await.borrow()).unwrap();
 
     let client = HttpClient::new(addr);
@@ -1639,9 +1618,16 @@ async fn http_server_is_responsive_when_index_add_hangs() {
     let (client, _server, _config_tx) = run.await;
 
     // Ensure the HTTP server stays responsive while the (simulated) embedding add is long-running.
-    let status = client.status().await.unwrap();
+    let status = wait_for_value(
+        async || client.status().await.ok(),
+        "Waiting for node status",
+    )
+    .await;
 
-    assert_eq!(status, httpapi::NodeStatus::Bootstrapping);
+    assert!(
+        status == httpapi::NodeStatus::Initializing || status == httpapi::NodeStatus::Bootstrapping,
+        "Expected node status to be Initializing or Bootstrapping, got {status:?}"
+    );
 }
 
 #[tokio::test]
@@ -1678,11 +1664,12 @@ async fn null_vector_is_not_indexed() {
     let index_name = index.index_name.clone().into();
     wait_for(
         || async {
-            let status = client
+            client
                 .index_status(&keyspace_name, &index_name)
                 .await
-                .expect("failed to get index status");
-            status.status == httpapi::IndexStatus::Serving && status.count == 1
+                .is_ok_and(|status| {
+                    status.status == httpapi::IndexStatus::Serving && status.count == 1
+                })
         },
         "Waiting for exactly 1 vector to be indexed (null vector must be skipped)",
     )
@@ -1703,7 +1690,6 @@ async fn similarity_scores_are_decreasing_and_correctly_converted() {
     crate::enable_tracing();
 
     let node_state = vector_store::new_node_state().await;
-    let internals = vector_store::new_internals();
     let (db_actor, db) = db_basic::new(node_state.clone());
 
     // Use a 1-D Euclidean index so distances are easy to predict.
@@ -1774,19 +1760,10 @@ async fn similarity_scores_are_decreasing_and_correctly_converted() {
     )
     .unwrap();
 
-    let (_, rx) = watch::channel(Arc::new(Config::default()));
-    let index_factory = vector_store::new_index_factory_usearch(rx).unwrap();
     let (receivers, _senders) = create_config_channels(test_config()).await;
-    let (server, _mtls) = vector_store::run(
-        node_state,
-        db_actor,
-        internals,
-        index_factory,
-        receivers,
-        vector_store::new_metrics(),
-    )
-    .await
-    .unwrap();
+    let (server, _mtls) = vector_store::run(Some(node_state), Some(db_actor), receivers)
+        .await
+        .unwrap();
     let addr = (*server.address().await.borrow()).unwrap();
     let client = HttpClient::new(addr);
 

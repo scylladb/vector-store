@@ -8,7 +8,6 @@ use crate::DbIndexPartitioning;
 use crate::IndexKey;
 use crate::IndexKind;
 use crate::IndexMetadata;
-use crate::Internals;
 use crate::Metrics;
 use crate::db::Db;
 use crate::db::DbExt;
@@ -17,8 +16,6 @@ use crate::db_index::DbIndexExt;
 use crate::fts_index::FtsIndex;
 use crate::fts_index::FtsIndexFactory;
 use crate::indexes::Indexes;
-use crate::memory;
-use crate::memory::Memory;
 use crate::monitor_indexes;
 use crate::monitor_items;
 use crate::node_state::NodeState;
@@ -26,8 +23,8 @@ use crate::node_state::NodeStateExt;
 use crate::perf;
 use crate::table::Table;
 use crate::vs_index::VsIndex;
-use crate::vs_index::factory::VsIndexConfiguration;
-use crate::vs_index::factory::VsIndexFactory;
+use crate::vs_index::VsIndexConfiguration;
+use crate::vs_index::VsIndexFactory;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Duration;
@@ -131,7 +128,6 @@ pub(crate) async fn new(
     node_state: Sender<NodeState>,
     metrics: Arc<Metrics>,
     indexes: Arc<RwLock<Indexes>>,
-    internals: Sender<Internals>,
     config_rx: watch::Receiver<Arc<Config>>,
 ) -> anyhow::Result<mpsc::Sender<Engine>> {
     let (tx, mut rx) = mpsc::channel(perf::channel_size().into());
@@ -147,7 +143,6 @@ pub(crate) async fn new(
         .borrow()
         .engine_status_update_interval
         .unwrap_or(Duration::from_secs(1));
-    let memory_actor = memory::new(internals, config_rx);
 
     tokio::spawn(
         async move {
@@ -171,7 +166,6 @@ pub(crate) async fn new(
                                     &index_factories,
                                     &indexes,
                                     metrics.clone(),
-                                    memory_actor.clone(),
                                 )
                                 .await
                             }
@@ -218,7 +212,6 @@ async fn add_index(
     index_factories: &IndexFactories,
     indexes: &RwLock<Indexes>,
     metrics: Arc<Metrics>,
-    memory: Sender<Memory>,
 ) {
     let key = metadata.key();
     if indexes.read().unwrap().contains_key(&key) {
@@ -271,7 +264,6 @@ async fn add_index(
         db_index,
         indexes,
         index_factories,
-        memory,
         metadata,
     };
 
@@ -301,7 +293,6 @@ struct AddIndexContext<'a> {
     db_index: mpsc::Sender<DbIndex>,
     indexes: &'a RwLock<Indexes>,
     index_factories: &'a IndexFactories,
-    memory: Sender<Memory>,
     metadata: IndexMetadata,
 }
 
@@ -321,7 +312,6 @@ async fn add_index_vs(ctx: AddIndexContext<'_>) -> anyhow::Result<()> {
             quantization: options.quantization,
         },
         Arc::clone(&ctx.table),
-        ctx.memory,
     )?;
 
     let monitor_actor = monitor_items::new(
@@ -341,10 +331,10 @@ async fn add_index_vs(ctx: AddIndexContext<'_>) -> anyhow::Result<()> {
 }
 
 async fn add_index_fts(ctx: AddIndexContext<'_>) -> anyhow::Result<()> {
-    let fts_sender =
-        ctx.index_factories
-            .fts
-            .create_index(ctx.key.clone(), Arc::clone(&ctx.table), ctx.memory);
+    let fts_sender = ctx
+        .index_factories
+        .fts
+        .create_index(ctx.key.clone(), Arc::clone(&ctx.table));
 
     let monitor_actor = monitor_items::new(
         ctx.key.clone(),

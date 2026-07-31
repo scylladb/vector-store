@@ -45,7 +45,6 @@ use crate::table::IndexId;
 use crate::table::PrimaryId;
 use crate::table::Table;
 use crate::table::TableSearch;
-use crate::worker;
 use crate::worker::Worker;
 use crate::worker::WorkerExt;
 
@@ -56,28 +55,22 @@ use super::actor::FtsStatsR;
 
 pub(crate) struct TantivyIndexFactory {
     worker: async_channel::Sender<Worker>,
+    memory: mpsc::Sender<Memory>,
 }
 
 impl TantivyIndexFactory {
-    pub(crate) fn new() -> Self {
-        Self {
-            worker: worker::new(),
-        }
+    pub(crate) fn new(worker: async_channel::Sender<Worker>, memory: mpsc::Sender<Memory>) -> Self {
+        Self { worker, memory }
     }
 }
 
 impl FtsIndexFactory for TantivyIndexFactory {
-    fn create_index(
-        &self,
-        key: IndexKey,
-        table: Arc<RwLock<Table>>,
-        memory: mpsc::Sender<Memory>,
-    ) -> mpsc::Sender<FtsIndex> {
+    fn create_index(&self, key: IndexKey, table: Arc<RwLock<Table>>) -> mpsc::Sender<FtsIndex> {
         new(
             key,
             table,
             self.worker.clone(),
-            memory,
+            self.memory.clone(),
             COMMIT_INTERVAL,
             MAX_UNCOMMITTED_THRESHOLD,
         )
@@ -520,6 +513,7 @@ mod tests {
     use crate::table::IndexIdGenerator;
     use crate::table::MockTableSearch;
     use crate::table::PartitionId;
+    use crate::worker;
     use scylla::value::CqlValue;
     use std::time::Duration;
 

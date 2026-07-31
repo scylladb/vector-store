@@ -10,14 +10,13 @@ use crate::ExpansionSearch;
 use crate::IndexKey;
 use crate::Quantization;
 use crate::SpaceType;
-use crate::memory::Memory;
 use crate::table::Table;
 use crate::vs_index::actor::VsIndex;
 use std::sync::Arc;
 use std::sync::RwLock;
 use tokio::sync::mpsc;
 
-pub struct VsIndexConfiguration {
+pub(crate) struct VsIndexConfiguration {
     pub key: IndexKey,
     pub dimensions: Dimensions,
     pub connectivity: Connectivity,
@@ -27,12 +26,11 @@ pub struct VsIndexConfiguration {
     pub quantization: Quantization,
 }
 
-pub trait VsIndexFactory {
+pub(crate) trait VsIndexFactory {
     fn create_index(
         &self,
         index: VsIndexConfiguration,
         table: Arc<RwLock<Table>>,
-        memory: mpsc::Sender<Memory>,
     ) -> anyhow::Result<mpsc::Sender<VsIndex>>;
     fn index_engine_version(&self) -> String;
 }
