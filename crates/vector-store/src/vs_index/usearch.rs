@@ -1281,6 +1281,19 @@ mod tests {
         search_handles
     }
 
+    async fn wait_for_count(
+        search: &mpsc::Sender<VsIndexSearch>,
+        index_key: IndexKey,
+        expected_count: usize,
+    ) -> anyhow::Result<()> {
+        Ok(time::timeout(Duration::from_secs(10), async {
+            while search.count(index_key.clone()).await.unwrap() != expected_count {
+                task::yield_now().await;
+            }
+        })
+        .await?)
+    }
+
     #[tokio::test]
     async fn add_or_replace_size_ann() {
         let (_, config_rx) = watch::channel(Arc::new(Config::default()));
@@ -1346,13 +1359,7 @@ mod tests {
                 Some((partition_id, None))
             }
         });
-        time::timeout(Duration::from_secs(10), async {
-            while search.count(index_key.clone()).await.unwrap() != 3 {
-                task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        wait_for_count(&search, index_key.clone(), 3).await.unwrap();
 
         table
             .write()
@@ -1377,6 +1384,7 @@ mod tests {
         modify
             .remove_vector(partition_id, 3.into(), AsyncInProgress::None)
             .await;
+        wait_for_count(&search, index_key.clone(), 2).await.unwrap();
         modify
             .add_vector(
                 partition_id,
@@ -1385,6 +1393,7 @@ mod tests {
                 AsyncInProgress::None,
             )
             .await;
+        wait_for_count(&search, index_key.clone(), 3).await.unwrap();
 
         table
             .write()
@@ -1418,13 +1427,7 @@ mod tests {
             .remove_vector(partition_id, 3.into(), AsyncInProgress::None)
             .await;
 
-        time::timeout(Duration::from_secs(10), async {
-            while search.count(index_key.clone()).await.unwrap() != 2 {
-                task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        wait_for_count(&search, index_key.clone(), 2).await.unwrap();
 
         table
             .write()
@@ -1508,13 +1511,7 @@ mod tests {
             .await;
 
         // Wait for the add operation to complete, as it runs in a separate task.
-        time::timeout(Duration::from_secs(10), async {
-            while search.count(index_key.clone()).await.unwrap() != 1 {
-                task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        wait_for_count(&search, index_key.clone(), 1).await.unwrap();
     }
 
     #[rstest]
@@ -1595,13 +1592,9 @@ mod tests {
             .returning(move |_| Some(index_id));
 
         // Wait for expected number of vectors to be added.
-        time::timeout(Duration::from_secs(10), async {
-            while search.count(index_key.clone()).await.unwrap() != threads * adds_per_worker {
-                task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        wait_for_count(&search, index_key.clone(), threads * adds_per_worker)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
