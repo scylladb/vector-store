@@ -165,7 +165,9 @@ pub(crate) async fn setup_store_with_quantization(
     (run, index, db, node_state)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn setup_store_and_wait_for_index(
+    config: Config,
     partitioning: DbIndexPartitioning,
     primary_keys: impl IntoIterator<Item = ColumnName>,
     partition_key_count: usize,
@@ -181,7 +183,7 @@ pub(crate) async fn setup_store_and_wait_for_index(
     Sender<NodeState>,
 ) {
     let (run, index, db, node_state) = setup_store(
-        test_config(),
+        config,
         partitioning,
         primary_keys,
         partition_key_count,
@@ -425,6 +427,7 @@ async fn failed_db_index_create() {
 async fn ann_returns_bad_request_when_provided_vector_size_is_not_eq_index_dimensions() {
     crate::enable_tracing();
     let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+        test_config(),
         DbIndexPartitioning::Global,
         ["pk".into(), "ck".into()],
         1,
@@ -464,6 +467,7 @@ async fn ann_returns_bad_request_when_filtering_required_but_not_allowed() {
     let pk_column: ColumnName = "pk".into();
     let ck_column: ColumnName = "ck".into();
     let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+        test_config(),
         DbIndexPartitioning::Global,
         [pk_column.clone(), ck_column.clone()],
         1,
@@ -556,6 +560,7 @@ async fn ann_fail_while_building_when_node_is_serving() {
     crate::enable_tracing();
 
     let (serving_index, client, db, _server, _node_state) = setup_store_and_wait_for_index(
+        test_config(),
         DbIndexPartitioning::Global,
         ["pk".into()],
         1,
@@ -637,6 +642,7 @@ async fn ann_fail_while_building_when_node_is_serving() {
 async fn ann_failed_when_wrong_number_of_primary_keys() {
     crate::enable_tracing();
     let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+        test_config(),
         DbIndexPartitioning::Global,
         vec!["pk".into()],
         1,
@@ -987,6 +993,7 @@ async fn setup_int_int_store() -> (
     let ck_column: ColumnName = "ck".into();
     let f_column: ColumnName = "f".into();
     let (index, client, db, server, node_state) = setup_store_and_wait_for_index(
+        test_config(),
         DbIndexPartitioning::Global,
         [pk_column.clone(), ck_column.clone()],
         1,
@@ -1481,6 +1488,7 @@ async fn ann_filter_partition_key_text_gt() {
     let pk_column_http: httpapi::ColumnName = pk_column.clone().into();
     let ck_column_http: httpapi::ColumnName = ck_column.clone().into();
     let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+        test_config(),
         DbIndexPartitioning::Global,
         [pk_column.clone(), ck_column.clone()],
         1,
@@ -1829,6 +1837,7 @@ async fn empty_index_has_zero_count() {
     crate::enable_tracing();
 
     let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+        test_config(),
         DbIndexPartitioning::Global,
         ["pk".into()],
         1,
@@ -1855,6 +1864,7 @@ async fn empty_index_returns_empty_ann_results() {
     crate::enable_tracing();
 
     let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+        test_config(),
         DbIndexPartitioning::Global,
         ["pk".into()],
         1,

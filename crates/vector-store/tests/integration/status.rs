@@ -14,6 +14,7 @@ use vector_store::DbIndexPartitioning;
 async fn status_is_serving_after_creation() {
     crate::enable_tracing();
     let (_index, client, _db, _server, _node_state) = vs_index::setup_store_and_wait_for_index(
+        test_config(),
         DbIndexPartitioning::Global,
         ["pk".into(), "ck".into()],
         1,
