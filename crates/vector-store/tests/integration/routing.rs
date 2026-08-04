@@ -16,10 +16,12 @@ use httpapi::PostIndexAnnFilter;
 use httpapi::PostIndexAnnRestriction;
 use httpclient::HttpClient;
 use reqwest::StatusCode;
+use rstest::rstest;
 use scylla::cluster::metadata::NativeType;
 use scylla::value::CqlValue;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::time::Duration;
 use uuid::Uuid;
 use vector_store::ColumnName;
 use vector_store::DbIndexPartitioning;
@@ -231,8 +233,9 @@ async fn assert_ann_served_by(
     response
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 #[cfg_attr(not(feature = "slow-test-hooks"), ignore = "requires slow-test-hooks")]
 async fn ann_routes_to_serving_index_while_replacement_is_bootstrapping() {
     crate::enable_tracing();
@@ -280,8 +283,9 @@ async fn ann_routes_to_serving_index_while_replacement_is_bootstrapping() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 #[cfg_attr(not(feature = "slow-test-hooks"), ignore = "requires slow-test-hooks")]
 async fn ann_routes_to_newest_serving_index() {
     crate::enable_tracing();
@@ -333,8 +337,9 @@ async fn ann_routes_to_newest_serving_index() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 #[cfg_attr(not(feature = "slow-test-hooks"), ignore = "requires slow-test-hooks")]
 async fn ann_routes_to_newest_local_index_with_same_score() {
     crate::enable_tracing();
@@ -402,8 +407,9 @@ async fn ann_routes_to_newest_local_index_with_same_score() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 #[cfg_attr(not(feature = "slow-test-hooks"), ignore = "requires slow-test-hooks")]
 async fn ann_routes_to_local_index_with_more_matching_partition_key_columns() {
     crate::enable_tracing();
@@ -486,8 +492,9 @@ async fn ann_routes_to_local_index_with_more_matching_partition_key_columns() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 #[cfg_attr(not(feature = "slow-test-hooks"), ignore = "requires slow-test-hooks")]
 async fn ann_routes_to_local_index_with_filter_columns_covering_restriction() {
     crate::enable_tracing();
@@ -562,8 +569,9 @@ async fn ann_routes_to_local_index_with_filter_columns_covering_restriction() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 #[cfg_attr(not(feature = "slow-test-hooks"), ignore = "requires slow-test-hooks")]
 async fn ann_routes_to_global_index_with_filter_columns_covering_restriction() {
     crate::enable_tracing();
@@ -638,8 +646,9 @@ async fn ann_routes_to_global_index_with_filter_columns_covering_restriction() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 #[cfg_attr(not(feature = "slow-test-hooks"), ignore = "requires slow-test-hooks")]
 async fn ann_routes_to_local_index_when_pk_restrictions_match() {
     crate::enable_tracing();
@@ -707,8 +716,9 @@ async fn ann_routes_to_local_index_when_pk_restrictions_match() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 #[cfg_attr(not(feature = "slow-test-hooks"), ignore = "requires slow-test-hooks")]
 async fn ann_routes_to_global_index_without_pk_restrictions() {
     crate::enable_tracing();

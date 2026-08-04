@@ -1210,6 +1210,7 @@ mod tests {
     use crate::vs_index::VsIndexExt;
     use crate::worker;
     use mockall::predicate::*;
+    use rstest::rstest;
     use scylla::value::CqlValue;
     use std::num::NonZeroUsize;
     use std::time::Duration;
@@ -1509,8 +1510,9 @@ mod tests {
         .unwrap();
     }
 
+    #[rstest]
+    #[timeout(Duration::from_secs(10))]
     #[tokio::test(flavor = "multi_thread")]
-    #[ntest::timeout(10_000)]
     async fn concurrent_add_and_search() {
         // By default, Usearch limits concurrent operations (searches, adds) to the number of CPU cores.
         // Exceeding this limit results in a "No available threads to lock" error.

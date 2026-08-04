@@ -18,6 +18,7 @@ use httpapi::PostIndexAnnResponse;
 use httpapi::PostIndexAnnRestriction;
 use httpclient::HttpClient;
 use reqwest::StatusCode;
+use rstest::rstest;
 use scylla::cluster::metadata::NativeType;
 use scylla::value::CqlValue;
 use std::collections::HashMap;
@@ -459,8 +460,9 @@ async fn ann_returns_bad_request_when_provided_vector_size_is_not_eq_index_dimen
     assert_eq!(result.status(), StatusCode::BAD_REQUEST);
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn ann_returns_bad_request_when_filtering_required_but_not_allowed() {
     crate::enable_tracing();
 
@@ -685,8 +687,9 @@ async fn ann_failed_when_wrong_number_of_primary_keys() {
     .await;
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn ann_filter_partition_key_int_eq() {
     crate::enable_tracing();
 
@@ -742,8 +745,9 @@ async fn ann_filter_partition_key_int_eq() {
     });
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn ann_filter_clustering_key_int_eq() {
     crate::enable_tracing();
 
@@ -799,8 +803,9 @@ async fn ann_filter_clustering_key_int_eq() {
     });
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn ann_filter_partition_key_int_in() {
     crate::enable_tracing();
 
@@ -860,8 +865,9 @@ async fn ann_filter_partition_key_int_in() {
     });
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn ann_filter_clustering_key_int_in() {
     crate::enable_tracing();
 
@@ -921,8 +927,9 @@ async fn ann_filter_clustering_key_int_in() {
     });
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn ann_filter_primary_key_int_eq_tuple() {
     crate::enable_tracing();
 
@@ -948,8 +955,9 @@ async fn ann_filter_primary_key_int_eq_tuple() {
     assert_pk_ck_combinations(&pk_ck_values, [(1, 5)]);
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn ann_filter_primary_key_int_in_tuple() {
     crate::enable_tracing();
 
@@ -1080,8 +1088,9 @@ fn assert_pk_ck_combinations(
     );
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn ann_filter_clustering_key_int_lt() {
     crate::enable_tracing();
 
@@ -1120,8 +1129,9 @@ async fn ann_filter_clustering_key_int_lt() {
     );
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn ann_filter_clustering_key_int_lte() {
     crate::enable_tracing();
 
@@ -1160,8 +1170,9 @@ async fn ann_filter_clustering_key_int_lte() {
     );
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn ann_filter_clustering_key_int_gt() {
     crate::enable_tracing();
 
@@ -1200,8 +1211,9 @@ async fn ann_filter_clustering_key_int_gt() {
     );
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn ann_filter_clustering_key_int_gte() {
     crate::enable_tracing();
 
@@ -1240,8 +1252,9 @@ async fn ann_filter_clustering_key_int_gte() {
     );
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn ann_filter_clustering_key_int_range() {
     crate::enable_tracing();
 
@@ -1286,8 +1299,9 @@ async fn ann_filter_clustering_key_int_range() {
     );
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn ann_filter_primary_key_int_lt_tuple() {
     crate::enable_tracing();
 
@@ -1334,8 +1348,9 @@ async fn ann_filter_primary_key_int_lt_tuple() {
     );
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn ann_filter_primary_key_int_lte_tuple() {
     crate::enable_tracing();
 
@@ -1383,8 +1398,9 @@ async fn ann_filter_primary_key_int_lte_tuple() {
     );
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn ann_filter_primary_key_int_gt_tuple() {
     crate::enable_tracing();
 
@@ -1430,8 +1446,9 @@ async fn ann_filter_primary_key_int_gt_tuple() {
     );
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn ann_filter_primary_key_int_gte_tuple() {
     crate::enable_tracing();
 
@@ -1478,8 +1495,9 @@ async fn ann_filter_primary_key_int_gte_tuple() {
     );
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn ann_filter_partition_key_text_gt() {
     crate::enable_tracing();
 
@@ -1564,8 +1582,9 @@ async fn ann_filter_partition_key_text_gt() {
     );
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn ann_filter_filtering_columns_int_eq() {
     crate::enable_tracing();
 
@@ -1592,8 +1611,9 @@ async fn ann_filter_filtering_columns_int_eq() {
     assert_pk_ck_combinations(&pk_ck_values, [(0, 1)]);
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn http_server_is_responsive_when_index_add_hangs() {
     crate::enable_tracing();
     let config = Config {
@@ -1638,8 +1658,9 @@ async fn http_server_is_responsive_when_index_add_hangs() {
     );
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn null_vector_is_not_indexed() {
     crate::enable_tracing();
 
@@ -1692,8 +1713,9 @@ async fn null_vector_is_not_indexed() {
 //  1. similarity_scores are in strictly decreasing order (nearest = highest score).
 //  2. For Euclidean distance, the formula similarity = 1/(1+d) is applied
 //     correctly.
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn similarity_scores_are_decreasing_and_correctly_converted() {
     crate::enable_tracing();
 
