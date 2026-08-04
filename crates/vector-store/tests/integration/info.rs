@@ -4,7 +4,7 @@
  */
 
 use crate::create_config_channels;
-use crate::usearch::test_config;
+use crate::vs_index::test_config;
 use crate::{db_basic, mock_opensearch};
 use httpclient::HttpClient;
 use vector_store::Config;

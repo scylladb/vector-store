@@ -8,7 +8,7 @@ use crate::db_basic;
 use crate::tls_utils::generate_server_cert;
 use crate::tls_utils::init;
 use crate::tls_utils::read_cert;
-use crate::usearch::test_config;
+use crate::vs_index::test_config;
 use httpapi::PostIndexAnnRequest;
 use reqwest::StatusCode;
 use std::num::NonZeroUsize;

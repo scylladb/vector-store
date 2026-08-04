@@ -18,7 +18,7 @@ mod quantization;
 mod routing;
 mod status;
 mod tls_utils;
-mod usearch;
+mod vs_index;
 
 use std::sync::Arc;
 use std::sync::Once;

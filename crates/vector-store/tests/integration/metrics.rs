@@ -6,7 +6,7 @@
 use crate::db_basic;
 use crate::db_basic::DbBasic;
 use crate::fts;
-use crate::usearch;
+use crate::vs_index;
 use crate::wait_for;
 use httpclient::HttpClient;
 use scylla::cluster::metadata::NativeType;
@@ -24,7 +24,7 @@ async fn setup_single_vector_index() -> (
     impl Sized,
     Sender<NodeState>,
 ) {
-    usearch::setup_store_and_wait_for_index(
+    vs_index::setup_store_and_wait_for_index(
         DbIndexPartitioning::Global,
         ["pk".into(), "ck".into()],
         1,

@@ -8,7 +8,7 @@ use crate::db_basic;
 use crate::db_basic::DbBasic;
 use crate::db_basic::ScanFn;
 use crate::db_basic::Table;
-use crate::usearch::test_config;
+use crate::vs_index::test_config;
 use crate::wait_for;
 use futures::FutureExt;
 use httpapi::IndexStatus;

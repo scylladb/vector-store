@@ -6,7 +6,7 @@
 use crate::create_config_channels;
 use crate::db_basic;
 use crate::db_basic::Table;
-use crate::usearch::test_config;
+use crate::vs_index::test_config;
 use futures::FutureExt;
 use httpapi::NodeStatus;
 use httpclient::HttpClient;

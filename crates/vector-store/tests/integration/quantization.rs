@@ -4,8 +4,8 @@
  */
 
 use crate::db_basic;
-use crate::usearch::setup_store_with_quantization;
-use crate::usearch::test_config;
+use crate::vs_index::setup_store_with_quantization;
+use crate::vs_index::test_config;
 use crate::wait_for;
 use crate::wait_for_value;
 use httpapi::DataType;

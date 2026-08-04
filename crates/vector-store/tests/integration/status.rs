@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
-use crate::usearch;
-use crate::usearch::test_config;
+use crate::vs_index;
+use crate::vs_index::test_config;
 use crate::wait_for;
 use httpapi::NodeStatus;
 use scylla::cluster::metadata::NativeType;
@@ -13,7 +13,7 @@ use vector_store::DbIndexPartitioning;
 #[tokio::test]
 async fn status_is_serving_after_creation() {
     crate::enable_tracing();
-    let (_index, client, _db, _server, _node_state) = usearch::setup_store_and_wait_for_index(
+    let (_index, client, _db, _server, _node_state) = vs_index::setup_store_and_wait_for_index(
         DbIndexPartitioning::Global,
         ["pk".into(), "ck".into()],
         1,
@@ -34,7 +34,7 @@ async fn status_is_serving_after_creation() {
 #[tokio::test]
 async fn status_is_bootstrapping_while_discovering_indexes() {
     crate::enable_tracing();
-    let (run, _index, db, _node_state) = usearch::setup_store(
+    let (run, _index, db, _node_state) = vs_index::setup_store(
         test_config(),
         DbIndexPartitioning::Global,
         ["pk".into(), "ck".into()],

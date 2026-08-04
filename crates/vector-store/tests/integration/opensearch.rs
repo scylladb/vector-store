@@ -7,7 +7,7 @@ use crate::create_config_channels;
 use crate::db_basic;
 use crate::db_basic::Table;
 use crate::mock_opensearch;
-use crate::usearch::test_config;
+use crate::vs_index::test_config;
 use crate::wait_for;
 use httpapi::IndexStatus;
 use httpclient::HttpClient;
