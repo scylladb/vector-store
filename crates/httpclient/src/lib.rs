@@ -170,6 +170,29 @@ impl HttpClient {
         }
     }
 
+    pub async fn index_info(
+        &self,
+        keyspace_name: &KeyspaceName,
+        index_name: &IndexName,
+    ) -> anyhow::Result<IndexInfo> {
+        let response = self
+            .client
+            .get(format!(
+                "{}/indexes/{}/{}",
+                self.url_api, keyspace_name, index_name
+            ))
+            .send()
+            .await?;
+
+        if response.status().is_success() {
+            Ok(response.json::<IndexInfo>().await?)
+        } else {
+            let status = response.status();
+            let error_text = response.text().await?;
+            Err(anyhow::anyhow!("HTTP {status}: {error_text}"))
+        }
+    }
+
     pub async fn info(&self) -> InfoResponse {
         self.client
             .get(format!("{}/info", self.url_api))
