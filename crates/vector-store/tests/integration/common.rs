@@ -21,6 +21,7 @@ use vector_store::DbIndexPartitioning;
 use vector_store::HttpServerExt;
 use vector_store::IndexKind;
 use vector_store::IndexMetadata;
+use vector_store::IndexOptionsFts;
 use vector_store::IndexOptionsVs;
 use vector_store::NonemptyArc;
 use vector_store::NonemptyIteratorExt;
@@ -75,6 +76,25 @@ pub(crate) fn make_vs_index(
             space_type: Default::default(),
             quantization: Default::default(),
         }),
+    )
+}
+
+pub(crate) fn make_fts_index(
+    name: &str,
+    primary_key_columns: &[&str],
+    partition_key_count: usize,
+    target_column: &str,
+    version: Uuid,
+) -> IndexMetadata {
+    make_index_with_kind(
+        name,
+        primary_key_columns,
+        partition_key_count,
+        target_column,
+        DbIndexPartitioning::Global,
+        &[],
+        version,
+        IndexKind::Fts(IndexOptionsFts {}),
     )
 }
 
