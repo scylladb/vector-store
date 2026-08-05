@@ -39,15 +39,12 @@ use tracing::debug_span;
 use tracing::info;
 use tracing::trace;
 
-type GetVsIndexKeysR = Vec<(IndexKey, crate::IndexOptionsVs)>;
 type AddIndexR = anyhow::Result<()>;
 type GetVsIndexR = Option<(mpsc::Sender<VsIndex>, mpsc::Sender<DbIndex>)>;
 type GetFtsIndexR = Option<(mpsc::Sender<FtsIndex>, mpsc::Sender<DbIndex>)>;
 
+#[allow(clippy::enum_variant_names)]
 pub(crate) enum Engine {
-    GetVsIndexKeys {
-        tx: oneshot::Sender<GetVsIndexKeysR>,
-    },
     AddIndex {
         metadata: IndexMetadata,
         tx: oneshot::Sender<AddIndexR>,
@@ -66,7 +63,6 @@ pub(crate) enum Engine {
 }
 
 pub(crate) trait EngineExt {
-    async fn get_vs_index_keys(&self) -> GetVsIndexKeysR;
     async fn add_index(&self, metadata: IndexMetadata) -> AddIndexR;
     async fn del_index(&self, key: IndexKey);
     async fn get_vs_index(&self, key: IndexKey) -> GetVsIndexR;
@@ -74,15 +70,6 @@ pub(crate) trait EngineExt {
 }
 
 impl EngineExt for mpsc::Sender<Engine> {
-    async fn get_vs_index_keys(&self) -> GetVsIndexKeysR {
-        let (tx, rx) = oneshot::channel();
-        self.send(Engine::GetVsIndexKeys { tx })
-            .await
-            .expect("EngineExt::get_vs_index_keys: internal actor should receive request");
-        rx.await
-            .expect("EngineExt::get_vs_index_keys: internal actor should send response")
-    }
-
     async fn add_index(&self, metadata: IndexMetadata) -> AddIndexR {
         let (tx, rx) = oneshot::channel();
         self.send(Engine::AddIndex { metadata, tx })
@@ -156,8 +143,6 @@ pub(crate) async fn new(
                             break;
                         };
                         match msg {
-                            Engine::GetVsIndexKeys { tx } => get_vs_index_keys(tx, &indexes).await,
-
                             Engine::AddIndex { metadata, tx } => {
                                 add_index(
                                     metadata,
@@ -192,17 +177,6 @@ pub(crate) async fn new(
     );
 
     Ok(tx)
-}
-
-async fn get_vs_index_keys(tx: oneshot::Sender<GetVsIndexKeysR>, indexes: &RwLock<Indexes>) {
-    let keys = indexes
-        .read()
-        .unwrap()
-        .iter_vs()
-        .map(|(key, entry)| (key.clone(), entry.options().clone()))
-        .collect();
-    tx.send(keys)
-        .unwrap_or_else(|_| trace!("Engine::GetVsIndexKeys: unable to send response"));
 }
 
 async fn add_index(
@@ -435,11 +409,6 @@ pub(crate) mod tests {
 
     #[automock]
     pub(crate) trait SimEngine {
-        fn get_vs_index_keys(
-            &self,
-            tx: oneshot::Sender<GetVsIndexKeysR>,
-        ) -> impl Future<Output = ()> + Send + 'static;
-
         fn add_index(
             &self,
             metadata: IndexMetadata,
@@ -477,7 +446,6 @@ pub(crate) mod tests {
 
                 while let Some(msg) = rx.recv().await {
                     match msg {
-                        Engine::GetVsIndexKeys { tx } => sim.get_vs_index_keys(tx).await,
                         Engine::AddIndex { metadata, tx } => sim.add_index(metadata, tx).await,
                         Engine::DelIndex { key } => sim.del_index(key).await,
                         Engine::GetVsIndex { key, tx } => sim.get_vs_index(key, tx).await,

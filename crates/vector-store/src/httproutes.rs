@@ -258,19 +258,18 @@ impl From<crate::SimilarityScore> for httpapi::SimilarityScore {
 )]
 
 async fn get_indexes(State(state): State<RoutesInnerState>) -> Response {
-    let vs_indexes = state.engine.get_vs_index_keys().await;
-    let fts_guard = state.indexes.read().unwrap();
+    let indexes_guard = state.indexes.read().unwrap();
 
-    let indexes: Vec<_> = vs_indexes
-        .iter()
-        .map(|(key, vs)| IndexInfo {
+    let indexes: Vec<_> = indexes_guard
+        .iter_vs()
+        .map(|(key, entry)| IndexInfo {
             keyspace: key.keyspace().into(),
             index: key.index().into(),
             index_type: IndexType::Vector {
-                data_type: vs.quantization.into(),
+                data_type: entry.options().quantization.into(),
             },
         })
-        .chain(fts_guard.iter_fts().map(|(key, _)| IndexInfo {
+        .chain(indexes_guard.iter_fts().map(|(key, _)| IndexInfo {
             keyspace: key.keyspace().into(),
             index: key.index().into(),
             index_type: IndexType::Fulltext,
