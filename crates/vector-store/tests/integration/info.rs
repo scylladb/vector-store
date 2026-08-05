@@ -4,7 +4,7 @@
  */
 
 use crate::create_config_channels;
-use crate::usearch::test_config;
+use crate::vs_index::usearch_test_config;
 use crate::{db_basic, mock_opensearch};
 use httpclient::HttpClient;
 use vector_store::Config;
@@ -24,7 +24,7 @@ async fn run_vs(config: Config) -> (HttpClient, impl Sized, impl Sized) {
 
 #[tokio::test]
 async fn get_application_info_usearch() {
-    let (client, _server, _config_senders) = run_vs(test_config()).await;
+    let (client, _server, _config_senders) = run_vs(usearch_test_config()).await;
 
     let info = client.info().await;
 
@@ -38,7 +38,7 @@ async fn get_application_info_opensearch() {
     let server = mock_opensearch::TestOpenSearchServer::start().await;
     let (client, _server, _config_senders) = run_vs(Config {
         opensearch_addr: Some(server.base_url()),
-        ..test_config()
+        ..usearch_test_config()
     })
     .await;
 
@@ -53,7 +53,7 @@ async fn get_application_info_opensearch() {
 async fn get_application_info_diskann() {
     let (client, _server, _config_senders) = run_vs(Config {
         use_diskann: true,
-        ..test_config()
+        ..usearch_test_config()
     })
     .await;
 

@@ -7,7 +7,7 @@ use crate::create_config_channels;
 use crate::db_basic;
 use crate::db_basic::Table;
 use crate::mock_opensearch;
-use crate::usearch::test_config;
+use crate::vs_index::usearch_test_config;
 use crate::wait_for;
 use httpapi::IndexStatus;
 use httpclient::HttpClient;
@@ -54,7 +54,7 @@ async fn simple_create_search_delete_index() {
 
     let (receivers, _senders) = create_config_channels(Config {
         opensearch_addr: Some(server.base_url()),
-        ..test_config()
+        ..usearch_test_config()
     })
     .await;
     let (server, _mtls) = vector_store::run(Some(node_state), Some(db_actor), receivers)

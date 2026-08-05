@@ -11,7 +11,7 @@ use crate::tls_utils::generate_client_identity;
 use crate::tls_utils::generate_server_cert;
 use crate::tls_utils::init;
 use crate::tls_utils::read_cert;
-use crate::usearch::test_config;
+use crate::vs_index::usearch_test_config;
 use crate::wait_for;
 use tempfile::NamedTempFile;
 use tokio::sync::mpsc::Sender;
@@ -56,7 +56,7 @@ async fn run_server(enable_mtls: bool) -> MtlsTestServer {
             None
         },
         mtls_addr,
-        ..test_config()
+        ..usearch_test_config()
     };
 
     let (receivers, senders) = create_config_channels(config.clone()).await;

@@ -11,8 +11,10 @@ use crate::routing::setup;
 use crate::routing::single_row_scan;
 use crate::wait_for;
 use httpapi::IndexStatus;
+use rstest::rstest;
 use scylla::cluster::metadata::NativeType;
 use scylla::value::CqlValue;
+use std::time::Duration;
 use vector_store::DbIndexPartitioning;
 use vector_store::Percentage;
 use vector_store::Progress;
@@ -22,8 +24,9 @@ use vector_store::Progress;
 // endpoint must report it as BOOTSTRAPPING and surface the build progress
 // percentage reported by the database. Once the scan finishes the index
 // becomes SERVING with build_progress == 100.
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 #[cfg_attr(not(feature = "slow-test-hooks"), ignore = "requires slow-test-hooks")]
 async fn index_status_reports_build_progress_while_bootstrapping() {
     crate::enable_tracing();
@@ -68,8 +71,9 @@ async fn index_status_reports_build_progress_while_bootstrapping() {
 }
 
 // A fully built (serving) index reports build_progress == 100.
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn index_status_reports_full_progress_when_serving() {
     crate::enable_tracing();
     let (client, db, _keep) = setup().await;

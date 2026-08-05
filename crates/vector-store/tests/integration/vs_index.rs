@@ -18,6 +18,7 @@ use httpapi::PostIndexAnnResponse;
 use httpapi::PostIndexAnnRestriction;
 use httpclient::HttpClient;
 use reqwest::StatusCode;
+use rstest::rstest;
 use scylla::cluster::metadata::NativeType;
 use scylla::value::CqlValue;
 use std::collections::HashMap;
@@ -46,9 +47,17 @@ use vector_store::SpaceType;
 use vector_store::Timestamp;
 use vector_store::node_state::NodeState;
 
-pub(crate) fn test_config() -> Config {
+pub(crate) fn usearch_test_config() -> Config {
     Config {
         vector_store_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+        ..Default::default()
+    }
+}
+
+fn diskann_test_config() -> Config {
+    Config {
+        vector_store_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+        use_diskann: true,
         ..Default::default()
     }
 }
@@ -165,7 +174,9 @@ pub(crate) async fn setup_store_with_quantization(
     (run, index, db, node_state)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn setup_store_and_wait_for_index(
+    config: Config,
     partitioning: DbIndexPartitioning,
     primary_keys: impl IntoIterator<Item = ColumnName>,
     partition_key_count: usize,
@@ -181,7 +192,7 @@ pub(crate) async fn setup_store_and_wait_for_index(
     Sender<NodeState>,
 ) {
     let (run, index, db, node_state) = setup_store(
-        test_config(),
+        config,
         partitioning,
         primary_keys,
         partition_key_count,
@@ -212,12 +223,15 @@ pub(crate) async fn setup_store_and_wait_for_index(
     (index, client, db, (server, _config_tx), node_state)
 }
 
+#[rstest]
+#[case::usearch(usearch_test_config())]
+#[case::diskann(diskann_test_config())]
 #[tokio::test]
-async fn simple_create_search_delete_index() {
+async fn simple_create_search_delete_index(#[case] config: Config) {
     crate::enable_tracing();
 
     let (run, index, db, _node_state) = setup_store(
-        test_config(),
+        config,
         DbIndexPartitioning::Global,
         ["pk".into(), "ck".into()],
         1,
@@ -296,8 +310,11 @@ async fn simple_create_search_delete_index() {
     .await;
 }
 
+#[rstest]
+#[case::usearch(usearch_test_config())]
+#[case::diskann(diskann_test_config())]
 #[tokio::test]
-async fn failed_db_index_create() {
+async fn failed_db_index_create(#[case] config: Config) {
     crate::enable_tracing();
 
     let node_state = vector_store::new_node_state().await;
@@ -323,7 +340,7 @@ async fn failed_db_index_create() {
         }),
     };
 
-    let (receivers, _senders) = create_config_channels(test_config()).await;
+    let (receivers, _senders) = create_config_channels(config).await;
     let (server, _mtls) = vector_store::run(Some(node_state), Some(db_actor), receivers)
         .await
         .unwrap();
@@ -421,10 +438,16 @@ async fn failed_db_index_create() {
     assert!(indexes.contains(&httpapi::IndexInfo::new("vector", "ann3")));
 }
 
+#[rstest]
+#[case::usearch(usearch_test_config())]
+#[case::diskann(diskann_test_config())]
 #[tokio::test]
-async fn ann_returns_bad_request_when_provided_vector_size_is_not_eq_index_dimensions() {
+async fn ann_returns_bad_request_when_provided_vector_size_is_not_eq_index_dimensions(
+    #[case] config: Config,
+) {
     crate::enable_tracing();
     let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+        config,
         DbIndexPartitioning::Global,
         ["pk".into(), "ck".into()],
         1,
@@ -456,14 +479,16 @@ async fn ann_returns_bad_request_when_provided_vector_size_is_not_eq_index_dimen
     assert_eq!(result.status(), StatusCode::BAD_REQUEST);
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn ann_returns_bad_request_when_filtering_required_but_not_allowed() {
     crate::enable_tracing();
 
     let pk_column: ColumnName = "pk".into();
     let ck_column: ColumnName = "ck".into();
     let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+        usearch_test_config(),
         DbIndexPartitioning::Global,
         [pk_column.clone(), ck_column.clone()],
         1,
@@ -501,11 +526,14 @@ async fn ann_returns_bad_request_when_filtering_required_but_not_allowed() {
     assert_eq!(result.status(), StatusCode::BAD_REQUEST);
 }
 
+#[rstest]
+#[case::usearch(usearch_test_config())]
+#[case::diskann(diskann_test_config())]
 #[tokio::test]
-async fn ann_fail_while_building_when_node_is_bootstrapping() {
+async fn ann_fail_while_building_when_node_is_bootstrapping(#[case] config: Config) {
     crate::enable_tracing();
     let (run, index, db, _node_state) = setup_store(
-        test_config(),
+        config,
         DbIndexPartitioning::Global,
         ["pk".into(), "ck".into()],
         1,
@@ -551,11 +579,15 @@ async fn ann_fail_while_building_when_node_is_bootstrapping() {
     assert_eq!(reason, IndexNotReadyReason::NodeBootstrapping);
 }
 
+#[rstest]
+#[case::usearch(usearch_test_config())]
+#[case::diskann(diskann_test_config())]
 #[tokio::test]
-async fn ann_fail_while_building_when_node_is_serving() {
+async fn ann_fail_while_building_when_node_is_serving(#[case] config: Config) {
     crate::enable_tracing();
 
     let (serving_index, client, db, _server, _node_state) = setup_store_and_wait_for_index(
+        config,
         DbIndexPartitioning::Global,
         ["pk".into()],
         1,
@@ -633,10 +665,14 @@ async fn ann_fail_while_building_when_node_is_serving() {
     );
 }
 
+#[rstest]
+#[case::usearch(usearch_test_config())]
+#[case::diskann(diskann_test_config())]
 #[tokio::test]
-async fn ann_failed_when_wrong_number_of_primary_keys() {
+async fn ann_failed_when_wrong_number_of_primary_keys(#[case] config: Config) {
     crate::enable_tracing();
     let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+        config,
         DbIndexPartitioning::Global,
         vec!["pk".into()],
         1,
@@ -679,8 +715,9 @@ async fn ann_failed_when_wrong_number_of_primary_keys() {
     .await;
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn ann_filter_partition_key_int_eq() {
     crate::enable_tracing();
 
@@ -736,8 +773,9 @@ async fn ann_filter_partition_key_int_eq() {
     });
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn ann_filter_clustering_key_int_eq() {
     crate::enable_tracing();
 
@@ -793,8 +831,9 @@ async fn ann_filter_clustering_key_int_eq() {
     });
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn ann_filter_partition_key_int_in() {
     crate::enable_tracing();
 
@@ -854,8 +893,9 @@ async fn ann_filter_partition_key_int_in() {
     });
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn ann_filter_clustering_key_int_in() {
     crate::enable_tracing();
 
@@ -915,8 +955,9 @@ async fn ann_filter_clustering_key_int_in() {
     });
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn ann_filter_primary_key_int_eq_tuple() {
     crate::enable_tracing();
 
@@ -942,8 +983,9 @@ async fn ann_filter_primary_key_int_eq_tuple() {
     assert_pk_ck_combinations(&pk_ck_values, [(1, 5)]);
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn ann_filter_primary_key_int_in_tuple() {
     crate::enable_tracing();
 
@@ -987,6 +1029,7 @@ async fn setup_int_int_store() -> (
     let ck_column: ColumnName = "ck".into();
     let f_column: ColumnName = "f".into();
     let (index, client, db, server, node_state) = setup_store_and_wait_for_index(
+        usearch_test_config(),
         DbIndexPartitioning::Global,
         [pk_column.clone(), ck_column.clone()],
         1,
@@ -1073,8 +1116,9 @@ fn assert_pk_ck_combinations(
     );
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn ann_filter_clustering_key_int_lt() {
     crate::enable_tracing();
 
@@ -1113,8 +1157,9 @@ async fn ann_filter_clustering_key_int_lt() {
     );
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn ann_filter_clustering_key_int_lte() {
     crate::enable_tracing();
 
@@ -1153,8 +1198,9 @@ async fn ann_filter_clustering_key_int_lte() {
     );
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn ann_filter_clustering_key_int_gt() {
     crate::enable_tracing();
 
@@ -1193,8 +1239,9 @@ async fn ann_filter_clustering_key_int_gt() {
     );
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn ann_filter_clustering_key_int_gte() {
     crate::enable_tracing();
 
@@ -1233,8 +1280,9 @@ async fn ann_filter_clustering_key_int_gte() {
     );
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn ann_filter_clustering_key_int_range() {
     crate::enable_tracing();
 
@@ -1279,8 +1327,9 @@ async fn ann_filter_clustering_key_int_range() {
     );
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn ann_filter_primary_key_int_lt_tuple() {
     crate::enable_tracing();
 
@@ -1327,8 +1376,9 @@ async fn ann_filter_primary_key_int_lt_tuple() {
     );
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn ann_filter_primary_key_int_lte_tuple() {
     crate::enable_tracing();
 
@@ -1376,8 +1426,9 @@ async fn ann_filter_primary_key_int_lte_tuple() {
     );
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn ann_filter_primary_key_int_gt_tuple() {
     crate::enable_tracing();
 
@@ -1423,8 +1474,9 @@ async fn ann_filter_primary_key_int_gt_tuple() {
     );
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn ann_filter_primary_key_int_gte_tuple() {
     crate::enable_tracing();
 
@@ -1471,8 +1523,9 @@ async fn ann_filter_primary_key_int_gte_tuple() {
     );
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn ann_filter_partition_key_text_gt() {
     crate::enable_tracing();
 
@@ -1481,6 +1534,7 @@ async fn ann_filter_partition_key_text_gt() {
     let pk_column_http: httpapi::ColumnName = pk_column.clone().into();
     let ck_column_http: httpapi::ColumnName = ck_column.clone().into();
     let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+        usearch_test_config(),
         DbIndexPartitioning::Global,
         [pk_column.clone(), ck_column.clone()],
         1,
@@ -1556,8 +1610,9 @@ async fn ann_filter_partition_key_text_gt() {
     );
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn ann_filter_filtering_columns_int_eq() {
     crate::enable_tracing();
 
@@ -1584,8 +1639,9 @@ async fn ann_filter_filtering_columns_int_eq() {
     assert_pk_ck_combinations(&pk_ck_values, [(0, 1)]);
 }
 
+#[rstest]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
 async fn http_server_is_responsive_when_index_add_hangs() {
     crate::enable_tracing();
     let config = Config {
@@ -1594,7 +1650,7 @@ async fn http_server_is_responsive_when_index_add_hangs() {
             Duration::from_secs(20), // Simulate long add operation (longer than test timeout).
             Duration::from_secs(0),
         ]),
-        ..test_config()
+        ..usearch_test_config()
     };
     let (run, _index, _db, _node_state) = setup_store(
         config,
@@ -1630,13 +1686,16 @@ async fn http_server_is_responsive_when_index_add_hangs() {
     );
 }
 
+#[rstest]
+#[case::usearch(usearch_test_config())]
+#[case::diskann(diskann_test_config())]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
-async fn null_vector_is_not_indexed() {
+async fn null_vector_is_not_indexed(#[case] config: Config) {
     crate::enable_tracing();
 
     let (run, index, _db, _node_state) = setup_store(
-        test_config(),
+        config,
         DbIndexPartitioning::Global,
         ["pk".into()],
         1,
@@ -1684,9 +1743,12 @@ async fn null_vector_is_not_indexed() {
 //  1. similarity_scores are in strictly decreasing order (nearest = highest score).
 //  2. For Euclidean distance, the formula similarity = 1/(1+d) is applied
 //     correctly.
+#[rstest]
+#[case::usearch(usearch_test_config())]
+#[case::diskann(diskann_test_config())]
+#[timeout(Duration::from_secs(10))]
 #[tokio::test]
-#[ntest::timeout(10_000)]
-async fn similarity_scores_are_decreasing_and_correctly_converted() {
+async fn similarity_scores_are_decreasing_and_correctly_converted(#[case] config: Config) {
     crate::enable_tracing();
 
     let node_state = vector_store::new_node_state().await;
@@ -1760,7 +1822,7 @@ async fn similarity_scores_are_decreasing_and_correctly_converted() {
     )
     .unwrap();
 
-    let (receivers, _senders) = create_config_channels(test_config()).await;
+    let (receivers, _senders) = create_config_channels(config).await;
     let (server, _mtls) = vector_store::run(Some(node_state), Some(db_actor), receivers)
         .await
         .unwrap();
@@ -1824,11 +1886,15 @@ async fn similarity_scores_are_decreasing_and_correctly_converted() {
     );
 }
 
+#[rstest]
+#[case::usearch(usearch_test_config())]
+#[case::diskann(diskann_test_config())]
 #[tokio::test]
-async fn empty_index_has_zero_count() {
+async fn empty_index_has_zero_count(#[case] config: Config) {
     crate::enable_tracing();
 
     let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+        config,
         DbIndexPartitioning::Global,
         ["pk".into()],
         1,
@@ -1850,11 +1916,15 @@ async fn empty_index_has_zero_count() {
     assert_eq!(status.count, 0);
 }
 
+#[rstest]
+#[case::usearch(usearch_test_config())]
+#[case::diskann(diskann_test_config())]
 #[tokio::test]
-async fn empty_index_returns_empty_ann_results() {
+async fn empty_index_returns_empty_ann_results(#[case] config: Config) {
     crate::enable_tracing();
 
     let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+        config,
         DbIndexPartitioning::Global,
         ["pk".into()],
         1,

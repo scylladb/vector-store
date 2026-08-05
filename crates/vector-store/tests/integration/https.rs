@@ -8,7 +8,7 @@ use crate::db_basic;
 use crate::tls_utils::generate_server_cert;
 use crate::tls_utils::init;
 use crate::tls_utils::read_cert;
-use crate::usearch::test_config;
+use crate::vs_index::usearch_test_config;
 use httpapi::PostIndexAnnRequest;
 use reqwest::StatusCode;
 use std::num::NonZeroUsize;
@@ -27,7 +27,7 @@ async fn run_server(
         vector_store_addr: addr,
         tls_cert_path,
         tls_key_path,
-        ..test_config()
+        ..usearch_test_config()
     };
 
     let (receivers, senders) = create_config_channels(config).await;

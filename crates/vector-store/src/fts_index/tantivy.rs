@@ -514,6 +514,7 @@ mod tests {
     use crate::table::MockTableSearch;
     use crate::table::PartitionId;
     use crate::worker;
+    use rstest::rstest;
     use scylla::value::CqlValue;
     use std::time::Duration;
 
@@ -615,8 +616,9 @@ mod tests {
         tokens
     }
 
+    #[rstest]
+    #[timeout(Duration::from_secs(10))]
     #[tokio::test]
-    #[ntest::timeout(10_000)]
     async fn add_document_increments_count() {
         let table = make_table_with_keys();
         let sender = make_sender(table);
@@ -630,8 +632,9 @@ mod tests {
         assert_eq!(count, 2);
     }
 
+    #[rstest]
+    #[timeout(Duration::from_secs(10))]
     #[tokio::test]
-    #[ntest::timeout(10_000)]
     async fn remove_document_decrements_count() {
         let table = make_table_with_keys();
         let sender = make_sender(table);
@@ -646,8 +649,9 @@ mod tests {
         assert_eq!(count, 1);
     }
 
+    #[rstest]
+    #[timeout(Duration::from_secs(10))]
     #[tokio::test]
-    #[ntest::timeout(10_000)]
     async fn search_returns_matching_docs() {
         let table = make_table_with_keys();
         let sender = make_sender(table);
@@ -670,8 +674,9 @@ mod tests {
         assert!(scores.iter().all(|&s| s > 0.0));
     }
 
+    #[rstest]
+    #[timeout(Duration::from_secs(10))]
     #[tokio::test]
-    #[ntest::timeout(10_000)]
     async fn search_orders_by_bm25_relevance() {
         let table = make_table_with_keys();
         let sender = make_sender(table);
@@ -695,8 +700,9 @@ mod tests {
         }
     }
 
+    #[rstest]
+    #[timeout(Duration::from_secs(10))]
     #[tokio::test]
-    #[ntest::timeout(10_000)]
     async fn search_returns_empty_for_no_match() {
         let table = make_table_with_keys();
         let sender = make_sender(table);
@@ -717,8 +723,9 @@ mod tests {
         assert!(scores.is_empty());
     }
 
+    #[rstest]
+    #[timeout(Duration::from_secs(10))]
     #[tokio::test]
-    #[ntest::timeout(10_000)]
     async fn remove_then_search_excludes_removed() {
         let table = make_table_with_keys();
         let sender = make_sender(table);
@@ -742,8 +749,9 @@ mod tests {
         assert_eq!(scores.len(), 1);
     }
 
+    #[rstest]
+    #[timeout(Duration::from_secs(10))]
     #[tokio::test]
-    #[ntest::timeout(10_000)]
     async fn stats_reflects_doc_count_and_segments() {
         let table = make_table_with_keys();
         let sender = make_sender(table);
@@ -759,8 +767,9 @@ mod tests {
         assert!(stats.size_bytes > 0);
     }
 
+    #[rstest]
+    #[timeout(Duration::from_secs(10))]
     #[tokio::test]
-    #[ntest::timeout(10_000)]
     async fn stats_for_unknown_index_returns_default() {
         let table = make_table_with_keys();
         let sender = make_sender(table);
@@ -773,8 +782,9 @@ mod tests {
         assert_eq!(stats.size_bytes, 0);
     }
 
+    #[rstest]
+    #[timeout(Duration::from_secs(10))]
     #[tokio::test]
-    #[ntest::timeout(10_000)]
     async fn add_document_rejected_when_memory_exhausted() {
         let table = make_table_with_keys();
         let key = make_index_key();
@@ -795,8 +805,9 @@ mod tests {
         assert_eq!(count, 0);
     }
 
+    #[rstest]
+    #[timeout(Duration::from_secs(10))]
     #[tokio::test]
-    #[ntest::timeout(10_000)]
     async fn threshold_forces_commit_before_interval() {
         let table = make_table_with_keys();
         let key = make_index_key();

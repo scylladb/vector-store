@@ -386,6 +386,7 @@ mod tests {
     use crate::engine::tests::MockSimEngine;
     use anyhow::anyhow;
     use futures::FutureExt;
+    use rstest::rstest;
     use std::collections::HashMap;
     use std::collections::HashSet;
     use std::num::NonZeroUsize;
@@ -500,8 +501,9 @@ mod tests {
         assert!(sv.has_changed(&tx_db).await);
     }
 
+    #[rstest]
+    #[timeout(Duration::from_secs(5))]
     #[tokio::test]
-    #[ntest::timeout(5_000)]
     async fn index_metadata_are_removed_once() {
         type IndexesT = HashSet<IndexKey>;
 
@@ -752,8 +754,9 @@ mod tests {
         );
     }
 
+    #[rstest]
+    #[timeout(Duration::from_secs(5))]
     #[tokio::test]
-    #[ntest::timeout(5_000)]
     async fn get_indexes_failed_while_index_is_invalid() {
         let valid_indexes: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(vec![]));
         let set_valid_indexes = |v| {
