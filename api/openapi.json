@@ -226,13 +226,13 @@
         "tags": [
           "scylla-vector-store-index"
         ],
-        "description": "Retrieves the current operational status and vector count for a specific vector index. The response includes the index's state and the total number of vectors currently indexed (excluding tombstoned or deleted entries). This endpoint enables clients to monitor index readiness and data availability for search operations.",
+        "description": "Retrieves the current operational status and item count for a specific index. The response includes the index's state and the total number of items currently indexed (excluding tombstoned or deleted entries). This endpoint enables clients to monitor index readiness and data availability for search operations.",
         "operationId": "get_index_status",
         "parameters": [
           {
             "name": "keyspace",
             "in": "path",
-            "description": "The name of the ScyllaDB keyspace containing the vector index.",
+            "description": "The name of the ScyllaDB keyspace containing the index.",
             "required": true,
             "schema": {
               "$ref": "#/components/schemas/KeyspaceName"
@@ -241,7 +241,7 @@
           {
             "name": "index",
             "in": "path",
-            "description": "The name of the ScyllaDB vector index within the specified keyspace to check status of.",
+            "description": "The name of the ScyllaDB index within the specified keyspace to check status of.",
             "required": true,
             "schema": {
               "$ref": "#/components/schemas/IndexName"
@@ -257,6 +257,7 @@
                   "$ref": "#/components/schemas/IndexStatusResponse"
                 },
                 "example": {
+                  "build_progress": 100.0,
                   "count": 12345,
                   "status": "SERVING"
                 }

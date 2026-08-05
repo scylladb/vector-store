@@ -298,12 +298,12 @@ impl From<crate::node_state::IndexStatus> for httpapi::IndexStatus {
     get,
     path = "/api/v1/indexes/{keyspace}/{index}/status",
     tag = "scylla-vector-store-index",
-    description = "Retrieves the current operational status and vector count for a specific vector index. \
-    The response includes the index's state and the total number of vectors currently indexed (excluding tombstoned or deleted entries). \
+    description = "Retrieves the current operational status and item count for a specific index. \
+    The response includes the index's state and the total number of items currently indexed (excluding tombstoned or deleted entries). \
     This endpoint enables clients to monitor index readiness and data availability for search operations.",
     params(
-        ("keyspace" = httpapi::KeyspaceName, Path, description = "The name of the ScyllaDB keyspace containing the vector index."),
-        ("index" = httpapi::IndexName, Path, description = "The name of the ScyllaDB vector index within the specified keyspace to check status of.")
+        ("keyspace" = httpapi::KeyspaceName, Path, description = "The name of the ScyllaDB keyspace containing the index."),
+        ("index" = httpapi::IndexName, Path, description = "The name of the ScyllaDB index within the specified keyspace to check status of.")
     ),
     responses(
         (
@@ -314,7 +314,8 @@ impl From<crate::node_state::IndexStatus> for httpapi::IndexStatus {
             content_type = "application/json",
             example = json!({
                 "status": "SERVING",
-                "count": 12345
+                "count": 12345,
+                "build_progress": 100.0
             })
         ),
         (
