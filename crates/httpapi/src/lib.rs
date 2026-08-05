@@ -56,16 +56,6 @@ pub enum DataType {
     B1,
 }
 
-#[derive(Debug, PartialEq, serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
-#[serde(tag = "type", rename_all = "lowercase")]
-/// Type of index, distinguishing between vector search and fulltext search indexes.
-pub enum IndexType {
-    /// Vector search index with its associated data type.
-    Vector { data_type: DataType },
-    /// Fulltext search index.
-    Fulltext,
-}
-
 #[derive(
     Copy,
     Clone,
@@ -92,12 +82,11 @@ impl Serialize for Distance {
 }
 
 #[derive(Debug, PartialEq, serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
-/// Information about an index, such as keyspace, name and type.
+/// Information about an index, such as keyspace, name, and creation options.
 pub struct IndexInfo {
     pub keyspace: KeyspaceName,
     pub index: IndexName,
-    #[serde(flatten)]
-    pub index_type: IndexType,
+    pub options: IndexOptions,
 }
 
 impl IndexInfo {
@@ -105,9 +94,14 @@ impl IndexInfo {
         IndexInfo {
             keyspace: String::from(keyspace).into(),
             index: String::from(index).into(),
-            index_type: IndexType::Vector {
-                data_type: DataType::F32,
-            },
+            options: IndexOptions::Vector(VectorIndexOptions {
+                dimensions: 3,
+                maximum_node_connections: 16,
+                construction_beam_width: 128,
+                search_beam_width: 64,
+                similarity_function: SimilarityFunction::Euclidean,
+                quantization: DataType::F32,
+            }),
         }
     }
 }
@@ -143,6 +137,56 @@ pub enum IndexStatus {
     Bootstrapping,
     /// The index has completed the initial table scan. It is now monitoring the database for changes.
     Serving,
+}
+
+#[derive(Debug, PartialEq, serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+/// Similarity function used to compare vectors, as set at index creation.
+pub enum SimilarityFunction {
+    /// Euclidean (L2) distance.
+    Euclidean,
+    /// Cosine similarity.
+    Cosine,
+    /// Dot product.
+    DotProduct,
+    /// Hamming distance.
+    Hamming,
+}
+
+#[derive(Debug, PartialEq, serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
+/// Options a vector index was created with.
+pub struct VectorIndexOptions {
+    /// Dimensionality of the indexed vectors.
+    pub dimensions: usize,
+    /// Maximum number of neighbor connections per graph node.
+    pub maximum_node_connections: usize,
+    /// Beam width used while building the index.
+    pub construction_beam_width: usize,
+    /// Beam width used while searching.
+    pub search_beam_width: usize,
+    /// Similarity function used to compare vectors.
+    pub similarity_function: SimilarityFunction,
+    /// Quantization applied to stored vectors.
+    pub quantization: DataType,
+}
+
+#[derive(Debug, PartialEq, serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
+/// Options a full-text index was created with.
+pub struct FulltextIndexOptions {
+    /// Text analyzer used for tokenization.
+    pub analyzer: String,
+    /// Whether token positions are stored, enabling phrase queries.
+    pub positions: bool,
+}
+
+#[derive(Debug, PartialEq, serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
+#[serde(tag = "type", rename_all = "lowercase")]
+/// Options an index was created with, tagged with the index's type.
+pub enum IndexOptions {
+    /// Vector search index options.
+    Vector(VectorIndexOptions),
+    /// Full-text search index options.
+    Fulltext(FulltextIndexOptions),
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, utoipa::ToSchema)]

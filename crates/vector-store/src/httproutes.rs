@@ -6,11 +6,14 @@
 use crate::Filter;
 use crate::IndexKey;
 use crate::IndexName;
+use crate::IndexOptionsFts;
+use crate::IndexOptionsVs;
 use crate::KeyspaceName;
 use crate::Progress;
 use crate::Quantization;
 use crate::Restriction;
 use crate::SimilarityScore;
+use crate::SpaceType;
 use crate::distance;
 use crate::engine::Engine;
 use crate::engine::EngineExt;
@@ -46,8 +49,11 @@ use axum::routing::put;
 use axum_server_dual_protocol::Protocol;
 use bigdecimal::BigDecimal;
 use httpapi::DataType;
+use httpapi::FulltextIndexOptions;
 use httpapi::IndexInfo;
-use httpapi::IndexType;
+use httpapi::IndexOptions;
+use httpapi::SimilarityFunction;
+use httpapi::VectorIndexOptions;
 use itertools::Itertools;
 use num_bigint::BigInt;
 use prometheus::Encoder;
@@ -91,7 +97,7 @@ use utoipa_swagger_ui::SwaggerUi;
             name = "LicenseRef-ScyllaDB-Source-Available-1.0"
         ),
         // version should be updated manually when there are changes in API
-        version = "2.1.0"
+        version = "3.0.0"
     ),
     tags(
         (
@@ -223,6 +229,43 @@ impl From<Quantization> for DataType {
     }
 }
 
+impl From<SpaceType> for SimilarityFunction {
+    fn from(space_type: SpaceType) -> Self {
+        match space_type {
+            SpaceType::Euclidean => SimilarityFunction::Euclidean,
+            SpaceType::Cosine => SimilarityFunction::Cosine,
+            SpaceType::DotProduct => SimilarityFunction::DotProduct,
+            SpaceType::Hamming => SimilarityFunction::Hamming,
+        }
+    }
+}
+
+impl From<&IndexOptionsVs> for VectorIndexOptions {
+    fn from(options: &IndexOptionsVs) -> Self {
+        VectorIndexOptions {
+            dimensions: options.dimensions.as_ref().get(),
+            maximum_node_connections: *options.connectivity.as_ref(),
+            construction_beam_width: *options.expansion_add.as_ref(),
+            search_beam_width: *options.expansion_search.as_ref(),
+            similarity_function: options.space_type.into(),
+            quantization: options.quantization.into(),
+        }
+    }
+}
+
+impl From<&IndexOptionsFts> for FulltextIndexOptions {
+    fn from(_options: &IndexOptionsFts) -> Self {
+        // The service does not yet track per-index full-text options,
+        // and the full-text backend applies a fixed "standard" analyzer with
+        // token positions enabled.
+        // Report those defaults until the options are modeled.
+        FulltextIndexOptions {
+            analyzer: "standard".to_string(),
+            positions: true,
+        }
+    }
+}
+
 impl From<httpapi::Limit> for crate::Limit {
     fn from(limit: httpapi::Limit) -> Self {
         Self::from(<httpapi::Limit as Into<NonZeroUsize>>::into(limit))
@@ -252,7 +295,32 @@ impl From<crate::SimilarityScore> for httpapi::SimilarityScore {
         (
             status = 200,
             description = "Successful operation. Returns an array of index information representing all indexes managed by the Vector Store.",
-            body = [IndexInfo]
+            body = [IndexInfo],
+            content_type = "application/json",
+            example = json!([
+                {
+                    "keyspace": "my_keyspace",
+                    "index": "my_vector_index",
+                    "options": {
+                        "type": "vector",
+                        "dimensions": 384,
+                        "maximum_node_connections": 16,
+                        "construction_beam_width": 128,
+                        "search_beam_width": 64,
+                        "similarity_function": "COSINE",
+                        "quantization": "F32"
+                    }
+                },
+                {
+                    "keyspace": "my_keyspace",
+                    "index": "my_fulltext_index",
+                    "options": {
+                        "type": "fulltext",
+                        "analyzer": "standard",
+                        "positions": true
+                    }
+                }
+            ])
         )
     )
 )]
@@ -265,14 +333,12 @@ async fn get_indexes(State(state): State<RoutesInnerState>) -> Response {
         .map(|(key, entry)| IndexInfo {
             keyspace: key.keyspace().into(),
             index: key.index().into(),
-            index_type: IndexType::Vector {
-                data_type: entry.options().quantization.into(),
-            },
+            options: IndexOptions::Vector(entry.options().into()),
         })
-        .chain(indexes_guard.iter_fts().map(|(key, _)| IndexInfo {
+        .chain(indexes_guard.iter_fts().map(|(key, entry)| IndexInfo {
             keyspace: key.keyspace().into(),
             index: key.index().into(),
-            index_type: IndexType::Fulltext,
+            options: IndexOptions::Fulltext(entry.options().into()),
         }))
         .collect();
 
@@ -2146,6 +2212,60 @@ mod tests {
         assert_eq!(
             httpapi::IndexStatus::from(crate::node_state::IndexStatus::Serving),
             httpapi::IndexStatus::Serving
+        );
+    }
+
+    #[test]
+    fn similarity_function_conversion() {
+        assert_eq!(
+            SimilarityFunction::from(SpaceType::Euclidean),
+            SimilarityFunction::Euclidean
+        );
+        assert_eq!(
+            SimilarityFunction::from(SpaceType::Cosine),
+            SimilarityFunction::Cosine
+        );
+        assert_eq!(
+            SimilarityFunction::from(SpaceType::DotProduct),
+            SimilarityFunction::DotProduct
+        );
+        assert_eq!(
+            SimilarityFunction::from(SpaceType::Hamming),
+            SimilarityFunction::Hamming
+        );
+    }
+
+    #[test]
+    fn vector_index_options_conversion() {
+        let options = IndexOptionsVs {
+            dimensions: NonZeroUsize::new(384).unwrap().into(),
+            connectivity: 32.into(),
+            expansion_add: 200.into(),
+            expansion_search: 100.into(),
+            space_type: SpaceType::DotProduct,
+            quantization: Quantization::I8,
+        };
+        assert_eq!(
+            VectorIndexOptions::from(&options),
+            VectorIndexOptions {
+                dimensions: 384,
+                maximum_node_connections: 32,
+                construction_beam_width: 200,
+                search_beam_width: 100,
+                similarity_function: SimilarityFunction::DotProduct,
+                quantization: DataType::I8,
+            }
+        );
+    }
+
+    #[test]
+    fn fulltext_index_option_conversion() {
+        assert_eq!(
+            FulltextIndexOptions::from(&IndexOptionsFts {}),
+            FulltextIndexOptions {
+                analyzer: "standard".to_string(),
+                positions: true,
+            }
         );
     }
 

@@ -321,7 +321,7 @@ async fn add_index_fts(ctx: AddIndexContext<'_>) -> anyhow::Result<()> {
 
     let entry =
         crate::indexes::FtsIndexEntry::new(ctx.metadata, fts_sender, monitor_actor, ctx.db_index)
-            .await;
+            .await?;
     ctx.indexes.write().unwrap().insert_fts(ctx.key, entry);
     Ok(())
 }

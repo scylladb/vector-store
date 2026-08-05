@@ -614,6 +614,13 @@ impl IndexKind {
             IndexKind::Fts(_) => None,
         }
     }
+
+    pub fn as_fts(&self) -> Option<&IndexOptionsFts> {
+        match self {
+            IndexKind::Fts(fts) => Some(fts),
+            IndexKind::Vs(_) => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -638,6 +645,10 @@ impl IndexMetadata {
 
     pub fn vs(&self) -> Option<&IndexOptionsVs> {
         self.kind.as_vs()
+    }
+
+    pub fn fts(&self) -> Option<&IndexOptionsFts> {
+        self.kind.as_fts()
     }
 
     fn discard_version(&self) -> Self {

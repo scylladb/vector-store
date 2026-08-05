@@ -6,7 +6,7 @@
     "license": {
       "name": "LicenseRef-ScyllaDB-Source-Available-1.0"
     },
-    "version": "2.1.0"
+    "version": "3.0.0"
   },
   "paths": {
     "/api/v1/indexes": {
@@ -26,7 +26,31 @@
                   "items": {
                     "$ref": "#/components/schemas/IndexInfo"
                   }
-                }
+                },
+                "example": [
+                  {
+                    "index": "my_vector_index",
+                    "keyspace": "my_keyspace",
+                    "options": {
+                      "construction_beam_width": 128,
+                      "dimensions": 384,
+                      "maximum_node_connections": 16,
+                      "quantization": "F32",
+                      "search_beam_width": 64,
+                      "similarity_function": "COSINE",
+                      "type": "vector"
+                    }
+                  },
+                  {
+                    "index": "my_fulltext_index",
+                    "keyspace": "my_keyspace",
+                    "options": {
+                      "analyzer": "standard",
+                      "positions": true,
+                      "type": "fulltext"
+                    }
+                  }
+                ]
               }
             }
           }
@@ -356,28 +380,43 @@
         "type": "string",
         "description": "A human-readable description of the error that occurred."
       },
-      "IndexInfo": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/IndexType"
-          },
-          {
-            "type": "object",
-            "required": [
-              "keyspace",
-              "index"
-            ],
-            "properties": {
-              "index": {
-                "$ref": "#/components/schemas/IndexName"
-              },
-              "keyspace": {
-                "$ref": "#/components/schemas/KeyspaceName"
-              }
-            }
-          }
+      "FulltextIndexOptions": {
+        "type": "object",
+        "description": "Options a full-text index was created with.",
+        "required": [
+          "analyzer",
+          "positions"
         ],
-        "description": "Information about an index, such as keyspace, name and type."
+        "properties": {
+          "analyzer": {
+            "type": "string",
+            "description": "Text analyzer used for tokenization."
+          },
+          "positions": {
+            "type": "boolean",
+            "description": "Whether token positions are stored, enabling phrase queries."
+          }
+        }
+      },
+      "IndexInfo": {
+        "type": "object",
+        "description": "Information about an index, such as keyspace, name, and creation options.",
+        "required": [
+          "keyspace",
+          "index",
+          "options"
+        ],
+        "properties": {
+          "index": {
+            "$ref": "#/components/schemas/IndexName"
+          },
+          "keyspace": {
+            "$ref": "#/components/schemas/KeyspaceName"
+          },
+          "options": {
+            "$ref": "#/components/schemas/IndexOptions"
+          }
+        }
       },
       "IndexName": {
         "type": "string",
@@ -419,6 +458,57 @@
           }
         ]
       },
+      "IndexOptions": {
+        "oneOf": [
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/VectorIndexOptions",
+                "description": "Vector search index options."
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "vector"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "Vector search index options."
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/FulltextIndexOptions",
+                "description": "Full-text search index options."
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "fulltext"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "Full-text search index options."
+          }
+        ],
+        "description": "Options an index was created with, tagged with the index's type."
+      },
       "IndexStatus": {
         "type": "string",
         "description": "Operational status of the vector index.",
@@ -455,45 +545,6 @@
             "$ref": "#/components/schemas/IndexStatus"
           }
         }
-      },
-      "IndexType": {
-        "oneOf": [
-          {
-            "type": "object",
-            "description": "Vector search index with its associated data type.",
-            "required": [
-              "data_type",
-              "type"
-            ],
-            "properties": {
-              "data_type": {
-                "$ref": "#/components/schemas/DataType"
-              },
-              "type": {
-                "type": "string",
-                "enum": [
-                  "vector"
-                ]
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Fulltext search index.",
-            "required": [
-              "type"
-            ],
-            "properties": {
-              "type": {
-                "type": "string",
-                "enum": [
-                  "fulltext"
-                ]
-              }
-            }
-          }
-        ],
-        "description": "Type of index, distinguishing between vector search and fulltext search indexes."
       },
       "InfoResponse": {
         "type": "object",
@@ -949,6 +1000,16 @@
           }
         }
       },
+      "SimilarityFunction": {
+        "type": "string",
+        "description": "Similarity function used to compare vectors, as set at index creation.",
+        "enum": [
+          "EUCLIDEAN",
+          "COSINE",
+          "DOT_PRODUCT",
+          "HAMMING"
+        ]
+      },
       "SimilarityScore": {
         "type": "number",
         "format": "float",
@@ -961,6 +1022,48 @@
           "format": "float"
         },
         "description": "The vector to use for the Approximate Nearest Neighbor search. The format of data must match the data_type of the index."
+      },
+      "VectorIndexOptions": {
+        "type": "object",
+        "description": "Options a vector index was created with.",
+        "required": [
+          "dimensions",
+          "maximum_node_connections",
+          "construction_beam_width",
+          "search_beam_width",
+          "similarity_function",
+          "quantization"
+        ],
+        "properties": {
+          "construction_beam_width": {
+            "type": "integer",
+            "description": "Beam width used while building the index.",
+            "minimum": 0
+          },
+          "dimensions": {
+            "type": "integer",
+            "description": "Dimensionality of the indexed vectors.",
+            "minimum": 0
+          },
+          "maximum_node_connections": {
+            "type": "integer",
+            "description": "Maximum number of neighbor connections per graph node.",
+            "minimum": 0
+          },
+          "quantization": {
+            "$ref": "#/components/schemas/DataType",
+            "description": "Quantization applied to stored vectors."
+          },
+          "search_beam_width": {
+            "type": "integer",
+            "description": "Beam width used while searching.",
+            "minimum": 0
+          },
+          "similarity_function": {
+            "$ref": "#/components/schemas/SimilarityFunction",
+            "description": "Similarity function used to compare vectors."
+          }
+        }
       }
     },
     "responses": {
