@@ -25,7 +25,7 @@ async fn setup_single_vector_index() -> (
     Sender<NodeState>,
 ) {
     vs_index::setup_store_and_wait_for_index(
-        vs_index::test_config(),
+        vs_index::usearch_test_config(),
         DbIndexPartitioning::Global,
         ["pk".into(), "ck".into()],
         1,

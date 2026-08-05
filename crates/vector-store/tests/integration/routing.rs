@@ -8,7 +8,7 @@ use crate::db_basic;
 use crate::db_basic::DbBasic;
 use crate::db_basic::ScanFn;
 use crate::db_basic::Table;
-use crate::vs_index::test_config;
+use crate::vs_index::usearch_test_config;
 use crate::wait_for;
 use futures::FutureExt;
 use httpapi::IndexStatus;
@@ -98,7 +98,7 @@ pub(crate) fn make_index(
 pub(crate) async fn setup() -> (HttpClient, DbBasic, impl Sized) {
     let node_state = vector_store::new_node_state().await;
     let (db_actor, db) = db_basic::new(node_state.clone());
-    let (receivers, senders) = create_config_channels(test_config()).await;
+    let (receivers, senders) = create_config_channels(usearch_test_config()).await;
     let (server, _mtls) = vector_store::run(Some(node_state), Some(db_actor), receivers)
         .await
         .unwrap();

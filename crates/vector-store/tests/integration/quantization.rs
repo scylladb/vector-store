@@ -5,7 +5,7 @@
 
 use crate::db_basic;
 use crate::vs_index::setup_store_with_quantization;
-use crate::vs_index::test_config;
+use crate::vs_index::usearch_test_config;
 use crate::wait_for;
 use crate::wait_for_value;
 use httpapi::DataType;
@@ -52,7 +52,7 @@ async fn quantization_is_effectively_applied() {
         )];
         let values_len = values.len();
         let (run, index, _db, _node_state) = setup_store_with_quantization(
-            test_config(),
+            usearch_test_config(),
             DbIndexPartitioning::Global,
             ["pk".into()],
             1,
@@ -136,7 +136,7 @@ async fn quantization_is_returned_as_index_data_type() {
         (Quantization::B1, DataType::B1),
     ] {
         let (run, index, _db, _node_state) = setup_store_with_quantization(
-            test_config(),
+            usearch_test_config(),
             DbIndexPartitioning::Global,
             ["pk".into()],
             1,
@@ -185,7 +185,7 @@ async fn search_with_quantization(quantization: Quantization, filter: Option<Pos
     )];
 
     let (run, index, _db, _node_state) = setup_store_with_quantization(
-        test_config(),
+        usearch_test_config(),
         DbIndexPartitioning::Global,
         [pk_column.clone()],
         1,
@@ -305,7 +305,7 @@ async fn binary_quantization_with_non_divisible_by_8_dimensions() {
     )];
 
     let (run, index, _db, _node_state) = setup_store_with_quantization(
-        test_config(),
+        usearch_test_config(),
         DbIndexPartitioning::Global,
         [pk_column.clone()],
         1,

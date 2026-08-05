@@ -47,7 +47,7 @@ use vector_store::SpaceType;
 use vector_store::Timestamp;
 use vector_store::node_state::NodeState;
 
-pub(crate) fn test_config() -> Config {
+pub(crate) fn usearch_test_config() -> Config {
     Config {
         vector_store_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
         ..Default::default()
@@ -220,7 +220,7 @@ async fn simple_create_search_delete_index() {
     crate::enable_tracing();
 
     let (run, index, db, _node_state) = setup_store(
-        test_config(),
+        usearch_test_config(),
         DbIndexPartitioning::Global,
         ["pk".into(), "ck".into()],
         1,
@@ -326,7 +326,7 @@ async fn failed_db_index_create() {
         }),
     };
 
-    let (receivers, _senders) = create_config_channels(test_config()).await;
+    let (receivers, _senders) = create_config_channels(usearch_test_config()).await;
     let (server, _mtls) = vector_store::run(Some(node_state), Some(db_actor), receivers)
         .await
         .unwrap();
@@ -428,7 +428,7 @@ async fn failed_db_index_create() {
 async fn ann_returns_bad_request_when_provided_vector_size_is_not_eq_index_dimensions() {
     crate::enable_tracing();
     let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
-        test_config(),
+        usearch_test_config(),
         DbIndexPartitioning::Global,
         ["pk".into(), "ck".into()],
         1,
@@ -469,7 +469,7 @@ async fn ann_returns_bad_request_when_filtering_required_but_not_allowed() {
     let pk_column: ColumnName = "pk".into();
     let ck_column: ColumnName = "ck".into();
     let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
-        test_config(),
+        usearch_test_config(),
         DbIndexPartitioning::Global,
         [pk_column.clone(), ck_column.clone()],
         1,
@@ -511,7 +511,7 @@ async fn ann_returns_bad_request_when_filtering_required_but_not_allowed() {
 async fn ann_fail_while_building_when_node_is_bootstrapping() {
     crate::enable_tracing();
     let (run, index, db, _node_state) = setup_store(
-        test_config(),
+        usearch_test_config(),
         DbIndexPartitioning::Global,
         ["pk".into(), "ck".into()],
         1,
@@ -562,7 +562,7 @@ async fn ann_fail_while_building_when_node_is_serving() {
     crate::enable_tracing();
 
     let (serving_index, client, db, _server, _node_state) = setup_store_and_wait_for_index(
-        test_config(),
+        usearch_test_config(),
         DbIndexPartitioning::Global,
         ["pk".into()],
         1,
@@ -644,7 +644,7 @@ async fn ann_fail_while_building_when_node_is_serving() {
 async fn ann_failed_when_wrong_number_of_primary_keys() {
     crate::enable_tracing();
     let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
-        test_config(),
+        usearch_test_config(),
         DbIndexPartitioning::Global,
         vec!["pk".into()],
         1,
@@ -1001,7 +1001,7 @@ async fn setup_int_int_store() -> (
     let ck_column: ColumnName = "ck".into();
     let f_column: ColumnName = "f".into();
     let (index, client, db, server, node_state) = setup_store_and_wait_for_index(
-        test_config(),
+        usearch_test_config(),
         DbIndexPartitioning::Global,
         [pk_column.clone(), ck_column.clone()],
         1,
@@ -1506,7 +1506,7 @@ async fn ann_filter_partition_key_text_gt() {
     let pk_column_http: httpapi::ColumnName = pk_column.clone().into();
     let ck_column_http: httpapi::ColumnName = ck_column.clone().into();
     let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
-        test_config(),
+        usearch_test_config(),
         DbIndexPartitioning::Global,
         [pk_column.clone(), ck_column.clone()],
         1,
@@ -1622,7 +1622,7 @@ async fn http_server_is_responsive_when_index_add_hangs() {
             Duration::from_secs(20), // Simulate long add operation (longer than test timeout).
             Duration::from_secs(0),
         ]),
-        ..test_config()
+        ..usearch_test_config()
     };
     let (run, _index, _db, _node_state) = setup_store(
         config,
@@ -1665,7 +1665,7 @@ async fn null_vector_is_not_indexed() {
     crate::enable_tracing();
 
     let (run, index, _db, _node_state) = setup_store(
-        test_config(),
+        usearch_test_config(),
         DbIndexPartitioning::Global,
         ["pk".into()],
         1,
@@ -1790,7 +1790,7 @@ async fn similarity_scores_are_decreasing_and_correctly_converted() {
     )
     .unwrap();
 
-    let (receivers, _senders) = create_config_channels(test_config()).await;
+    let (receivers, _senders) = create_config_channels(usearch_test_config()).await;
     let (server, _mtls) = vector_store::run(Some(node_state), Some(db_actor), receivers)
         .await
         .unwrap();
@@ -1859,7 +1859,7 @@ async fn empty_index_has_zero_count() {
     crate::enable_tracing();
 
     let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
-        test_config(),
+        usearch_test_config(),
         DbIndexPartitioning::Global,
         ["pk".into()],
         1,
@@ -1886,7 +1886,7 @@ async fn empty_index_returns_empty_ann_results() {
     crate::enable_tracing();
 
     let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
-        test_config(),
+        usearch_test_config(),
         DbIndexPartitioning::Global,
         ["pk".into()],
         1,

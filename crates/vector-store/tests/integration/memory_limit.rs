@@ -6,7 +6,7 @@
 use crate::create_config_channels;
 use crate::db_basic;
 use crate::db_basic::Table;
-use crate::vs_index::test_config;
+use crate::vs_index::usearch_test_config;
 use futures::FutureExt;
 use httpapi::NodeStatus;
 use httpclient::HttpClient;
@@ -131,7 +131,7 @@ async fn memory_limit_during_index_build() {
     let mut config = Config {
         memory_limit: Some(LIMIT_MEMORY),
         memory_usage_check_interval: Some(Duration::from_millis(10)),
-        ..test_config()
+        ..usearch_test_config()
     };
 
     let (receivers, senders) = create_config_channels(config.clone()).await;
