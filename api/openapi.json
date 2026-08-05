@@ -57,6 +57,70 @@
         }
       }
     },
+    "/api/v1/indexes/{keyspace}/{index}": {
+      "get": {
+        "tags": [
+          "scylla-vector-store-index"
+        ],
+        "description": "Retrieves information about a specific index, including its search type and the options it was created with. This is the same information reported per-entry by the `/api/v1/indexes` listing, scoped to a single index.",
+        "operationId": "get_index_info",
+        "parameters": [
+          {
+            "name": "keyspace",
+            "in": "path",
+            "description": "The name of the ScyllaDB keyspace containing the index.",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/KeyspaceName"
+            }
+          },
+          {
+            "name": "index",
+            "in": "path",
+            "description": "The name of the ScyllaDB index within the specified keyspace.",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/IndexName"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful operation. Returns the index's type and creation options.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IndexInfo"
+                },
+                "example": {
+                  "index": "my_vector_index",
+                  "keyspace": "my_keyspace",
+                  "options": {
+                    "construction_beam_width": 128,
+                    "dimensions": 384,
+                    "maximum_node_connections": 16,
+                    "quantization": "F32",
+                    "search_beam_width": 64,
+                    "similarity_function": "COSINE",
+                    "type": "vector"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Index not found. Possible causes: index does not exist, or is not discovered yet.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/indexes/{keyspace}/{index}/ann": {
       "post": {
         "tags": [

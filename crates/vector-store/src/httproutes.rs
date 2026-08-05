@@ -173,6 +173,7 @@ fn new_open_api_router() -> (Router<RoutesInnerState>, utoipa::openapi::OpenApi)
             OpenApiRouter::new()
                 .routes(routes!(get_indexes))
                 .routes(routes!(get_index_status))
+                .routes(routes!(get_index_info))
                 .routes(routes!(post_index_ann))
                 .routes(routes!(post_index_bm25))
                 .routes(routes!(get_info))
@@ -451,6 +452,75 @@ async fn get_index_status(
         )
             .into_response(),
     }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/indexes/{keyspace}/{index}",
+    tag = "scylla-vector-store-index",
+    description = "Retrieves information about a specific index, including its search type and the options \
+    it was created with. This is the same information reported per-entry by the `/api/v1/indexes` listing, \
+    scoped to a single index.",
+    params(
+        ("keyspace" = httpapi::KeyspaceName, Path, description = "The name of the ScyllaDB keyspace containing the index."),
+        ("index" = httpapi::IndexName, Path, description = "The name of the ScyllaDB index within the specified keyspace.")
+    ),
+    responses(
+        (
+            status = 200,
+            description = "Successful operation. Returns the index's type and creation options.",
+            body = IndexInfo,
+            content_type = "application/json",
+            example = json!({
+                "keyspace": "my_keyspace",
+                "index": "my_vector_index",
+                "options": {
+                    "type": "vector",
+                    "dimensions": 384,
+                    "maximum_node_connections": 16,
+                    "construction_beam_width": 128,
+                    "search_beam_width": 64,
+                    "similarity_function": "COSINE",
+                    "quantization": "F32"
+                }
+            })
+        ),
+        (
+            status = 404,
+            description = "Index not found. Possible causes: index does not exist, or is not discovered yet.",
+            content_type = "application/json",
+            body = ErrorMessage
+        )
+    )
+)]
+async fn get_index_info(
+    State(state): State<RoutesInnerState>,
+    Path((keyspace_name, index_name)): Path<(httpapi::KeyspaceName, httpapi::IndexName)>,
+) -> Response {
+    let keyspace_name: crate::KeyspaceName = keyspace_name.into();
+    let index_name: crate::IndexName = index_name.into();
+    let index_key = IndexKey::new(&keyspace_name, &index_name);
+
+    let indexes = state.indexes.read().unwrap();
+    let info = if let Some(entry) = indexes.get_vs(&index_key) {
+        IndexInfo {
+            keyspace: keyspace_name.into(),
+            index: index_name.into(),
+            options: IndexOptions::Vector(entry.options().into()),
+        }
+    } else if let Some(entry) = indexes.get_fts(&index_key) {
+        IndexInfo {
+            keyspace: keyspace_name.into(),
+            index: index_name.into(),
+            options: IndexOptions::Fulltext(entry.options().into()),
+        }
+    } else {
+        let msg = format!("missing index: {keyspace_name}.{index_name}");
+        debug!("get_index_info: {msg}");
+        return (StatusCode::NOT_FOUND, msg).into_response();
+    };
+
+    (StatusCode::OK, response::Json(info)).into_response()
 }
 
 async fn refresh_index_metrics(
