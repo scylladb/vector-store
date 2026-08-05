@@ -3,12 +3,12 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
-use crate::routing::add_table;
-use crate::routing::blocking_scan_fn;
-use crate::routing::make_index;
-use crate::routing::ordered_timeuuid;
-use crate::routing::setup;
-use crate::routing::single_row_scan;
+use crate::common::add_table;
+use crate::common::blocking_scan_fn;
+use crate::common::make_index;
+use crate::common::ordered_timeuuid;
+use crate::common::setup;
+use crate::common::single_row_scan;
 use crate::wait_for;
 use httpapi::IndexStatus;
 use rstest::rstest;
