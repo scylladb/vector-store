@@ -5,7 +5,7 @@
 
 use crate::common::add_table;
 use crate::common::blocking_scan_fn;
-use crate::common::make_index;
+use crate::common::make_vs_index;
 use crate::common::ordered_timeuuid;
 use crate::common::setup;
 use crate::common::single_row_scan;
@@ -146,7 +146,7 @@ async fn ann_routes_to_serving_index_while_replacement_is_bootstrapping() {
         ["embedding".into()],
     );
 
-    let oldest = make_index(
+    let oldest = make_vs_index(
         "oldest",
         &["pk"],
         1,
@@ -163,7 +163,7 @@ async fn ann_routes_to_serving_index_while_replacement_is_bootstrapping() {
     .unwrap();
     wait_for_serving(&client, &oldest).await;
 
-    let replacement = make_index(
+    let replacement = make_vs_index(
         "replacement",
         &["pk"],
         1,
@@ -196,7 +196,7 @@ async fn ann_routes_to_newest_serving_index() {
         ["embedding".into()],
     );
 
-    let oldest = make_index(
+    let oldest = make_vs_index(
         "oldest",
         &["pk"],
         1,
@@ -213,7 +213,7 @@ async fn ann_routes_to_newest_serving_index() {
     .unwrap();
     wait_for_serving(&client, &oldest).await;
 
-    let replacement = make_index(
+    let replacement = make_vs_index(
         "replacement",
         &["pk"],
         1,
@@ -253,7 +253,7 @@ async fn ann_routes_to_newest_local_index_with_same_score() {
         ["embedding".into()],
     );
 
-    let older_local = make_index(
+    let older_local = make_vs_index(
         "older",
         &["pk", "ck"],
         1,
@@ -270,7 +270,7 @@ async fn ann_routes_to_newest_local_index_with_same_score() {
     .unwrap();
     wait_for_serving(&client, &older_local).await;
 
-    let newer_local = make_index(
+    let newer_local = make_vs_index(
         "newer",
         &["pk", "ck"],
         1,
@@ -324,7 +324,7 @@ async fn ann_routes_to_local_index_with_more_matching_partition_key_columns() {
         ["embedding".into()],
     );
 
-    let less_precise = make_index(
+    let less_precise = make_vs_index(
         "less_precise",
         &["pk1", "pk2", "ck"],
         2,
@@ -345,7 +345,7 @@ async fn ann_routes_to_local_index_with_more_matching_partition_key_columns() {
     .unwrap();
     wait_for_serving(&client, &less_precise).await;
 
-    let more_precise = make_index(
+    let more_precise = make_vs_index(
         "more_precise",
         &["pk1", "pk2", "ck"],
         2,
@@ -409,7 +409,7 @@ async fn ann_routes_to_local_index_with_filter_columns_covering_restriction() {
         ["embedding".into()],
     );
 
-    let covering = make_index(
+    let covering = make_vs_index(
         "covering",
         &["pk", "ck"],
         1,
@@ -426,7 +426,7 @@ async fn ann_routes_to_local_index_with_filter_columns_covering_restriction() {
     .unwrap();
     wait_for_serving(&client, &covering).await;
 
-    let non_covering = make_index(
+    let non_covering = make_vs_index(
         "non_covering",
         &["pk", "ck"],
         1,
@@ -486,7 +486,7 @@ async fn ann_routes_to_global_index_with_filter_columns_covering_restriction() {
         ["embedding".into()],
     );
 
-    let covering = make_index(
+    let covering = make_vs_index(
         "covering",
         &["pk", "ck"],
         1,
@@ -503,7 +503,7 @@ async fn ann_routes_to_global_index_with_filter_columns_covering_restriction() {
     .unwrap();
     wait_for_serving(&client, &covering).await;
 
-    let non_covering = make_index(
+    let non_covering = make_vs_index(
         "non_covering",
         &["pk", "ck"],
         1,
@@ -562,7 +562,7 @@ async fn ann_routes_to_local_index_when_pk_restrictions_match() {
         ["embedding".into()],
     );
 
-    let local_index = make_index(
+    let local_index = make_vs_index(
         "local_idx",
         &["pk", "ck"],
         1,
@@ -579,7 +579,7 @@ async fn ann_routes_to_local_index_when_pk_restrictions_match() {
     .unwrap();
     wait_for_serving(&client, &local_index).await;
 
-    let global_index = make_index(
+    let global_index = make_vs_index(
         "global_idx",
         &["pk", "ck"],
         1,
@@ -632,7 +632,7 @@ async fn ann_routes_to_global_index_without_pk_restrictions() {
         ["embedding".into()],
     );
 
-    let local_index = make_index(
+    let local_index = make_vs_index(
         "local_idx",
         &["pk", "ck"],
         1,
@@ -649,7 +649,7 @@ async fn ann_routes_to_global_index_without_pk_restrictions() {
     .unwrap();
     wait_for_serving(&client, &local_index).await;
 
-    let global_index = make_index(
+    let global_index = make_vs_index(
         "global_idx",
         &["pk", "ck"],
         1,

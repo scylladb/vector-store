@@ -50,7 +50,7 @@ pub(crate) fn single_row_scan(
     )])
 }
 
-pub(crate) fn make_index(
+pub(crate) fn make_vs_index(
     name: &str,
     primary_key_columns: &[&str],
     partition_key_count: usize,
@@ -58,6 +58,36 @@ pub(crate) fn make_index(
     partitioning: DbIndexPartitioning,
     filtering_columns: &[&str],
     version: Uuid,
+) -> IndexMetadata {
+    make_index_with_kind(
+        name,
+        primary_key_columns,
+        partition_key_count,
+        target_column,
+        partitioning,
+        filtering_columns,
+        version,
+        IndexKind::Vs(IndexOptionsVs {
+            dimensions: NonZeroUsize::new(3).unwrap().into(),
+            connectivity: Default::default(),
+            expansion_add: Default::default(),
+            expansion_search: Default::default(),
+            space_type: Default::default(),
+            quantization: Default::default(),
+        }),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn make_index_with_kind(
+    name: &str,
+    primary_key_columns: &[&str],
+    partition_key_count: usize,
+    target_column: &str,
+    partitioning: DbIndexPartitioning,
+    filtering_columns: &[&str],
+    version: Uuid,
+    kind: IndexKind,
 ) -> IndexMetadata {
     IndexMetadata {
         keyspace_name: "vector".into(),
@@ -75,14 +105,7 @@ pub(crate) fn make_index(
             .map(|s| ColumnName::from(*s))
             .collect(),
         version: version.into(),
-        kind: IndexKind::Vs(IndexOptionsVs {
-            dimensions: NonZeroUsize::new(3).unwrap().into(),
-            connectivity: Default::default(),
-            expansion_add: Default::default(),
-            expansion_search: Default::default(),
-            space_type: Default::default(),
-            quantization: Default::default(),
-        }),
+        kind,
     }
 }
 
