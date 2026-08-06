@@ -143,6 +143,29 @@ enum Command {
         index: String,
     },
 
+    DeleteRows {
+        #[clap(long)]
+        data_dir: PathBuf,
+
+        #[clap(long)]
+        scylla: SocketAddr,
+
+        #[clap(long)]
+        user: Option<String>,
+
+        #[clap(long)]
+        passwd_path: Option<PathBuf>,
+
+        #[clap(long, default_value = KEYSPACE)]
+        keyspace: String,
+
+        #[clap(long, default_value = TABLE)]
+        table: String,
+
+        #[clap(long, value_parser = clap::value_parser!(u32).range(1..=1_000_000))]
+        concurrency: u32,
+    },
+
     SearchCql {
         #[clap(long)]
         data_dir: PathBuf,
@@ -311,6 +334,32 @@ async fn main() {
             })
             .await;
             info!("Drop Index took {duration:.2?}");
+        }
+
+        Command::DeleteRows {
+            data_dir,
+            scylla,
+            user,
+            passwd_path,
+            keyspace,
+            table,
+            concurrency,
+        } => {
+            let dataset = data::new(data_dir).await;
+            let scylla = Scylla::new(scylla, user, passwd_path, &keyspace, &table).await;
+            let (duration, _) = measure_duration(async move {
+                scylla
+                    .delete_rows(
+                        &keyspace,
+                        &table,
+                        dataset.buckets(),
+                        dataset.ids_stream().await,
+                        concurrency as usize,
+                    )
+                    .await;
+            })
+            .await;
+            info!("Delete rows took {duration:.2?}");
         }
 
         Command::SearchCql {

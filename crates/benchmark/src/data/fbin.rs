@@ -6,7 +6,6 @@
 use crate::data::Query;
 use futures::StreamExt;
 use futures::stream;
-use futures::stream::BoxStream;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::io::SeekFrom;
@@ -51,9 +50,20 @@ pub(crate) async fn dimension(path: Arc<PathBuf>, config: Arc<Config>) -> usize 
         .dimension as usize
 }
 
-pub(crate) async fn ids_stream(path: Arc<PathBuf>, config: Arc<Config>) -> BoxStream<'static, i64> {
+pub(crate) async fn ids_stream(path: Arc<PathBuf>, config: Arc<Config>) -> mpsc::Receiver<i64> {
     let header = Header::header(&path.join(&config.data_fbin)).await;
-    stream::iter(0..header.count as i64).boxed()
+
+    let workers = Handle::current().metrics().num_workers();
+    const OVERLOAD_FACTOR: usize = 3;
+    let (tx, rx) = mpsc::channel(workers * OVERLOAD_FACTOR);
+    tokio::spawn(async move {
+        for id in 0..header.count as i64 {
+            if tx.send(id).await.is_err() {
+                break;
+            }
+        }
+    });
+    rx
 }
 
 pub(crate) async fn vector_stream(

@@ -20,6 +20,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::io::BufReader;
 use tokio::io::BufWriter;
 use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 use tracing::info;
 
 const DATASET_FILENAME: &str = "dataset.toml";
@@ -84,6 +85,17 @@ impl Data {
         }
     }
 
+    pub(crate) async fn ids_stream(&self) -> mpsc::Receiver<i64> {
+        match &self.format {
+            Format::Parquet(config) => {
+                parquet::ids_stream(Arc::clone(&self.path), Arc::clone(config)).await
+            }
+            Format::Fbin(config) => {
+                fbin::ids_stream(Arc::clone(&self.path), Arc::clone(config)).await
+            }
+        }
+    }
+
     pub(crate) fn buckets(&self) -> Arc<BTreeMap<i64, u8>> {
         Arc::clone(&self.buckets)
     }
@@ -114,12 +126,12 @@ async fn format(path: &Path) -> Format {
 }
 
 async fn build_buckets(path: Arc<PathBuf>, format: &Format) -> BTreeMap<i64, u8> {
-    let stream = match &format {
+    let rx = match &format {
         Format::Parquet(config) => parquet::ids_stream(Arc::clone(&path), Arc::clone(config)).await,
         Format::Fbin(config) => fbin::ids_stream(Arc::clone(&path), Arc::clone(config)).await,
     };
     info!("Building buckets for dataset at {path:?}...");
-    let mut buckets = stream
+    let mut buckets = ReceiverStream::new(rx)
         .map(|id| (id, u8::MAX))
         .collect::<BTreeMap<_, _>>()
         .await;

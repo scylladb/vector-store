@@ -219,6 +219,50 @@ impl Scylla {
         _ = semaphore.acquire_many(concurrency as u32).await.unwrap();
     }
 
+    pub(crate) async fn delete_rows(
+        &self,
+        keyspace: &str,
+        table: &str,
+        buckets: Arc<BTreeMap<i64, u8>>,
+        mut rx: mpsc::Receiver<i64>,
+        concurrency: usize,
+    ) {
+        let mut st_delete = self
+            .0
+            .session
+            .prepare(format!(
+                "DELETE FROM {keyspace}.{table} WHERE {BUCKET} = ? AND {VECTOR_ID} = ?"
+            ))
+            .await
+            .unwrap();
+        st_delete.set_consistency(Consistency::Any);
+
+        let semaphore = Arc::new(Semaphore::new(concurrency));
+
+        let mut count = 0;
+        while let Some(vector_id) = rx.recv().await {
+            let permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
+            let scylla = Arc::clone(&self.0);
+            let st_delete = st_delete.clone();
+
+            count += 1;
+            if count % 1_000_000 == 0 {
+                info!("Deleting vector {}M", count / 1_000_000);
+            }
+
+            let bucket = *buckets.get(&vector_id).unwrap_or(&u8::MAX) as i64;
+            tokio::spawn(async move {
+                scylla
+                    .session
+                    .execute_unpaged(&st_delete, (bucket, vector_id))
+                    .await
+                    .unwrap();
+                drop(permit);
+            });
+        }
+        _ = semaphore.acquire_many(concurrency as u32).await.unwrap();
+    }
+
     pub(crate) async fn search(&self, bucket: Option<u8>, query: &Query) -> f64 {
         let found = if let Some(bucket) = bucket {
             time::timeout(Duration::from_secs(10), async move {
