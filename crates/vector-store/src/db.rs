@@ -480,6 +480,12 @@ fn reconnect_reasons(old_config: &Config, new_config: &Config) -> Vec<&'static s
     if new_config.cql_uri_translation_map != old_config.cql_uri_translation_map {
         reasons.push("CQL URI translation map");
     }
+    if new_config.cql_preferred_datacenter != old_config.cql_preferred_datacenter {
+        reasons.push("CQL preferred datacenter");
+    }
+    if new_config.cql_preferred_rack != old_config.cql_preferred_rack {
+        reasons.push("CQL preferred rack");
+    }
 
     reasons
 }
@@ -554,7 +560,20 @@ async fn create_session(
             } else {
                 builder
             }
-        });
+        })
+        .pipe(
+            |builder| match (&config.cql_preferred_datacenter, &config.cql_preferred_rack) {
+                (Some(dc), Some(rack)) => {
+                    info!("Setting preferred CQL datacenter/rack to {dc}/{rack}");
+                    builder.prefer_datacenter_and_rack(dc.clone(), rack.clone())
+                }
+                (Some(dc), None) => {
+                    info!("Setting preferred CQL datacenter to {dc}");
+                    builder.prefer_datacenter(dc.clone())
+                }
+                (None, _) => builder,
+            },
+        );
 
     if let Some(Credentials {
         username,
@@ -1269,6 +1288,74 @@ pub(crate) mod tests {
         assert_eq!(
             reconnect_reasons(&old_config, &new_config),
             vec!["CQL URI translation map"]
+        );
+    }
+
+    #[test]
+    fn reconnects_when_cql_preferred_datacenter_changes() {
+        let old_config = Config {
+            cql_preferred_datacenter: Some("dc1".to_string()),
+            ..Config::default()
+        };
+        let new_config = Config {
+            cql_preferred_datacenter: Some("dc2".to_string()),
+            ..Config::default()
+        };
+
+        assert_eq!(
+            reconnect_reasons(&old_config, &new_config),
+            vec!["CQL preferred datacenter"]
+        );
+    }
+
+    #[test]
+    fn reconnects_when_cql_preferred_datacenter_cleared() {
+        let old_config = Config {
+            cql_preferred_datacenter: Some("dc1".to_string()),
+            ..Config::default()
+        };
+        let new_config = Config::default();
+
+        assert_eq!(
+            reconnect_reasons(&old_config, &new_config),
+            vec!["CQL preferred datacenter"]
+        );
+    }
+
+    #[test]
+    fn reconnects_when_cql_preferred_rack_changes() {
+        let old_config = Config {
+            cql_preferred_datacenter: Some("dc1".to_string()),
+            cql_preferred_rack: Some("rack1".to_string()),
+            ..Config::default()
+        };
+        let new_config = Config {
+            cql_preferred_datacenter: Some("dc1".to_string()),
+            cql_preferred_rack: Some("rack2".to_string()),
+            ..Config::default()
+        };
+
+        assert_eq!(
+            reconnect_reasons(&old_config, &new_config),
+            vec!["CQL preferred rack"]
+        );
+    }
+
+    #[test]
+    fn reconnects_when_cql_preferred_rack_cleared() {
+        let old_config = Config {
+            cql_preferred_datacenter: Some("dc1".to_string()),
+            cql_preferred_rack: Some("rack1".to_string()),
+            ..Config::default()
+        };
+        let new_config = Config {
+            cql_preferred_datacenter: Some("dc1".to_string()),
+            ..Config::default()
+        };
+
+        assert_eq!(
+            reconnect_reasons(&old_config, &new_config),
+            vec!["CQL preferred rack"]
         );
     }
 
