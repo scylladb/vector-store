@@ -98,7 +98,7 @@ impl<I, D: std::fmt::Debug> std::fmt::Debug for IndexEntry<I, D> {
 }
 
 pub(crate) type VsIndexEntry = IndexEntry<VsIndex, VsIndexData>;
-pub(crate) type FtsIndexEntry = IndexEntry<FtsIndex>;
+pub(crate) type FtsIndexEntry = IndexEntry<FtsIndex, FtsIndexData>;
 
 #[derive(Debug)]
 pub(crate) struct VsIndexData {
@@ -108,6 +108,11 @@ pub(crate) struct VsIndexData {
     table_columns: Arc<HashMap<ColumnName, NativeType>>,
     version: IndexVersion,
     options: crate::IndexOptionsVs,
+}
+
+#[derive(Debug)]
+pub(crate) struct FtsIndexData {
+    options: crate::IndexOptionsFts,
 }
 
 impl<I, D> IndexEntry<I, D> {
@@ -239,17 +244,27 @@ impl FtsIndexEntry {
         index: mpsc::Sender<FtsIndex>,
         monitor: mpsc::Sender<MonitorItems>,
         db_index: mpsc::Sender<DbIndex>,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
+        let options = metadata
+            .fts()
+            .ok_or_else(|| {
+                anyhow::anyhow!("add_index_fts must be called with a fulltext-search index")
+            })?
+            .clone();
         let progress = db_index.full_scan_progress().await;
-        Self {
+        Ok(Self {
             index,
             _monitor: monitor,
             db_index,
             status: IndexStatus::Initializing,
             progress,
             primary_key_columns: metadata.primary_key_columns,
-            data: (),
-        }
+            data: FtsIndexData { options },
+        })
+    }
+
+    pub(crate) fn options(&self) -> &crate::IndexOptionsFts {
+        &self.data.options
     }
 }
 

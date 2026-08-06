@@ -3,9 +3,11 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+mod common;
 mod db_basic;
 mod fts;
 mod https;
+mod index_info;
 mod index_status;
 mod info;
 mod memory_limit;

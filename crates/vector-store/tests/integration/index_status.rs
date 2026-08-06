@@ -3,12 +3,12 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
-use crate::routing::add_table;
-use crate::routing::blocking_scan_fn;
-use crate::routing::make_index;
-use crate::routing::ordered_timeuuid;
-use crate::routing::setup;
-use crate::routing::single_row_scan;
+use crate::common::add_table;
+use crate::common::blocking_scan_fn;
+use crate::common::make_vs_index;
+use crate::common::ordered_timeuuid;
+use crate::common::setup;
+use crate::common::single_row_scan;
 use crate::wait_for;
 use httpapi::IndexStatus;
 use rstest::rstest;
@@ -44,7 +44,7 @@ async fn index_status_reports_build_progress_while_bootstrapping() {
     // whose scan never completes, keeping it bootstrapping at that progress.
     db.set_next_full_scan_progress(Progress::InProgress(Percentage::try_from(37.0).unwrap()));
 
-    let index = make_index(
+    let index = make_vs_index(
         "building",
         &["pk"],
         1,
@@ -86,7 +86,7 @@ async fn index_status_reports_full_progress_when_serving() {
         ["embedding".into()],
     );
 
-    let index = make_index(
+    let index = make_vs_index(
         "ready",
         &["pk"],
         1,

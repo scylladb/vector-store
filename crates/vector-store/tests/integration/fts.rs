@@ -456,5 +456,8 @@ async fn fts_index_appears_in_indexes_list() {
         .find(|i| i.keyspace == keyspace_name && i.index == index_name);
 
     assert!(fts_index.is_some());
-    assert_eq!(fts_index.unwrap().index_type, httpapi::IndexType::Fulltext);
+    assert!(matches!(
+        fts_index.unwrap().options,
+        httpapi::IndexOptions::Fulltext(_)
+    ));
 }

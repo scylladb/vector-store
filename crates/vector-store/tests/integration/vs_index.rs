@@ -335,7 +335,7 @@ async fn failed_db_index_create(#[case] config: Config) {
             connectivity: Default::default(),
             expansion_add: Default::default(),
             expansion_search: Default::default(),
-            space_type: Default::default(),
+            space_type: SpaceType::Euclidean,
             quantization: Default::default(),
         }),
     };

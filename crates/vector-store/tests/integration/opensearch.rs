@@ -23,6 +23,7 @@ use vector_store::IndexKind;
 use vector_store::IndexMetadata;
 use vector_store::IndexOptionsVs;
 use vector_store::NonemptyArc;
+use vector_store::SpaceType::Euclidean;
 use vector_store::Timestamp;
 
 #[tokio::test]
@@ -46,7 +47,7 @@ async fn simple_create_search_delete_index() {
             connectivity: Default::default(),
             expansion_add: Default::default(),
             expansion_search: Default::default(),
-            space_type: Default::default(),
+            space_type: Euclidean,
             quantization: Default::default(),
         }),
     };
