@@ -258,9 +258,8 @@ struct Fixture {
 }
 
 impl e2etest::Fixture for Fixture {
-    async fn setup(setup: &mut impl e2etest::Setup) -> Self {
-        setup.setup::<TestActors>().await;
-        let actors = setup.get::<TestActors>().await.unwrap();
+    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
+        let actors = setup.setup::<TestActors>().await?;
 
         let scylla_configs = alternator::get_scylla_configs(
             &actors,
@@ -277,7 +276,7 @@ impl e2etest::Fixture for Fixture {
 
         common::init_with_config(&actors, scylla_configs, vs_configs, false).await;
 
-        Self { actors }
+        Some(Self { actors })
     }
 
     async fn teardown(self) {

@@ -221,9 +221,8 @@ struct Fixture {
 }
 
 impl e2etest::Fixture for Fixture {
-    async fn setup(setup: &mut impl e2etest::Setup) -> Self {
-        setup.setup::<TestActors>().await;
-        let actors = setup.get::<TestActors>().await.unwrap();
+    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
+        let actors = setup.setup::<TestActors>().await?;
 
         alternator::init_with_args(
             &actors,
@@ -231,7 +230,7 @@ impl e2etest::Fixture for Fixture {
         )
         .await;
 
-        Self { actors }
+        Some(Self { actors })
     }
 
     async fn teardown(self) {

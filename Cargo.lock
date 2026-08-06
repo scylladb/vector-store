@@ -1895,9 +1895,9 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "e2etest"
-version = "0.2.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c07d6e20f5593d38a99c606d037cd6e5c48ae207c807be3ba0bd41c772da0b2"
+checksum = "f6295e4e70c848165ef0f1463b0ae68611429f363e8a2057a5c72ce7429cdde0"
 dependencies = [
  "async-backtrace",
  "e2etest-macros",
@@ -1934,9 +1934,9 @@ dependencies = [
 
 [[package]]
 name = "e2etest-macros"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "319137d449236a9c0b537f2d2266d31ce919bc3d367364178a05a1c69c01ff63"
+checksum = "db22f36307489497d9241f4245dbae82d7c13ba7276fb8b297d4e916c03bda01"
 dependencies = [
  "convert_case 0.11.0",
  "itertools 0.14.0",

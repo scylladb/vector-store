@@ -29,11 +29,10 @@ struct GroupFixture {
 }
 
 impl e2etest::Fixture for GroupFixture {
-    async fn setup(setup: &mut impl e2etest::Setup) -> Self {
-        setup.setup::<TestActors>().await;
-        let actors = setup.get::<TestActors>().await.unwrap();
+    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
+        let actors = setup.setup::<TestActors>().await?;
         common::init(&actors).await;
-        Self { actors }
+        Some(Self { actors })
     }
 
     async fn teardown(self) {
@@ -49,8 +48,8 @@ struct Fixture {
 }
 
 impl e2etest::Fixture for Fixture {
-    async fn setup(setup: &mut impl e2etest::Setup) -> Self {
-        let actors = setup.get::<TestActors>().await.unwrap();
+    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
+        let actors = setup.setup::<TestActors>().await?;
 
         let (session, clients) = common::prepare_connection(&actors).await;
 
@@ -62,12 +61,12 @@ impl e2etest::Fixture for Fixture {
             None,
         )
         .await;
-        Self {
+        Some(Self {
             session,
             clients,
             keyspace,
             table,
-        }
+        })
     }
 
     async fn teardown(self) {

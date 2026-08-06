@@ -22,11 +22,10 @@ struct Cluster {
 }
 
 impl e2etest::Fixture for Cluster {
-    async fn setup(setup: &mut impl e2etest::Setup) -> Self {
-        setup.setup::<TestActors>().await;
-        let actors = setup.get::<TestActors>().await.unwrap();
+    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
+        let actors = setup.setup::<TestActors>().await?;
         init(&actors).await;
-        Self { actors }
+        Some(Self { actors })
     }
 
     async fn teardown(self) {
@@ -43,17 +42,16 @@ struct Fixture {
 }
 
 impl e2etest::Fixture for Fixture {
-    async fn setup(setup: &mut impl e2etest::Setup) -> Self {
-        setup.setup::<Cluster>().await;
-        let actors = setup.get::<TestActors>().await.unwrap();
-        let (session, clients, keyspace, table) = Self::init_fts_table(&actors).await;
-        Self {
+    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
+        let cluster = setup.setup::<Cluster>().await?;
+        let (session, clients, keyspace, table) = Self::init_fts_table(&cluster.actors).await;
+        Some(Self {
             session,
             keyspace,
             table,
             clients,
             index: RwLock::new(None),
-        }
+        })
     }
 
     async fn teardown(self) {
