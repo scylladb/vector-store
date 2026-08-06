@@ -52,6 +52,8 @@ use std::collections::btree_map::Entry;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::RwLock;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
@@ -117,13 +119,15 @@ fn new(
     let (tx_search, mut rx_search) = mpsc::channel(perf::channel_size().into());
 
     let span_key = index_key.clone();
+    let params = Arc::new(params);
 
     tokio::spawn(perf::hotpath_async(
         {
             async move {
                 debug!("starting");
 
-                let mut state = State::new(table, params);
+                let mut partitions = BTreeMap::new();
+                let mut sizes = BTreeMap::new();
 
                 let mut allocate_prev = Allocate::Can;
                 let allocate_rx = memory.subscribe_allocate().await;
@@ -134,45 +138,20 @@ fn new(
                         continue;
                     }
 
-                    match msg {
-                        Message::Modify(VsIndexModify::AddVector {
-                            partition_id,
-                            primary_id,
-                            embedding,
-                            in_progress: _in_progress,
-                        }) => {
-                            state.add_vector(partition_id, primary_id, embedding).await;
-                        }
-                        Message::Modify(VsIndexModify::RemoveVector {
-                            partition_id,
-                            primary_id,
-                            in_progress: _in_progress,
-                        }) => {
-                            state.remove_vector(partition_id, primary_id).await;
-                        }
-                        Message::Modify(VsIndexModify::RemovePartition { partition_id }) => {
-                            state.remove_partition(partition_id);
-                        }
-                        Message::Search(VsIndexSearch::Ann {
-                            index_key,
-                            embedding,
-                            limit,
-                            tx,
-                        }) => {
-                            if let Some(tx) = validate_dimensions(tx, &embedding, state.params.dim)
-                            {
-                                _ = tx.send(state.ann(index_key, embedding, limit).await);
-                            }
-                        }
-                        Message::Search(VsIndexSearch::FilteredAnn { tx, .. }) => {
-                            _ = tx.send(Err(anyhow::anyhow!(
-                                "DiskANN index does not support filtered search"
-                            )));
-                        }
-                        Message::Search(VsIndexSearch::Count { index_key, tx }) => {
-                            _ = tx.send(state.count(&index_key));
-                        }
-                    }
+                    let Some((partition, size, msg)) =
+                        preprocess(&mut partitions, &mut sizes, table.as_ref(), &params, msg)
+                    else {
+                        continue;
+                    };
+
+                    process(
+                        partition,
+                        Arc::clone(&table),
+                        Arc::clone(&params),
+                        size,
+                        msg,
+                    )
+                    .await;
                 }
 
                 debug!("finished");
@@ -182,6 +161,155 @@ fn new(
     ));
 
     Ok((tx_modify, tx_search))
+}
+
+#[hotpath::measure]
+fn preprocess<T>(
+    partitions: &mut BTreeMap<PartitionId, Arc<Partition>>,
+    sizes: &mut BTreeMap<IndexId, Arc<AtomicUsize>>,
+    table: &RwLock<T>,
+    params: &DiskannParams,
+    msg: Message,
+) -> Option<(Arc<Partition>, Arc<AtomicUsize>, Message)>
+where
+    T: TableSearch + Send + Sync + 'static,
+{
+    match msg {
+        Message::Modify(VsIndexModify::AddVector {
+            partition_id,
+            ref embedding,
+            ..
+        }) => {
+            let partition = match partitions.entry(partition_id) {
+                Entry::Occupied(entry) => Arc::clone(entry.get()),
+                Entry::Vacant(entry) => {
+                    // The first vector of a partition becomes the start point of the graph, so the
+                    // index is created here to make it depend on the order of the messages only.
+                    let index = create_diskann_index(params, Some(embedding.as_slice()))
+                        .context(format!(
+                            "failed to create index for partition {partition_id:?}"
+                        ))
+                        .inspect_err(|err| warn!("add_vector failed: {err}"))
+                        .ok()?;
+                    Arc::clone(entry.insert(Arc::new(Partition {
+                        partition_id,
+                        index,
+                    })))
+                }
+            };
+            let size = Arc::clone(sizes.entry(partition_id.index_id()).or_default());
+            Some((partition, size, msg))
+        }
+
+        Message::Modify(VsIndexModify::RemoveVector { partition_id, .. }) => {
+            let Some(partition) = partitions.get(&partition_id).cloned() else {
+                debug!("remove_vector: partition {partition_id:?} not found");
+                return None;
+            };
+            let size = Arc::clone(sizes.entry(partition_id.index_id()).or_default());
+            Some((partition, size, msg))
+        }
+
+        Message::Search(VsIndexSearch::Ann {
+            index_key,
+            embedding,
+            limit,
+            tx,
+        }) => {
+            let Some((partition_id, _)) = table.read().unwrap().partition_id(&index_key, None)
+            else {
+                warn!("partition id not found for index key {index_key} during ann");
+                _ = tx.send(Ok((vec![], vec![])));
+                return None;
+            };
+            let Some(partition) = partitions.get(&partition_id).cloned() else {
+                _ = tx.send(Ok((vec![], vec![])));
+                return None;
+            };
+            let size = Arc::clone(sizes.entry(partition_id.index_id()).or_default());
+            Some((
+                partition,
+                size,
+                Message::Search(VsIndexSearch::Ann {
+                    index_key,
+                    embedding,
+                    limit,
+                    tx,
+                }),
+            ))
+        }
+
+        Message::Search(VsIndexSearch::FilteredAnn { tx, .. }) => {
+            _ = tx.send(Err(anyhow::anyhow!(
+                "DiskANN index does not support filtered search"
+            )));
+            None
+        }
+
+        Message::Search(VsIndexSearch::Count { index_key, tx }) => {
+            let count: CountR = match table.read().unwrap().index_id(&index_key) {
+                Some(index_id) => Ok(sizes
+                    .get(&index_id)
+                    .map(|size| size.load(Ordering::Relaxed))
+                    .unwrap_or(0)),
+                None => Err(anyhow::anyhow!(
+                    "index id not found for index key {index_key}"
+                )),
+            };
+            _ = tx.send(count);
+            None
+        }
+
+        Message::Modify(VsIndexModify::RemovePartition { partition_id }) => {
+            if partitions.remove(&partition_id).is_none() {
+                debug!("remove_partition: partition {partition_id:?} not found");
+            }
+            None
+        }
+    }
+}
+
+#[hotpath::measure]
+async fn process<T>(
+    partition: Arc<Partition>,
+    table: Arc<RwLock<T>>,
+    params: Arc<DiskannParams>,
+    size: Arc<AtomicUsize>,
+    msg: Message,
+) where
+    T: TableSearch + Send + Sync + 'static,
+{
+    match msg {
+        Message::Modify(VsIndexModify::AddVector {
+            primary_id,
+            embedding,
+            in_progress: _in_progress,
+            ..
+        }) => add_vector(&partition, &size, primary_id, embedding).await,
+
+        Message::Modify(VsIndexModify::RemoveVector {
+            primary_id,
+            in_progress: _in_progress,
+            ..
+        }) => remove_vector(&partition, &params, &size, primary_id).await,
+
+        Message::Search(VsIndexSearch::Ann {
+            embedding,
+            limit,
+            tx,
+            ..
+        }) => {
+            if let Some(tx) = validate_dimensions(tx, &embedding, params.dim) {
+                _ = tx.send(ann(&partition, &table, &params, embedding, limit).await);
+            }
+        }
+
+        Message::Search(VsIndexSearch::FilteredAnn { .. })
+        | Message::Search(VsIndexSearch::Count { .. })
+        | Message::Modify(VsIndexModify::RemovePartition { .. }) => {
+            unreachable!()
+        }
+    }
 }
 
 fn create_diskann_index(
@@ -200,201 +328,124 @@ fn create_diskann_index(
 }
 
 struct Partition {
-    index: DiskANNIndex<DiskannProvider>,
+    partition_id: PartitionId,
+    index: DiskannIndex,
 }
 
-struct State<T>
+async fn add_vector(
+    partition: &Partition,
+    size: &AtomicUsize,
+    primary_id: PrimaryId,
+    embedding: Vector,
+) {
+    if let Err(err) = partition
+        .index
+        .insert(
+            &InmemStrategy,
+            &InmemContext,
+            &primary_id,
+            embedding.as_slice(),
+        )
+        .await
+    {
+        warn!("add_vector: failed to insert vector: {err}");
+    } else {
+        size.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+async fn remove_vector(
+    partition: &Partition,
+    params: &DiskannParams,
+    size: &AtomicUsize,
+    primary_id: PrimaryId,
+) {
+    if let Err(err) = partition
+        .index
+        .inplace_delete(
+            InmemStrategy,
+            &InmemContext,
+            &primary_id,
+            params.config.pruned_degree().get(),
+            InplaceDeleteMethod::OneHop,
+        )
+        .await
+    {
+        warn!("remove_vector: failed to delete vector: {err}");
+    } else {
+        size.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+async fn search(
+    partition: &Partition,
+    params: &DiskannParams,
+    embedding: &Vector,
+    k: usize,
+) -> anyhow::Result<impl Iterator<Item = anyhow::Result<(PrimaryId, Distance)>>> {
+    let space_type = params.space_type;
+    let dimensions = embedding.dim();
+
+    let k = k.min(params.max_points.get());
+    let l_value = params.l_default.get().max(k);
+    let knn = Knn::new(k, l_value, Some(params.beam_width.get()))
+        .context("failed to build DiskANN search parameters")?;
+
+    let mut neighbors: Vec<Neighbor<PrimaryId>> = Vec::with_capacity(knn.k_value().get());
+    let SearchStats { result_count, .. } = partition
+        .index
+        .search(
+            knn,
+            &InmemStrategy,
+            &InmemContext,
+            embedding.as_slice(),
+            &mut neighbors,
+        )
+        .await?;
+
+    neighbors.truncate((result_count as usize).min(k));
+    Ok(neighbors.into_iter().map(move |neighbor| {
+        let raw_distance = match space_type {
+            SpaceType::DotProduct => neighbor.distance() + 1.0,
+            _ => neighbor.distance(),
+        };
+        Distance::try_from((raw_distance, space_type, dimensions))
+            .map(|distance| (*neighbor.id(), distance))
+    }))
+}
+
+async fn ann<T>(
+    partition: &Partition,
+    table: &RwLock<T>,
+    params: &DiskannParams,
+    embedding: Vector,
+    limit: Limit,
+) -> AnnR
 where
     T: TableSearch + Send + Sync + 'static,
 {
-    partitions: BTreeMap<PartitionId, Partition>,
-    sizes: BTreeMap<IndexId, usize>,
-    table: Arc<RwLock<T>>,
-    params: DiskannParams,
-}
+    let matches = search(partition, params, &embedding, limit.0.get())
+        .await
+        .context("ann search failed")?;
 
-impl<T> State<T>
-where
-    T: TableSearch + Send + Sync + 'static,
-{
-    fn new(table: Arc<RwLock<T>>, params: DiskannParams) -> Self {
-        Self {
-            partitions: BTreeMap::new(),
-            sizes: BTreeMap::new(),
-            table,
-            params,
-        }
-    }
-
-    fn get_or_create_partition(
-        &mut self,
-        partition_id: &PartitionId,
-        start_point: Option<&[f32]>,
-    ) -> anyhow::Result<&mut Partition> {
-        match self.partitions.entry(*partition_id) {
-            Entry::Occupied(entry) => Ok(entry.into_mut()),
-            Entry::Vacant(entry) => {
-                let index = create_diskann_index(&self.params, start_point).context(format!(
-                    "failed to create index for partition {partition_id:?}"
-                ))?;
-
-                self.sizes.entry(partition_id.index_id()).or_insert(0);
-
-                Ok(entry.insert(Partition { index }))
-            }
-        }
-    }
-
-    async fn add_vector(
-        &mut self,
-        partition_id: PartitionId,
-        primary_id: PrimaryId,
-        embedding: Vector,
-    ) {
-        let partition =
-            match self.get_or_create_partition(&partition_id, Some(embedding.as_slice())) {
-                Ok(partition) => partition,
-                Err(err) => {
-                    warn!("add_vector failed: {err}");
-                    return;
-                }
-            };
-        if let Err(err) = partition
-            .index
-            .insert(
-                &InmemStrategy,
-                &InmemContext,
-                &primary_id,
-                embedding.as_slice(),
-            )
-            .await
-        {
-            warn!("add_vector: failed to insert vector: {err}");
-        } else {
-            let size = self.sizes.entry(partition_id.index_id()).or_insert(0);
-            *size = size.saturating_add(1);
-        }
-    }
-
-    async fn remove_vector(&mut self, partition_id: PartitionId, primary_id: PrimaryId) {
-        let Some(partition) = self.partitions.get_mut(&partition_id) else {
-            debug!("remove_vector: partition {partition_id:?} not found");
-            return;
-        };
-        if let Err(err) = partition
-            .index
-            .inplace_delete(
-                InmemStrategy,
-                &InmemContext,
-                &primary_id,
-                self.params.config.pruned_degree().get(),
-                InplaceDeleteMethod::OneHop,
-            )
-            .await
-        {
-            warn!("remove_vector: failed to delete vector: {err}");
-        } else {
-            let size = self.sizes.entry(partition_id.index_id()).or_insert(0);
-            *size = size.saturating_sub(1);
-        }
-    }
-
-    async fn search(
-        &self,
-        embedding: &Vector,
-        k: usize,
-        partition: &Partition,
-    ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<(PrimaryId, Distance)>>> {
-        let space_type = self.params.space_type;
-        let dimensions = embedding.dim();
-
-        let k = k.min(self.params.max_points.get());
-        let l_value = self.params.l_default.get().max(k);
-        let params = Knn::new(k, l_value, Some(self.params.beam_width.get()))
-            .context("failed to build DiskANN search parameters")?;
-
-        let mut neighbors: Vec<Neighbor<PrimaryId>> = Vec::with_capacity(params.k_value().get());
-        let SearchStats { result_count, .. } = partition
-            .index
-            .search(
-                params,
-                &InmemStrategy,
-                &InmemContext,
-                embedding.as_slice(),
-                &mut neighbors,
-            )
-            .await?;
-
-        neighbors.truncate((result_count as usize).min(k));
-        Ok(neighbors.into_iter().map(move |neighbor| {
-            let raw_distance = match space_type {
-                SpaceType::DotProduct => neighbor.distance() + 1.0,
-                _ => neighbor.distance(),
-            };
-            Distance::try_from((raw_distance, space_type, dimensions))
-                .map(|distance| (*neighbor.id(), distance))
-        }))
-    }
-
-    async fn ann(&self, index_key: IndexKey, embedding: Vector, limit: Limit) -> AnnR {
-        let partition_id: PartitionId = {
-            let table = self.table.read().unwrap();
-            if let Some((partition_id, _)) = table.partition_id(&index_key, None) {
-                partition_id
-            } else {
-                warn!(
-                    "partition id not found for index key {} during ann",
-                    index_key
-                );
-                return Ok((vec![], vec![]));
-            }
-        };
-
-        let Some(partition) = self.partitions.get(&partition_id) else {
-            return Ok((vec![], vec![]));
-        };
-
-        let matches = self
-            .search(&embedding, limit.0.get(), partition)
-            .await
-            .context("ann search failed")?;
-
-        let table = self.table.read().unwrap();
-        let (primary_keys, distances) = itertools::process_results(
-            matches.filter_map_ok(|(primary_id, distance)| {
-                table
-                    .primary_key(partition_id, primary_id)
-                    .or_else(|| {
-                        debug!(
-                            "not defined primary key for partition_id {partition_id:?} \
-                                        and primary_id {primary_id:?}",
-                        );
-                        None
-                    })
-                    .map(|primary_key| (primary_key, distance))
-            }),
-            |it| it.unzip(),
-        )?;
-        Ok((primary_keys, distances))
-    }
-
-    fn remove_partition(&mut self, partition_id: PartitionId) {
-        if self.partitions.remove(&partition_id).is_none() {
-            debug!("remove_partition: partition {partition_id:?} not found");
-        }
-    }
-
-    fn count(&self, index_key: &IndexKey) -> CountR {
-        let index_id = {
-            let table = self.table.read().unwrap();
-            let Some(index_id) = table.index_id(index_key) else {
-                anyhow::bail!("index id not found for index key {index_key}");
-            };
-            index_id
-        };
-
-        Ok(self.sizes.get(&index_id).copied().unwrap_or(0))
-    }
+    let partition_id = partition.partition_id;
+    let table = table.read().unwrap();
+    let (primary_keys, distances) = itertools::process_results(
+        matches.filter_map_ok(|(primary_id, distance)| {
+            table
+                .primary_key(partition_id, primary_id)
+                .or_else(|| {
+                    debug!(
+                        "not defined primary key for partition_id {partition_id:?} \
+                                    and primary_id {primary_id:?}",
+                    );
+                    None
+                })
+                .map(|primary_key| (primary_key, distance))
+        }),
+        |it| it.unzip(),
+    )?;
+    Ok((primary_keys, distances))
 }
 
 #[hotpath::measure]
