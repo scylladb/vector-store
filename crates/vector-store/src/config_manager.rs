@@ -566,6 +566,16 @@ pub async fn load_config(env: impl Fn(&str) -> anyhow::Result<String>) -> anyhow
         .map(|v| serde_json::from_str(&v))
         .transpose()?;
 
+    config.cql_preferred_datacenter = env("VECTOR_STORE_CQL_PREFERRED_DATACENTER").ok();
+    config.cql_preferred_rack = env("VECTOR_STORE_CQL_PREFERRED_RACK").ok();
+
+    // Rack preference only makes sense together with a datacenter preference.
+    if config.cql_preferred_rack.is_some() && config.cql_preferred_datacenter.is_none() {
+        bail!(
+            "VECTOR_STORE_CQL_PREFERRED_RACK requires VECTOR_STORE_CQL_PREFERRED_DATACENTER to also be set"
+        );
+    }
+
     // Validate that both cert and key are provided together, or neither
     match (&tls_cert_path, &tls_key_path) {
         (Some(_), Some(_)) | (None, None) => {
@@ -863,6 +873,44 @@ mod tests {
         )]));
         let config = load_config(env).await.unwrap();
         assert_eq!(config.cql_connection_timeout, Some(Duration::from_secs(30)));
+    }
+
+    #[tokio::test]
+    async fn load_config_cql_preferred_datacenter() {
+        let env = mock_env(HashMap::new());
+        let config = load_config(env).await.unwrap();
+        assert_eq!(config.cql_preferred_datacenter, None);
+
+        let env = mock_env(HashMap::from([(
+            "VECTOR_STORE_CQL_PREFERRED_DATACENTER",
+            "dc1".into(),
+        )]));
+        let config = load_config(env).await.unwrap();
+        assert_eq!(config.cql_preferred_datacenter, Some("dc1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn load_config_cql_preferred_datacenter_and_rack() {
+        let env = mock_env(HashMap::from([
+            ("VECTOR_STORE_CQL_PREFERRED_DATACENTER", "dc1".into()),
+            ("VECTOR_STORE_CQL_PREFERRED_RACK", "rack1".into()),
+        ]));
+        let config = load_config(env).await.unwrap();
+        assert_eq!(config.cql_preferred_datacenter, Some("dc1".to_string()));
+        assert_eq!(config.cql_preferred_rack, Some("rack1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn load_config_cql_preferred_rack_without_datacenter_errors() {
+        let env = mock_env(HashMap::from([(
+            "VECTOR_STORE_CQL_PREFERRED_RACK",
+            "rack1".into(),
+        )]));
+        let result = load_config(env).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains(
+            "VECTOR_STORE_CQL_PREFERRED_RACK requires VECTOR_STORE_CQL_PREFERRED_DATACENTER"
+        ));
     }
 
     #[tokio::test]
