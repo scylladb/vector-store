@@ -30,6 +30,7 @@ use crate::vs_index::VsIndexModify;
 use crate::vs_index::VsIndexSearch;
 use crate::vs_index::validator;
 use crate::worker::Worker;
+use crate::worker::WorkerExt;
 use anyhow::Context;
 use diskann::graph::Config as DiskannConfig;
 use diskann::graph::DiskANNIndex;
@@ -71,7 +72,7 @@ type DiskannProvider = InmemProvider<Full<f32>, PrimaryId>;
 type DiskannIndex = DiskANNIndex<DiskannProvider>;
 
 pub struct DiskannIndexFactory {
-    _worker: async_channel::Sender<Worker>,
+    worker: async_channel::Sender<Worker>,
     memory: mpsc::Sender<Memory>,
     alpha: DiskannAlpha,
 }
@@ -85,7 +86,13 @@ impl VsIndexFactory for DiskannIndexFactory {
         let params = DiskannParams::new(&index, self.alpha, MAX_POINTS)
             .context("failed to create DiskANN parameters")?;
 
-        new(index.key, self.memory.clone(), table, params)
+        new(
+            index.key,
+            self.worker.clone(),
+            self.memory.clone(),
+            table,
+            params,
+        )
     }
 
     fn index_engine_version(&self) -> String {
@@ -101,7 +108,7 @@ pub fn new_diskann(
     let config = config_rx.borrow_and_update();
 
     Ok(DiskannIndexFactory {
-        _worker: worker,
+        worker,
         memory,
         alpha: config
             .diskann_alpha
@@ -111,6 +118,7 @@ pub fn new_diskann(
 
 fn new(
     index_key: IndexKey,
+    worker: async_channel::Sender<Worker>,
     memory: mpsc::Sender<Memory>,
     table: Arc<RwLock<impl TableSearch + Send + Sync + 'static>>,
     params: DiskannParams,
@@ -144,14 +152,7 @@ fn new(
                         continue;
                     };
 
-                    process(
-                        partition,
-                        Arc::clone(&table),
-                        Arc::clone(&params),
-                        size,
-                        msg,
-                    )
-                    .await;
+                    dispatch_task(partition, &table, &params, &worker, size, msg).await;
                 }
 
                 debug!("finished");
@@ -267,6 +268,33 @@ where
             None
         }
     }
+}
+
+#[hotpath::measure]
+async fn dispatch_task<T>(
+    partition: Arc<Partition>,
+    table: &Arc<RwLock<T>>,
+    params: &Arc<DiskannParams>,
+    worker: &async_channel::Sender<Worker>,
+    size: Arc<AtomicUsize>,
+    msg: Message,
+) where
+    T: TableSearch + Send + Sync + 'static,
+{
+    let non_blocking = is_non_blocking(&msg);
+    let table = Arc::clone(table);
+    let params = Arc::clone(params);
+    let task = move || process(partition, table, params, size, msg);
+    if non_blocking {
+        worker.spawn_async_non_blocking(task).await;
+    } else {
+        worker.spawn_async_blocking(task).await;
+    }
+}
+
+#[hotpath::measure]
+fn is_non_blocking(msg: &Message) -> bool {
+    matches!(msg, Message::Search(VsIndexSearch::Ann { .. }))
 }
 
 #[hotpath::measure]
