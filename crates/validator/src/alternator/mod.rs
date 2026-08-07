@@ -654,7 +654,9 @@ async fn get_scylla_configs(
             config.args.retain(|arg| !arg.starts_with(name));
             config.args.push(format!("{name}={value}"));
         }
-        config.extra_config = extra_config.clone();
+        if let Some(extra_config) = extra_config.clone() {
+            config.extra_config = Some(extra_config);
+        }
     }
     scylla_configs
 }
@@ -669,7 +671,7 @@ async fn init_with_args(actors: &TestActors, extra_args: impl IntoIterator<Item 
 
     // Capture db_ip before actors is moved into init_with_config.
     let db_ip = actors.services_subnet.ip(common::DB_OCTET_1);
-    common::init_with_config(actors, scylla_configs, vs_configs).await;
+    common::init_with_config(actors, scylla_configs, vs_configs, true).await;
 
     wait_for_alternator(db_ip).await;
     info!("finished");

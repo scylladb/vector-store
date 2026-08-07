@@ -108,7 +108,7 @@ async fn reloads_tls_identity_after_cert_file_rotation(actors: Arc<TestActors>) 
         );
     }
 
-    init_with_config(&actors, scylla_configs, vs_configs).await;
+    init_with_config(&actors, scylla_configs, vs_configs, true).await;
 
     wait_for(
         || async { https_status_ok(&vs_ips, &cert_v1).await },

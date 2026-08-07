@@ -29,6 +29,7 @@ use std::collections::HashMap;
 use std::iter;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
+use std::sync::LazyLock;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -36,6 +37,7 @@ use std::time::Instant;
 use tap::Pipe;
 use tokio::time;
 use tracing::info;
+use uuid::Uuid;
 
 pub const DEFAULT_TEST_TIMEOUT: Duration = Duration::from_secs(10 * 60); // 10 minutes
 pub const DEFAULT_OPERATION_TIMEOUT: Duration = Duration::from_secs(20);
@@ -54,6 +56,75 @@ pub const DB_PROXY_OCTET_3: u8 = 13;
 pub const VS_OCTET_1: u8 = 21;
 pub const VS_OCTET_2: u8 = 22;
 pub const VS_OCTET_3: u8 = 23;
+
+// Credentials for the default, reduced-privilege role that the Vector Store
+// uses to connect to ScyllaDB, mirroring the setup used in production deployments.
+pub const DEFAULT_DB_USER: &str = "vector_store";
+pub const DEFAULT_DB_PASSWORD: &str = "vector_store_password";
+
+/// Fine-grained indexing permissions granted to `DEFAULT_DB_USER`, mirroring
+/// the reduced-privilege role used in production deployments rather than full `SELECT` access.
+const DEFAULT_ROLE_PERMISSIONS: &[&str] = &["VECTOR_SEARCH_INDEXING", "TEXT_SEARCH_INDEXING"];
+
+pub(crate) static SUPERUSER_NAME: LazyLock<String> =
+    LazyLock::new(|| Uuid::new_v4().simple().to_string());
+pub(crate) static SUPERUSER_PASSWORD: LazyLock<String> =
+    LazyLock::new(|| Uuid::new_v4().simple().to_string());
+static SUPERUSER_SALTED_PASSWORD: LazyLock<String> = LazyLock::new(|| {
+    bcrypt::hash(&*SUPERUSER_PASSWORD, bcrypt::DEFAULT_COST)
+        .expect("failed to hash superuser password")
+});
+
+/// Builds the ScyllaDB config YAML with authentication enabled and superuser credentials set.
+pub fn scylla_auth_config() -> Vec<u8> {
+    let name = &*SUPERUSER_NAME;
+    let salted = &*SUPERUSER_SALTED_PASSWORD;
+    format!(
+        "authenticator: PasswordAuthenticator\n\
+         authorizer: CassandraAuthorizer\n\
+         auth_superuser_name: '{name}'\n\
+         auth_superuser_salted_password: '{salted}'"
+    )
+    .into_bytes()
+}
+
+/// Connects to ScyllaDB as the superuser and creates `DEFAULT_DB_USER`,
+/// granting it the reduced-privilege indexing permissions
+/// (`DEFAULT_ROLE_PERMISSIONS`) that the Vector Store uses by default.
+#[framed]
+async fn setup_default_role(actors: &TestActors, tls: bool) {
+    info!("Setting up default role '{DEFAULT_DB_USER}' with indexing permissions");
+
+    let session = if tls {
+        prepare_connection_with_auth(actors, &SUPERUSER_NAME, &SUPERUSER_PASSWORD)
+            .await
+            .0
+    } else {
+        prepare_connection_with_auth_no_tls(actors, &SUPERUSER_NAME, &SUPERUSER_PASSWORD)
+            .await
+            .0
+    };
+
+    session
+        .query_unpaged(
+            format!(
+                "CREATE ROLE {DEFAULT_DB_USER} WITH PASSWORD = '{DEFAULT_DB_PASSWORD}' AND LOGIN = true"
+            ),
+            (),
+        )
+        .await
+        .expect("failed to create default role");
+
+    for permission in DEFAULT_ROLE_PERMISSIONS {
+        let query = format!("GRANT {permission} ON ALL KEYSPACES TO {DEFAULT_DB_USER}");
+        session
+            .query_unpaged(query, ())
+            .await
+            .unwrap_or_else(|err| {
+                panic!("failed to grant {permission} to {DEFAULT_DB_USER}: {err}")
+            });
+    }
+}
 
 #[derive(
     Clone, Debug, PartialEq, Eq, Hash, derive_more::From, derive_more::AsRef, derive_more::Display,
@@ -120,7 +191,7 @@ pub async fn get_default_scylla_node_configs(actors: &TestActors) -> Vec<ScyllaN
                 args: e2etest_scylla_cluster::default_scylla_args(),
                 cert_path: Some(cert_path.clone()),
                 key_path: Some(key_path.clone()),
-                extra_config: None,
+                extra_config: Some(scylla_auth_config()),
             }
         })
         .collect()
@@ -157,8 +228,8 @@ pub async fn get_default_vs_node_configs(actors: &TestActors) -> Vec<VectorStore
         .map(|(&vs_ip, &db_ip)| VectorStoreNodeConfig {
             vs_ip,
             db_ip,
-            user: None,
-            password: None,
+            user: Some(DEFAULT_DB_USER.to_string()),
+            password: Some(DEFAULT_DB_PASSWORD.to_string()),
             envs: [(
                 "VECTOR_STORE_SCYLLADB_CERTIFICATE_FILE".to_string(),
                 cert_path.clone(),
@@ -178,8 +249,8 @@ pub fn get_proxy_vs_node_configs(actors: &TestActors) -> Vec<VectorStoreNodeConf
         .map(|(&vs_ip, &db_ip)| VectorStoreNodeConfig {
             vs_ip,
             db_ip,
-            user: None,
-            password: None,
+            user: Some(DEFAULT_DB_USER.to_string()),
+            password: Some(DEFAULT_DB_PASSWORD.to_string()),
             envs: Default::default(),
         })
         .collect()
@@ -211,7 +282,7 @@ pub async fn init(actors: &TestActors) {
 
     let scylla_configs = get_default_scylla_node_configs(actors).await;
     let vs_configs = get_default_vs_node_configs(actors).await;
-    init_with_config(actors, scylla_configs, vs_configs).await;
+    init_with_config(actors, scylla_configs, vs_configs, true).await;
 
     info!("finished");
 }
@@ -249,6 +320,9 @@ pub async fn init_with_proxy(actors: &TestActors) {
         cfg.envs.extend(envs.clone());
     });
     actors.vs.start(vs_configs).await;
+
+    setup_default_role(actors, false).await;
+
     assert!(actors.vs.wait_for_ready().await);
 
     info!("finished");
@@ -302,6 +376,9 @@ pub async fn init_with_proxy_single_vs(actors: &TestActors) {
         cfg.envs.extend(envs.clone());
     });
     actors.vs.start(vs_configs).await;
+
+    setup_default_role(actors, false).await;
+
     assert!(actors.vs.wait_for_ready().await);
 
     info!("finished");
@@ -320,12 +397,18 @@ pub async fn init_with_config(
     actors: &TestActors,
     scylla_configs: Vec<ScyllaNodeConfig>,
     vs_configs: Vec<VectorStoreNodeConfig>,
+    use_default_auth: bool,
 ) {
     init_dns(actors).await;
 
     actors.db.start(scylla_configs).await;
     assert!(actors.db.wait_for_ready().await);
     actors.vs.start(vs_configs).await;
+
+    if use_default_auth {
+        setup_default_role(actors, true).await;
+    }
+
     assert!(actors.vs.wait_for_ready().await);
 }
 
@@ -350,6 +433,7 @@ pub async fn prepare_connection_with_custom_vs_ips(
     let session = Arc::new(
         SessionBuilder::new()
             .known_node(actors.services_subnet.ip(DB_OCTET_1).to_string())
+            .user(&*SUPERUSER_NAME, &*SUPERUSER_PASSWORD)
             .tls_context(Some(TlsContext::from(tls_config)))
             .build()
             .await
@@ -374,6 +458,28 @@ pub async fn prepare_connection_with_auth(
             .known_node(actors.services_subnet.ip(DB_OCTET_1).to_string())
             .user(user, password)
             .tls_context(Some(TlsContext::from(tls_config)))
+            .build()
+            .await
+            .expect("failed to create session"),
+    );
+    let vs_ips = get_default_vs_ips(actors);
+    let clients = vs_ips
+        .iter()
+        .map(|&ip| HttpClient::new((ip, VS_PORT).into()))
+        .collect();
+    (session, clients)
+}
+
+#[framed]
+pub async fn prepare_connection_with_auth_no_tls(
+    actors: &TestActors,
+    user: &str,
+    password: &str,
+) -> (Arc<Session>, Vec<HttpClient>) {
+    let session = Arc::new(
+        SessionBuilder::new()
+            .known_node(actors.services_subnet.ip(DB_OCTET_1).to_string())
+            .user(user, password)
             .build()
             .await
             .expect("failed to create session"),
@@ -428,6 +534,7 @@ pub async fn prepare_connection_with_custom_vs_ips_no_tls(
     let session = Arc::new(
         SessionBuilder::new()
             .known_node(actors.services_subnet.ip(DB_OCTET_1).to_string())
+            .user(&*SUPERUSER_NAME, &*SUPERUSER_PASSWORD)
             .build()
             .await
             .expect("failed to create session"),
