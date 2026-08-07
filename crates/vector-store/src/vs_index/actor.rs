@@ -67,14 +67,14 @@ pub(crate) trait VsIndexModifyExt {
         primary_id: PrimaryId,
         embedding: Vector,
         in_progress: AsyncInProgress,
-    );
+    ) -> anyhow::Result<()>;
     async fn remove_vector(
         &self,
         partition_id: PartitionId,
         primary_id: PrimaryId,
         in_progress: AsyncInProgress,
-    );
-    async fn remove_partition(&self, partition_id: PartitionId);
+    ) -> anyhow::Result<()>;
+    async fn remove_partition(&self, partition_id: PartitionId) -> anyhow::Result<()>;
 }
 
 pub(crate) trait VsIndexSearchExt {
@@ -97,15 +97,15 @@ impl VsIndexModifyExt for mpsc::Sender<VsIndexModify> {
         primary_id: PrimaryId,
         embedding: Vector,
         in_progress: AsyncInProgress,
-    ) {
-        self.send(VsIndexModify::AddVector {
-            partition_id,
-            primary_id,
-            embedding,
-            in_progress,
-        })
-        .await
-        .expect("internal actor should receive request");
+    ) -> anyhow::Result<()> {
+        Ok(self
+            .send(VsIndexModify::AddVector {
+                partition_id,
+                primary_id,
+                embedding,
+                in_progress,
+            })
+            .await?)
     }
 
     #[hotpath::measure]
@@ -114,21 +114,21 @@ impl VsIndexModifyExt for mpsc::Sender<VsIndexModify> {
         partition_id: PartitionId,
         primary_id: PrimaryId,
         in_progress: AsyncInProgress,
-    ) {
-        self.send(VsIndexModify::RemoveVector {
-            partition_id,
-            primary_id,
-            in_progress,
-        })
-        .await
-        .expect("internal actor should receive request");
+    ) -> anyhow::Result<()> {
+        Ok(self
+            .send(VsIndexModify::RemoveVector {
+                partition_id,
+                primary_id,
+                in_progress,
+            })
+            .await?)
     }
 
     #[hotpath::measure]
-    async fn remove_partition(&self, partition_id: PartitionId) {
-        self.send(VsIndexModify::RemovePartition { partition_id })
-            .await
-            .expect("internal actor should receive request");
+    async fn remove_partition(&self, partition_id: PartitionId) -> anyhow::Result<()> {
+        Ok(self
+            .send(VsIndexModify::RemovePartition { partition_id })
+            .await?)
     }
 }
 

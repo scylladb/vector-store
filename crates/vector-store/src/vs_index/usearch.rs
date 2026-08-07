@@ -1247,7 +1247,8 @@ mod tests {
                             vec![0.0f32; dimensions.get()].into(),
                             AsyncInProgress::None,
                         )
-                        .await;
+                        .await
+                        .unwrap();
                 }
             }));
         }
@@ -1326,7 +1327,8 @@ mod tests {
                 vec![1., 1., 1.].into(),
                 AsyncInProgress::None,
             )
-            .await;
+            .await
+            .unwrap();
         modify
             .add_vector(
                 partition_id,
@@ -1334,7 +1336,8 @@ mod tests {
                 vec![2., -2., 2.].into(),
                 AsyncInProgress::None,
             )
-            .await;
+            .await
+            .unwrap();
         modify
             .add_vector(
                 partition_id,
@@ -1342,7 +1345,8 @@ mod tests {
                 vec![3., 3., 3.].into(),
                 AsyncInProgress::None,
             )
-            .await;
+            .await
+            .unwrap();
 
         table
             .write()
@@ -1383,7 +1387,8 @@ mod tests {
 
         modify
             .remove_vector(partition_id, 3.into(), AsyncInProgress::None)
-            .await;
+            .await
+            .unwrap();
         wait_for_count(&search, index_key.clone(), 2).await.unwrap();
         modify
             .add_vector(
@@ -1392,7 +1397,8 @@ mod tests {
                 vec![2.1, -2.1, 2.1].into(),
                 AsyncInProgress::None,
             )
-            .await;
+            .await
+            .unwrap();
         wait_for_count(&search, index_key.clone(), 3).await.unwrap();
 
         table
@@ -1425,7 +1431,8 @@ mod tests {
 
         modify
             .remove_vector(partition_id, 3.into(), AsyncInProgress::None)
-            .await;
+            .await
+            .unwrap();
 
         wait_for_count(&search, index_key.clone(), 2).await.unwrap();
 
@@ -1489,7 +1496,8 @@ mod tests {
                 vec![1., 1., 1.].into(),
                 AsyncInProgress::None,
             )
-            .await;
+            .await
+            .unwrap();
 
         table
             .write()
@@ -1508,7 +1516,8 @@ mod tests {
                 vec![1., 1., 1.].into(),
                 AsyncInProgress::None,
             )
-            .await;
+            .await
+            .unwrap();
 
         // Wait for the add operation to complete, as it runs in a separate task.
         wait_for_count(&search, index_key.clone(), 1).await.unwrap();

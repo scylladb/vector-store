@@ -579,7 +579,8 @@ mod tests {
                 content.into(),
                 AsyncInProgress::Fullscan(tx),
             )
-            .await;
+            .await
+            .unwrap();
         rx.recv().await;
     }
 
@@ -587,7 +588,8 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(1);
         sender
             .remove_document(primary.into(), AsyncInProgress::Fullscan(tx))
-            .await;
+            .await
+            .unwrap();
         rx.recv().await;
     }
 
@@ -829,7 +831,8 @@ mod tests {
                     "content".into(),
                     AsyncInProgress::Fullscan(tx.clone()),
                 )
-                .await;
+                .await
+                .unwrap();
         }
         // Each added document holds a Fullscan sender clone in the writer's uncommitted guards.
         // Dropping our own sender leaves only those clones alive, so `recv` returns `None` exactly
