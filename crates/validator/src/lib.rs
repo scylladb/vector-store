@@ -201,10 +201,22 @@ pub async fn run() -> ExitCode {
         info!("All tasks finished");
     }
 
+    info!(
+        "Tests passed:\n{list}",
+        list = format_test_names(&stats.tests_passed_names())
+    );
+    info!(
+        "Tests skipped:\n{list}",
+        list = format_test_names(&stats.tests_skipped_names())
+    );
     if !stats.is_success() {
+        info!(
+            "Tests skipped by errors:\n{list}",
+            list = format_test_names(&stats.tests_skipped_err_names())
+        );
         error!(
-            "{error_list}",
-            error_list = format_failed_names(&stats.failed_names())
+            "Tests failed:\n{list}",
+            list = format_test_names(&stats.failed_names())
         );
         return ExitCode::FAILURE;
     }
@@ -212,13 +224,12 @@ pub async fn run() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-pub(crate) fn format_failed_names(failed_names: &[String]) -> String {
-    let failed_names = failed_names
+pub(crate) fn format_test_names(failed_names: &[String]) -> String {
+    failed_names
         .iter()
         .map(|name| format!("- {name}"))
         .collect::<Vec<_>>()
-        .join("\n");
-    format!("List of failures:\n{failed_names}")
+        .join("\n")
 }
 
 /// Represents a subnet for services, derived from a base IP address.
@@ -258,7 +269,7 @@ struct TestActors {
 }
 
 impl e2etest::Fixture for TestActors {
-    async fn setup(setup: &mut impl e2etest::Setup) -> Self {
+    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
         let args = setup.get::<RunArgs>().await.unwrap();
 
         validate_different_subnet(args.dns_ip, args.base_ip);
@@ -293,7 +304,7 @@ impl e2etest::Fixture for TestActors {
         info!("dns version: {}", dns.version().await);
         info!("vector-store version: {}", vs.version().await);
 
-        Self {
+        Some(Self {
             services_subnet,
             tls,
             dns,
@@ -301,7 +312,7 @@ impl e2etest::Fixture for TestActors {
             db,
             vs,
             db_proxy,
-        }
+        })
     }
     async fn teardown(self) {}
 }

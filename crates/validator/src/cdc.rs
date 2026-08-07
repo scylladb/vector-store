@@ -37,11 +37,10 @@ struct FixtureDirect {
 }
 
 impl e2etest::Fixture for FixtureDirect {
-    async fn setup(setup: &mut impl e2etest::Setup) -> Self {
-        setup.setup::<TestActors>().await;
-        let actors = setup.get::<TestActors>().await.unwrap();
+    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
+        let actors = setup.setup::<TestActors>().await?;
         init(&actors).await;
-        Self { actors }
+        Some(Self { actors })
     }
 
     async fn teardown(self) {
@@ -60,11 +59,10 @@ struct FixtureProxy {
 }
 
 impl e2etest::Fixture for FixtureProxy {
-    async fn setup(setup: &mut impl e2etest::Setup) -> Self {
-        setup.setup::<TestActors>().await;
-        let actors = setup.get::<TestActors>().await.unwrap();
+    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
+        let actors = setup.setup::<TestActors>().await?;
         init_with_proxy_single_vs(&actors).await;
-        Self { actors }
+        Some(Self { actors })
     }
 
     async fn teardown(self) {
