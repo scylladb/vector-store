@@ -22,8 +22,11 @@ use crate::table::PartitionId;
 use crate::table::PrimaryId;
 use crate::table::Table;
 use crate::table::TableSearch;
+use crate::vs_index;
+use crate::vs_index::Message;
+use crate::vs_index::VsIndexModify;
+use crate::vs_index::VsIndexSearch;
 use crate::vs_index::actor::AnnR;
-use crate::vs_index::actor::VsIndex;
 use crate::vs_index::factory::VsIndexConfiguration;
 use crate::vs_index::validator;
 use crate::worker::Worker;
@@ -65,7 +68,7 @@ impl VsIndexFactory for UsearchIndexFactory {
         &self,
         index: VsIndexConfiguration,
         table: Arc<RwLock<Table>>,
-    ) -> anyhow::Result<mpsc::Sender<VsIndex>> {
+    ) -> anyhow::Result<(mpsc::Sender<VsIndexModify>, mpsc::Sender<VsIndexSearch>)> {
         match &self.mode {
             Mode::Usearch => {
                 let options = IndexOptions {
@@ -510,7 +513,9 @@ impl From<Quantization> for ScalarKind {
 }
 
 mod operation {
-    use super::VsIndex;
+    use super::Message;
+    use super::VsIndexModify;
+    use super::VsIndexSearch;
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
@@ -524,14 +529,15 @@ mod operation {
         Search,
     }
 
-    impl From<&VsIndex> for Mode {
-        fn from(msg: &VsIndex) -> Self {
+    impl From<&Message> for Mode {
+        fn from(msg: &Message) -> Self {
             match msg {
-                VsIndex::AddVector { .. } => Mode::Insert,
-                VsIndex::RemoveVector { .. } => Mode::Remove,
-                VsIndex::Ann { .. } | VsIndex::FilteredAnn { .. } => Mode::Search,
-                VsIndex::RemovePartition { .. } => todo!(),
-                VsIndex::Count { .. } => unreachable!(),
+                Message::Modify(VsIndexModify::AddVector { .. }) => Mode::Insert,
+                Message::Modify(VsIndexModify::RemoveVector { .. }) => Mode::Remove,
+                Message::Modify(VsIndexModify::RemovePartition { .. }) => todo!(),
+                Message::Search(VsIndexSearch::Ann { .. })
+                | Message::Search(VsIndexSearch::FilteredAnn { .. }) => Mode::Search,
+                Message::Search(VsIndexSearch::Count { .. }) => unreachable!(),
             }
         }
     }
@@ -606,7 +612,7 @@ mod operation {
         }
 
         #[hotpath::measure]
-        pub(super) async fn permit_for_message(&mut self, msg: &VsIndex) -> Permit {
+        pub(super) async fn permit_for_message(&mut self, msg: &Message) -> Permit {
             self.permit(msg.into()).await
         }
 
@@ -686,8 +692,9 @@ fn new<I: UsearchIndex + Send + Sync + 'static>(
     table: Arc<RwLock<impl TableSearch + Send + Sync + 'static>>,
     worker: async_channel::Sender<Worker>,
     memory: mpsc::Sender<Memory>,
-) -> anyhow::Result<mpsc::Sender<VsIndex>> {
-    let (tx, mut rx) = mpsc::channel(perf::channel_size().into());
+) -> anyhow::Result<(mpsc::Sender<VsIndexModify>, mpsc::Sender<VsIndexSearch>)> {
+    let (tx_modify, mut rx_modify) = mpsc::channel(perf::channel_size().into());
+    let (tx_search, mut rx_search) = mpsc::channel(perf::channel_size().into());
 
     tokio::spawn(perf::hotpath_async(
         {
@@ -700,12 +707,11 @@ fn new<I: UsearchIndex + Send + Sync + 'static>(
                 let mut allocate_prev = Allocate::Can;
                 let allocate_rx = memory.subscribe_allocate().await;
 
-                while let Some(msg) = rx.recv().await {
+                while let Some(msg) = vs_index::recv(&mut rx_search, &mut rx_modify).await {
                     if !check_memory_allocation(&msg, &allocate_rx, &mut allocate_prev, &index_key)
                     {
                         continue;
                     }
-
                     let Some((state, partition, msg)) = preprocess(
                         index_fn.clone(),
                         &mut states,
@@ -718,7 +724,7 @@ fn new<I: UsearchIndex + Send + Sync + 'static>(
                     };
 
                     dispatch_task(state, partition, &table, &worker, msg).await;
-                    hotpath::val!("usearch-rx.len-end").set(&rx.len());
+                    hotpath::val!("usearch-rx").set(&(rx_modify.len(), rx_search.len()));
                 }
 
                 partitions
@@ -731,7 +737,7 @@ fn new<I: UsearchIndex + Send + Sync + 'static>(
         .instrument(error_span!("usearch", "{index_key}")),
     ));
 
-    Ok(tx)
+    Ok((tx_modify, tx_search))
 }
 
 #[hotpath::measure]
@@ -741,14 +747,14 @@ fn preprocess<'a, I, T>(
     partitions: &mut BTreeMap<PartitionId, Arc<PartitionState<I>>>,
     table: &RwLock<T>,
     dimensions: Dimensions,
-    msg: VsIndex,
-) -> Option<(&'a mut IndexState, Arc<PartitionState<I>>, VsIndex)>
+    msg: Message,
+) -> Option<(&'a mut IndexState, Arc<PartitionState<I>>, Message)>
 where
     I: UsearchIndex + Send + Sync + 'static,
     T: TableSearch + Send + Sync + 'static,
 {
     match msg {
-        VsIndex::AddVector { partition_id, .. } => {
+        Message::Modify(VsIndexModify::AddVector { partition_id, .. }) => {
             let index_id = partition_id.index_id();
             if let Some(partition) = partitions.get(&partition_id) {
                 let Some(state) = states.get_mut(&index_id) else {
@@ -772,12 +778,12 @@ where
             Some((state, partition, msg))
         }
 
-        VsIndex::Ann {
+        Message::Search(VsIndexSearch::Ann {
             index_key,
             embedding,
             limit,
             tx,
-        } => {
+        }) => {
             let Some((partition_id, _)) = table.read().unwrap().partition_id(&index_key, None)
             else {
                 warn!("partition id not found for index key {index_key:?} during ann");
@@ -797,22 +803,22 @@ where
             Some((
                 state,
                 partition,
-                VsIndex::Ann {
+                Message::Search(VsIndexSearch::Ann {
                     embedding,
                     limit,
                     tx,
                     index_key,
-                },
+                }),
             ))
         }
 
-        VsIndex::FilteredAnn {
+        Message::Search(VsIndexSearch::FilteredAnn {
             index_key,
             embedding,
             filter,
             limit,
             tx,
-        } => {
+        }) => {
             let Some((partition_id, restrictions)) = table
                 .read()
                 .unwrap()
@@ -836,7 +842,7 @@ where
                 return None;
             };
             let msg = if let Some(restrictions) = restrictions {
-                VsIndex::FilteredAnn {
+                VsIndexSearch::FilteredAnn {
                     embedding,
                     limit,
                     filter: Filter {
@@ -847,17 +853,17 @@ where
                     index_key,
                 }
             } else {
-                VsIndex::Ann {
+                VsIndexSearch::Ann {
                     embedding,
                     limit,
                     tx,
                     index_key,
                 }
             };
-            Some((state, partition, msg))
+            Some((state, partition, Message::Search(msg)))
         }
 
-        VsIndex::Count { index_key, tx } => {
+        Message::Search(VsIndexSearch::Count { index_key, tx }) => {
             let Some(index_id) = table.read().unwrap().index_id(&index_key) else {
                 let err = anyhow!("index id not found for index key {index_key:?}");
                 warn!("index count: {err}");
@@ -871,7 +877,7 @@ where
             None
         }
 
-        VsIndex::RemoveVector { partition_id, .. } => {
+        Message::Modify(VsIndexModify::RemoveVector { partition_id, .. }) => {
             let index_id = partition_id.index_id();
             states
                 .get_mut(&index_id)
@@ -879,7 +885,7 @@ where
                 .map(|(state, partition)| (state, Arc::clone(partition), msg))
         }
 
-        VsIndex::RemovePartition { partition_id } => {
+        Message::Modify(VsIndexModify::RemovePartition { partition_id }) => {
             if let Some(idx) = partitions.remove(&partition_id) {
                 idx.stop();
             };
@@ -894,12 +900,12 @@ async fn dispatch_task<I, T>(
     partition: Arc<PartitionState<I>>,
     table: &Arc<RwLock<T>>,
     worker: &async_channel::Sender<Worker>,
-    msg: VsIndex,
+    msg: Message,
 ) where
     I: UsearchIndex + Send + Sync + 'static,
     T: TableSearch + Send + Sync + 'static,
 {
-    if let VsIndex::AddVector { .. } = &msg
+    if let Message::Modify(VsIndexModify::AddVector { .. }) = &msg
         && partition.needs_more_capacity().is_some()
     {
         let operation_permit = state.operation.permit_for_reserve().await;
@@ -937,8 +943,8 @@ async fn dispatch_task<I, T>(
 }
 
 #[hotpath::measure]
-fn is_non_blocking(msg: &VsIndex) -> bool {
-    matches!(msg, VsIndex::Ann { .. })
+fn is_non_blocking(msg: &Message) -> bool {
+    matches!(msg, Message::Search(VsIndexSearch::Ann { .. }))
 }
 
 #[hotpath::measure]
@@ -947,51 +953,51 @@ fn process<I, T>(
     table: Arc<RwLock<T>>,
     dimensions: Dimensions,
     size: Arc<AtomicUsize>,
-    msg: VsIndex,
+    msg: Message,
 ) where
     I: UsearchIndex + Send + Sync + 'static,
     T: TableSearch + Send + Sync + 'static,
 {
     match msg {
-        VsIndex::AddVector {
+        Message::Modify(VsIndexModify::AddVector {
             primary_id,
             embedding,
             in_progress: _in_progress,
             ..
-        } => add(partition, primary_id, &embedding, &size),
+        }) => add(partition, primary_id, &embedding, &size),
 
-        VsIndex::Ann {
+        Message::Search(VsIndexSearch::Ann {
             embedding,
             limit,
             tx,
             ..
-        } => {
+        }) => {
             if let Some(tx) = validate_dimensions(tx, &embedding, dimensions) {
                 ann(partition, tx, &table, embedding, limit);
             }
         }
 
-        VsIndex::FilteredAnn {
+        Message::Search(VsIndexSearch::FilteredAnn {
             embedding,
             limit,
             filter,
             tx,
             ..
-        } => {
+        }) => {
             if let Some(tx) = validate_dimensions(tx, &embedding, dimensions) {
                 filtered_ann(partition, tx, &table, embedding, filter, limit);
             }
         }
 
-        VsIndex::Count { .. } => unreachable!(),
+        Message::Search(VsIndexSearch::Count { .. }) => unreachable!(),
 
-        VsIndex::RemoveVector {
+        Message::Modify(VsIndexModify::RemoveVector {
             primary_id,
             in_progress: _in_progress,
             ..
-        } => remove(partition, primary_id, &size),
+        }) => remove(partition, primary_id, &size),
 
-        VsIndex::RemovePartition { .. } => unreachable!(),
+        Message::Modify(VsIndexModify::RemovePartition { .. }) => unreachable!(),
     }
 }
 
@@ -1149,12 +1155,12 @@ fn filtered_ann<I>(
 
 #[hotpath::measure]
 fn check_memory_allocation(
-    msg: &VsIndex,
+    msg: &Message,
     rx_allocate: &watch::Receiver<Allocate>,
     allocate_prev: &mut Allocate,
     key: &IndexKey,
 ) -> bool {
-    if !matches!(msg, VsIndex::AddVector { .. }) {
+    if !matches!(msg, Message::Modify(VsIndexModify::AddVector { .. })) {
         return true;
     }
 
@@ -1207,7 +1213,8 @@ mod tests {
     use crate::memory;
     use crate::table::IndexIdGenerator;
     use crate::table::MockTableSearch;
-    use crate::vs_index::VsIndexExt;
+    use crate::vs_index::VsIndexModifyExt;
+    use crate::vs_index::VsIndexSearchExt;
     use crate::worker;
     use mockall::predicate::*;
     use rstest::rstest;
@@ -1222,7 +1229,7 @@ mod tests {
 
     fn add_concurrently(
         partition_id: PartitionId,
-        index: mpsc::Sender<VsIndex>,
+        index: mpsc::Sender<VsIndexModify>,
         threads: usize,
         adds_per_worker: usize,
         dimensions: NonZeroUsize,
@@ -1240,7 +1247,8 @@ mod tests {
                             vec![0.0f32; dimensions.get()].into(),
                             AsyncInProgress::None,
                         )
-                        .await;
+                        .await
+                        .unwrap();
                 }
             }));
         }
@@ -1249,7 +1257,7 @@ mod tests {
 
     fn search_concurrently(
         index_key: IndexKey,
-        index: mpsc::Sender<VsIndex>,
+        index: mpsc::Sender<VsIndexSearch>,
         threads: usize,
         searches_per_worker: usize,
         dimensions: NonZeroUsize,
@@ -1274,6 +1282,19 @@ mod tests {
         search_handles
     }
 
+    async fn wait_for_count(
+        search: &mpsc::Sender<VsIndexSearch>,
+        index_key: IndexKey,
+        expected_count: usize,
+    ) -> anyhow::Result<()> {
+        Ok(time::timeout(Duration::from_secs(10), async {
+            while search.count(index_key.clone()).await.unwrap() != expected_count {
+                task::yield_now().await;
+            }
+        })
+        .await?)
+    }
+
     #[tokio::test]
     async fn add_or_replace_size_ann() {
         let (_, config_rx) = watch::channel(Arc::new(Config::default()));
@@ -1287,7 +1308,7 @@ mod tests {
         let threads = perf::num_workers().into();
         let table = Arc::new(RwLock::new(MockTableSearch::new()));
         let index_key = IndexKey::new(&"vector".into(), &"store".into());
-        let actor = new(
+        let (modify, search) = new(
             move || Ok(Arc::new(ThreadedUsearchIndex::new(options, threads)?)),
             index_key.clone(),
             NonZeroUsize::new(3).unwrap().into(),
@@ -1299,30 +1320,33 @@ mod tests {
 
         let index_id = IndexIdGenerator::new().next(true).unwrap();
         let partition_id = PartitionId::global(index_id);
-        actor
+        modify
             .add_vector(
                 partition_id,
                 1.into(),
                 vec![1., 1., 1.].into(),
                 AsyncInProgress::None,
             )
-            .await;
-        actor
+            .await
+            .unwrap();
+        modify
             .add_vector(
                 partition_id,
                 2.into(),
                 vec![2., -2., 2.].into(),
                 AsyncInProgress::None,
             )
-            .await;
-        actor
+            .await
+            .unwrap();
+        modify
             .add_vector(
                 partition_id,
                 3.into(),
                 vec![3., 3., 3.].into(),
                 AsyncInProgress::None,
             )
-            .await;
+            .await
+            .unwrap();
 
         table
             .write()
@@ -1339,13 +1363,7 @@ mod tests {
                 Some((partition_id, None))
             }
         });
-        time::timeout(Duration::from_secs(10), async {
-            while actor.count(index_key.clone()).await.unwrap() != 3 {
-                task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        wait_for_count(&search, index_key.clone(), 3).await.unwrap();
 
         table
             .write()
@@ -1355,7 +1373,7 @@ mod tests {
             .once()
             .returning(|_, _| Some([CqlValue::Int(2)].into()));
 
-        let (primary_keys, distances) = actor
+        let (primary_keys, distances) = search
             .ann(
                 index_key.clone(),
                 vec![2.2, -2.2, 2.2].into(),
@@ -1367,17 +1385,21 @@ mod tests {
         assert_eq!(distances.len(), 1);
         assert_eq!(primary_keys.first().unwrap(), &[CqlValue::Int(2)].into());
 
-        actor
+        modify
             .remove_vector(partition_id, 3.into(), AsyncInProgress::None)
-            .await;
-        actor
+            .await
+            .unwrap();
+        wait_for_count(&search, index_key.clone(), 2).await.unwrap();
+        modify
             .add_vector(
                 partition_id,
                 3.into(),
                 vec![2.1, -2.1, 2.1].into(),
                 AsyncInProgress::None,
             )
-            .await;
+            .await
+            .unwrap();
+        wait_for_count(&search, index_key.clone(), 3).await.unwrap();
 
         table
             .write()
@@ -1388,7 +1410,7 @@ mod tests {
             .returning(|_, _| Some([CqlValue::Int(3)].into()));
 
         time::timeout(Duration::from_secs(10), async {
-            while actor
+            while search
                 .ann(
                     index_key.clone(),
                     vec![2.2, -2.2, 2.2].into(),
@@ -1407,17 +1429,12 @@ mod tests {
         .await
         .unwrap();
 
-        actor
+        modify
             .remove_vector(partition_id, 3.into(), AsyncInProgress::None)
-            .await;
+            .await
+            .unwrap();
 
-        time::timeout(Duration::from_secs(10), async {
-            while actor.count(index_key.clone()).await.unwrap() != 2 {
-                task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        wait_for_count(&search, index_key.clone(), 2).await.unwrap();
 
         table
             .write()
@@ -1427,7 +1444,7 @@ mod tests {
             .once()
             .returning(|_, _| Some([CqlValue::Int(2)].into()));
 
-        let (primary_keys, distances) = actor
+        let (primary_keys, distances) = search
             .ann(
                 index_key,
                 vec![2.2, -2.2, 2.2].into(),
@@ -1458,7 +1475,7 @@ mod tests {
         let threads = perf::num_workers().into();
         let table = Arc::new(RwLock::new(MockTableSearch::new()));
         let index_key = IndexKey::new(&"vector".into(), &"store".into());
-        let actor = new(
+        let (modify, search) = new(
             move || Ok(Arc::new(ThreadedUsearchIndex::new(options, threads)?)),
             index_key.clone(),
             NonZeroUsize::new(3).unwrap().into(),
@@ -1472,14 +1489,15 @@ mod tests {
         allocate_tx.send(Allocate::Cannot).unwrap();
         let index_id = IndexIdGenerator::new().next(true).unwrap();
         let partition_id = PartitionId::global(index_id);
-        actor
+        modify
             .add_vector(
                 partition_id,
                 1.into(),
                 vec![1., 1., 1.].into(),
                 AsyncInProgress::None,
             )
-            .await;
+            .await
+            .unwrap();
 
         table
             .write()
@@ -1488,26 +1506,21 @@ mod tests {
             .with(eq(index_key.clone()))
             .returning(move |_| Some(index_id));
 
-        assert_eq!(actor.count(index_key.clone()).await.unwrap(), 0);
+        assert_eq!(search.count(index_key.clone()).await.unwrap(), 0);
 
         allocate_tx.send(Allocate::Can).unwrap();
-        actor
+        modify
             .add_vector(
                 partition_id,
                 1.into(),
                 vec![1., 1., 1.].into(),
                 AsyncInProgress::None,
             )
-            .await;
+            .await
+            .unwrap();
 
         // Wait for the add operation to complete, as it runs in a separate task.
-        time::timeout(Duration::from_secs(10), async {
-            while actor.count(index_key.clone()).await.unwrap() != 1 {
-                task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        wait_for_count(&search, index_key.clone(), 1).await.unwrap();
     }
 
     #[rstest]
@@ -1529,7 +1542,7 @@ mod tests {
         let threads = perf::num_workers().into();
         let table = Arc::new(RwLock::new(MockTableSearch::new()));
         let index_key = IndexKey::new(&"vector".into(), &"store".into());
-        let index = new(
+        let (modify, search) = new(
             move || Ok(Arc::new(ThreadedUsearchIndex::new(options, threads)?)),
             index_key.clone(),
             dimensions.into(),
@@ -1560,14 +1573,14 @@ mod tests {
         });
         let add_handles = add_concurrently(
             partition_id,
-            index.clone(),
+            modify.clone(),
             threads,
             adds_per_worker,
             dimensions,
         );
         let search_handles = search_concurrently(
             index_key.clone(),
-            index.clone(),
+            search.clone(),
             threads,
             adds_per_worker,
             dimensions,
@@ -1588,13 +1601,9 @@ mod tests {
             .returning(move |_| Some(index_id));
 
         // Wait for expected number of vectors to be added.
-        time::timeout(Duration::from_secs(10), async {
-            while index.count(index_key.clone()).await.unwrap() != threads * adds_per_worker {
-                task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        wait_for_count(&search, index_key.clone(), threads * adds_per_worker)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

@@ -18,7 +18,7 @@ use crate::db_index::DbIndexExt;
 use crate::fts_index::FtsIndex;
 use crate::monitor_items::MonitorItems;
 use crate::node_state::IndexStatus;
-use crate::vs_index::VsIndex;
+use crate::vs_index::VsIndexSearch;
 use scylla::cluster::metadata::NativeType;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -97,7 +97,7 @@ impl<I, D: std::fmt::Debug> std::fmt::Debug for IndexEntry<I, D> {
     }
 }
 
-pub(crate) type VsIndexEntry = IndexEntry<VsIndex, VsIndexData>;
+pub(crate) type VsIndexEntry = IndexEntry<VsIndexSearch, VsIndexData>;
 pub(crate) type FtsIndexEntry = IndexEntry<FtsIndex, FtsIndexData>;
 
 #[derive(Debug)]
@@ -147,7 +147,7 @@ impl<I, D> IndexEntry<I, D> {
 
 impl VsIndexEntry {
     pub(crate) async fn new(
-        index: mpsc::Sender<VsIndex>,
+        index: mpsc::Sender<VsIndexSearch>,
         monitor: mpsc::Sender<MonitorItems>,
         db_index: mpsc::Sender<DbIndex>,
         metadata: IndexMetadata,
@@ -280,7 +280,7 @@ pub(crate) enum BestIndexState {
     /// A serving candidate was found.
     Serving {
         key: IndexKey,
-        index: mpsc::Sender<VsIndex>,
+        index: mpsc::Sender<VsIndexSearch>,
         primary_key_columns: NonemptyArc<ColumnName>,
         filtering_columns: NonemptyArc<ColumnName>,
         table_columns: Arc<HashMap<ColumnName, NativeType>>,

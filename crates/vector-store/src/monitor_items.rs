@@ -24,8 +24,8 @@ use crate::table::Operation;
 use crate::table::PartitionId;
 use crate::table::PrimaryId;
 use crate::table::TableModify;
-use crate::vs_index::VsIndex;
-use crate::vs_index::VsIndexExt;
+use crate::vs_index::VsIndexModify;
+use crate::vs_index::VsIndexModifyExt;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -37,6 +37,26 @@ use tracing::debug;
 use tracing::error;
 use tracing::error_span;
 
+pub(crate) enum IndexStatus {
+    Live,
+    Dead,
+}
+
+impl From<anyhow::Result<()>> for IndexStatus {
+    fn from(result: anyhow::Result<()>) -> Self {
+        match result {
+            Ok(()) => IndexStatus::Live,
+            Err(_) => IndexStatus::Dead,
+        }
+    }
+}
+
+impl IndexStatus {
+    pub(crate) fn is_dead(&self) -> bool {
+        matches!(self, IndexStatus::Dead)
+    }
+}
+
 pub(crate) trait IndexDispatch {
     fn add_vector(
         &self,
@@ -44,9 +64,10 @@ pub(crate) trait IndexDispatch {
         _primary_id: PrimaryId,
         _vector: Vector,
         _in_progress: AsyncInProgress,
-    ) -> impl Future<Output = ()> + Send {
+    ) -> impl Future<Output = IndexStatus> + Send {
         async move {
             error!("ignoring add vector for an index that does not support it");
+            IndexStatus::Live
         }
     }
 
@@ -56,9 +77,10 @@ pub(crate) trait IndexDispatch {
         _primary_id: PrimaryId,
         _document: String,
         _in_progress: AsyncInProgress,
-    ) -> impl Future<Output = ()> + Send {
+    ) -> impl Future<Output = IndexStatus> + Send {
         async move {
             error!("ignoring add document for an index that does not support it");
+            IndexStatus::Live
         }
     }
 
@@ -67,20 +89,25 @@ pub(crate) trait IndexDispatch {
         partition_id: PartitionId,
         primary_id: PrimaryId,
         in_progress: AsyncInProgress,
-    ) -> impl Future<Output = ()> + Send;
+    ) -> impl Future<Output = IndexStatus> + Send;
 
-    fn remove_partition(&self, partition_id: PartitionId) -> impl Future<Output = ()> + Send;
+    fn remove_partition(
+        &self,
+        partition_id: PartitionId,
+    ) -> impl Future<Output = IndexStatus> + Send;
 }
 
-impl IndexDispatch for mpsc::Sender<VsIndex> {
+impl IndexDispatch for mpsc::Sender<VsIndexModify> {
     async fn add_vector(
         &self,
         partition_id: PartitionId,
         primary_id: PrimaryId,
         vector: Vector,
         in_progress: AsyncInProgress,
-    ) {
-        VsIndexExt::add_vector(self, partition_id, primary_id, vector, in_progress).await;
+    ) -> IndexStatus {
+        VsIndexModifyExt::add_vector(self, partition_id, primary_id, vector, in_progress)
+            .await
+            .into()
     }
 
     async fn remove_value(
@@ -88,13 +115,16 @@ impl IndexDispatch for mpsc::Sender<VsIndex> {
         partition_id: PartitionId,
         primary_id: PrimaryId,
         in_progress: AsyncInProgress,
-    ) {
+    ) -> IndexStatus {
         self.remove_vector(partition_id, primary_id, in_progress)
-            .await;
+            .await
+            .into()
     }
 
-    async fn remove_partition(&self, partition_id: PartitionId) {
-        VsIndexExt::remove_partition(self, partition_id).await;
+    async fn remove_partition(&self, partition_id: PartitionId) -> IndexStatus {
+        VsIndexModifyExt::remove_partition(self, partition_id)
+            .await
+            .into()
     }
 }
 
@@ -105,8 +135,10 @@ impl IndexDispatch for mpsc::Sender<FtsIndex> {
         primary_id: PrimaryId,
         document: String,
         in_progress: AsyncInProgress,
-    ) {
-        FtsIndexExt::add_document(self, primary_id, document, in_progress).await;
+    ) -> IndexStatus {
+        FtsIndexExt::add_document(self, primary_id, document, in_progress)
+            .await
+            .into()
     }
 
     async fn remove_value(
@@ -114,11 +146,13 @@ impl IndexDispatch for mpsc::Sender<FtsIndex> {
         _partition_id: PartitionId,
         primary_id: PrimaryId,
         in_progress: AsyncInProgress,
-    ) {
-        self.remove_document(primary_id, in_progress).await;
+    ) -> IndexStatus {
+        self.remove_document(primary_id, in_progress).await.into()
     }
 
-    async fn remove_partition(&self, _partition_id: PartitionId) {}
+    async fn remove_partition(&self, _partition_id: PartitionId) -> IndexStatus {
+        IndexStatus::Live
+    }
 }
 
 pub(crate) enum MonitorItems {}
@@ -150,10 +184,16 @@ where
                         let primary_key = db_row.primary_key;
                         match db_row.operation {
                             DbIndexedOperation::Upsert(values) => {
-                                upsert(&table, &index, primary_key, values, in_progress, &metrics, &key).await;
+                                if upsert(&table, &index, primary_key, values, in_progress, &metrics, &key).await.is_dead() {
+                                    error!("Index for {key:?} disappeared while processing upsert");
+                                    break;
+                                }
                             }
                             DbIndexedOperation::Delete(timestamp) => {
-                                delete(&table, &index, primary_key, timestamp, in_progress, &metrics, &key).await;
+                                if delete(&table, &index, primary_key, timestamp, in_progress, &metrics, &key).await.is_dead() {
+                                    error!("Index for {key:?} disappeared while processing delete");
+                                    break;
+                                }
                             }
                         }
                     }
@@ -176,7 +216,7 @@ async fn upsert<I: IndexDispatch>(
     in_progress: AsyncInProgress,
     metrics: &Metrics,
     index_key: &IndexKey,
-) {
+) -> IndexStatus {
     let Ok(operations) = table
         .write()
         .unwrap()
@@ -185,9 +225,9 @@ async fn upsert<I: IndexDispatch>(
             error!("failed to upsert values to a table: {err}");
         })
     else {
-        return;
+        return IndexStatus::Live;
     };
-    process_operations(operations, index, in_progress, metrics, index_key).await;
+    process_operations(operations, index, in_progress, metrics, index_key).await
 }
 
 async fn delete<I: IndexDispatch>(
@@ -198,7 +238,7 @@ async fn delete<I: IndexDispatch>(
     in_progress: AsyncInProgress,
     metrics: &Metrics,
     index_key: &IndexKey,
-) {
+) -> IndexStatus {
     let Ok(operations) = table
         .write()
         .unwrap()
@@ -207,9 +247,9 @@ async fn delete<I: IndexDispatch>(
             error!("failed to delete row from a table: {err}");
         })
     else {
-        return;
+        return IndexStatus::Live;
     };
-    process_operations(operations, index, in_progress, metrics, index_key).await;
+    process_operations(operations, index, in_progress, metrics, index_key).await
 }
 
 async fn process_operations<I: IndexDispatch>(
@@ -218,7 +258,7 @@ async fn process_operations<I: IndexDispatch>(
     mut in_progress: AsyncInProgress,
     metrics: &Metrics,
     index_key: &IndexKey,
-) {
+) -> IndexStatus {
     let in_progress = &mut in_progress;
     for operation in operations.into_iter() {
         match operation {
@@ -229,9 +269,13 @@ async fn process_operations<I: IndexDispatch>(
                 is_update,
             } => {
                 let op_label = if is_update { OP_UPDATE } else { OP_INSERT };
-                index
+                if index
                     .add_vector(partition_id, primary_id, vector, in_progress.take())
-                    .await;
+                    .await
+                    .is_dead()
+                {
+                    return IndexStatus::Dead;
+                }
                 metrics
                     .modified
                     .with_label_values(&[
@@ -248,9 +292,13 @@ async fn process_operations<I: IndexDispatch>(
                 is_update,
             } => {
                 let op_label = if is_update { OP_UPDATE } else { OP_INSERT };
-                index
+                if index
                     .add_document(partition_id, primary_id, document, in_progress.take())
-                    .await;
+                    .await
+                    .is_dead()
+                {
+                    return IndexStatus::Dead;
+                }
                 metrics
                     .modified
                     .with_label_values(&[
@@ -264,17 +312,25 @@ async fn process_operations<I: IndexDispatch>(
                 primary_id,
                 partition_id,
             } => {
-                index
+                if index
                     .remove_value(partition_id, primary_id, AsyncInProgress::None)
-                    .await;
+                    .await
+                    .is_dead()
+                {
+                    return IndexStatus::Dead;
+                }
             }
             Operation::RemoveValue {
                 primary_id,
                 partition_id,
             } => {
-                index
+                if index
                     .remove_value(partition_id, primary_id, in_progress.take())
-                    .await;
+                    .await
+                    .is_dead()
+                {
+                    return IndexStatus::Dead;
+                }
                 metrics
                     .modified
                     .with_label_values(&[
@@ -285,12 +341,15 @@ async fn process_operations<I: IndexDispatch>(
                     .inc();
             }
             Operation::RemovePartition { partition_id } => {
-                index.remove_partition(partition_id).await;
+                if index.remove_partition(partition_id).await.is_dead() {
+                    return IndexStatus::Dead;
+                }
             }
         }
     }
 
     metrics.mark_dirty(index_key.keyspace().as_ref(), index_key.index().as_ref());
+    IndexStatus::Live
 }
 
 #[cfg(test)]
@@ -303,7 +362,7 @@ mod tests {
     use crate::Timestamped;
     use crate::metrics::Metrics;
     use crate::table::MockTableModify;
-    use crate::vs_index::VsIndex;
+    use crate::vs_index::VsIndexModify;
     use anyhow::anyhow;
     use mockall::predicate::*;
     use scylla::value::CqlValue;
@@ -343,7 +402,7 @@ mod tests {
     #[tokio::test]
     async fn do_nothing_on_error() {
         let (tx_db_rows, rx_db_rows) = mpsc::channel(10);
-        let (tx_index, mut rx_index) = mpsc::channel::<VsIndex>(10);
+        let (tx_index, mut rx_index) = mpsc::channel::<VsIndexModify>(10);
         let metrics: Arc<Metrics> = Arc::new(Metrics::new());
         let table = Arc::new(RwLock::new(MockTableModify::new()));
         let index_key = IndexKey::new(&"vector".to_string().into(), &"store".to_string().into());
@@ -388,7 +447,7 @@ mod tests {
     #[tokio::test]
     async fn add_vector_with_progress() {
         let (tx_db_rows, rx_db_rows) = mpsc::channel(10);
-        let (tx_index, mut rx_index) = mpsc::channel::<VsIndex>(10);
+        let (tx_index, mut rx_index) = mpsc::channel::<VsIndexModify>(10);
         let metrics: Arc<Metrics> = Arc::new(Metrics::new());
         let table = Arc::new(RwLock::new(MockTableModify::new()));
         let index_key = IndexKey::new(&"vector".to_string().into(), &"store".to_string().into());
@@ -433,7 +492,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        let VsIndex::AddVector {
+        let VsIndexModify::AddVector {
             primary_id,
             partition_id,
             embedding,
@@ -460,7 +519,7 @@ mod tests {
     #[tokio::test]
     async fn add_vector_with_cdc_progress() {
         let (tx_db_rows, rx_db_rows) = mpsc::channel(10);
-        let (tx_index, mut rx_index) = mpsc::channel::<VsIndex>(10);
+        let (tx_index, mut rx_index) = mpsc::channel::<VsIndexModify>(10);
         let metrics: Arc<Metrics> = Arc::new(Metrics::new());
         let table = Arc::new(RwLock::new(MockTableModify::new()));
         let index_key = IndexKey::new(&"vector".to_string().into(), &"store".to_string().into());
@@ -507,7 +566,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        let Some(VsIndex::AddVector {
+        let Some(VsIndexModify::AddVector {
             partition_id,
             primary_id,
             embedding,
@@ -534,7 +593,7 @@ mod tests {
     #[tokio::test]
     async fn update_vector() {
         let (tx_db_rows, rx_db_rows) = mpsc::channel(10);
-        let (tx_index, mut rx_index) = mpsc::channel::<VsIndex>(10);
+        let (tx_index, mut rx_index) = mpsc::channel::<VsIndexModify>(10);
         let metrics: Arc<Metrics> = Arc::new(Metrics::new());
         let table = Arc::new(RwLock::new(MockTableModify::new()));
         let index_key = IndexKey::new(&"vector".to_string().into(), &"store".to_string().into());
@@ -585,7 +644,7 @@ mod tests {
             .await
             .unwrap();
 
-        let Some(VsIndex::RemoveVector {
+        let Some(VsIndexModify::RemoveVector {
             partition_id,
             primary_id,
             in_progress: AsyncInProgress::None,
@@ -596,7 +655,7 @@ mod tests {
         assert_eq!(primary_id, 2.into());
         assert_eq!(partition_id, 3.into());
 
-        let Some(VsIndex::AddVector {
+        let Some(VsIndexModify::AddVector {
             partition_id,
             primary_id,
             embedding,
@@ -617,7 +676,7 @@ mod tests {
     #[tokio::test]
     async fn insert_and_update_in_single_batch() {
         let (tx_db_rows, rx_db_rows) = mpsc::channel(10);
-        let (tx_index, mut rx_index) = mpsc::channel::<VsIndex>(10);
+        let (tx_index, mut rx_index) = mpsc::channel::<VsIndexModify>(10);
         let metrics: Arc<Metrics> = Arc::new(Metrics::new());
         let table = Arc::new(RwLock::new(MockTableModify::new()));
         let index_key = IndexKey::new(&"vector".to_string().into(), &"store".to_string().into());
@@ -677,7 +736,7 @@ mod tests {
             .unwrap();
 
         // First: plain insert
-        let Some(VsIndex::AddVector {
+        let Some(VsIndexModify::AddVector {
             partition_id,
             primary_id,
             embedding,
@@ -691,7 +750,7 @@ mod tests {
         assert_eq!(embedding, vec![10.].into());
 
         // Second: remove half of the update
-        let Some(VsIndex::RemoveVector {
+        let Some(VsIndexModify::RemoveVector {
             partition_id,
             primary_id,
             in_progress: AsyncInProgress::None,
@@ -703,7 +762,7 @@ mod tests {
         assert_eq!(partition_id, 4.into());
 
         // Third: add half of the update
-        let Some(VsIndex::AddVector {
+        let Some(VsIndexModify::AddVector {
             partition_id,
             primary_id,
             embedding,
@@ -724,7 +783,7 @@ mod tests {
     #[tokio::test]
     async fn remove_vector_with_none_value() {
         let (tx_db_rows, rx_db_rows) = mpsc::channel(10);
-        let (tx_index, mut rx_index) = mpsc::channel::<VsIndex>(10);
+        let (tx_index, mut rx_index) = mpsc::channel::<VsIndexModify>(10);
         let metrics: Arc<Metrics> = Arc::new(Metrics::new());
         let table = Arc::new(RwLock::new(MockTableModify::new()));
         let index_key = IndexKey::new(&"vector".to_string().into(), &"store".to_string().into());
@@ -764,7 +823,7 @@ mod tests {
             .await
             .unwrap();
 
-        let Some(VsIndex::RemoveVector {
+        let Some(VsIndexModify::RemoveVector {
             partition_id,
             primary_id,
             ..
@@ -783,7 +842,7 @@ mod tests {
     #[tokio::test]
     async fn remove_vector_with_delete() {
         let (tx_db_rows, rx_db_rows) = mpsc::channel(10);
-        let (tx_index, mut rx_index) = mpsc::channel::<VsIndex>(10);
+        let (tx_index, mut rx_index) = mpsc::channel::<VsIndexModify>(10);
         let metrics: Arc<Metrics> = Arc::new(Metrics::new());
         let table = Arc::new(RwLock::new(MockTableModify::new()));
         let index_key = IndexKey::new(&"vector".to_string().into(), &"store".to_string().into());
@@ -825,7 +884,7 @@ mod tests {
             .await
             .unwrap();
 
-        let Some(VsIndex::RemoveVector {
+        let Some(VsIndexModify::RemoveVector {
             partition_id,
             primary_id,
             ..
@@ -844,7 +903,7 @@ mod tests {
     #[tokio::test]
     async fn remove_partition() {
         let (tx_db_rows, rx_db_rows) = mpsc::channel(10);
-        let (tx_index, mut rx_index) = mpsc::channel::<VsIndex>(10);
+        let (tx_index, mut rx_index) = mpsc::channel::<VsIndexModify>(10);
         let metrics: Arc<Metrics> = Arc::new(Metrics::new());
         let table = Arc::new(RwLock::new(MockTableModify::new()));
         let index_key = IndexKey::new(&"vector".to_string().into(), &"store".to_string().into());
@@ -886,7 +945,7 @@ mod tests {
             .await
             .unwrap();
 
-        let Some(VsIndex::RemovePartition { partition_id }) = rx_index.recv().await else {
+        let Some(VsIndexModify::RemovePartition { partition_id }) = rx_index.recv().await else {
             unreachable!();
         };
         assert_eq!(partition_id, 6.into());

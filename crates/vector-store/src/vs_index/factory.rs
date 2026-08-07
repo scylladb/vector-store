@@ -11,7 +11,8 @@ use crate::IndexKey;
 use crate::Quantization;
 use crate::SpaceType;
 use crate::table::Table;
-use crate::vs_index::actor::VsIndex;
+use crate::vs_index::VsIndexModify;
+use crate::vs_index::VsIndexSearch;
 use std::sync::Arc;
 use std::sync::RwLock;
 use tokio::sync::mpsc;
@@ -31,6 +32,6 @@ pub(crate) trait VsIndexFactory {
         &self,
         index: VsIndexConfiguration,
         table: Arc<RwLock<Table>>,
-    ) -> anyhow::Result<mpsc::Sender<VsIndex>>;
+    ) -> anyhow::Result<(mpsc::Sender<VsIndexModify>, mpsc::Sender<VsIndexSearch>)>;
     fn index_engine_version(&self) -> String;
 }

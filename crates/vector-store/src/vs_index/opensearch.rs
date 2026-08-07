@@ -19,8 +19,11 @@ use crate::table::IndexIdGenerator;
 use crate::table::PrimaryId;
 use crate::table::Table;
 use crate::table::TableSearch;
-use crate::vs_index::actor::VsIndex;
-use crate::vs_index::factory::VsIndexConfiguration;
+use crate::vs_index;
+use crate::vs_index::Message;
+use crate::vs_index::VsIndexConfiguration;
+use crate::vs_index::VsIndexModify;
+use crate::vs_index::VsIndexSearch;
 use crate::vs_index::validator;
 use anyhow::anyhow;
 use opensearch::DeleteParts;
@@ -88,7 +91,7 @@ impl VsIndexFactory for OpenSearchIndexFactory {
         &self,
         index: VsIndexConfiguration,
         table: Arc<RwLock<Table>>,
-    ) -> anyhow::Result<mpsc::Sender<VsIndex>> {
+    ) -> anyhow::Result<(mpsc::Sender<VsIndexModify>, mpsc::Sender<VsIndexSearch>)> {
         new(
             index.key,
             index.dimensions,
@@ -216,9 +219,10 @@ pub fn new(
     space_type: SpaceType,
     table: Arc<RwLock<impl TableSearch + Send + Sync + 'static>>,
     client: Arc<OpenSearch>,
-) -> anyhow::Result<mpsc::Sender<VsIndex>> {
+) -> anyhow::Result<(mpsc::Sender<VsIndexModify>, mpsc::Sender<VsIndexSearch>)> {
     info!("Creating new index with key: {key}");
-    let (tx, mut rx) = mpsc::channel(perf::channel_size().into());
+    let (tx_modify, mut rx_modify) = mpsc::channel(perf::channel_size().into());
+    let (tx_search, mut rx_search) = mpsc::channel(perf::channel_size().into());
 
     tokio::spawn({
         let cloned_key = key.clone();
@@ -249,7 +253,7 @@ pub fn new(
 
             let key = Arc::new(key);
 
-            while let Some(msg) = rx.recv().await {
+            while let Some(msg) = vs_index::recv(&mut rx_search, &mut rx_modify).await {
                 let permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
                 tokio::spawn({
                     let key = Arc::clone(&key);
@@ -267,11 +271,11 @@ pub fn new(
         .instrument(debug_span!("opensearch", "{cloned_key}"))
     });
 
-    Ok(tx)
+    Ok((tx_modify, tx_search))
 }
 
 async fn process(
-    msg: VsIndex,
+    msg: Message,
     dimensions: Dimensions,
     space_type: SpaceType,
     index_key: Arc<IndexKey>,
@@ -279,30 +283,30 @@ async fn process(
     client: Arc<OpenSearch>,
 ) {
     match msg {
-        VsIndex::AddVector {
+        Message::Modify(VsIndexModify::AddVector {
             primary_id,
             embedding,
             in_progress: _in_progress,
             ..
-        } => add(index_key, primary_id, &embedding, client).await,
-        VsIndex::RemoveVector {
+        }) => add(index_key, primary_id, &embedding, client).await,
+        Message::Modify(VsIndexModify::RemoveVector {
             primary_id,
             in_progress: _in_progress,
             ..
-        } => remove(index_key, primary_id, client).await,
-        VsIndex::Ann {
+        }) => remove(index_key, primary_id, client).await,
+        Message::Search(VsIndexSearch::Ann {
             embedding,
             limit,
             tx,
             ..
-        } => {
+        }) => {
             ann(
                 index_key, tx, embedding, dimensions, limit, space_type, table, client,
             )
             .await
         }
-        VsIndex::FilteredAnn { tx, .. } => filtered_ann(tx).await,
-        VsIndex::Count { tx, .. } => count(index_key, tx, client).await,
+        Message::Search(VsIndexSearch::FilteredAnn { tx, .. }) => filtered_ann(tx).await,
+        Message::Search(VsIndexSearch::Count { tx, .. }) => count(index_key, tx, client).await,
 
         _ => todo!(),
     }
