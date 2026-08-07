@@ -654,7 +654,9 @@ async fn get_scylla_configs(
             config.args.retain(|arg| !arg.starts_with(name));
             config.args.push(format!("{name}={value}"));
         }
-        config.extra_config = extra_config.clone();
+        if let Some(extra_config) = extra_config.clone() {
+            config.extra_config = Some(extra_config);
+        }
     }
     scylla_configs
 }

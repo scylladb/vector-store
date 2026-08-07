@@ -54,7 +54,7 @@ async fn test_secondary_uri_works_correctly(actors: Arc<TestActors>) {
             args: e2etest_scylla_cluster::default_scylla_args(),
             cert_path: Some(cert_path.clone()),
             key_path: Some(key_path.clone()),
-            extra_config: None,
+            extra_config: Some(scylla_auth_config()),
         },
         ScyllaNodeConfig {
             db_ip: actors.services_subnet.ip(DB_OCTET_2),
@@ -63,7 +63,7 @@ async fn test_secondary_uri_works_correctly(actors: Arc<TestActors>) {
             args: e2etest_scylla_cluster::default_scylla_args(),
             cert_path: Some(cert_path.clone()),
             key_path: Some(key_path.clone()),
-            extra_config: None,
+            extra_config: Some(scylla_auth_config()),
         },
         ScyllaNodeConfig {
             db_ip: actors.services_subnet.ip(DB_OCTET_3),
@@ -72,7 +72,7 @@ async fn test_secondary_uri_works_correctly(actors: Arc<TestActors>) {
             args: e2etest_scylla_cluster::default_scylla_args(),
             cert_path: Some(cert_path.clone()),
             key_path: Some(key_path.clone()),
-            extra_config: None,
+            extra_config: Some(scylla_auth_config()),
         },
     ];
     let cert_env = actors
@@ -89,8 +89,8 @@ async fn test_secondary_uri_works_correctly(actors: Arc<TestActors>) {
             "VECTOR_STORE_SCYLLADB_CERTIFICATE_FILE".to_string(),
             cert_env,
         )]),
-        user: None,
-        password: None,
+        user: Some(DEFAULT_DB_USER.to_string()),
+        password: Some(DEFAULT_DB_PASSWORD.to_string()),
     }];
     init_with_config(&actors, scylla_configs, vs_configs).await;
 
