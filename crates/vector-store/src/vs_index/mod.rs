@@ -4,6 +4,8 @@
  */
 
 mod actor;
+#[cfg(feature = "gpu")]
+mod cuvs;
 mod diskann;
 mod factory;
 mod opensearch;
@@ -65,4 +67,39 @@ pub(crate) fn new_index_factory_diskann(
     memory: mpsc::Sender<Memory>,
 ) -> anyhow::Result<Box<dyn VsIndexFactory + Send + Sync>> {
     Ok(Box::new(diskann::new_diskann(config_rx, worker, memory)?))
+}
+
+#[cfg(feature = "gpu")]
+pub(crate) fn new_index_factory_cuvs(
+    config_rx: watch::Receiver<Arc<Config>>,
+) -> anyhow::Result<Box<dyn VsIndexFactory + Send + Sync>> {
+    Ok(Box::new(cuvs::new_cuvs(config_rx)?))
+}
+
+#[cfg(not(feature = "gpu"))]
+pub(crate) fn new_index_factory_cuvs(
+    _config_rx: watch::Receiver<Arc<Config>>,
+) -> anyhow::Result<Box<dyn VsIndexFactory + Send + Sync>> {
+    Err(anyhow::anyhow!(
+        "VECTOR_STORE_USE_GPU is set but this vector-store binary was built without GPU support \
+         (missing the `gpu` Cargo feature).
+         Install libcuvs (see scripts/setup-gpu) and rebuild with `--features gpu`, \
+         or unset VECTOR_STORE_USE_GPU to use the default USearch backend."
+    ))
+}
+
+#[cfg(all(test, not(feature = "gpu")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_index_factory_cuvs_fails_without_gpu_feature() {
+        let (_, config_rx) = watch::channel(Arc::new(Config::default()));
+        let err = match new_index_factory_cuvs(config_rx) {
+            Ok(_) => panic!("expected an error when the `gpu` feature is disabled"),
+            Err(err) => err.to_string(),
+        };
+        assert!(err.contains("built without GPU support"));
+        assert!(err.contains("--features gpu"));
+    }
 }
