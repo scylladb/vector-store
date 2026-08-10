@@ -19,7 +19,10 @@ if git status --porcelain | grep -q . ; then
     exit 1
 fi
 
-archs="amd64 arm64"
+# architectures to build could be given as arguments (a subset of the default
+# list), e.g. `./scripts/build-release arm64`; defaults to all release
+# architectures
+archs="${*:-amd64 arm64}"
 
 for arch in $archs ; do
     echo rebuild the release version $vector_store_version for $arch
@@ -49,7 +52,7 @@ cargo_sbom=crates/vector-store/vector-store.cdx.json
 mv $cargo_sbom vector-store-$vector_store_version.cdx.json
 echo "Cargo SBOM: vector-store-$vector_store_version.cdx.json"
 
-./scripts/build-dockers
+./scripts/build-dockers $archs
 
 for arch in $archs ; do
     echo generate Docker image SBOM for $arch using syft
