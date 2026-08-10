@@ -10,33 +10,11 @@ use e2etest_vector_store_cluster::VectorStoreClusterExt;
 use httpapi::IndexStatus;
 use httpapi::NodeStatus;
 use std::sync::Arc;
-use std::sync::LazyLock;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::info;
-use uuid::Uuid;
 
 const WAITING_FOR_DB_DISCOVERY: Duration = Duration::from_secs(5);
-
-static SUPERUSER_NAME: LazyLock<String> = LazyLock::new(|| Uuid::new_v4().simple().to_string());
-static SUPERUSER_PASSWORD: LazyLock<String> = LazyLock::new(|| Uuid::new_v4().simple().to_string());
-static SUPERUSER_SALTED_PASSWORD: LazyLock<String> = LazyLock::new(|| {
-    bcrypt::hash(&*SUPERUSER_PASSWORD, bcrypt::DEFAULT_COST)
-        .expect("failed to hash superuser password")
-});
-
-/// Builds the ScyllaDB config YAML with authentication enabled and superuser credentials set.
-fn scylla_auth_config() -> Vec<u8> {
-    let name = &*SUPERUSER_NAME;
-    let salted = &*SUPERUSER_SALTED_PASSWORD;
-    format!(
-        "authenticator: PasswordAuthenticator\n\
-         authorizer: CassandraAuthorizer\n\
-         auth_superuser_name: '{name}'\n\
-         auth_superuser_salted_password: '{salted}'"
-    )
-    .into_bytes()
-}
 
 e2etest::group!(name = auth, fixtures = (Fixture), parent = crate::validator);
 
