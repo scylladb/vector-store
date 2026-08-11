@@ -40,7 +40,7 @@ diskann = { git = "https://github.com/microsoft/DiskANN.git", rev = "90f49467a75
 diskann-vector = { git = "https://github.com/microsoft/DiskANN.git", rev = "90f49467a7558bd53e01f61617c294611a96158d" }
 diskann-inmem = { git = "https://github.com/microsoft/DiskANN.git", rev = "90f49467a7558bd53e01f61617c294611a96158d" }
 dotenvy = "0.15.7"
-e2etest = "0.2.0"
+e2etest = "0.3.1"
 e2etest-dns = "0.1.0"
 e2etest-firewall = "0.1.0"
 e2etest-scylla-cluster = "0.1.1"
