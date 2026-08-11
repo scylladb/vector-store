@@ -29,7 +29,13 @@ version tag. Then from the root of the repository run:
 ```
 
 This will create a tar.gz release in the `releases/{amd64/arm64}` directory,
-per-architecture docker images, and a multi-platform docker manifest. You can
+per-architecture docker images, and a multi-platform docker manifest. The
+script optionally accepts a subset of architectures to build as arguments
+(e.g. `./scripts/build-release arm64`). A single-architecture build doesn't
+create the multi-platform docker image, so it doesn't need qemu as long as
+the requested architecture matches the host — this is how the release
+workflow builds each architecture natively on its own per-arch runner.
+Building a non-native architecture still requires qemu. You can
 push the docker images and manifest to docker hub:
 
 ```bash
