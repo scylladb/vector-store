@@ -7,12 +7,54 @@ repo=$(realpath $repo/..)
 
 cd $repo
 
+# check the tooling up front: both are needed only after the per-arch images
+# have been pushed, so failing later would leave them published without the
+# multi-arch tag that refers to them
+if ! docker buildx version > /dev/null 2>&1 ; then
+    echo "error: the docker buildx plugin is required to assemble the multi-arch tag."
+    echo "It is packaged separately from the docker engine, as docker-buildx-plugin"
+    echo "in the docker repositories and as docker-buildx in Debian/Ubuntu."
+    exit 1
+fi
+
+if ! command -v jq > /dev/null 2>&1 ; then
+    echo "error: jq is required to resolve the per-architecture image digests."
+    exit 1
+fi
+
 vector_store_version=$(./scripts/run-with-release-toolchain cargo info vector-store | grep ^version: | cut -d ' ' -f 2)
 
 archs="amd64 arm64"
 
-docker_tag=scylladb/vector-store:$vector_store_version
+docker_image=scylladb/vector-store
+docker_tag=$docker_image:$vector_store_version
+
+sources=""
 for arch in $archs ; do
     docker push $docker_tag-$arch
+
+    # take the digest of the linux/$arch manifest rather than the per-arch tag
+    # itself: buildx attaches a provenance attestation to a build, which makes
+    # even a single-platform image an index bundling the image with an extra
+    # unknown/unknown manifest. Referencing the tag would copy those into the
+    # multi-arch tag too, so it would list four entries instead of the two
+    # architectures. The attestations stay available on the per-arch tags
+    digest=$(docker buildx imagetools inspect --raw $docker_tag-$arch \
+        | jq -r --arg arch $arch \
+          '.manifests[]? | select(.platform.os == "linux" and .platform.architecture == $arch) | .digest')
+
+    if [[ -n $digest ]] ; then
+        sources="$sources $docker_image@$digest"
+    else
+        # a plain image manifest, i.e. built without attestations
+        sources="$sources $docker_tag-$arch"
+    fi
 done
-docker push $docker_tag
+
+# combine the pushed per-arch images into the multi-arch tag registry-side, no
+# multi-platform image is built locally
+#
+# `docker buildx imagetools` is used instead of `docker manifest`: the latter
+# rejects a source image that is itself an index ("... is a manifest list")
+echo Combine the per-arch images into $docker_tag
+docker buildx imagetools create --tag $docker_tag $sources
