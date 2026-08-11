@@ -50,7 +50,7 @@ jobs:
     - name: Try to download vector-store artifact
       id: download-vector-store
       continue-on-error: true
-      uses: dawidd6/action-download-artifact@09f2f74827fd3a8607589e5ad7f9398816f540fe # v3.1.4
+      uses: dawidd6/action-download-artifact@b6e2e70617bc3265edd6dab6c906732b2f1ae151 # v21
       with:
         workflow: daily.yml
         name: daily-vector-store-${{matrix.arch}}-${{github.sha}}
@@ -60,7 +60,7 @@ jobs:
     - name: Try to download vector-search-validator artifact
       id: download-vector-search-validator
       continue-on-error: true
-      uses: dawidd6/action-download-artifact@09f2f74827fd3a8607589e5ad7f9398816f540fe # v3.1.4
+      uses: dawidd6/action-download-artifact@b6e2e70617bc3265edd6dab6c906732b2f1ae151 # v21
       with:
         workflow: daily.yml
         name: daily-vector-search-validator-${{matrix.arch}}-${{github.sha}}
