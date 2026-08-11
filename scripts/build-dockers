@@ -31,18 +31,9 @@ $dockerfile
 EOF
 done
 
-# build the multi-arch docker image only when more than one architecture is
-# requested, a single-arch build (e.g. a per-arch CI job) doesn't need it and
-# it would require emulation for the non-native architectures
-if [[ $(wc -w <<< "$archs") -gt 1 ]] ; then
-    for arch in $archs ; do
-        [[ -z $platform ]] && platform="linux/$arch" || platform="$platform,linux/$arch"
-    done
-
-    echo Build the multi-arch docker image for $platform
-    docker build --platform $platform --tag $docker_tag -f- . <<EOF
-$dockerfile
-EOF
-fi
+# the multi-arch image is not built here: the default docker driver cannot
+# store a multi-platform image in the classic image store, so the combined
+# tag is assembled from the pushed per-arch images at upload time (see
+# scripts/upload-dockers and the release workflow)
 
 docker images -f "reference=$docker_tag*"
