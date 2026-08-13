@@ -18,7 +18,7 @@ use std::time::Duration;
 use tracing::info;
 
 const ANN_LIMIT: usize = 5;
-const FRAME_DELAY: Duration = Duration::from_millis(100);
+const FRAME_DELAY: Duration = Duration::from_millis(500);
 
 e2etest::group!(
     name = routing,

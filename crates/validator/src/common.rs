@@ -57,6 +57,8 @@ pub const VS_OCTET_1: u8 = 21;
 pub const VS_OCTET_2: u8 = 22;
 pub const VS_OCTET_3: u8 = 23;
 
+const INDEX_STATUS_UPDATE_INTERVAL: &str = "100ms";
+
 // Credentials for the default, reduced-privilege role that the Vector Store
 // uses to connect to ScyllaDB, mirroring the setup used in production deployments.
 pub const DEFAULT_DB_USER: &str = "vector_store";
@@ -251,7 +253,12 @@ pub fn get_proxy_vs_node_configs(actors: &TestActors) -> Vec<VectorStoreNodeConf
             db_ip,
             user: Some(DEFAULT_DB_USER.to_string()),
             password: Some(DEFAULT_DB_PASSWORD.to_string()),
-            envs: Default::default(),
+            envs: [(
+                "VECTOR_STORE_INDEX_STATUS_UPDATE_INTERVAL".to_string(),
+                INDEX_STATUS_UPDATE_INTERVAL.to_string(),
+            )]
+            .into_iter()
+            .collect(),
         })
         .collect()
 }
