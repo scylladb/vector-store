@@ -538,6 +538,8 @@ pub async fn prepare_connection_with_custom_vs_ips_no_tls(
     actors: &TestActors,
     vs_ips: Vec<Ipv4Addr>,
 ) -> (Arc<Session>, Vec<HttpClient>) {
+    actors.db_proxy.turn_off_rules().await;
+
     let session = Arc::new(
         SessionBuilder::new()
             .known_node(actors.services_subnet.ip(DB_OCTET_1).to_string())
