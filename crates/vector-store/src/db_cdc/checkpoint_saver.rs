@@ -107,7 +107,7 @@ impl CDCCheckpointSaver for MetricsCheckpointSaver {
     async fn load_last_checkpoint(
         &self,
         _stream_id: &StreamID,
-    ) -> anyhow::Result<Option<chrono::Duration>> {
+    ) -> anyhow::Result<Option<Duration>> {
         Ok(None)
     }
 }

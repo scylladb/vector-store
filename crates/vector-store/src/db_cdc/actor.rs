@@ -477,7 +477,7 @@ async fn create_cdc_reader(
         .keyspace(metadata.keyspace_name.as_ref())
         .table_name(metadata.table_name.as_ref())
         .consumer_factory(Arc::new(consumer_factory))
-        .start_timestamp(chrono::Duration::from_std(cdc_start)?)
+        .start_timestamp(cdc_start)
         .safety_interval(params.safety_interval)
         .sleep_interval(params.sleep_interval)
         .should_save_progress(true)
