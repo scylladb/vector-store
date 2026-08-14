@@ -59,12 +59,7 @@ async fn simple_create_drop_index(actors: Arc<TestActors>) {
         .expect("failed to drop an index");
 
     for client in &clients {
-        wait_for(
-            || async { client.indexes().await.is_empty() },
-            "Waiting for index deletion",
-            DEFAULT_OPERATION_TIMEOUT,
-        )
-        .await;
+        wait_for_no_index(client, &index).await;
     }
 
     session
@@ -151,12 +146,7 @@ async fn simple_create_drop_multiple_indexes(actors: Arc<TestActors>) {
 
     // Wait for the first index to be dropped
     for client in &clients {
-        wait_for(
-            || async { client.indexes().await.len() == 1 },
-            "Waiting for the first index to be dropped",
-            DEFAULT_OPERATION_TIMEOUT,
-        )
-        .await;
+        wait_for_no_index(client, &index1).await;
     }
 
     // ANN query on v1 should not succeed after dropping the index
@@ -185,12 +175,7 @@ async fn simple_create_drop_multiple_indexes(actors: Arc<TestActors>) {
 
     // Wait for the second index to be dropped
     for client in &clients {
-        wait_for(
-            || async { client.indexes().await.is_empty() },
-            "Waiting for all indexes to be dropped",
-            DEFAULT_OPERATION_TIMEOUT,
-        )
-        .await;
+        wait_for_no_index(client, &index2).await;
     }
 
     // Drop keyspace
@@ -230,7 +215,7 @@ async fn drop_table_removes_index(actors: Arc<TestActors>) {
             .expect("failed to insert a row");
     }
 
-    let _ = create_index(CreateIndexQuery::new(
+    let index = create_index(CreateIndexQuery::new(
         &session,
         &clients,
         &table,
@@ -248,12 +233,7 @@ async fn drop_table_removes_index(actors: Arc<TestActors>) {
         .expect("failed to drop table");
 
     for client in &clients {
-        wait_for(
-            || async { client.indexes().await.is_empty() },
-            "Waiting for index deletion",
-            DEFAULT_OPERATION_TIMEOUT,
-        )
-        .await;
+        wait_for_no_index(client, &index).await;
     }
 
     session

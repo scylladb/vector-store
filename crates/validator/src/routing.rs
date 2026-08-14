@@ -18,7 +18,7 @@ use std::time::Duration;
 use tracing::info;
 
 const ANN_LIMIT: usize = 5;
-const FRAME_DELAY: Duration = Duration::from_millis(100);
+const FRAME_DELAY: Duration = Duration::from_millis(500);
 
 e2etest::group!(
     name = routing,
@@ -128,18 +128,7 @@ async fn ann_routes_to_serving_index_while_replacement_is_bootstrapping(actors: 
         .await
         .expect("failed to drop oldest index");
 
-    wait_for(
-        || async {
-            client
-                .indexes()
-                .await
-                .iter()
-                .all(|i| i.index != oldest.index)
-        },
-        "oldest index must be removed",
-        DEFAULT_OPERATION_TIMEOUT,
-    )
-    .await;
+    wait_for_no_index(client, &oldest).await;
 
     get_query_results(
         format!(
@@ -370,12 +359,7 @@ async fn ann_returns_not_found_after_index_is_dropped(actors: Arc<TestActors>) {
         .await
         .expect("failed to drop index");
 
-    wait_for(
-        || async { client.indexes().await.is_empty() },
-        "index must be removed",
-        DEFAULT_OPERATION_TIMEOUT,
-    )
-    .await;
+    wait_for_no_index(client, &index).await;
 
     session
         .query_unpaged(
