@@ -637,4 +637,47 @@ mod tests {
         assert_eq!(params.beam_width, NonZeroUsize::new(32).unwrap());
         assert_eq!(params.space_type, SpaceType::Euclidean);
     }
+
+    #[tokio::test]
+    async fn diskann_add_vector_stops_at_max_points_cap() {
+        let max_points = NonZeroUsize::new(3).unwrap();
+
+        let vs_config = VsIndexConfiguration {
+            key: IndexKey::new(
+                &KeyspaceName::from("ks".to_string()),
+                &IndexName::from("tbl".to_string()),
+            ),
+            dimensions: NonZeroUsize::new(2).unwrap().into(),
+            connectivity: Connectivity(16),
+            expansion_add: ExpansionAdd(64),
+            expansion_search: ExpansionSearch(32),
+            space_type: SpaceType::Euclidean,
+            quantization: Quantization::F32,
+        };
+
+        let params = DiskannParams::new(
+            &vs_config,
+            DiskannAlpha::new(DISKANN_DEFAULT_ALPHA).unwrap(),
+            max_points,
+        )
+        .unwrap();
+
+        let embeddings: Vec<Vector> = (0..5)
+            .map(|i| Vector::from(vec![i as f32, i as f32]))
+            .collect();
+
+        let index = create_diskann_index(&params, Some(embeddings[0].as_slice())).unwrap();
+        let partition = Partition {
+            partition_id: PartitionId::from(0u64),
+            index,
+        };
+        let size = AtomicUsize::new(0);
+
+        // Try to insert more vectors than the cap allows.
+        for (i, embedding) in embeddings.into_iter().enumerate() {
+            add_vector(&partition, &size, PrimaryId::from(i as u64), embedding).await;
+        }
+
+        assert_eq!(size.load(Ordering::Relaxed), max_points.get());
+    }
 }
