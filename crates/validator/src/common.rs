@@ -23,11 +23,13 @@ use itertools::Itertools;
 use scylla::client::session::Session;
 use scylla::client::session::TlsContext;
 use scylla::client::session_builder::SessionBuilder;
+use scylla::policies::host_filter::AllowListHostFilter;
 use scylla::response::query_result::QueryRowsResult;
 use scylla::statement::Statement;
 use std::collections::HashMap;
 use std::iter;
 use std::net::Ipv4Addr;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::atomic::AtomicUsize;
@@ -126,6 +128,44 @@ async fn setup_default_role(actors: &TestActors, tls: bool) {
                 panic!("failed to grant {permission} to {DEFAULT_DB_USER}: {err}")
             });
     }
+
+    for ip in get_default_db_ips(actors) {
+        wait_for_role_login(actors, ip, tls).await;
+    }
+}
+
+#[framed]
+async fn wait_for_role_login(actors: &TestActors, ip: Ipv4Addr, tls: bool) {
+    let tls_context = if tls {
+        Some(TlsContext::from(actors.tls.client_tls_config().await))
+    } else {
+        None
+    };
+
+    // Without a host filter the driver discovers the whole cluster and opens
+    // DEFAULT_DB_USER connections to every node, so probing one node authenticates
+    // against nodes that have not been verified yet.
+    // To avoid this, we use a host filter that only allows the specific node we're probing.
+    let addr = SocketAddr::from((ip, DB_PORT));
+    let host_filter = Arc::new(
+        AllowListHostFilter::new([addr]).expect("failed to build the allow list host filter"),
+    );
+
+    wait_for(
+        || async {
+            SessionBuilder::new()
+                .known_node_addr(addr)
+                .user(DEFAULT_DB_USER, DEFAULT_DB_PASSWORD)
+                .tls_context(tls_context.clone())
+                .host_filter(host_filter.clone())
+                .build()
+                .await
+                .is_ok()
+        },
+        format!("node {ip} must accept '{DEFAULT_DB_USER}' credentials"),
+        DEFAULT_OPERATION_TIMEOUT,
+    )
+    .await;
 }
 
 #[derive(
@@ -326,10 +366,10 @@ pub async fn init_with_proxy(actors: &TestActors) {
     vs_configs.iter_mut().for_each(|cfg| {
         cfg.envs.extend(envs.clone());
     });
-    actors.vs.start(vs_configs).await;
 
     setup_default_role(actors, false).await;
 
+    actors.vs.start(vs_configs).await;
     assert!(actors.vs.wait_for_ready().await);
 
     info!("finished");
@@ -382,10 +422,10 @@ pub async fn init_with_proxy_single_vs(actors: &TestActors) {
     vs_configs.iter_mut().for_each(|cfg| {
         cfg.envs.extend(envs.clone());
     });
-    actors.vs.start(vs_configs).await;
 
     setup_default_role(actors, false).await;
 
+    actors.vs.start(vs_configs).await;
     assert!(actors.vs.wait_for_ready().await);
 
     info!("finished");
@@ -410,12 +450,12 @@ pub async fn init_with_config(
 
     actors.db.start(scylla_configs).await;
     assert!(actors.db.wait_for_ready().await);
-    actors.vs.start(vs_configs).await;
 
     if use_default_auth {
         setup_default_role(actors, true).await;
     }
 
+    actors.vs.start(vs_configs).await;
     assert!(actors.vs.wait_for_ready().await);
 }
 
