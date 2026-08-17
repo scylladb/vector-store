@@ -65,7 +65,7 @@ use tracing::error;
 use tracing::trace;
 use tracing::warn;
 
-const MAX_POINTS: NonZeroUsize = NonZeroUsize::new(1_000_000).unwrap();
+const DISKANN_DEFAULT_MAX_POINTS: NonZeroUsize = NonZeroUsize::new(1_000_000).unwrap();
 
 type DiskannProvider = InmemProvider<Full<f32>, PrimaryId>;
 
@@ -75,6 +75,7 @@ pub struct DiskannIndexFactory {
     worker: async_channel::Sender<Worker>,
     memory: mpsc::Sender<Memory>,
     alpha: DiskannAlpha,
+    max_points: NonZeroUsize,
 }
 
 impl VsIndexFactory for DiskannIndexFactory {
@@ -83,7 +84,7 @@ impl VsIndexFactory for DiskannIndexFactory {
         index: VsIndexConfiguration,
         table: Arc<RwLock<Table>>,
     ) -> anyhow::Result<(mpsc::Sender<VsIndexModify>, mpsc::Sender<VsIndexSearch>)> {
-        let params = DiskannParams::new(&index, self.alpha, MAX_POINTS)
+        let params = DiskannParams::new(&index, self.alpha, self.max_points)
             .context("failed to create DiskANN parameters")?;
 
         new(
@@ -113,6 +114,9 @@ pub fn new_diskann(
         alpha: config
             .diskann_alpha
             .unwrap_or(DiskannAlpha::new(DISKANN_DEFAULT_ALPHA).unwrap()),
+        max_points: config
+            .diskann_max_points
+            .unwrap_or(DISKANN_DEFAULT_MAX_POINTS),
     })
 }
 
@@ -618,7 +622,7 @@ mod tests {
         let params = DiskannParams::new(
             &vs_config,
             DiskannAlpha::new(DISKANN_DEFAULT_ALPHA).unwrap(),
-            MAX_POINTS,
+            DISKANN_DEFAULT_MAX_POINTS,
         )
         .unwrap();
 
