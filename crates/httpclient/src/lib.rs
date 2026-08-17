@@ -17,6 +17,8 @@ use httpapi::PostIndexAnnRequest;
 use httpapi::PostIndexAnnResponse;
 use httpapi::PostIndexBm25Request;
 use httpapi::PostIndexBm25Response;
+use httpapi::PostIndexHighlightRequest;
+use httpapi::PostIndexHighlightResponse;
 use httpapi::SimilarityScore;
 use httpapi::Vector;
 use reqwest::Client;
@@ -139,6 +141,40 @@ impl HttpClient {
         self.client
             .post(format!(
                 "{}/indexes/{}/{}/bm25",
+                self.url_api, keyspace_name, index_name
+            ))
+            .json(&request)
+            .send()
+            .await
+            .unwrap()
+    }
+
+    pub async fn highlight(
+        &self,
+        keyspace_name: &KeyspaceName,
+        index_name: &IndexName,
+        query: String,
+        documents: Vec<String>,
+    ) -> Vec<Option<String>> {
+        self.post_highlight(keyspace_name, index_name, query, documents)
+            .await
+            .json::<PostIndexHighlightResponse>()
+            .await
+            .unwrap()
+            .highlights
+    }
+
+    pub async fn post_highlight(
+        &self,
+        keyspace_name: &KeyspaceName,
+        index_name: &IndexName,
+        query: String,
+        documents: Vec<String>,
+    ) -> reqwest::Response {
+        let request = PostIndexHighlightRequest { query, documents };
+        self.client
+            .post(format!(
+                "{}/indexes/{}/{}/highlight",
                 self.url_api, keyspace_name, index_name
             ))
             .json(&request)
