@@ -903,6 +903,30 @@ async fn post_index_ann(
     .await
 }
 
+async fn check_fts_serving<T>(
+    serving_or_progress: Result<T, Progress>,
+    node_state: &Sender<NodeState>,
+    keyspace: &crate::KeyspaceName,
+    index_name: &crate::IndexName,
+    route_name: &str,
+) -> Result<T, Response> {
+    match serving_or_progress {
+        Ok(serving) => Ok(serving),
+        Err(Progress::InProgress(percentage)) => {
+            let reason =
+                index_not_ready_reason(node_state, keyspace, index_name, percentage).await;
+            debug!("{route_name}: index {keyspace}.{index_name} not ready: {reason:?}");
+            Err((StatusCode::SERVICE_UNAVAILABLE, response::Json(reason)).into_response())
+        }
+        Err(Progress::Done) => {
+            let msg =
+                format!("Index {keyspace}.{index_name} is not serving, but full scan did finish.");
+            debug!("{route_name}: {msg}");
+            Err((StatusCode::INTERNAL_SERVER_ERROR, msg).into_response())
+        }
+    }
+}
+
 #[utoipa::path(
     post,
     path = "/api/v1/indexes/{keyspace}/{index}/bm25",
@@ -988,23 +1012,19 @@ async fn post_index_bm25(
         }
     };
 
-    let (fts_sender, primary_key_columns) = match serving_or_progress {
+    let (fts_sender, primary_key_columns) = match check_fts_serving(
+        serving_or_progress,
+        &state.node_state,
+        &keyspace,
+        &index_name,
+        "post_index_bm25",
+    )
+    .await
+    {
         Ok(serving) => serving,
-        Err(Progress::InProgress(percentage)) => {
+        Err(resp) => {
             timer.observe_duration();
-
-            let reason =
-                index_not_ready_reason(&state.node_state, &keyspace, &index_name, percentage).await;
-            debug!("post_index_bm25: index {keyspace}.{index_name} not ready: {reason:?}");
-            return (StatusCode::SERVICE_UNAVAILABLE, response::Json(reason)).into_response();
-        }
-        Err(Progress::Done) => {
-            timer.observe_duration();
-
-            let msg =
-                format!("Index {keyspace}.{index_name} is not serving, but full scan did finish.");
-            debug!("post_index_bm25: {msg}");
-            return (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response();
+            return resp;
         }
     };
 
