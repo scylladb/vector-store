@@ -544,7 +544,7 @@ pub(crate) fn new(
                                 })
                                 .await;
                         }
-                        FtsIndex::_Highlight {
+                        FtsIndex::Highlight {
                             index_key,
                             query,
                             documents,
@@ -940,7 +940,7 @@ mod tests {
         documents: &[&str],
     ) -> Vec<Option<String>> {
         sender
-            ._highlight(
+            .highlight(
                 make_index_key(),
                 query.into(),
                 documents.iter().map(|doc| doc.to_string()).collect(),
@@ -1140,7 +1140,7 @@ mod tests {
         add_doc(&sender, 1, "fox").await;
 
         let result = sender
-            ._highlight(make_index_key(), "fox AND".into(), vec!["a fox".into()])
+            .highlight(make_index_key(), "fox AND".into(), vec!["a fox".into()])
             .await;
 
         assert!(result.is_err());
@@ -1154,7 +1154,7 @@ mod tests {
         add_doc(&sender, 2, "dog").await;
 
         let result = sender
-            ._highlight(
+            .highlight(
                 make_index_key(),
                 "(fox -dog)^2".into(),
                 vec!["fox dog".into()],
@@ -1174,7 +1174,7 @@ mod tests {
         // A plain boost carries no negation, but we still cannot see inside it
         // to rule one out, so we report it as unsupported rather than a false "no match".
         let result = sender
-            ._highlight(make_index_key(), "fox^2".into(), vec!["fox dog".into()])
+            .highlight(make_index_key(), "fox^2".into(), vec!["fox dog".into()])
             .await;
 
         assert!(result.is_err());
@@ -1186,7 +1186,7 @@ mod tests {
         let sender = make_sender(table);
 
         let result = sender
-            ._highlight(make_index_key(), "fox".into(), vec!["a fox".into()])
+            .highlight(make_index_key(), "fox".into(), vec!["a fox".into()])
             .await;
 
         assert!(result.is_err());

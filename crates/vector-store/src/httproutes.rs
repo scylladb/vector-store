@@ -19,6 +19,7 @@ use crate::engine::Engine;
 use crate::engine::EngineExt;
 use crate::fts_index::FtsIndex;
 use crate::fts_index::FtsIndexExt;
+use crate::fts_index::QueryError;
 use crate::indexes;
 use crate::indexes::Indexes;
 use crate::info::Info;
@@ -178,6 +179,7 @@ fn new_open_api_router() -> (Router<RoutesInnerState>, utoipa::openapi::OpenApi)
                 .routes(routes!(get_index_info))
                 .routes(routes!(post_index_ann))
                 .routes(routes!(post_index_bm25))
+                .routes(routes!(post_index_highlight))
                 .routes(routes!(get_info))
                 .routes(routes!(get_status)),
         )
@@ -913,8 +915,7 @@ async fn check_fts_serving<T>(
     match serving_or_progress {
         Ok(serving) => Ok(serving),
         Err(Progress::InProgress(percentage)) => {
-            let reason =
-                index_not_ready_reason(node_state, keyspace, index_name, percentage).await;
+            let reason = index_not_ready_reason(node_state, keyspace, index_name, percentage).await;
             debug!("{route_name}: index {keyspace}.{index_name} not ready: {reason:?}");
             Err((StatusCode::SERVICE_UNAVAILABLE, response::Json(reason)).into_response())
         }
@@ -1070,6 +1071,134 @@ async fn post_index_bm25(
                     .into_response(),
             }
         }
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/indexes/{keyspace}/{index}/highlight",
+    tag = "scylla-vector-store-index",
+    description = "Computes a highlighted excerpt (snippet) for each of the supplied document texts. \
+The index is used only to analyze the query and to weight its terms by their document frequency, prioritizing \
+rarer terms when picking which fragment of a long text to show. \
+Highlights are returned in the same order as the requested documents. \
+A document that matches no query term yields `null`. \
+If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
+    params(
+        ("keyspace" = httpapi::KeyspaceName, Path, description = "The name of the ScyllaDB keyspace containing the index."),
+        ("index" = httpapi::IndexName, Path, description = "The name of the full-text index within the specified keyspace to highlight against.")
+    ),
+    request_body = httpapi::PostIndexHighlightRequest,
+    responses(
+        (
+            status = 200,
+            description = "Successful highlighting. Returns one highlight per requested document, in the requested order.",
+            body = httpapi::PostIndexHighlightResponse
+        ),
+        (
+            status = 400,
+            description = "Bad request. Possible causes: malformed input, unparsable query, or missing required fields.",
+            content_type = "application/json",
+            body = ErrorMessage
+        ),
+        (
+            status = 403,
+            description = "Forbidden. TLS is enabled in the configuration, but the client connected over plain HTTP.",
+            content_type = "application/json",
+            body = ErrorMessage
+        ),
+        (
+            status = 404,
+            description = "Index not found. Possible causes: index does not exist, or is not discovered yet.",
+            content_type = "application/json",
+            body = ErrorMessage
+        ),
+        (
+            status = 500,
+            description = "Error while highlighting. Possible causes: internal error, or search engine issues.",
+            content_type = "application/json",
+            body = ErrorMessage
+        ),
+        (
+            status = 503,
+            response = httpapi::IndexNotReadyResponse
+        )
+    )
+)]
+async fn post_index_highlight(
+    State(state): State<RoutesInnerState>,
+    extensions: Extensions,
+    Path((keyspace, index_name)): Path<(httpapi::KeyspaceName, httpapi::IndexName)>,
+    extract::Json(request): extract::Json<httpapi::PostIndexHighlightRequest>,
+) -> Response {
+    let keyspace: crate::KeyspaceName = keyspace.into();
+    let index_name: crate::IndexName = index_name.into();
+    if let Some(resp) = check_insecure_tls(state.use_tls, &extensions, "post_index_highlight") {
+        return resp;
+    }
+
+    let timer = state
+        .metrics
+        .latency
+        .with_label_values(&[keyspace.as_ref(), index_name.as_ref()])
+        .start_timer();
+
+    let index_key = IndexKey::new(&keyspace, &index_name);
+
+    let serving_or_progress = {
+        let indexes = state.indexes.read().unwrap();
+        let Some(entry) = indexes.get_fts(&index_key) else {
+            timer.observe_duration();
+
+            let msg = format!("missing index: {keyspace}.{index_name}");
+            debug!("post_index_highlight: {msg}");
+            return (StatusCode::NOT_FOUND, msg).into_response();
+        };
+        if entry.status() == crate::node_state::IndexStatus::Serving {
+            Ok(entry.index().clone())
+        } else {
+            Err(entry.progress())
+        }
+    };
+
+    let fts_sender = match check_fts_serving(
+        serving_or_progress,
+        &state.node_state,
+        &keyspace,
+        &index_name,
+        "post_index_highlight",
+    )
+    .await
+    {
+        Ok(sender) => sender,
+        Err(resp) => {
+            timer.observe_duration();
+            return resp;
+        }
+    };
+
+    let result = fts_sender
+        .highlight(index_key, request.query, request.documents)
+        .await;
+
+    timer.observe_duration();
+
+    match result {
+        Err(err) => {
+            let msg = format!("index.highlight request error: {err}");
+            debug!("post_index_highlight: {msg}");
+            let status = if err.downcast_ref::<QueryError>().is_some() {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (status, msg).into_response()
+        }
+        Ok(highlights) => (
+            StatusCode::OK,
+            response::Json(httpapi::PostIndexHighlightResponse { highlights }),
+        )
+            .into_response(),
     }
 }
 
