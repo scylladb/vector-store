@@ -65,7 +65,7 @@ use tracing::error;
 use tracing::trace;
 use tracing::warn;
 
-const MAX_POINTS: NonZeroUsize = NonZeroUsize::new(1_000_000).unwrap();
+const DISKANN_DEFAULT_MAX_POINTS: NonZeroUsize = NonZeroUsize::new(1_000_000).unwrap();
 
 type DiskannProvider = InmemProvider<Full<f32>, PrimaryId>;
 
@@ -75,6 +75,7 @@ pub struct DiskannIndexFactory {
     worker: async_channel::Sender<Worker>,
     memory: mpsc::Sender<Memory>,
     alpha: DiskannAlpha,
+    max_points: NonZeroUsize,
 }
 
 impl VsIndexFactory for DiskannIndexFactory {
@@ -83,7 +84,7 @@ impl VsIndexFactory for DiskannIndexFactory {
         index: VsIndexConfiguration,
         table: Arc<RwLock<Table>>,
     ) -> anyhow::Result<(mpsc::Sender<VsIndexModify>, mpsc::Sender<VsIndexSearch>)> {
-        let params = DiskannParams::new(&index, self.alpha, MAX_POINTS)
+        let params = DiskannParams::new(&index, self.alpha, self.max_points)
             .context("failed to create DiskANN parameters")?;
 
         new(
@@ -113,6 +114,9 @@ pub fn new_diskann(
         alpha: config
             .diskann_alpha
             .unwrap_or(DiskannAlpha::new(DISKANN_DEFAULT_ALPHA).unwrap()),
+        max_points: config
+            .diskann_max_points
+            .unwrap_or(DISKANN_DEFAULT_MAX_POINTS),
     })
 }
 
@@ -618,7 +622,7 @@ mod tests {
         let params = DiskannParams::new(
             &vs_config,
             DiskannAlpha::new(DISKANN_DEFAULT_ALPHA).unwrap(),
-            MAX_POINTS,
+            DISKANN_DEFAULT_MAX_POINTS,
         )
         .unwrap();
 
@@ -632,5 +636,48 @@ mod tests {
         assert_eq!(params.l_default, NonZeroUsize::new(32).unwrap());
         assert_eq!(params.beam_width, NonZeroUsize::new(32).unwrap());
         assert_eq!(params.space_type, SpaceType::Euclidean);
+    }
+
+    #[tokio::test]
+    async fn diskann_add_vector_stops_at_max_points_cap() {
+        let max_points = NonZeroUsize::new(3).unwrap();
+
+        let vs_config = VsIndexConfiguration {
+            key: IndexKey::new(
+                &KeyspaceName::from("ks".to_string()),
+                &IndexName::from("tbl".to_string()),
+            ),
+            dimensions: NonZeroUsize::new(2).unwrap().into(),
+            connectivity: Connectivity(16),
+            expansion_add: ExpansionAdd(64),
+            expansion_search: ExpansionSearch(32),
+            space_type: SpaceType::Euclidean,
+            quantization: Quantization::F32,
+        };
+
+        let params = DiskannParams::new(
+            &vs_config,
+            DiskannAlpha::new(DISKANN_DEFAULT_ALPHA).unwrap(),
+            max_points,
+        )
+        .unwrap();
+
+        let embeddings: Vec<Vector> = (0..5)
+            .map(|i| Vector::from(vec![i as f32, i as f32]))
+            .collect();
+
+        let index = create_diskann_index(&params, Some(embeddings[0].as_slice())).unwrap();
+        let partition = Partition {
+            partition_id: PartitionId::from(0u64),
+            index,
+        };
+        let size = AtomicUsize::new(0);
+
+        // Try to insert more vectors than the cap allows.
+        for (i, embedding) in embeddings.into_iter().enumerate() {
+            add_vector(&partition, &size, PrimaryId::from(i as u64), embedding).await;
+        }
+
+        assert_eq!(size.load(Ordering::Relaxed), max_points.get());
     }
 }
