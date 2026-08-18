@@ -2023,9 +2023,9 @@ dependencies = [
 
 [[package]]
 name = "e2etest-vector-store-cluster"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb3607172385cb4f2f193ecd769a492b5818da496a1ce3781ec732f9a403ac44"
+checksum = "d9a1a9cf864079261c2f040d501f56e5fbce652b7beb3240290ab8f25b5d874d"
 dependencies = [
  "anyhow",
  "async-backtrace",
