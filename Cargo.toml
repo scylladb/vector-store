@@ -45,7 +45,7 @@ e2etest-firewall = "0.1.0"
 e2etest-scylla-cluster = "0.1.1"
 e2etest-scylla-proxy-cluster = "0.1.0"
 e2etest-tls = "0.1.0"
-e2etest-vector-store-cluster = "0.1.1"
+e2etest-vector-store-cluster = "0.1.2"
 futures = "0.3.31"
 hotpath = { version = "0.15.0", features = ["tokio", "futures", "async-channel"] }
 http = "1.4.0"
