@@ -234,6 +234,12 @@ fn handle_remove_document(
     state.writer.write().unwrap().rm_document(term, in_progress)
 }
 
+/// A query-related failure caused by the caller's input (an unparsable query, or a query
+/// construct that this endpoint cannot process) rather than an internal/actor failure.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub(crate) struct QueryError(pub(crate) String);
+
 fn make_query(
     index: &tantivy::Index,
     body_field: tantivy::schema::Field,
@@ -242,7 +248,7 @@ fn make_query(
     let query_parser = QueryParser::for_index(index, vec![body_field]);
     query_parser
         .parse_query(query_str)
-        .map_err(|e| anyhow!("fts: failed to parse query: {e}"))
+        .map_err(|e| QueryError(format!("fts: failed to parse query: {e}")).into())
 }
 
 fn find_partition_id(
