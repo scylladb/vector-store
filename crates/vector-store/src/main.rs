@@ -25,7 +25,9 @@ fn dotenvy_to_std_var(key: &str) -> anyhow::Result<String> {
     Ok(dotenvy::var(key)?)
 }
 
-// Index creating/querying is CPU bound task, so that vector-store uses rayon ThreadPool for them.
+// Index creation and querying are CPU-bound tasks, so they are dispatched through the worker
+// actors. A blocking task is moved to a dedicated thread only when every worker actor is
+// already busy — so that the runtime does not get starved.
 // From the start there was no need (network traffic seems to be not so high) to support more than
 // one thread per network IO bound tasks.
 fn main() -> anyhow::Result<()> {
