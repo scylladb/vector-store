@@ -264,7 +264,7 @@
             }
           },
           "400": {
-            "description": "Bad request. Possible causes: malformed input, or missing required fields.",
+            "description": "Bad request. Possible causes: malformed input, unparsable query, or missing required fields.",
             "content": {
               "application/json": {
                 "schema": {

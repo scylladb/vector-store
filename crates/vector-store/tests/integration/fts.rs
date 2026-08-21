@@ -309,6 +309,25 @@ async fn fts_bm25_search_not_found_returns_404() {
 }
 
 #[tokio::test]
+async fn fts_bm25_search_unparsable_query_returns_400() {
+    crate::enable_tracing();
+
+    let (client, keyspace_name, index_name, _db, _hold) =
+        setup_fts_and_wait([(vec![CqlValue::Int(1)], "a quiet fox", 10)], 1).await;
+
+    let response = client
+        .post_bm25(
+            &keyspace_name,
+            &index_name,
+            "fox AND".into(),
+            NonZeroUsize::new(10).unwrap().into(),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn fts_bm25_search_returns_503_and_node_bootstrapping_reason_when_index_is_building_during_node_bootstrapping()
  {
     crate::enable_tracing();
