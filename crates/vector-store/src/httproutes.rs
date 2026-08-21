@@ -394,7 +394,7 @@ impl From<crate::node_state::IndexStatus> for httpapi::IndexStatus {
         ),
         (
             status = 500,
-            description = "Error while checking index state or counting vectors. Possible causes: internal error, or issues accessing the database.",
+            description = "Error while checking index state or counting indexed items. Possible causes: internal error, or issues accessing the database.",
             content_type = "application/json",
             body = ErrorMessage
         )
