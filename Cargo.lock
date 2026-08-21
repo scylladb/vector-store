@@ -6141,6 +6141,7 @@ dependencies = [
  "const-hex",
  "criterion",
  "cuvs",
+ "cuvs-sys",
  "dashmap 6.1.0",
  "derive_more",
  "diskann",

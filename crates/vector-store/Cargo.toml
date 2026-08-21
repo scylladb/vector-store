@@ -25,7 +25,7 @@ dev-tools = []
 hotpath = ["hotpath/hotpath"]
 console = ["console-subscriber"]
 slow-test-hooks = []
-gpu = ["dep:cuvs"]
+gpu = ["dep:cuvs", "dep:cuvs-sys"]
 
 [dependencies]
 anyhow.workspace = true
@@ -40,6 +40,7 @@ chrono.workspace = true
 const-hex.workspace = true
 console-subscriber = {workspace = true, optional = true}
 cuvs = { workspace = true, optional = true }
+cuvs-sys = { workspace = true, optional = true }
 dashmap.workspace = true
 derive_more.workspace = true
 diskann.workspace = true
