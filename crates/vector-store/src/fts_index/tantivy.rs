@@ -15,6 +15,10 @@ use tantivy::ReloadPolicy;
 use tantivy::TantivyDocument;
 use tantivy::collector::TopDocs;
 use tantivy::indexer::IndexWriterOptions;
+use tantivy::query::BooleanQuery;
+use tantivy::query::BoostQuery;
+use tantivy::query::Occur;
+use tantivy::query::Query;
 use tantivy::query::QueryParser;
 use tantivy::schema::INDEXED;
 use tantivy::schema::IndexRecordOption;
@@ -23,6 +27,7 @@ use tantivy::schema::Schema;
 use tantivy::schema::TextFieldIndexing;
 use tantivy::schema::TextOptions;
 use tantivy::schema::Value;
+use tantivy::snippet::SnippetGenerator;
 use tantivy::tokenizer::Language;
 use tantivy::tokenizer::LowerCaser;
 use tantivy::tokenizer::SimpleTokenizer;
@@ -48,6 +53,7 @@ use crate::table::TableSearch;
 use crate::worker::Worker;
 use crate::worker::WorkerExt;
 
+use super::actor::FtsHighlightR;
 use super::actor::FtsIndex;
 use super::actor::FtsSearchR;
 use super::actor::FtsStats;
@@ -234,6 +240,12 @@ fn handle_remove_document(
     state.writer.write().unwrap().rm_document(term, in_progress)
 }
 
+/// A query-related failure caused by the caller's input (an unparsable query, or a query
+/// construct that this endpoint cannot process) rather than an internal/actor failure.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub(crate) struct QueryError(pub(crate) String);
+
 fn make_query(
     index: &tantivy::Index,
     body_field: tantivy::schema::Field,
@@ -242,7 +254,7 @@ fn make_query(
     let query_parser = QueryParser::for_index(index, vec![body_field]);
     query_parser
         .parse_query(query_str)
-        .map_err(|e| anyhow!("fts: failed to parse query: {e}"))
+        .map_err(|e| QueryError(format!("fts: failed to parse query: {e}")).into())
 }
 
 fn find_partition_id(
@@ -298,6 +310,66 @@ fn handle_search(
         .unzip();
 
     Ok((primary_keys, scores))
+}
+
+const HIGHLIGHT_MAX_NUM_CHARS: usize = 150;
+const HIGHLIGHT_PRE_TAG: &str = "<b>";
+const HIGHLIGHT_POST_TAG: &str = "</b>";
+
+/// Rebuilds `query`, dropping any `MustNot` clause at every nesting level.
+///
+/// Works around a Tantivy limitation.
+/// `SnippetGenerator` uses `BooleanQuery::query_terms` to determine which terms to highlight.
+/// That method walks every subquery regardless of `Occur`, discarding the sign entirely.
+/// Without this, a negated term (e.g. `-dog` in `fox -dog`) would still get highlighted
+/// in caller-supplied text even though the query excludes documents containing it.
+///
+/// Returns `Err` for a query construct we cannot see inside since we cannot rule
+/// out a `MustNot` clause hidden behind it. The caller surfaces this as a query error
+/// rather than silently returning no highlights, since the query may still positively
+/// match the document.
+fn strip_negated_clauses(query: &dyn Query) -> anyhow::Result<Box<dyn Query>> {
+    let Some(boolean_query) = query.downcast_ref::<BooleanQuery>() else {
+        if query.downcast_ref::<BoostQuery>().is_some() {
+            return Err(QueryError(
+                "fts: boosted queries are not supported for highlighting".to_string(),
+            )
+            .into());
+        }
+        return Ok(query.box_clone());
+    };
+    let clauses = boolean_query
+        .clauses()
+        .iter()
+        .filter(|(occur, _)| *occur != Occur::MustNot)
+        .map(|(occur, subquery)| Ok((*occur, strip_negated_clauses(subquery.as_ref())?)))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(Box::new(BooleanQuery::new(clauses)))
+}
+
+fn handle_highlight(state: &IndexState, query_str: &str, documents: &[String]) -> FtsHighlightR {
+    let body_field = state.schema.get_field("body").unwrap();
+    let searcher = state.reader.searcher();
+    let query = make_query(&state.index, body_field, query_str)?;
+    let query = strip_negated_clauses(query.as_ref())?;
+
+    // The generator uses the live index to weight terms by document frequency,
+    // prioritizing rarer indexed terms when picking which fragment of a long text to show.
+    let mut generator = SnippetGenerator::create(&searcher, query.as_ref(), body_field)
+        .map_err(|e| anyhow!("fts: failed to create snippet generator: {e}"))?;
+    generator.set_max_num_chars(HIGHLIGHT_MAX_NUM_CHARS);
+
+    Ok(documents
+        .iter()
+        .map(|text| {
+            let mut snippet = generator.snippet(text);
+            if snippet.is_empty() {
+                return None;
+            }
+            snippet.set_snippet_prefix_postfix(HIGHLIGHT_PRE_TAG, HIGHLIGHT_POST_TAG);
+            Some(snippet.to_html())
+        })
+        .collect())
 }
 
 fn handle_stats(state: &IndexState) -> FtsStatsR {
@@ -468,6 +540,24 @@ pub(crate) fn new(
                                         &query,
                                         limit,
                                     );
+                                    _ = tx.send(result);
+                                })
+                                .await;
+                        }
+                        FtsIndex::_Highlight {
+                            index_key,
+                            query,
+                            documents,
+                            tx,
+                        } => {
+                            let Some(state) = get_state(&states, table.as_ref(), &index_key)
+                            else {
+                                _ = tx.send(Err(anyhow!("fts: missing index {index_key}")));
+                                continue;
+                            };
+                            worker
+                                .spawn_blocking(move || {
+                                    let result = handle_highlight(&state, &query, &documents);
                                     _ = tx.send(result);
                                 })
                                 .await;
@@ -842,6 +932,264 @@ mod tests {
         let count = sender.count(key).await.unwrap();
 
         assert_eq!(count, TEST_COMMIT_THRESHOLD);
+    }
+
+    async fn highlight(
+        sender: &mpsc::Sender<FtsIndex>,
+        query: &str,
+        documents: &[&str],
+    ) -> Vec<Option<String>> {
+        sender
+            ._highlight(
+                make_index_key(),
+                query.into(),
+                documents.iter().map(|doc| doc.to_string()).collect(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn highlight_marks_query_terms_in_caller_supplied_text() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+        add_doc(&sender, 1, "the quick brown fox jumps").await;
+
+        let highlights = highlight(&sender, "fox", &["a completely different fox story"]).await;
+
+        assert_eq!(highlights.len(), 1);
+        assert_eq!(
+            highlights[0].as_deref(),
+            Some("a completely different <b>fox</b> story")
+        );
+    }
+
+    #[tokio::test]
+    async fn highlight_returns_none_when_query_term_was_never_indexed() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+        add_doc(&sender, 1, "unrelated content about turtles").await;
+
+        let highlights = highlight(&sender, "fox", &["a completely different fox story"]).await;
+
+        assert_eq!(highlights[0], None);
+    }
+
+    #[tokio::test]
+    async fn highlight_returns_one_entry_per_document_in_order() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+        add_doc(&sender, 13, "turtles").await;
+        add_doc(&sender, 21, "fox").await;
+        add_doc(&sender, 34, "dog").await;
+
+        let highlights = highlight(
+            &sender,
+            "fox OR dog OR turtles",
+            &["quick fox jumps", "turtles swim slowly", "lazy dog sleeps"],
+        )
+        .await;
+
+        assert_eq!(highlights.len(), 3);
+        assert_eq!(highlights[0].as_deref(), Some("quick <b>fox</b> jumps"));
+        assert_eq!(highlights[1].as_deref(), Some("<b>turtles</b> swim slowly"));
+        assert_eq!(highlights[2].as_deref(), Some("lazy <b>dog</b> sleeps"));
+    }
+
+    #[tokio::test]
+    async fn highlight_returns_none_without_matches() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+        add_doc(&sender, 1, "fox").await;
+
+        let highlights = highlight(&sender, "fox", &["turtles all the way down"]).await;
+
+        assert_eq!(highlights[0], None);
+    }
+
+    #[tokio::test]
+    async fn highlight_returns_none_for_not_matched_or_indexed_documents() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+        add_doc(&sender, 1, "fox").await;
+        add_doc(&sender, 2, "dog").await;
+        // "turtles" is not indexed
+        add_doc(&sender, 4, "cat").await;
+
+        let highlights = highlight(
+            &sender,
+            // "dog" does not appear in the query
+            "fox OR turtles OR cat",
+            &[
+                "quick fox jumps",
+                "turtles swim slowly",
+                "lazy dog sleeps",
+                "cat nap time",
+            ],
+        )
+        .await;
+
+        assert_eq!(highlights.len(), 4);
+        assert_eq!(highlights[0].as_deref(), Some("quick <b>fox</b> jumps"));
+        assert_eq!(highlights[1], None);
+        assert_eq!(highlights[2], None);
+        assert_eq!(highlights[3].as_deref(), Some("<b>cat</b> nap time"));
+    }
+
+    #[tokio::test]
+    async fn highlight_escapes_html_in_fragment_but_not_in_tags() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+        add_doc(&sender, 1, "fox").await;
+
+        let highlights =
+            highlight(&sender, "fox", &["<script>fox & \"friends\"</script> end"]).await;
+
+        assert_eq!(
+            highlights[0].as_deref(),
+            Some("&lt;script&gt;<b>fox</b> &amp; &quot;friends&quot;&lt;/script&gt; end")
+        );
+    }
+
+    #[tokio::test]
+    async fn highlight_truncates_to_default_max_num_chars() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+        add_doc(&sender, 1, "needle").await;
+
+        let padding = "haystack ".repeat(40);
+        let text = format!("{padding}needle {padding}");
+        let highlights = highlight(&sender, "needle", &[text.as_str()]).await;
+
+        let highlight = highlights[0].as_deref().unwrap();
+        let highlight_len = highlight.len();
+        assert!(
+            highlight_len
+                <= HIGHLIGHT_MAX_NUM_CHARS + HIGHLIGHT_PRE_TAG.len() + HIGHLIGHT_POST_TAG.len(),
+            "highlight of {highlight_len} chars exceeds the default max_num_chars of {HIGHLIGHT_MAX_NUM_CHARS} plus tag overhead: {highlight}",
+        );
+        assert!(highlight.contains("<b>needle</b>"));
+    }
+
+    #[tokio::test]
+    async fn highlight_empty_documents_returns_no_highlights() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+        add_doc(&sender, 1, "fox").await;
+
+        assert!(highlight(&sender, "fox", &[]).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn highlight_marks_terms_for_phrase_query() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+        add_doc(&sender, 1, "brown fox").await;
+
+        let highlights = highlight(&sender, "\"brown fox\"", &["the quick brown fox jumps"]).await;
+
+        assert_eq!(
+            highlights[0].as_deref(),
+            Some("the quick <b>brown</b> <b>fox</b> jumps")
+        );
+    }
+
+    #[tokio::test]
+    async fn highlight_does_not_mark_negated_query_terms() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+        add_doc(&sender, 1, "fox").await;
+        add_doc(&sender, 2, "dog").await;
+
+        let highlights = highlight(&sender, "fox -dog", &["fox dog"]).await;
+
+        assert_eq!(highlights[0].as_deref(), Some("<b>fox</b> dog"));
+    }
+
+    #[tokio::test]
+    async fn highlight_marks_positive_terms_in_nested_query_with_negation() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+        add_doc(&sender, 1, "fox").await;
+        add_doc(&sender, 2, "cat").await;
+        add_doc(&sender, 3, "dog").await;
+
+        let highlights = highlight(&sender, "(fox OR cat) -dog", &["fox cat dog"]).await;
+
+        assert_eq!(highlights[0].as_deref(), Some("<b>fox</b> <b>cat</b> dog"));
+    }
+
+    #[tokio::test]
+    async fn highlight_marks_non_ascii_terms() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+        add_doc(&sender, 1, "café").await;
+
+        let highlights = highlight(&sender, "café", &["I love a nice café over über coffee"]).await;
+
+        assert_eq!(
+            highlights[0].as_deref(),
+            Some("I love a nice <b>café</b> over über coffee")
+        );
+    }
+
+    #[tokio::test]
+    async fn highlight_fails_on_unparsable_query() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+        add_doc(&sender, 1, "fox").await;
+
+        let result = sender
+            ._highlight(make_index_key(), "fox AND".into(), vec!["a fox".into()])
+            .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn highlight_fails_for_negated_boosted_query() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+        add_doc(&sender, 1, "fox").await;
+        add_doc(&sender, 2, "dog").await;
+
+        let result = sender
+            ._highlight(
+                make_index_key(),
+                "(fox -dog)^2".into(),
+                vec!["fox dog".into()],
+            )
+            .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn highlight_fails_for_boosted_query() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+        add_doc(&sender, 1, "fox").await;
+        add_doc(&sender, 2, "dog").await;
+
+        // A plain boost carries no negation, but we still cannot see inside it
+        // to rule one out, so we report it as unsupported rather than a false "no match".
+        let result = sender
+            ._highlight(make_index_key(), "fox^2".into(), vec!["fox dog".into()])
+            .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn highlight_fails_without_index() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+
+        let result = sender
+            ._highlight(make_index_key(), "fox".into(), vec!["a fox".into()])
+            .await;
+
+        assert!(result.is_err());
     }
 
     #[test]

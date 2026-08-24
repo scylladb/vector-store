@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
 pub(crate) type FtsSearchR = anyhow::Result<(Vec<PrimaryKey>, Vec<f32>)>;
+pub(crate) type FtsHighlightR = anyhow::Result<Vec<Option<String>>>;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FtsStats {
@@ -43,6 +44,12 @@ pub(crate) enum FtsIndex {
         limit: Limit,
         tx: oneshot::Sender<FtsSearchR>,
     },
+    _Highlight {
+        index_key: IndexKey,
+        query: String,
+        documents: Vec<String>,
+        tx: oneshot::Sender<FtsHighlightR>,
+    },
     Stats {
         index_key: IndexKey,
         tx: oneshot::Sender<FtsStatsR>,
@@ -63,6 +70,12 @@ pub(crate) trait FtsIndexExt {
     ) -> anyhow::Result<()>;
     async fn count(&self, index_key: IndexKey) -> CountR;
     async fn search(&self, index_key: IndexKey, query: String, limit: Limit) -> FtsSearchR;
+    async fn _highlight(
+        &self,
+        index_key: IndexKey,
+        query: String,
+        documents: Vec<String>,
+    ) -> FtsHighlightR;
     async fn stats(&self, index_key: IndexKey) -> FtsStatsR;
 }
 
@@ -107,6 +120,23 @@ impl FtsIndexExt for mpsc::Sender<FtsIndex> {
             index_key,
             query,
             limit,
+            tx,
+        })
+        .await?;
+        rx.await?
+    }
+
+    async fn _highlight(
+        &self,
+        index_key: IndexKey,
+        query: String,
+        documents: Vec<String>,
+    ) -> FtsHighlightR {
+        let (tx, rx) = oneshot::channel();
+        self.send(FtsIndex::_Highlight {
+            index_key,
+            query,
+            documents,
             tx,
         })
         .await?;
