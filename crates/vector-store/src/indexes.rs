@@ -359,8 +359,8 @@ impl Indexes {
 
     /// Determines the index to route a query to, given a requested `IndexKey`.
     ///
-    /// To ensure queries are routed to the most up-to-date and best-matching index,
-    /// this function applies the following routing logic:
+    /// When `routing` is `true`, ensures queries are routed to the most
+    /// up-to-date and best-matching index by applying the following logic:
     ///
     /// 1. Returns `NotFound` if the requested index key does not exist.
     /// 2. Identifies all candidate indexes within the same routing group
@@ -370,19 +370,27 @@ impl Indexes {
     /// 5. Picks the candidate with the highest score, breaking ties by
     ///    the newest `IndexVersion`.
     /// 6. Returns `NotServing` if no candidate meets the criteria.
+    ///
+    /// When `routing` is `false`, the only candidate considered is the
+    /// requested index itself - the query is served by exactly the named
+    /// index, or not at all.
     pub(crate) fn best_index(
         &self,
         key: &IndexKey,
         equality_columns: &[ColumnName],
         range_columns: &[ColumnName],
+        routing: bool,
     ) -> BestIndexState {
         let Some(requested_entry) = self.vs_entries.get(key) else {
             return BestIndexState::NotFound;
         };
-        let candidates = self
-            .vs_routing
-            .get(&requested_entry.data.routing_group)
-            .expect("routing_map must contain group for every index in indexes");
+        let candidates: &[IndexKey] = if routing {
+            self.vs_routing
+                .get(&requested_entry.data.routing_group)
+                .expect("routing_map must contain group for every index in indexes")
+        } else {
+            std::slice::from_ref(key)
+        };
 
         let routed_key = candidates
             .iter()
