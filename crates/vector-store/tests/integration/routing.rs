@@ -5,6 +5,7 @@
 
 use crate::common::add_table;
 use crate::common::blocking_scan_fn;
+use crate::common::make_index_with_kind;
 use crate::common::make_vs_index;
 use crate::common::ordered_timeuuid;
 use crate::common::setup;
@@ -21,8 +22,11 @@ use scylla::value::CqlValue;
 use std::num::NonZeroUsize;
 use std::time::Duration;
 use vector_store::DbIndexPartitioning;
+use vector_store::IndexKind;
 use vector_store::IndexMetadata;
+use vector_store::IndexOptionsVs;
 use vector_store::NonemptyArc;
+use vector_store::SpaceType;
 
 const ANN_LIMIT: usize = 5;
 
@@ -126,6 +130,51 @@ async fn assert_ann_served_by(
         1,
         "expected ANN request to be served by {}",
         expected.index_name,
+    );
+    response
+}
+
+/// Like `assert_ann_served_by`, but also asserts the request was not served
+/// by `not_expected`.
+async fn assert_ann_served_by_and_not(
+    client: &HttpClient,
+    expected: &IndexMetadata,
+    not_expected: &IndexMetadata,
+    request: impl std::future::Future<Output = reqwest::Response>,
+) -> reqwest::Response {
+    client
+        .internals_clear_counters()
+        .await
+        .expect("internals counters must be cleared");
+    let expected_counter = format!(
+        "ann-served-request--{}--{}",
+        expected.keyspace_name, expected.index_name
+    );
+    let not_expected_counter = format!(
+        "ann-served-request--{}--{}",
+        not_expected.keyspace_name, not_expected.index_name
+    );
+    for counter in [&expected_counter, &not_expected_counter] {
+        client
+            .internals_start_counter(counter.clone())
+            .await
+            .expect("internals served counter must be registered");
+    }
+
+    let response = request.await;
+
+    let counters = client.internals_counters().await.unwrap();
+    assert_eq!(
+        counters.get(&expected_counter).copied().unwrap_or(0),
+        1,
+        "expected ANN request to be served by {}",
+        expected.index_name,
+    );
+    assert_eq!(
+        counters.get(&not_expected_counter).copied().unwrap_or(0),
+        0,
+        "expected ANN request not to be served by {}",
+        not_expected.index_name,
     );
     response
 }
@@ -668,5 +717,86 @@ async fn ann_routes_to_global_index_without_pk_restrictions() {
 
     let response =
         assert_ann_served_by(&client, &global_index, post_ann(&client, &local_index)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+fn vs_options_with_space_type(space_type: SpaceType) -> IndexOptionsVs {
+    IndexOptionsVs {
+        dimensions: NonZeroUsize::new(3).unwrap().into(),
+        connectivity: Default::default(),
+        expansion_add: Default::default(),
+        expansion_search: Default::default(),
+        space_type,
+        quantization: Default::default(),
+    }
+}
+
+/// Regression test for indexes on the same column being routed to each
+/// other despite disagreeing on their distance function (or any other part
+/// of their definition). Two indexes on the same column, one COSINE and one
+/// EUCLIDEAN, are both fully serving; the EUCLIDEAN one is the newer of the
+/// two, so before the fix it would win the "prefer the newest index in the
+/// routing group" tie-break even for a query addressed to the COSINE index,
+/// silently answering it under the wrong distance function.
+#[rstest]
+#[timeout(Duration::from_secs(10))]
+#[tokio::test]
+#[cfg_attr(not(feature = "slow-test-hooks"), ignore = "requires slow-test-hooks")]
+async fn ann_does_not_route_between_indexes_with_different_distance_function() {
+    crate::enable_tracing();
+    let (client, db, _keep) = setup().await;
+
+    add_table(
+        &db,
+        ["pk".into()],
+        1,
+        [("pk".into(), NativeType::Int)],
+        ["embedding".into()],
+    );
+
+    let cosine = make_index_with_kind(
+        "cosine",
+        &["pk"],
+        1,
+        "embedding",
+        DbIndexPartitioning::Global,
+        &[],
+        ordered_timeuuid(1),
+        IndexKind::Vs(vs_options_with_space_type(SpaceType::Cosine)),
+    );
+    db.add_index(
+        cosine.clone(),
+        Some(single_row_scan([CqlValue::Int(1)])),
+        None,
+    )
+    .unwrap();
+    wait_for_serving(&client, &cosine).await;
+
+    let euclidean = make_index_with_kind(
+        "euclidean",
+        &["pk"],
+        1,
+        "embedding",
+        DbIndexPartitioning::Global,
+        &[],
+        ordered_timeuuid(2),
+        IndexKind::Vs(vs_options_with_space_type(SpaceType::Euclidean)),
+    );
+    db.add_index(
+        euclidean.clone(),
+        Some(single_row_scan([CqlValue::Int(1)])),
+        None,
+    )
+    .unwrap();
+    wait_for_serving(&client, &euclidean).await;
+
+    let response =
+        assert_ann_served_by_and_not(&client, &cosine, &euclidean, post_ann(&client, &cosine))
+            .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response =
+        assert_ann_served_by_and_not(&client, &euclidean, &cosine, post_ann(&client, &euclidean))
+            .await;
     assert_eq!(response.status(), StatusCode::OK);
 }
