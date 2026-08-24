@@ -19,6 +19,7 @@ use crate::engine::Engine;
 use crate::engine::EngineExt;
 use crate::fts_index::FtsIndex;
 use crate::fts_index::FtsIndexExt;
+use crate::fts_index::QueryError;
 use crate::indexes;
 use crate::indexes::Indexes;
 use crate::info::Info;
@@ -924,7 +925,7 @@ If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
         ),
         (
             status = 400,
-            description = "Bad request. Possible causes: malformed input, or missing required fields.",
+            description = "Bad request. Possible causes: malformed input, unparsable query, or missing required fields.",
             content_type = "application/json",
             body = ErrorMessage
         ),
@@ -1018,7 +1019,12 @@ async fn post_index_bm25(
         Err(err) => {
             let msg = format!("index.bm25 request error: {err}");
             debug!("post_index_bm25: {msg}");
-            (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
+            let status = if err.downcast_ref::<QueryError>().is_some() {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (status, msg).into_response()
         }
         Ok((primary_keys, scores)) => {
             if primary_keys.len() != scores.len() {
