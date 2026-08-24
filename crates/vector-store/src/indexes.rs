@@ -58,21 +58,24 @@ impl Ord for NeedsFiltering {
     }
 }
 
-/// Key for grouping indexes that can be routed between each other
-/// (i.e., indexes over the same keyspace, table, and target column).
+/// Key for grouping indexes that can be routed between each other: the same
+/// keyspace, table, and target column, with identical index options. Name,
+/// partitioning, filtering columns, and version may still differ.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct RoutingGroupKey {
     keyspace: KeyspaceName,
     table: TableName,
     columns: NonemptyArc<ColumnName>,
+    options: crate::IndexOptionsVs,
 }
 
-impl From<&IndexMetadata> for RoutingGroupKey {
-    fn from(metadata: &IndexMetadata) -> Self {
+impl RoutingGroupKey {
+    fn new(metadata: &IndexMetadata, options: &crate::IndexOptionsVs) -> Self {
         Self {
             keyspace: metadata.keyspace_name.clone(),
             table: metadata.table_name.clone(),
             columns: metadata.target_columns.clone(),
+            options: options.clone(),
         }
     }
 }
@@ -152,13 +155,13 @@ impl VsIndexEntry {
         db_index: mpsc::Sender<DbIndex>,
         metadata: IndexMetadata,
     ) -> anyhow::Result<Self> {
-        let routing_group = RoutingGroupKey::from(&metadata);
         let options = metadata
             .vs()
             .ok_or_else(|| {
                 anyhow::anyhow!("add_index_vs must be called with a vector-search index")
             })?
             .clone();
+        let routing_group = RoutingGroupKey::new(&metadata, &options);
         let filtering_columns = metadata
             .primary_key_columns
             .iter()
@@ -364,7 +367,8 @@ impl Indexes {
     ///
     /// 1. Returns `NotFound` if the requested index key does not exist.
     /// 2. Identifies all candidate indexes within the same routing group
-    ///    (i.e., sharing the same keyspace, table, and target column).
+    ///    (i.e., sharing the same keyspace, table, target column, and
+    ///    index options).
     /// 3. Filters out candidates whose `score_index` returns `None` (invalid).
     /// 4. Narrows down the remaining candidates to those that are actively serving.
     /// 5. Picks the candidate with the highest score, breaking ties by
