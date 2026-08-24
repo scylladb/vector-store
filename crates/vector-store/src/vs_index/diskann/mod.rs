@@ -67,6 +67,7 @@ use tracing::trace;
 use tracing::warn;
 
 mod inmem;
+mod scylla;
 
 const DISKANN_DEFAULT_MAX_POINTS: NonZeroUsize = NonZeroUsize::new(1_000_000).unwrap();
 
