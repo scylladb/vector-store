@@ -6,7 +6,9 @@
 use crate::TestActors;
 use crate::common::*;
 use async_backtrace::framed;
+use httpapi::FulltextIndexOptions;
 use httpapi::IndexInfo;
+use httpapi::IndexOptions;
 use httpapi::KeyspaceName;
 use httpclient::HttpClient;
 use scylla::client::session::Session;
@@ -111,6 +113,17 @@ impl Fixture {
     #[framed]
     async fn create_fts_index(&self) {
         let index = create_fts_index(&self.session, &self.clients, &self.table).await;
+        self.wait_for_index_on_all_nodes(index).await;
+    }
+
+    #[framed]
+    async fn create_fts_index_with_options(&self, options: &[(&str, &str)]) {
+        let index =
+            create_fts_index_with_options(&self.session, &self.clients, &self.table, options).await;
+        self.wait_for_index_on_all_nodes(index).await;
+    }
+
+    async fn wait_for_index_on_all_nodes(&self, index: IndexInfo) {
         for client in &self.clients {
             wait_for_index(client, &index).await;
         }
@@ -173,8 +186,19 @@ async fn create_fts_index(
     clients: &[HttpClient],
     table: &TableName,
 ) -> IndexInfo {
+    create_fts_index_with_options(session, clients, table, &[]).await
+}
+
+async fn create_fts_index_with_options(
+    session: &Session,
+    clients: &[HttpClient],
+    table: &TableName,
+    options: &[(&str, &str)],
+) -> IndexInfo {
     create_index(
-        CreateIndexQuery::new(session, clients, table, "content").index_type("fulltext_index"),
+        CreateIndexQuery::new(session, clients, table, "content")
+            .index_type("fulltext_index")
+            .options(options.iter().copied()),
     )
     .await
 }
@@ -738,6 +762,124 @@ async fn fts_large_document_set(fixture: Arc<Fixture>) {
         common_hits_rows_num, MAX_SEARCH_LIMIT,
         "Expected common-term results capped at {MAX_SEARCH_LIMIT}, got {common_hits_rows_num}"
     );
+
+    info!("finished");
+}
+
+#[e2etest::test(group = fts)]
+async fn fts_index_options_are_reported(fixture: Arc<Fixture>) {
+    info!("started");
+
+    fixture
+        .create_fts_index_with_options(&[("analyzer", "german"), ("positions", "false")])
+        .await;
+
+    let index = fixture.index();
+    for client in &fixture.clients {
+        let info = client
+            .index_info(&fixture.keyspace, &index.index)
+            .await
+            .expect("failed to get index info");
+        assert_eq!(
+            info.options,
+            IndexOptions::Fulltext(FulltextIndexOptions {
+                analyzer: "german".to_string(),
+                positions: false,
+            }),
+            "reported index options do not match the ones it was created with"
+        );
+    }
+
+    info!("finished");
+}
+
+#[e2etest::test(group = fts)]
+async fn fts_english_analyzer_stems_terms(fixture: Arc<Fixture>) {
+    info!("started");
+
+    fixture
+        .insert_documents([
+            (1, "the runners are running quickly"),
+            (2, "a turtle walks through the garden"),
+        ])
+        .await;
+    fixture
+        .create_fts_index_with_options(&[("analyzer", "english")])
+        .await;
+
+    // Both the document and the query are stemmed, so "run" matches "running"
+    // but not the semantically matching "walks" document.
+    let pks = fixture.bm25_search_pks("run").await;
+    assert_eq!(pks, vec![1], "expected only pk 1 matching 'run'");
+
+    info!("finished");
+}
+
+#[e2etest::test(group = fts)]
+async fn fts_standard_analyzer_does_not_stem_terms(fixture: Arc<Fixture>) {
+    info!("started");
+
+    fixture
+        .insert_documents([
+            (1, "the runners are running quickly"),
+            (2, "a turtle walks through the garden"),
+        ])
+        .await;
+    fixture
+        .create_fts_index_with_options(&[("analyzer", "standard")])
+        .await;
+
+    // The standard analyzer does not stem, so only the exact term matches.
+    assert!(
+        fixture.bm25_search_pks("run").await.is_empty(),
+        "the standard analyzer should not match 'run' against 'running'"
+    );
+
+    info!("finished");
+}
+
+#[e2etest::test(group = fts)]
+async fn fts_whitespace_analyzer_keeps_case(fixture: Arc<Fixture>) {
+    info!("started");
+
+    fixture.insert_documents([(1, "Quick brown Fox")]).await;
+    fixture
+        .create_fts_index_with_options(&[("analyzer", "whitespace")])
+        .await;
+
+    // The whitespace analyzer neither lowercases nor splits on punctuation.
+    assert_eq!(
+        fixture.bm25_search_pks("Quick").await,
+        vec![1],
+        "the whitespace analyzer should match the exact term 'Quick'"
+    );
+    assert!(
+        fixture.bm25_search_pks("quick").await.is_empty(),
+        "the whitespace analyzer should keep the letter case of the indexed terms"
+    );
+
+    info!("finished");
+}
+
+#[e2etest::test(group = fts)]
+async fn fts_index_with_unsupported_options_returns_error(fixture: Arc<Fixture>) {
+    info!("started");
+
+    for (option, value) in [("analyzer", "klingon"), ("positions", "sometimes")] {
+        fixture
+            .session
+            .query_unpaged(
+                format!(
+                    "CREATE CUSTOM INDEX {} ON {}(content) USING 'fulltext_index' \
+                     WITH OPTIONS = {{'{option}': '{value}'}}",
+                    unique_index_name(),
+                    fixture.table
+                ),
+                (),
+            )
+            .await
+            .expect_err(&format!("'{option}': '{value}' should be rejected"));
+    }
 
     info!("finished");
 }
