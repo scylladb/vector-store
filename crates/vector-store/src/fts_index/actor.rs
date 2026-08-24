@@ -44,7 +44,7 @@ pub(crate) enum FtsIndex {
         limit: Limit,
         tx: oneshot::Sender<FtsSearchR>,
     },
-    _Highlight {
+    Highlight {
         index_key: IndexKey,
         query: String,
         documents: Vec<String>,
@@ -70,7 +70,7 @@ pub(crate) trait FtsIndexExt {
     ) -> anyhow::Result<()>;
     async fn count(&self, index_key: IndexKey) -> CountR;
     async fn search(&self, index_key: IndexKey, query: String, limit: Limit) -> FtsSearchR;
-    async fn _highlight(
+    async fn highlight(
         &self,
         index_key: IndexKey,
         query: String,
@@ -126,14 +126,14 @@ impl FtsIndexExt for mpsc::Sender<FtsIndex> {
         rx.await?
     }
 
-    async fn _highlight(
+    async fn highlight(
         &self,
         index_key: IndexKey,
         query: String,
         documents: Vec<String>,
     ) -> FtsHighlightR {
         let (tx, rx) = oneshot::channel();
-        self.send(FtsIndex::_Highlight {
+        self.send(FtsIndex::Highlight {
             index_key,
             query,
             documents,

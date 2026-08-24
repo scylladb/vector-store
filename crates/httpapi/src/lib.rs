@@ -445,6 +445,21 @@ mod tests {
         assert_eq!(distances, vec![f32::MAX, -f32::MAX, 1.5]);
         assert_eq!(similarity_scores, vec![f32::MAX, -f32::MAX, 0.5]);
     }
+
+    #[test]
+    fn highlight_request_parses_query_and_documents() {
+        let request: PostIndexHighlightRequest =
+            serde_json::from_str(r#"{"query":"fox","documents":["the quick brown fox jumps","a completely different fox story"]}"#).unwrap();
+
+        assert_eq!(request.query, "fox");
+        assert_eq!(
+            request.documents,
+            vec![
+                "the quick brown fox jumps",
+                "a completely different fox story"
+            ]
+        );
+    }
 }
 
 #[derive(
@@ -475,4 +490,20 @@ pub struct PostIndexBm25Request {
 pub struct PostIndexBm25Response {
     pub primary_keys: HashMap<ColumnName, Vec<Value>>,
     pub scores: Vec<f32>,
+}
+
+#[derive(Debug, PartialEq, serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
+/// Request body for highlighting.
+pub struct PostIndexHighlightRequest {
+    /// The text query whose terms should be marked in the documents.
+    pub query: String,
+    /// The documents to highlight.
+    pub documents: Vec<String>,
+}
+
+#[derive(Debug, PartialEq, serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
+/// Response for highlighting.
+pub struct PostIndexHighlightResponse {
+    /// The highlighted documents. Each document is a string of text with the query terms marked.
+    pub highlights: Vec<Option<String>>,
 }

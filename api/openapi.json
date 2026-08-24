@@ -309,6 +309,100 @@
         }
       }
     },
+    "/api/v1/indexes/{keyspace}/{index}/highlight": {
+      "post": {
+        "tags": [
+          "scylla-vector-store-index"
+        ],
+        "description": "Computes a highlighted excerpt (snippet) for each of the supplied document texts. The index is used only to analyze the query and to weight its terms by their document frequency, prioritizing rarer terms when picking which fragment of a long text to show. Highlights are returned in the same order as the requested documents. A document that matches no query term yields `null`. If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
+        "operationId": "post_index_highlight",
+        "parameters": [
+          {
+            "name": "keyspace",
+            "in": "path",
+            "description": "The name of the ScyllaDB keyspace containing the index.",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/KeyspaceName"
+            }
+          },
+          {
+            "name": "index",
+            "in": "path",
+            "description": "The name of the full-text index within the specified keyspace to highlight against.",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/IndexName"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PostIndexHighlightRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful highlighting. Returns one highlight per requested document, in the requested order.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PostIndexHighlightResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request. Possible causes: malformed input, unparsable query, or missing required fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden. TLS is enabled in the configuration, but the client connected over plain HTTP.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Index not found. Possible causes: index does not exist, or is not discovered yet.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error while highlighting. Possible causes: internal error, or search engine issues.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/IndexNotReadyResponse"
+          }
+        }
+      }
+    },
     "/api/v1/indexes/{keyspace}/{index}/status": {
       "get": {
         "tags": [
@@ -1061,6 +1155,46 @@
               "type": "number",
               "format": "float"
             }
+          }
+        }
+      },
+      "PostIndexHighlightRequest": {
+        "type": "object",
+        "description": "Request body for highlighting.",
+        "required": [
+          "query",
+          "documents"
+        ],
+        "properties": {
+          "documents": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The documents to highlight."
+          },
+          "query": {
+            "type": "string",
+            "description": "The text query whose terms should be marked in the documents."
+          }
+        }
+      },
+      "PostIndexHighlightResponse": {
+        "type": "object",
+        "description": "Response for highlighting.",
+        "required": [
+          "highlights"
+        ],
+        "properties": {
+          "highlights": {
+            "type": "array",
+            "items": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "description": "The highlighted documents. Each document is a string of text with the query terms marked."
           }
         }
       },
