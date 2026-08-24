@@ -185,8 +185,10 @@ async fn get_indexes(db: &Sender<Db>) -> anyhow::Result<HashSet<IndexMetadata>> 
             .await
             .inspect_err(|err| warn!("unable to get index version: {err}"))?
         else {
-            debug!("get_indexes: no version for index {idx:?}");
-            continue;
+            // The index has just been listed, so its schema is still propagating.
+            // Fail the round to have the caller reset the schema version and retry
+            // this index on the next tick.
+            bail!("no options row for the index {idx:?}");
         };
 
         let kind = match idx.kind {
@@ -839,6 +841,48 @@ mod tests {
 
         // second index is invalid
         set_valid_indexes(vec![true, false, true]);
+        assert!(get_indexes(&db).await.is_err());
+    }
+
+    #[rstest]
+    #[timeout(Duration::from_secs(5))]
+    #[tokio::test]
+    async fn get_indexes_failed_while_index_options_row_is_missing() {
+        // A listed index without an options row has a schema that is still propagating.
+        // The whole round has to fail, so the caller resets the latched schema version
+        // and retries. Dropping just the index would leave it undiscovered until
+        // an unrelated schema change.
+        let mut mock_db = MockSimDb::new();
+
+        mock_db.expect_get_indexes().returning(move |tx| {
+            async move {
+                tx.send(Ok(vec![DbCustomIndex {
+                    keyspace: "ks".to_string().into(),
+                    index: "idx".to_string().into(),
+                    table: "tbl".to_string().into(),
+                    primary_key_columns: NonemptyArc::new(["pk"]).unwrap(),
+                    partition_key_count: NonZeroUsize::new(1).unwrap(),
+                    target_columns: NonemptyArc::new(["embedding"]).unwrap(),
+                    partitioning: DbIndexPartitioning::Global,
+                    filtering_columns: Arc::new([]),
+                    kind: DbIndexKind::VectorSearch,
+                }]))
+                .unwrap();
+            }
+            .boxed()
+        });
+
+        mock_db
+            .expect_get_index_version()
+            .returning(move |_, _, _, tx| {
+                async move {
+                    tx.send(Ok(None)).unwrap();
+                }
+                .boxed()
+            });
+
+        let db = db::tests::new(mock_db);
+
         assert!(get_indexes(&db).await.is_err());
     }
 
