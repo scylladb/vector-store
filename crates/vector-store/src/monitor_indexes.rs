@@ -245,7 +245,7 @@ async fn build_vs_index_kind(
 
     let (connectivity, expansion_add, expansion_search, space_type, quantization) =
         if let Some(params) = db
-            .get_index_params(idx.keyspace.clone(), idx.table.clone(), idx.index.clone())
+            .get_vs_index_params(idx.keyspace.clone(), idx.table.clone(), idx.index.clone())
             .await
             .inspect_err(|err| warn!("unable to get index params: {err}"))?
         {
@@ -674,7 +674,7 @@ mod tests {
             });
 
         mock_db
-            .expect_get_index_params()
+            .expect_get_vs_index_params()
             .returning(move |_, _, _, tx| {
                 async move {
                     // Return default params for all indexes
@@ -807,7 +807,7 @@ mod tests {
             });
 
         mock_db
-            .expect_get_index_params()
+            .expect_get_vs_index_params()
             .returning(move |_, _, _, tx| {
                 async move {
                     tx.send(Ok(Some((

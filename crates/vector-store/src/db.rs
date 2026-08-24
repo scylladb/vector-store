@@ -79,7 +79,7 @@ pub(crate) type LatestSchemaVersionR = anyhow::Result<Option<CqlTimeuuid>>;
 type GetIndexesR = anyhow::Result<Vec<DbCustomIndex>>;
 type GetIndexVersionR = anyhow::Result<Option<IndexVersion>>;
 type GetIndexTargetTypeR = anyhow::Result<Option<Dimensions>>;
-type GetIndexParamsR = anyhow::Result<
+type GetVsIndexParamsR = anyhow::Result<
     Option<(
         Connectivity,
         ExpansionAdd,
@@ -121,11 +121,11 @@ pub enum Db {
         tx: oneshot::Sender<GetIndexTargetTypeR>,
     },
 
-    GetIndexParams {
+    GetVsIndexParams {
         keyspace: KeyspaceName,
         table: TableName,
         index: IndexName,
-        tx: oneshot::Sender<GetIndexParamsR>,
+        tx: oneshot::Sender<GetVsIndexParamsR>,
     },
 
     // Schema changes are concurrent processes without an atomic view from the client/driver side.
@@ -163,12 +163,12 @@ pub(crate) trait DbExt {
         index: IndexName,
     ) -> GetIndexTargetTypeR;
 
-    async fn get_index_params(
+    async fn get_vs_index_params(
         &self,
         keyspace: KeyspaceName,
         table: TableName,
         index: IndexName,
-    ) -> GetIndexParamsR;
+    ) -> GetVsIndexParamsR;
 
     async fn is_valid_index(&self, metadata: IndexMetadata) -> IsValidIndexR;
 }
@@ -228,14 +228,14 @@ impl DbExt for mpsc::Sender<Db> {
         rx.await?
     }
 
-    async fn get_index_params(
+    async fn get_vs_index_params(
         &self,
         keyspace: KeyspaceName,
         table: TableName,
         index: IndexName,
-    ) -> GetIndexParamsR {
+    ) -> GetVsIndexParamsR {
         let (tx, rx) = oneshot::channel();
-        self.send(Db::GetIndexParams {
+        self.send(Db::GetVsIndexParams {
             keyspace,
             table,
             index,
@@ -383,7 +383,7 @@ fn respond_with_error(msg: Db, error: anyhow::Error) {
         Db::GetIndexTargetType { tx, .. } => {
             let _ = tx.send(Err(error));
         }
-        Db::GetIndexParams { tx, .. } => {
+        Db::GetVsIndexParams { tx, .. } => {
             let _ = tx.send(Err(error));
         }
         Db::IsValidIndex { tx, .. } => {
@@ -441,14 +441,14 @@ async fn process(
             )
             .unwrap_or_else(|_| trace!("process: Db::GetIndexTargetType: unable to send response")),
 
-        Db::GetIndexParams {
+        Db::GetVsIndexParams {
             keyspace,
             table,
             index,
             tx,
         } => tx
-            .send(statements.get_index_params(keyspace, table, index).await)
-            .unwrap_or_else(|_| trace!("process: Db::GetIndexParams: unable to send response")),
+            .send(statements.get_vs_index_params(keyspace, table, index).await)
+            .unwrap_or_else(|_| trace!("process: Db::GetVsIndexParams: unable to send response")),
 
         Db::IsValidIndex { metadata, tx } => tx
             .send(statements.is_valid_index(metadata).await)
@@ -899,12 +899,12 @@ impl Statements {
         }))
     }
 
-    async fn get_index_params(
+    async fn get_vs_index_params(
         &self,
         keyspace: KeyspaceName,
         table: TableName,
         index: IndexName,
-    ) -> GetIndexParamsR {
+    ) -> GetVsIndexParamsR {
         let session = self
             .session_rx
             .borrow()
@@ -1199,12 +1199,12 @@ pub(crate) mod tests {
             tx: oneshot::Sender<GetIndexTargetTypeR>,
         ) -> impl Future<Output = ()> + Send + 'static;
 
-        fn get_index_params(
+        fn get_vs_index_params(
             &self,
             keyspace: KeyspaceName,
             table: TableName,
             index: IndexName,
-            tx: oneshot::Sender<GetIndexParamsR>,
+            tx: oneshot::Sender<GetVsIndexParamsR>,
         ) -> impl Future<Output = ()> + Send + 'static;
 
         fn is_valid_index(
@@ -1251,12 +1251,12 @@ pub(crate) mod tests {
                                 .await
                         }
 
-                        Db::GetIndexParams {
+                        Db::GetVsIndexParams {
                             keyspace,
                             table,
                             index,
                             tx,
-                        } => sim.get_index_params(keyspace, table, index, tx).await,
+                        } => sim.get_vs_index_params(keyspace, table, index, tx).await,
 
                         Db::IsValidIndex { metadata, tx } => sim.is_valid_index(metadata, tx).await,
                     }

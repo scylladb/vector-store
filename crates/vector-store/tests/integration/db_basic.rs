@@ -404,7 +404,7 @@ fn process_db(db: &DbBasic, msg: Db, node_state: Sender<NodeState>) {
             .map_err(|_| anyhow!("Db::GetIndexTargetType: unable to send response"))
             .unwrap(),
 
-        Db::GetIndexParams {
+        Db::GetVsIndexParams {
             keyspace,
             table: _,
             index,
@@ -428,7 +428,7 @@ fn process_db(db: &DbBasic, msg: Db, node_state: Sender<NodeState>) {
                         )
                     })
                 })))
-            .map_err(|_| anyhow!("Db::GetIndexParams: unable to send response"))
+            .map_err(|_| anyhow!("Db::GetVsIndexParams: unable to send response"))
             .unwrap(),
 
         Db::IsValidIndex { tx, .. } => tx
