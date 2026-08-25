@@ -747,6 +747,15 @@ impl IndexMetadata {
             ),
         }
     }
+
+    /// The subset of `filtering_columns` not already in `primary_key_columns`.
+    /// Table::new() stores a primary-key column as Column::PrimaryKey, not a
+    /// value slot, so it can't also be fetched/stored as a filtering column.
+    fn nonpk_filtering_columns(&self) -> impl Iterator<Item = &ColumnName> {
+        self.filtering_columns
+            .iter()
+            .filter(|col| !self.primary_key_columns.contains(col))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

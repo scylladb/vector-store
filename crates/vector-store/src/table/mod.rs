@@ -1686,6 +1686,131 @@ mod tests {
         }
     }
 
+    /// A local index can declare a filtering column ("ck") that is also one
+    /// of the base table's primary-key columns. Such a column gets its value
+    /// from the primary key, not from a fetched row value. This test upserts
+    /// a row for such an index and checks that the target vector and the
+    /// other filtering column ("f") end up with the correct values - i.e.
+    /// that "ck" being both a primary-key and a filtering column doesn't
+    /// shift values onto the wrong columns.
+    #[test]
+    fn local_index_filtering_on_primary_key_column_stays_aligned() {
+        use crate::DbIndexPartitioning;
+        use crate::Dimensions;
+        use crate::IndexKind;
+        use crate::IndexMetadata;
+        use crate::IndexOptionsVs;
+        use uuid::Uuid;
+
+        let metadata = IndexMetadata {
+            keyspace_name: "ks".into(),
+            index_name: "idx".into(),
+            table_name: "tbl".into(),
+            // The base table's primary key: "pk" is the partition key, "ck"
+            // a clustering key.
+            primary_key_columns: NonemptyArc::new(["pk", "ck"]).unwrap(),
+            partition_key_count: NonZeroUsize::new(1).unwrap(),
+            target_columns: NonemptyArc::new(["embedding"]).unwrap(),
+            // The local index is partitioned by "pk" alone, so "ck" is not
+            // part of its own partition key either.
+            partitioning: DbIndexPartitioning::Local(NonemptyArc::new(["pk"]).unwrap()),
+            // Declares "ck" (a primary-key column) and "f" (a genuine value
+            // column) as filtering columns.
+            filtering_columns: Arc::new(["ck".into(), "f".into()]),
+            alternator_attribute_types: Default::default(),
+            version: Uuid::new_v4().into(),
+            kind: IndexKind::Vs(IndexOptionsVs {
+                dimensions: Dimensions(NonZeroUsize::new(3).unwrap()),
+                connectivity: Default::default(),
+                expansion_add: Default::default(),
+                expansion_search: Default::default(),
+                space_type: Default::default(),
+                quantization: Default::default(),
+            }),
+        };
+
+        let partition_key_columns = match &metadata.partitioning {
+            DbIndexPartitioning::Local(columns) => Some(columns.clone()),
+            DbIndexPartitioning::Global => None,
+        };
+        let filtering_columns: Arc<[_]> = metadata.nonpk_filtering_columns().cloned().collect();
+        assert_eq!(filtering_columns.as_ref(), &["f".into()]);
+
+        let index_key = IndexKey::new(&metadata.keyspace_name, &metadata.index_name);
+        let mut table = Table::new(
+            index_key.clone(),
+            metadata.primary_key_columns.clone(),
+            metadata.partition_key_count,
+            partition_key_columns,
+            metadata.target_columns.len(),
+            filtering_columns,
+            Arc::new(
+                [
+                    ("pk".into(), NativeType::Int),
+                    ("ck".into(), NativeType::Int),
+                    ("f".into(), NativeType::Int),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+        )
+        .unwrap();
+
+        // A row fetched by the real pipeline: a value for the target vector,
+        // then a value for each *non*-primary-key filtering column - "ck"
+        // has no value of its own here, matching db_index.rs/db_cdc.
+        let primary_key: PrimaryKey = [CqlValue::Int(1), CqlValue::Int(2)].into();
+        let values = NonemptyBox::<Timestamped<DbIndexedValue>>::new([
+            Timestamped::new(
+                Timestamp::from_millis(100),
+                Some(DbIndexedValue::Vector(vec![0.1, 0.2, 0.3].into())),
+            ),
+            Timestamped::new(
+                Timestamp::from_millis(100),
+                Some(DbIndexedValue::Filtering(CqlValue::Int(42))),
+            ),
+        ])
+        .unwrap();
+
+        let operations = table
+            .upsert(&index_key, primary_key.clone(), values)
+            .unwrap();
+        assert_eq!(operations.len(), 1);
+        let (primary_id, partition_id) = match operations.first().unwrap() {
+            Operation::AddVector {
+                primary_id,
+                partition_id,
+                vector,
+                is_update: false,
+            } => {
+                assert_eq!(vector, &vec![0.1, 0.2, 0.3].into());
+                (*primary_id, *partition_id)
+            }
+            _ => panic!("Expected AddVector operation"),
+        };
+
+        assert_eq!(
+            table.primary_key(partition_id, primary_id).unwrap(),
+            primary_key
+        );
+        assert!(table.is_valid_for(
+            partition_id,
+            primary_id,
+            &Restriction::Eq {
+                lhs: "ck".into(),
+                rhs: CqlValue::Int(2),
+            }
+        ));
+        assert!(table.is_valid_for(
+            partition_id,
+            primary_id,
+            &Restriction::Eq {
+                lhs: "f".into(),
+                rhs: CqlValue::Int(42),
+            }
+        ));
+    }
+
     #[test]
     fn global_add_remove_multiple_add() {
         let pk1 = PrimaryKey::from([CqlValue::Int(1)]);

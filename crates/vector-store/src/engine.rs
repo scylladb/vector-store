@@ -213,13 +213,16 @@ async fn add_index(
         DbIndexPartitioning::Local(partition_key_columns) => Some(partition_key_columns.clone()),
         DbIndexPartitioning::Global => None,
     };
+    // Must match the columns db_index.rs/db_cdc actually fetch a value for,
+    // or Table::new()'s column list goes out of sync with update_columns().
+    let filtering_columns: Arc<[_]> = metadata.nonpk_filtering_columns().cloned().collect();
     let table = match Table::new(
         key.clone(),
         metadata.primary_key_columns.clone(),
         metadata.partition_key_count,
         partition_key_columns,
         metadata.target_columns.len(),
-        Arc::clone(&metadata.filtering_columns),
+        filtering_columns,
         table_columns,
     ) {
         Ok(table) => Arc::new(RwLock::new(table)),
