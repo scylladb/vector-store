@@ -64,12 +64,14 @@ pub use crate::vector::Vector;
 use crate::vs_index::VsIndexFactory;
 use db::Db;
 use scylla::cluster::metadata::ColumnType;
+use scylla::cluster::metadata::NativeType;
 use scylla::serialize::SerializationError;
 use scylla::serialize::value::SerializeValue;
 use scylla::serialize::writers::CellWriter;
 use scylla::serialize::writers::WrittenCellProof;
 use scylla::value::CqlValue;
 use scylla_cdc::CqlIdentifier;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::net::SocketAddr;
@@ -714,6 +716,11 @@ pub struct IndexMetadata {
     pub target_columns: NonemptyArc<ColumnName>,
     pub partitioning: DbIndexPartitioning,
     pub filtering_columns: Arc<[ColumnName]>,
+    /// For Alternator tables: the declared DynamoDB type ("S", "N" or "B")
+    /// of each partition-key/filtering column with no real column in the
+    /// table's CQL schema (its value lives only in the ":attrs" map).
+    /// Empty for CQL-native tables and for columns that are real columns.
+    pub alternator_attribute_types: Arc<BTreeMap<ColumnName, String>>,
     pub version: IndexVersion,
     pub kind: IndexKind,
 }
@@ -729,6 +736,17 @@ impl IndexMetadata {
 
     pub fn fts(&self) -> Option<&IndexOptionsFts> {
         self.kind.as_fts()
+    }
+
+    /// The NativeType to treat `column` as, if it's a virtual Alternator
+    /// attribute (see alternator_attribute_types) - None otherwise.
+    pub fn alternator_native_type(&self, column: &ColumnName) -> Option<NativeType> {
+        match self.alternator_attribute_types.get(column)?.as_str() {
+            "S" => Some(NativeType::Text),
+            "N" => Some(NativeType::Decimal),
+            "B" => Some(NativeType::Blob),
+            _ => None,
+        }
     }
 
     fn discard_version(&self) -> Self {
@@ -781,6 +799,8 @@ pub struct DbCustomIndex {
     pub target_columns: NonemptyArc<ColumnName>,
     pub partitioning: DbIndexPartitioning,
     pub filtering_columns: Arc<[ColumnName]>,
+    /// See IndexMetadata::alternator_attribute_types.
+    pub alternator_attribute_types: Arc<BTreeMap<ColumnName, String>>,
     pub kind: DbIndexKind,
 }
 

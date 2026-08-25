@@ -22,6 +22,7 @@ use anyhow::anyhow;
 use anyhow::bail;
 use async_trait::async_trait;
 use scylla::client::session::Session;
+use scylla::cluster::metadata::NativeType;
 use scylla::statement::prepared::PreparedStatement;
 use scylla::value::CqlValue;
 use scylla::value::Row;
@@ -50,6 +51,8 @@ struct CdcConsumerData {
     nonpk_partition_key_columns: Box<[ColumnName]>,
     target_columns: NonemptyArc<ColumnName>,
     filtering_columns: Arc<[ColumnName]>,
+    /// See Statements::alternator_decode_types in db_index.rs.
+    alternator_decode_types: Box<[Option<NativeType>]>,
     kind: IndexKind,
     tx: mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
     metrics: Arc<Metrics>,
@@ -106,8 +109,13 @@ impl CdcConsumerData {
             bail!(msg);
         }
 
-        let values =
-            db_index::parse_values(row.columns, Some(timestamp), target_columns_len, &self.kind)?;
+        let values = db_index::parse_values(
+            row.columns,
+            Some(timestamp),
+            target_columns_len,
+            &self.kind,
+            &self.alternator_decode_types,
+        )?;
         _ = self
             .tx
             .send((
@@ -282,6 +290,13 @@ impl CdcConsumerFactory {
             .cloned()
             .collect();
 
+        let alternator_decode_types = db_index::alternator_decode_types(
+            nonpk_partition_key_columns
+                .iter()
+                .chain(filtering_columns.iter()),
+            metadata,
+        );
+
         let query = db_index_backend::request_query(
             &metadata.keyspace_name.as_ref().into(),
             &metadata.table_name.as_ref().into(),
@@ -309,6 +324,7 @@ impl CdcConsumerFactory {
             nonpk_partition_key_columns,
             target_columns,
             filtering_columns,
+            alternator_decode_types,
             kind: metadata.kind.clone(),
             tx,
             metrics,

@@ -284,6 +284,10 @@ struct Statements {
     nonpk_partition_key_columns: Box<[ColumnName]>,
     filtering_columns: Arc<[ColumnName]>,
     table_columns: GetTableColumnsR,
+    /// Aligned with nonpk_partition_key_columns + filtering_columns: the
+    /// NativeType to decode each one's raw ":attrs" value as, or None for a
+    /// real CQL column. See parse_values().
+    alternator_decode_types: Box<[Option<NativeType>]>,
     st_range_scan: PreparedStatement,
     kind: IndexKind,
 }
@@ -340,18 +344,28 @@ impl Statements {
         let target_columns = metadata.target_columns.clone();
         let filtering_columns: Arc<[_]> = metadata.nonpk_filtering_columns().cloned().collect();
 
+        // Merge in synthesized types for Alternator attributes with no real
+        // column (see IndexMetadata::alternator_attribute_types); real
+        // columns come last so they win on any name collision.
         let table_columns = Arc::new(
-            table
-                .columns
-                .iter()
-                .filter_map(|(name, coltype)| {
+            metadata
+                .alternator_attribute_types
+                .keys()
+                .filter_map(|name| Some((name.clone(), metadata.alternator_native_type(name)?)))
+                .chain(table.columns.iter().filter_map(|(name, coltype)| {
                     if let ColumnType::Native(typ) = &coltype.typ {
                         Some((ColumnName::from(name.clone()), typ.clone()))
                     } else {
                         None
                     }
-                })
+                }))
                 .collect(),
+        );
+        let alternator_decode_types = alternator_decode_types(
+            nonpk_partition_key_columns
+                .iter()
+                .chain(filtering_columns.iter()),
+            &metadata,
         );
         let st_partition_key_list = table
             .partition_key
@@ -389,6 +403,7 @@ impl Statements {
             target_columns,
             filtering_columns,
             table_columns,
+            alternator_decode_types,
             st_range_scan,
             session_rx,
             kind: metadata.kind.clone(),
@@ -569,6 +584,7 @@ impl Statements {
         let target_columns_offset = self.primary_key_columns.len().get();
         let target_columns_len = self.target_columns.len();
         let kind = self.kind.clone();
+        let alternator_decode_types = self.alternator_decode_types.clone();
 
         // wait for an active session
         let session = {
@@ -604,6 +620,7 @@ impl Statements {
                     None,
                     target_columns_len,
                     &kind,
+                    &alternator_decode_types,
                 )
                 .inspect_err(|err| error!("Error while parsing values: {err}"))
                 .ok()?;
@@ -625,11 +642,24 @@ impl Statements {
     }
 }
 
+/// Builds parse_values()'s alternator_decode_types parameter: for each of
+/// `columns`, its NativeType from `metadata.alternator_native_type()`.
+pub(crate) fn alternator_decode_types<'a>(
+    columns: impl IntoIterator<Item = &'a ColumnName>,
+    metadata: &IndexMetadata,
+) -> Box<[Option<NativeType>]> {
+    columns
+        .into_iter()
+        .map(|column| metadata.alternator_native_type(column))
+        .collect()
+}
+
 pub(crate) fn parse_values(
     columns: impl IntoIterator<Item = Option<CqlValue>>,
     default_timestamp: Option<Timestamp>,
     target_columns_len: NonZeroUsize,
     kind: &IndexKind,
+    alternator_decode_types: &[Option<NativeType>],
 ) -> anyhow::Result<NonemptyBox<Timestamped<DbIndexedValue>>> {
     let default_timestamp = default_timestamp.unwrap_or(Timestamp::MIN);
     let values = columns
@@ -649,7 +679,20 @@ pub(crate) fn parse_values(
                     None
                 }
             } else {
-                // filtering columns
+                // filtering columns: a virtual Alternator attribute's raw
+                // value is a tagged blob that needs decoding first.
+                let native_type = alternator_decode_types
+                    .get(idx - target_columns_len.get())
+                    .cloned()
+                    .flatten();
+                let value = value
+                    .map(|value| match (value, native_type) {
+                        (CqlValue::Blob(bytes), Some(native_type)) => {
+                            crate::vector::parse_alternator_scalar(&bytes, &native_type)
+                        }
+                        (value, _) => Ok(value),
+                    })
+                    .transpose()?;
                 value.map(DbIndexedValue::Filtering)
             };
 
@@ -823,6 +866,7 @@ mod tests {
             None,
             NonZeroUsize::new(1).unwrap(),
             &vs_kind(),
+            &[],
         )
         .unwrap();
         let result = result.as_slice();
@@ -848,6 +892,7 @@ mod tests {
             Some(Timestamp::from_millis(1)),
             NonZeroUsize::new(1).unwrap(),
             &vs_kind(),
+            &[],
         )
         .unwrap();
         let result = result.as_slice();
@@ -868,6 +913,7 @@ mod tests {
             None,
             NonZeroUsize::new(1).unwrap(),
             &vs_kind(),
+            &[],
         );
         assert_matches!(
             result
@@ -885,6 +931,7 @@ mod tests {
             None,
             NonZeroUsize::new(1).unwrap(),
             &vs_kind(),
+            &[],
         );
         assert_matches!(
             result
@@ -906,6 +953,7 @@ mod tests {
             None,
             NonZeroUsize::new(1).unwrap(),
             &vs_kind(),
+            &[],
         );
         assert_matches!(
             result
@@ -928,6 +976,7 @@ mod tests {
             None,
             NonZeroUsize::new(3).unwrap(),
             &vs_kind(),
+            &[],
         );
         assert_matches!(
             result

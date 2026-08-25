@@ -856,6 +856,14 @@ impl Statements {
                         })?;
                     let partition_key_count = NonZeroUsize::new(table.partition_key.len()).unwrap();
                     let is_alternator = KeyspaceName::from(&keyspace_name).is_alternator();
+                    let alternator_attribute_types = Arc::new(if is_alternator {
+                        options
+                            .remove("search_schema_types")
+                            .map(|v| parse_alternator_attribute_types(&v))
+                            .unwrap_or_default()
+                    } else {
+                        BTreeMap::new()
+                    });
                     Ok(options.remove("target").and_then(|target| {
                         let kind = db_index_kind_from_options(&mut options)?;
                         from_target_option(table, target, kind, is_alternator)
@@ -870,6 +878,7 @@ impl Statements {
                                         .expect("target column should be non-empty"),
                                     partitioning,
                                     filtering_columns,
+                                    alternator_attribute_types,
                                     kind,
                                 },
                             )
@@ -1104,6 +1113,17 @@ fn parse_target_option(table: &Table, value: &str) -> anyhow::Result<Option<Targ
         return Ok(Some(convert_legacy_target_option(table, legacy)?));
     };
     Ok(None)
+}
+
+/// Parses an Alternator index's "search_schema_types" option: a JSON map
+/// from attribute name to declared DynamoDB type ("S"/"N"/"B"). Invalid
+/// JSON yields an empty map rather than an error.
+fn parse_alternator_attribute_types(value: &str) -> BTreeMap<ColumnName, String> {
+    serde_json::from_str::<BTreeMap<String, String>>(value)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(name, dynamodb_type)| (ColumnName::from(name), dynamodb_type))
+        .collect()
 }
 
 fn convert_legacy_target_option(

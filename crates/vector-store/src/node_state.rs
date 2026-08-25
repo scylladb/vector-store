@@ -237,6 +237,7 @@ mod tests {
     use crate::KeyspaceName;
     use crate::NonemptyArc;
     use crate::TableName;
+    use std::collections::BTreeMap;
     use std::num::NonZeroUsize;
     use std::sync::Arc;
     use uuid::Uuid;
@@ -251,6 +252,7 @@ mod tests {
             target_columns: NonemptyArc::new(["test_column"]).unwrap(),
             partitioning: DbIndexPartitioning::Global,
             filtering_columns: Arc::new([]),
+            alternator_attribute_types: Arc::new(BTreeMap::new()),
             version: Uuid::new_v4().into(),
             kind: IndexKind::Vs(IndexOptionsVs {
                 dimensions: Dimensions(NonZeroUsize::new(3).unwrap()),
@@ -577,6 +579,7 @@ mod tests {
             target_columns: NonemptyArc::new(["test_column"]).unwrap(),
             partitioning: DbIndexPartitioning::Global,
             filtering_columns: Arc::new([]),
+            alternator_attribute_types: Arc::new(BTreeMap::new()),
             version: Uuid::new_v4().into(),
             kind: IndexKind::Vs(IndexOptionsVs {
                 dimensions: Dimensions(NonZeroUsize::new(3).unwrap()),
@@ -670,6 +673,7 @@ mod tests {
             target_columns: NonemptyArc::new(["test_column"]).unwrap(),
             partitioning: DbIndexPartitioning::Global,
             filtering_columns: Arc::new([]),
+            alternator_attribute_types: Arc::new(BTreeMap::new()),
             version: Uuid::new_v4().into(),
             kind: IndexKind::Vs(IndexOptionsVs {
                 dimensions: Dimensions(NonZeroUsize::new(3).unwrap()),

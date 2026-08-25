@@ -210,6 +210,7 @@ async fn get_indexes(db: &Sender<Db>) -> anyhow::Result<HashSet<IndexMetadata>> 
             target_columns: idx.target_columns,
             partitioning: idx.partitioning,
             filtering_columns: idx.filtering_columns,
+            alternator_attribute_types: idx.alternator_attribute_types,
             version,
             kind,
         };
@@ -402,6 +403,7 @@ mod tests {
     use anyhow::anyhow;
     use futures::FutureExt;
     use rstest::rstest;
+    use std::collections::BTreeMap;
     use std::collections::HashMap;
     use std::collections::HashSet;
     use std::num::NonZeroUsize;
@@ -420,6 +422,7 @@ mod tests {
             target_columns: NonemptyArc::new(["embedding"]).unwrap(),
             partitioning: DbIndexPartitioning::Global,
             filtering_columns: Arc::new([]),
+            alternator_attribute_types: Arc::new(BTreeMap::new()),
             version: Uuid::new_v4().into(),
             kind: IndexKind::Vs(IndexOptionsVs {
                 dimensions: NonZeroUsize::new(3).unwrap().into(),
@@ -442,6 +445,7 @@ mod tests {
             target_columns: NonemptyArc::new(["content"]).unwrap(),
             partitioning: DbIndexPartitioning::Global,
             filtering_columns: Arc::new([]),
+            alternator_attribute_types: Arc::new(BTreeMap::new()),
             version: Uuid::new_v4().into(),
             kind: IndexKind::Fts(IndexOptionsFts::default()),
         }
@@ -533,6 +537,7 @@ mod tests {
                 target_columns: NonemptyArc::new(["embedding"]).unwrap(),
                 partitioning: DbIndexPartitioning::Global,
                 filtering_columns: Arc::new([]),
+                alternator_attribute_types: Arc::new(BTreeMap::new()),
                 kind: DbIndexKind::VectorSearch,
             }
         }
@@ -594,6 +599,7 @@ mod tests {
                         target_columns: idx.target_columns.clone(),
                         partitioning: DbIndexPartitioning::Global,
                         filtering_columns: Arc::new([]),
+                        alternator_attribute_types: Arc::new(BTreeMap::new()),
                         kind: idx.kind,
                     })
                     .collect()
@@ -792,6 +798,7 @@ mod tests {
                         target_columns: NonemptyArc::new(["embedding"]).unwrap(),
                         partitioning: DbIndexPartitioning::Global,
                         filtering_columns: Arc::new([]),
+                        alternator_attribute_types: Arc::new(BTreeMap::new()),
                         kind: DbIndexKind::VectorSearch,
                     };
                     tx.send(Ok(vec![index(), index(), index()])).unwrap();
@@ -878,6 +885,7 @@ mod tests {
                     target_columns: NonemptyArc::new(["embedding"]).unwrap(),
                     partitioning: DbIndexPartitioning::Global,
                     filtering_columns: Arc::new([]),
+                    alternator_attribute_types: Arc::new(BTreeMap::new()),
                     kind: DbIndexKind::VectorSearch,
                 }]))
                 .unwrap();
@@ -902,20 +910,24 @@ mod tests {
     fn mock_db_with_fts_index(options: Option<IndexOptionsFts>) -> MockSimDb {
         let mut mock_db = MockSimDb::new();
 
-        mock_db.expect_get_indexes().returning(move |tx| {
-            async move {
-                tx.send(Ok(vec![DbCustomIndex {
-                    keyspace: "ks".to_string().into(),
-                    index: "fts_idx".to_string().into(),
-                    table: "tbl".to_string().into(),
-                    primary_key_columns: NonemptyArc::new(["pk"]).unwrap(),
-                    partition_key_count: NonZeroUsize::new(1).unwrap(),
-                    target_columns: NonemptyArc::new(["content"]).unwrap(),
-                    partitioning: DbIndexPartitioning::Global,
-                    filtering_columns: Arc::new([]),
-                    kind: DbIndexKind::FullTextSearch,
-                }]))
-                .unwrap();
+        mock_db.expect_get_indexes().returning({
+            move |tx| {
+                async move {
+                    tx.send(Ok(vec![DbCustomIndex {
+                        keyspace: "ks".to_string().into(),
+                        index: "fts_idx".to_string().into(),
+                        table: "tbl".to_string().into(),
+                        primary_key_columns: NonemptyArc::new(["pk"]).unwrap(),
+                        partition_key_count: NonZeroUsize::new(1).unwrap(),
+                        target_columns: NonemptyArc::new(["content"]).unwrap(),
+                        partitioning: DbIndexPartitioning::Global,
+                        filtering_columns: Arc::new([]),
+                        alternator_attribute_types: Arc::new(BTreeMap::new()),
+                        kind: DbIndexKind::FullTextSearch,
+                    }]))
+                    .unwrap();
+                }
+                .boxed()
             }
             .boxed()
         });
