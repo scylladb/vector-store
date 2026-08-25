@@ -54,6 +54,7 @@ use scylla::value::CqlTimeuuid;
 use secrecy::ExposeSecret;
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tap::Pipe;
@@ -454,6 +455,18 @@ async fn process(
             .send(statements.is_valid_index(metadata).await)
             .unwrap_or_else(|_| trace!("process: Db::IsValidIndex: unable to send response")),
     }
+}
+
+/// Parses a single value of an index `options` map, falling back to its default
+/// when the option is absent or carries an unsupported value.
+fn parse_index_option<T: FromStr + Default>(options: &BTreeMap<String, String>, name: &str) -> T {
+    let Some(value) = options.get(name) else {
+        return T::default();
+    };
+    value.parse().unwrap_or_else(|_| {
+        warn!("unsupported value '{value}' of the index option '{name}', using the default");
+        T::default()
+    })
 }
 
 fn reconnect_reasons(old_config: &Config, new_config: &Config) -> Vec<&'static str> {
@@ -917,30 +930,15 @@ impl Statements {
             .try_next()
             .await?
             .map(|(options,)| options);
-        Ok(options.map(|mut options| {
-            let connectivity = options
-                .remove("maximum_node_connections")
-                .and_then(|s| s.parse::<usize>().ok())
-                .map(Connectivity)
-                .unwrap_or_default();
-            let expansion_add = options
-                .remove("construction_beam_width")
-                .and_then(|s| s.parse::<usize>().ok())
-                .map(ExpansionAdd)
-                .unwrap_or_default();
-            let expansion_search = options
-                .remove("search_beam_width")
-                .and_then(|s| s.parse::<usize>().ok())
-                .map(ExpansionSearch)
-                .unwrap_or_default();
-            let space_type = options
-                .remove("similarity_function")
-                .and_then(|s| s.parse().ok())
-                .unwrap_or_default();
-            let quantization = options
-                .remove("quantization")
-                .and_then(|s| s.parse::<Quantization>().ok())
-                .unwrap_or_default();
+        Ok(options.map(|options| {
+            let connectivity: Connectivity =
+                parse_index_option(&options, "maximum_node_connections");
+            let expansion_add: ExpansionAdd =
+                parse_index_option(&options, "construction_beam_width");
+            let expansion_search: ExpansionSearch =
+                parse_index_option(&options, "search_beam_width");
+            let space_type: SpaceType = parse_index_option(&options, "similarity_function");
+            let quantization: Quantization = parse_index_option(&options, "quantization");
             (
                 connectivity,
                 expansion_add,
@@ -1268,6 +1266,34 @@ pub(crate) mod tests {
         );
 
         tx
+    }
+
+    #[test]
+    fn index_option_is_parsed_when_supported() {
+        let options = BTreeMap::from([("maximum_node_connections".to_string(), "48".to_string())]);
+
+        assert_eq!(
+            parse_index_option::<Connectivity>(&options, "maximum_node_connections"),
+            Connectivity::from(48)
+        );
+    }
+
+    #[test]
+    fn index_option_falls_back_to_default_when_unsupported() {
+        let options = BTreeMap::from([("search_beam_width".to_string(), "many".to_string())]);
+
+        assert_eq!(
+            parse_index_option::<ExpansionSearch>(&options, "search_beam_width"),
+            ExpansionSearch::default()
+        );
+    }
+
+    #[test]
+    fn index_option_falls_back_to_default_when_missing() {
+        assert_eq!(
+            parse_index_option::<Connectivity>(&BTreeMap::new(), "maximum_node_connections"),
+            Connectivity::default()
+        );
     }
 
     #[test]

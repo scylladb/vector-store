@@ -389,6 +389,7 @@ pub struct Dimensions(NonZeroUsize);
     derive_more::AsRef,
     derive_more::From,
     derive_more::Display,
+    derive_more::FromStr,
 )]
 /// Limit number of neighbors per graph node
 pub struct Connectivity(usize);
@@ -409,6 +410,7 @@ impl Default for Connectivity {
     derive_more::AsRef,
     derive_more::From,
     derive_more::Display,
+    derive_more::FromStr,
 )]
 /// Control the recall of indexing
 pub struct ExpansionAdd(usize);
@@ -429,6 +431,7 @@ impl Default for ExpansionAdd {
     derive_more::AsRef,
     derive_more::From,
     derive_more::Display,
+    derive_more::FromStr,
 )]
 /// Control the quality of the search
 pub struct ExpansionSearch(usize);
