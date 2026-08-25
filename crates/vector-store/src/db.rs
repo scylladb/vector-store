@@ -855,9 +855,10 @@ impl Statements {
                                 .context(InvalidMetadata)
                         })?;
                     let partition_key_count = NonZeroUsize::new(table.partition_key.len()).unwrap();
+                    let is_alternator = KeyspaceName::from(&keyspace_name).is_alternator();
                     Ok(options.remove("target").and_then(|target| {
                         let kind = db_index_kind_from_options(&mut options)?;
-                        from_target_option(table, target, kind)
+                        from_target_option(table, target, kind, is_alternator)
                             .map(
                                 |(partitioning, target_column, filtering_columns)| DbCustomIndex {
                                     keyspace: keyspace_name.into(),
@@ -1152,21 +1153,26 @@ fn from_target_option(
     table: &Table,
     value: String,
     kind: DbIndexKind,
+    is_alternator: bool,
 ) -> anyhow::Result<(DbIndexPartitioning, ColumnName, Arc<[ColumnName]>)> {
     let Some(target) = parse_target_option(table, &value)? else {
         // Global index with a single target column
         return Ok((DbIndexPartitioning::Global, value.into(), Arc::new([])));
     };
 
-    validate_target_column(table, &target.target_column, kind)?;
+    // Alternator's tc/pk columns may not be real columns in the table.
+    if !is_alternator {
+        validate_target_column(table, &target.target_column, kind)?;
+    }
 
     let partitioning = if target.partition_key_columns.is_empty() {
         DbIndexPartitioning::Global
     } else {
-        if let Some(invalid) = target
-            .partition_key_columns
-            .iter()
-            .find(|pk_col| !table.columns.contains_key(*pk_col))
+        if !is_alternator
+            && let Some(invalid) = target
+                .partition_key_columns
+                .iter()
+                .find(|pk_col| !table.columns.contains_key(*pk_col))
         {
             bail!("invalid target option: pk column {invalid} is not in the table's columns");
         }
