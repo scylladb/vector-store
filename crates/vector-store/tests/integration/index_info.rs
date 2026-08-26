@@ -204,7 +204,7 @@ async fn indexes_lists_all_indexes_with_options() {
     )
     .unwrap();
 
-    let fts_options = IndexOptionsFts {};
+    let fts_options = IndexOptionsFts::default();
     let fts_index = make_fts_index("third", &["pk"], 1, "content", ordered_timeuuid(3));
     db.add_index(
         fts_index.clone(),

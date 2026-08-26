@@ -499,6 +499,74 @@ impl FromStr for Quantization {
     }
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default, derive_more::Display)]
+/// A text analyzer a full-text index uses to split text into tokens.
+pub enum Analyzer {
+    #[default]
+    #[display("standard")]
+    Standard,
+    #[display("english")]
+    English,
+    #[display("german")]
+    German,
+    #[display("french")]
+    French,
+    #[display("spanish")]
+    Spanish,
+    #[display("italian")]
+    Italian,
+    #[display("portuguese")]
+    Portuguese,
+    #[display("russian")]
+    Russian,
+    #[display("simple")]
+    Simple,
+    #[display("whitespace")]
+    Whitespace,
+}
+
+impl FromStr for Analyzer {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "standard" => Ok(Self::Standard),
+            "english" => Ok(Self::English),
+            "german" => Ok(Self::German),
+            "french" => Ok(Self::French),
+            "spanish" => Ok(Self::Spanish),
+            "italian" => Ok(Self::Italian),
+            "portuguese" => Ok(Self::Portuguese),
+            "russian" => Ok(Self::Russian),
+            "simple" => Ok(Self::Simple),
+            "whitespace" => Ok(Self::Whitespace),
+            _ => Err(anyhow::anyhow!("Unknown analyzer: {s}")),
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, derive_more::AsRef, derive_more::From)]
+/// Whether a full-text index stores token positions, which are required by phrase queries.
+pub struct Positions(bool);
+
+impl Default for Positions {
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
+impl FromStr for Positions {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "true" => Ok(Self(true)),
+            "false" => Ok(Self(false)),
+            _ => Err(anyhow::anyhow!("Unknown positions value: {s}")),
+        }
+    }
+}
+
 #[derive(Clone, Copy, derive_more::AsRef, derive_more::Display, derive_more::From)]
 /// Limit the number of search result
 pub struct Limit(NonZeroUsize);
@@ -605,9 +673,12 @@ pub struct IndexOptionsVs {
     pub quantization: Quantization,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 /// Full-text-search-specific index configuration.
-pub struct IndexOptionsFts {}
+pub struct IndexOptionsFts {
+    pub analyzer: Analyzer,
+    pub positions: Positions,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 /// Discriminates between vector-search and full-text-search index.
@@ -902,5 +973,49 @@ mod tests {
         assert!(Percentage::try_from(101.0).is_err());
         assert!(Percentage::try_from(0.0).is_ok());
         assert!(Percentage::try_from(100.0).is_ok());
+    }
+
+    #[test]
+    fn analyzer_parses_every_value_scylladb_accepts() {
+        for (text, expected) in [
+            ("standard", Analyzer::Standard),
+            ("english", Analyzer::English),
+            ("german", Analyzer::German),
+            ("french", Analyzer::French),
+            ("spanish", Analyzer::Spanish),
+            ("italian", Analyzer::Italian),
+            ("portuguese", Analyzer::Portuguese),
+            ("russian", Analyzer::Russian),
+            ("simple", Analyzer::Simple),
+            ("whitespace", Analyzer::Whitespace),
+        ] {
+            assert_eq!(text.parse::<Analyzer>().unwrap(), expected);
+            assert_eq!(text.to_uppercase().parse::<Analyzer>().unwrap(), expected);
+            assert_eq!(expected.to_string(), text);
+        }
+    }
+
+    #[test]
+    fn analyzer_rejects_unknown_value() {
+        assert!("klingon".parse::<Analyzer>().is_err());
+    }
+
+    #[test]
+    fn analyzer_defaults_to_standard() {
+        assert_eq!(Analyzer::default(), Analyzer::Standard);
+    }
+
+    #[test]
+    fn positions_parses_booleans_case_insensitively() {
+        assert!(*"true".parse::<Positions>().unwrap().as_ref());
+        assert!(*"TRUE".parse::<Positions>().unwrap().as_ref());
+        assert!(!*"false".parse::<Positions>().unwrap().as_ref());
+        assert!(!*"False".parse::<Positions>().unwrap().as_ref());
+        assert!("yes".parse::<Positions>().is_err());
+    }
+
+    #[test]
+    fn positions_defaults_to_enabled() {
+        assert!(*Positions::default().as_ref());
     }
 }

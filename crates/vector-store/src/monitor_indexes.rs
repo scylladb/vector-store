@@ -198,7 +198,7 @@ async fn get_indexes(db: &Sender<Db>) -> anyhow::Result<HashSet<IndexMetadata>> 
                 };
                 kind
             }
-            DbIndexKind::FullTextSearch => IndexKind::Fts(IndexOptionsFts {}),
+            DbIndexKind::FullTextSearch => IndexKind::Fts(IndexOptionsFts::default()),
         };
 
         let metadata = IndexMetadata {
@@ -430,7 +430,7 @@ mod tests {
             partitioning: DbIndexPartitioning::Global,
             filtering_columns: Arc::new([]),
             version: Uuid::new_v4().into(),
-            kind: IndexKind::Fts(IndexOptionsFts {}),
+            kind: IndexKind::Fts(IndexOptionsFts::default()),
         }
     }
 
@@ -932,7 +932,7 @@ mod tests {
         assert_eq!(result.len(), 1);
         let idx = result.into_iter().next().unwrap();
         assert_eq!(idx.index_name.as_ref(), "fts_idx");
-        assert_eq!(idx.kind, IndexKind::Fts(IndexOptionsFts {}));
+        assert_eq!(idx.kind, IndexKind::Fts(IndexOptionsFts::default()));
     }
 
     #[test]

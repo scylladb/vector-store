@@ -94,7 +94,7 @@ pub(crate) fn make_fts_index(
         DbIndexPartitioning::Global,
         &[],
         version,
-        IndexKind::Fts(IndexOptionsFts {}),
+        IndexKind::Fts(IndexOptionsFts::default()),
     )
 }
 
