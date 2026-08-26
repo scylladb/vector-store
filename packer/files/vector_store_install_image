@@ -103,6 +103,17 @@ def install_service():
         print(e.output)
     run('systemctl daemon-reload')
 
+def configure_journald():
+    conf_dir = '/etc/systemd/journald.conf.d'
+    os.makedirs(conf_dir, exist_ok=True)
+    with open('{dir}/vector-store.conf'.format(dir=conf_dir), 'w') as f:
+        f.write('[Journal]\nStorage=persistent\nSystemMaxUse=10G\n')
+    run('systemctl restart systemd-journald')
+
+def disable_syslog():
+    # journald already keeps every log; rsyslog would just duplicate it into /var/log files.
+    run('apt-get remove --purge -y rsyslog')
+
 if __name__ == '__main__':
     if os.getuid() > 0:
         print('Requires root permission.')
@@ -124,6 +135,8 @@ if __name__ == '__main__':
         COPY_OR_MOVE='cp'
     install_vector_store(args.version, args.arch)
     install_service()
+    configure_journald()
+    disable_syslog()
     install_pip_package(args.arch)
     get_swap_scripts()
     update_swap(args.swap_size)
