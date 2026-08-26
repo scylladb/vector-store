@@ -86,6 +86,24 @@ pub(crate) fn make_fts_index(
     target_column: &str,
     version: Uuid,
 ) -> IndexMetadata {
+    make_fts_index_with_options(
+        name,
+        primary_key_columns,
+        partition_key_count,
+        target_column,
+        version,
+        IndexOptionsFts::default(),
+    )
+}
+
+pub(crate) fn make_fts_index_with_options(
+    name: &str,
+    primary_key_columns: &[&str],
+    partition_key_count: usize,
+    target_column: &str,
+    version: Uuid,
+    options: IndexOptionsFts,
+) -> IndexMetadata {
     make_index_with_kind(
         name,
         primary_key_columns,
@@ -94,7 +112,7 @@ pub(crate) fn make_fts_index(
         DbIndexPartitioning::Global,
         &[],
         version,
-        IndexKind::Fts(IndexOptionsFts::default()),
+        IndexKind::Fts(options),
     )
 }
 

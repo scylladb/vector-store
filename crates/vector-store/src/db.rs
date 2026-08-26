@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+use crate::Analyzer;
 use crate::AsyncInProgress;
 use crate::ColumnName;
 use crate::Config;
@@ -17,11 +18,13 @@ use crate::ExpansionAdd;
 use crate::ExpansionSearch;
 use crate::IndexMetadata;
 use crate::IndexName;
+use crate::IndexOptionsFts;
 use crate::IndexVersion;
 use crate::KeyspaceName;
 use crate::Metrics;
 use crate::NonemptyArc;
 use crate::NonemptyIteratorExt;
+use crate::Positions;
 use crate::Quantization;
 use crate::SpaceType;
 use crate::TableName;
@@ -89,6 +92,7 @@ type GetVsIndexParamsR = anyhow::Result<
         Quantization,
     )>,
 >;
+type GetFtsIndexParamsR = anyhow::Result<Option<IndexOptionsFts>>;
 type IsValidIndexR = bool;
 
 const RECONNECT_TIMEOUT: Duration = Duration::from_secs(1);
@@ -127,6 +131,13 @@ pub enum Db {
         table: TableName,
         index: IndexName,
         tx: oneshot::Sender<GetVsIndexParamsR>,
+    },
+
+    GetFtsIndexParams {
+        keyspace: KeyspaceName,
+        table: TableName,
+        index: IndexName,
+        tx: oneshot::Sender<GetFtsIndexParamsR>,
     },
 
     // Schema changes are concurrent processes without an atomic view from the client/driver side.
@@ -170,6 +181,13 @@ pub(crate) trait DbExt {
         table: TableName,
         index: IndexName,
     ) -> GetVsIndexParamsR;
+
+    async fn get_fts_index_params(
+        &self,
+        keyspace: KeyspaceName,
+        table: TableName,
+        index: IndexName,
+    ) -> GetFtsIndexParamsR;
 
     async fn is_valid_index(&self, metadata: IndexMetadata) -> IsValidIndexR;
 }
@@ -237,6 +255,23 @@ impl DbExt for mpsc::Sender<Db> {
     ) -> GetVsIndexParamsR {
         let (tx, rx) = oneshot::channel();
         self.send(Db::GetVsIndexParams {
+            keyspace,
+            table,
+            index,
+            tx,
+        })
+        .await?;
+        rx.await?
+    }
+
+    async fn get_fts_index_params(
+        &self,
+        keyspace: KeyspaceName,
+        table: TableName,
+        index: IndexName,
+    ) -> GetFtsIndexParamsR {
+        let (tx, rx) = oneshot::channel();
+        self.send(Db::GetFtsIndexParams {
             keyspace,
             table,
             index,
@@ -387,6 +422,9 @@ fn respond_with_error(msg: Db, error: anyhow::Error) {
         Db::GetVsIndexParams { tx, .. } => {
             let _ = tx.send(Err(error));
         }
+        Db::GetFtsIndexParams { tx, .. } => {
+            let _ = tx.send(Err(error));
+        }
         Db::IsValidIndex { tx, .. } => {
             let _ = tx.send(false);
         }
@@ -450,6 +488,19 @@ async fn process(
         } => tx
             .send(statements.get_vs_index_params(keyspace, table, index).await)
             .unwrap_or_else(|_| trace!("process: Db::GetVsIndexParams: unable to send response")),
+
+        Db::GetFtsIndexParams {
+            keyspace,
+            table,
+            index,
+            tx,
+        } => tx
+            .send(
+                statements
+                    .get_fts_index_params(keyspace, table, index)
+                    .await,
+            )
+            .unwrap_or_else(|_| trace!("process: Db::GetFtsIndexParams: unable to send response")),
 
         Db::IsValidIndex { metadata, tx } => tx
             .send(statements.is_valid_index(metadata).await)
@@ -912,24 +963,33 @@ impl Statements {
         }))
     }
 
+    async fn get_index_options(
+        &self,
+        keyspace: KeyspaceName,
+        table: TableName,
+        index: IndexName,
+    ) -> anyhow::Result<Option<BTreeMap<String, String>>> {
+        let session = self
+            .session_rx
+            .borrow()
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("No active session"))?;
+        Ok(session
+            .execute_iter(self.st_get_index_options.clone(), (keyspace, table, index))
+            .await?
+            .rows_stream::<(BTreeMap<String, String>,)>()?
+            .try_next()
+            .await?
+            .map(|(options,)| options))
+    }
+
     async fn get_vs_index_params(
         &self,
         keyspace: KeyspaceName,
         table: TableName,
         index: IndexName,
     ) -> GetVsIndexParamsR {
-        let session = self
-            .session_rx
-            .borrow()
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("No active session"))?;
-        let options = session
-            .execute_iter(self.st_get_index_options.clone(), (keyspace, table, index))
-            .await?
-            .rows_stream::<(BTreeMap<String, String>,)>()?
-            .try_next()
-            .await?
-            .map(|(options,)| options);
+        let options = self.get_index_options(keyspace, table, index).await?;
         Ok(options.map(|options| {
             let connectivity: Connectivity =
                 parse_index_option(&options, "maximum_node_connections");
@@ -946,6 +1006,23 @@ impl Statements {
                 space_type,
                 quantization,
             )
+        }))
+    }
+
+    async fn get_fts_index_params(
+        &self,
+        keyspace: KeyspaceName,
+        table: TableName,
+        index: IndexName,
+    ) -> GetFtsIndexParamsR {
+        let options = self.get_index_options(keyspace, table, index).await?;
+        Ok(options.map(|options| {
+            let analyzer: Analyzer = parse_index_option(&options, "analyzer");
+            let positions: Positions = parse_index_option(&options, "positions");
+            IndexOptionsFts {
+                analyzer,
+                positions,
+            }
         }))
     }
 
@@ -1205,6 +1282,14 @@ pub(crate) mod tests {
             tx: oneshot::Sender<GetVsIndexParamsR>,
         ) -> impl Future<Output = ()> + Send + 'static;
 
+        fn get_fts_index_params(
+            &self,
+            keyspace: KeyspaceName,
+            table: TableName,
+            index: IndexName,
+            tx: oneshot::Sender<GetFtsIndexParamsR>,
+        ) -> impl Future<Output = ()> + Send + 'static;
+
         fn is_valid_index(
             &self,
             metadata: IndexMetadata,
@@ -1255,6 +1340,13 @@ pub(crate) mod tests {
                             index,
                             tx,
                         } => sim.get_vs_index_params(keyspace, table, index, tx).await,
+
+                        Db::GetFtsIndexParams {
+                            keyspace,
+                            table,
+                            index,
+                            tx,
+                        } => sim.get_fts_index_params(keyspace, table, index, tx).await,
 
                         Db::IsValidIndex { metadata, tx } => sim.is_valid_index(metadata, tx).await,
                     }
