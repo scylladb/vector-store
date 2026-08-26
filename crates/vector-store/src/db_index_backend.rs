@@ -11,6 +11,7 @@ use crate::KeyspaceIdentifier;
 use crate::KeyspaceName;
 use crate::TableIdentifier;
 use crate::TableName;
+use anyhow::bail;
 use futures::TryStreamExt;
 use regex::Regex;
 use scylla::client::session::Session;
@@ -145,21 +146,28 @@ async fn get_dimensions_from_column_type(
     re_get_index_target_type: &Regex,
     location: IndexLocation,
 ) -> anyhow::Result<Option<Dimensions>> {
+    let IndexLocation {
+        keyspace,
+        table,
+        index,
+    } = location;
     let column_type = session
         .execute_iter(
             st_get_index_target_type.clone(),
-            (location.keyspace, location.table, target_column.clone()),
+            (keyspace, table, target_column.clone()),
         )
         .await?
         .rows_stream::<(String,)>()?
         .try_next()
         .await?;
-    let dimensions = column_type
-        .and_then(|(typ,)| {
-            re_get_index_target_type
-                .captures(&typ)
-                .and_then(|captures| captures["dimensions"].parse::<usize>().ok())
-        })
+
+    // A missing row means the node that served the read has not applied the schema change yet.
+    let Some((column_type,)) = column_type else {
+        bail!("no type of the column {target_column} for the index {index}");
+    };
+    let dimensions = re_get_index_target_type
+        .captures(&column_type)
+        .and_then(|captures| captures["dimensions"].parse::<usize>().ok())
         .and_then(|dimensions| NonZeroUsize::new(dimensions).map(|dimensions| dimensions.into()));
     Ok(dimensions)
 }
@@ -173,21 +181,26 @@ async fn get_dimensions_from_index_options(
     st_get_index_options: &PreparedStatement,
     location: IndexLocation,
 ) -> anyhow::Result<Option<Dimensions>> {
+    let IndexLocation {
+        keyspace,
+        table,
+        index,
+    } = location;
     let index_options = session
         .execute_iter(
             st_get_index_options.clone(),
-            (location.keyspace, location.table, location.index),
+            (keyspace, table, index.clone()),
         )
         .await?
         .rows_stream::<(BTreeMap<String, String>,)>()?
         .try_next()
         .await?;
+    let Some((mut index_options,)) = index_options else {
+        bail!("no options for the index {index}");
+    };
     let dimensions = index_options
-        .and_then(|(mut options,)| {
-            options
-                .remove("dimensions")
-                .and_then(|s| s.parse::<usize>().ok())
-        })
+        .remove("dimensions")
+        .and_then(|s| s.parse::<usize>().ok())
         .and_then(|dimensions| NonZeroUsize::new(dimensions).map(|dimensions| dimensions.into()));
     Ok(dimensions)
 }
