@@ -306,15 +306,14 @@ impl CdcConsumerFactory {
                 .chain(filtering_columns.iter()),
             primary_key_columns.iter(),
         );
-        let st_select_values =
-            session
-                .prepare(query)
-                .await
-                .context("request_query")?
-                .pipe(|mut stmt| {
-                    stmt.set_is_idempotent(true);
-                    stmt
-                });
+        let st_select_values = session
+            .prepare(query.clone())
+            .await
+            .with_context(|| format!("request_query: {query}"))?
+            .pipe(|mut stmt| {
+                stmt.set_is_idempotent(true);
+                stmt
+            });
 
         Ok(Self(Arc::new(CdcConsumerData {
             session,
