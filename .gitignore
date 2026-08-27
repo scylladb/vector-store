@@ -28,3 +28,6 @@ __pycache__/
 
 # Generated SBOM files
 *.cdx.json
+
+# latte benchmark reports (README quick-start writes into the working dir)
+report.json
