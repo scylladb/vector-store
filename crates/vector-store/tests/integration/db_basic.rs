@@ -177,6 +177,7 @@ struct DbMock {
     next_get_db_index_failed: bool,
     next_full_scan_progress: Option<Progress>,
     simulate_endless_get_indexes_processing: bool,
+    vectors: HashMap<PrimaryKey, Vector>,
 }
 
 impl DbMock {
@@ -193,7 +194,33 @@ impl DbBasic {
             next_get_db_index_failed: false,
             next_full_scan_progress: None,
             simulate_endless_get_indexes_processing: false,
+            vectors: HashMap::new(),
         })))
+    }
+
+    fn record_row(&self, row: &DbIndexedRow) {
+        let mut db = self.0.write().unwrap();
+        match &row.operation {
+            DbIndexedOperation::Upsert(values) => match values.first().value() {
+                Some(DbIndexedValue::Vector(vector)) => {
+                    db.vectors.insert(row.primary_key.clone(), vector.clone());
+                }
+                None => {
+                    db.vectors.remove(&row.primary_key);
+                }
+                Some(_) => {}
+            },
+            DbIndexedOperation::Delete(_) => {
+                db.vectors.remove(&row.primary_key);
+            }
+        }
+    }
+
+    fn get_vectors(&self, keys: &[PrimaryKey]) -> Vec<Option<Vector>> {
+        let db = self.0.read().unwrap();
+        keys.iter()
+            .map(|key| db.vectors.get(key).cloned())
+            .collect()
     }
 
     pub(crate) fn add_table(
@@ -471,6 +498,13 @@ pub(crate) fn new_db_index(
 
     let (tx_index, mut rx_index) = mpsc::channel(10);
     let (tx_embeddings, rx_embeddings) = mpsc::channel(10);
+    // Only a vector index feeds the base-table vectors read back by
+    // DbIndex::GetVectors; an FTS index stores documents instead.
+    let tx_embeddings = if metadata.vs().is_some() {
+        record_streamed_vectors(db.clone(), tx_embeddings)
+    } else {
+        tx_embeddings
+    };
     let fullscan_finished = Arc::new(AtomicBool::new(false));
     tokio::spawn({
         let fullscan_finished = fullscan_finished.clone();
@@ -558,6 +592,19 @@ pub(crate) fn new_db_index(
     Ok((tx_index, rx_embeddings))
 }
 
+fn record_streamed_vectors(db: DbBasic, tx: TxIndexedRow) -> TxIndexedRow {
+    let (tx_recorded, mut rx_recorded) = mpsc::channel(10);
+    tokio::spawn(async move {
+        while let Some((row, in_progress)) = rx_recorded.recv().await {
+            db.record_row(&row);
+            if tx.send((row, in_progress)).await.is_err() {
+                break;
+            }
+        }
+    });
+    tx_recorded
+}
+
 fn fullscan(db: &mut DbBasic, metadata: &IndexMetadata) -> Option<ScanFn> {
     db.0.write()
         .unwrap()
@@ -612,7 +659,7 @@ async fn spawn_process_db_index(
                 .unwrap(),
 
             DbIndex::GetVectors { keys, tx } => tx
-                .send(Ok(vec![None; keys.len()]))
+                .send(Ok(db.get_vectors(&keys)))
                 .map_err(|_| anyhow!("DbIndex::GetVectors: unable to send response"))
                 .unwrap(),
         }

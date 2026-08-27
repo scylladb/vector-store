@@ -67,6 +67,14 @@ fn diskann_test_config() -> Config {
     }
 }
 
+fn diskann_scylla_test_config() -> Config {
+    Config {
+        vector_store_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+        diskann_backend: Some(DiskannBackendKind::Scylla),
+        ..Default::default()
+    }
+}
+
 pub(crate) async fn setup_store(
     config: Config,
     partitioning: DbIndexPartitioning,
@@ -232,6 +240,7 @@ pub(crate) async fn setup_store_and_wait_for_index(
 #[rstest]
 #[case::usearch(usearch_test_config())]
 #[case::diskann(diskann_test_config())]
+#[case::diskann_scylla(diskann_scylla_test_config())]
 #[tokio::test]
 async fn simple_create_search_delete_index(#[case] config: Config) {
     crate::enable_tracing();
@@ -319,6 +328,7 @@ async fn simple_create_search_delete_index(#[case] config: Config) {
 #[rstest]
 #[case::usearch(usearch_test_config())]
 #[case::diskann(diskann_test_config())]
+#[case::diskann_scylla(diskann_scylla_test_config())]
 #[tokio::test]
 async fn failed_db_index_create(#[case] config: Config) {
     crate::enable_tracing();
@@ -448,6 +458,7 @@ async fn failed_db_index_create(#[case] config: Config) {
 #[rstest]
 #[case::usearch(usearch_test_config())]
 #[case::diskann(diskann_test_config())]
+#[case::diskann_scylla(diskann_scylla_test_config())]
 #[tokio::test]
 async fn ann_returns_bad_request_when_provided_vector_size_is_not_eq_index_dimensions(
     #[case] config: Config,
@@ -536,6 +547,7 @@ async fn ann_returns_bad_request_when_filtering_required_but_not_allowed() {
 #[rstest]
 #[case::usearch(usearch_test_config())]
 #[case::diskann(diskann_test_config())]
+#[case::diskann_scylla(diskann_scylla_test_config())]
 #[tokio::test]
 async fn ann_fail_while_building_when_node_is_bootstrapping(#[case] config: Config) {
     crate::enable_tracing();
@@ -589,6 +601,7 @@ async fn ann_fail_while_building_when_node_is_bootstrapping(#[case] config: Conf
 #[rstest]
 #[case::usearch(usearch_test_config())]
 #[case::diskann(diskann_test_config())]
+#[case::diskann_scylla(diskann_scylla_test_config())]
 #[tokio::test]
 async fn ann_fail_while_building_when_node_is_serving(#[case] config: Config) {
     crate::enable_tracing();
@@ -675,6 +688,7 @@ async fn ann_fail_while_building_when_node_is_serving(#[case] config: Config) {
 #[rstest]
 #[case::usearch(usearch_test_config())]
 #[case::diskann(diskann_test_config())]
+#[case::diskann_scylla(diskann_scylla_test_config())]
 #[tokio::test]
 async fn ann_failed_when_wrong_number_of_primary_keys(#[case] config: Config) {
     crate::enable_tracing();
@@ -1863,6 +1877,7 @@ async fn http_server_is_responsive_when_index_add_hangs() {
 #[rstest]
 #[case::usearch(usearch_test_config())]
 #[case::diskann(diskann_test_config())]
+#[case::diskann_scylla(diskann_scylla_test_config())]
 #[timeout(Duration::from_secs(10))]
 #[tokio::test]
 async fn null_vector_is_not_indexed(#[case] config: Config) {
@@ -1920,6 +1935,7 @@ async fn null_vector_is_not_indexed(#[case] config: Config) {
 #[rstest]
 #[case::usearch(usearch_test_config())]
 #[case::diskann(diskann_test_config())]
+#[case::diskann_scylla(diskann_scylla_test_config())]
 #[timeout(Duration::from_secs(10))]
 #[tokio::test]
 async fn similarity_scores_are_decreasing_and_correctly_converted(#[case] config: Config) {
@@ -2064,6 +2080,7 @@ async fn similarity_scores_are_decreasing_and_correctly_converted(#[case] config
 #[rstest]
 #[case::usearch(usearch_test_config())]
 #[case::diskann(diskann_test_config())]
+#[case::diskann_scylla(diskann_scylla_test_config())]
 #[tokio::test]
 async fn empty_index_has_zero_count(#[case] config: Config) {
     crate::enable_tracing();
@@ -2094,6 +2111,7 @@ async fn empty_index_has_zero_count(#[case] config: Config) {
 #[rstest]
 #[case::usearch(usearch_test_config())]
 #[case::diskann(diskann_test_config())]
+#[case::diskann_scylla(diskann_scylla_test_config())]
 #[tokio::test]
 async fn empty_index_returns_empty_ann_results(#[case] config: Config) {
     crate::enable_tracing();
