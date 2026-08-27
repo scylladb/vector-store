@@ -1470,7 +1470,9 @@ fn try_to_json(value: CqlValue) -> anyhow::Result<Value> {
 
         CqlValue::Decimal(value) => Ok(Value::String(BigDecimal::from(value).to_string())),
 
-        _ => unimplemented!(),
+        CqlValue::Inet(value) => Ok(Value::String(value.to_string())),
+
+        other => bail!("unsupported CqlValue variant for JSON conversion: {other:?}"),
     }
 }
 
@@ -2396,6 +2398,24 @@ mod tests {
             .unwrap(),
             Value::String("-98765432109876543210.123456789".to_string())
         );
+
+        assert_eq!(
+            try_to_json(CqlValue::Inet(
+                "192.168.1.1".parse::<std::net::IpAddr>().unwrap()
+            ))
+            .unwrap(),
+            Value::String("192.168.1.1".to_string())
+        );
+        assert_eq!(
+            try_to_json(CqlValue::Inet("::1".parse::<std::net::IpAddr>().unwrap())).unwrap(),
+            Value::String("::1".to_string())
+        );
+
+        // Counter can't actually reach try_to_json in practice (it can't be
+        // a primary-key or filtering-column type), but it's convenient here
+        // to prove that an unhandled variant returns a regular error instead
+        // of panicking the server.
+        assert!(try_to_json(CqlValue::Counter(scylla::value::Counter(1))).is_err());
     }
 
     #[test]
