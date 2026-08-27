@@ -89,6 +89,7 @@ where
     fn create_index(
         &self,
         params: &DiskannParams,
+        partition_id: PartitionId,
         start_point: &[f32],
     ) -> anyhow::Result<DiskANNIndex<Self::Provider>>;
 
@@ -227,7 +228,7 @@ where
                     // The first vector of a partition becomes the start point of the graph, so the
                     // index is created here to make it depend on the order of the messages only.
                     let index = backend
-                        .create_index(params, embedding.as_slice())
+                        .create_index(params, partition_id, embedding.as_slice())
                         .context(format!(
                             "failed to create index for partition {partition_id:?}"
                         ))
@@ -712,7 +713,7 @@ mod tests {
         let backend = inmem::InmemBackend::new();
 
         let index = backend
-            .create_index(&params, embeddings[0].as_slice())
+            .create_index(&params, PartitionId::from(0u64), embeddings[0].as_slice())
             .unwrap();
         let partition = Partition {
             partition_id: PartitionId::from(0u64),

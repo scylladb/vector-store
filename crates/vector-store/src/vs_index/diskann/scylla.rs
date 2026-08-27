@@ -40,6 +40,7 @@
 
 use super::DiskannBackend;
 use super::DiskannParams;
+use crate::PartitionId;
 use crate::PrimaryId;
 use crate::Vector;
 use anyhow::Context as _;
@@ -119,7 +120,11 @@ impl ContainsSimd for PrimaryId {
 /// a cost in recall. A source that cannot answer returns `Err`.
 #[async_trait]
 pub(super) trait VectorSource: Debug + Send + Sync + 'static {
-    async fn get(&self, ids: &[PrimaryId]) -> anyhow::Result<Vec<Option<Vector>>>;
+    async fn get(
+        &self,
+        partition_id: PartitionId,
+        ids: &[PrimaryId],
+    ) -> anyhow::Result<Vec<Option<Vector>>>;
 }
 
 #[derive(Clone)]
@@ -147,6 +152,7 @@ impl DiskannBackend for ScyllaBackend {
     fn create_index(
         &self,
         params: &DiskannParams,
+        partition_id: PartitionId,
         start_point: &[f32],
     ) -> anyhow::Result<DiskANNIndex<Self::Provider>> {
         let provider = ScyllaProvider::new(
@@ -154,6 +160,7 @@ impl DiskannBackend for ScyllaBackend {
             usize::from(params.dim.0),
             params.metric,
             params.config.max_degree().get(),
+            partition_id,
             Arc::clone(&self.source),
         )
         .context("failed to create ScyllaProvider")?;
@@ -215,6 +222,7 @@ pub(super) struct ScyllaProvider {
     inflight: Inflight,
     start: Vector,
     start_neighbors: RwLock<AdjacencyList<PrimaryId>>,
+    partition_id: PartitionId,
     source: Arc<dyn VectorSource>,
     max_degree: usize,
     dim: usize,
@@ -227,6 +235,7 @@ impl ScyllaProvider {
         dim: usize,
         metric: Metric,
         max_degree: usize,
+        partition_id: PartitionId,
         source: Arc<dyn VectorSource>,
     ) -> anyhow::Result<Self> {
         if start_point.len() != dim {
@@ -241,6 +250,7 @@ impl ScyllaProvider {
             inflight: Inflight::default(),
             start: Vector::from(start_point.to_vec()),
             start_neighbors: RwLock::new(AdjacencyList::with_capacity(max_degree)),
+            partition_id,
             source,
             max_degree,
             dim,
@@ -290,7 +300,7 @@ impl ScyllaProvider {
 
         let fetched = self
             .source
-            .get(&wanted)
+            .get(self.partition_id, &wanted)
             .await
             .map_err(|err| ANNError::message(format!("vector source failed: {err:#}")))?;
 
