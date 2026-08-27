@@ -359,6 +359,22 @@ impl Statements {
                         None
                     }
                 }))
+                // A filtering column added purely for an Alternator
+                // Projection's sake (see Alternator's
+                // compute_extra_fc_attributes()) has no declared type - it's
+                // a plain opaque attribute value, not usable for typed
+                // filtering. Store it as a raw Blob, exactly as it comes out
+                // of the ":attrs" map, so Table::new() below can still
+                // include it (for projection/return purposes only).
+                .chain(
+                    filtering_columns
+                        .iter()
+                        .filter(|name| {
+                            !metadata.alternator_attribute_types.contains_key(*name)
+                                && !table.columns.contains_key(name.as_ref())
+                        })
+                        .map(|name| (name.clone(), NativeType::Blob)),
+                )
                 .collect(),
         );
         let alternator_decode_types = alternator_decode_types(
