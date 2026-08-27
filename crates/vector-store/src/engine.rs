@@ -303,6 +303,7 @@ async fn add_index_vs(ctx: AddIndexContext<'_>) -> anyhow::Result<()> {
             quantization: options.quantization,
         },
         Arc::clone(&ctx.table),
+        ctx.db_index.clone(),
     )?;
 
     let monitor_actor = monitor_items::new(
