@@ -5,6 +5,7 @@
 
 use super::DiskannBackend;
 use super::DiskannParams;
+use crate::PartitionId;
 use crate::PrimaryId;
 use anyhow::Context;
 use diskann::graph::DiskANNIndex;
@@ -38,6 +39,7 @@ impl DiskannBackend for InmemBackend {
     fn create_index(
         &self,
         params: &DiskannParams,
+        _partition_id: PartitionId,
         start_point: &[f32],
     ) -> anyhow::Result<DiskANNIndex<Self::Provider>> {
         let layer = Full::<f32>::new(usize::from(params.dim.0), params.metric);
