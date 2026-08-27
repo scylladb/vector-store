@@ -789,6 +789,10 @@
           "limit": {
             "$ref": "#/components/schemas/Limit"
           },
+          "routing": {
+            "type": "boolean",
+            "description": "By default, the query may be routed to a different, better-matching index on the same column. Set to `false` to force the query to be served by exactly the index named in the URL."
+          },
           "vector": {
             "$ref": "#/components/schemas/Vector"
           }

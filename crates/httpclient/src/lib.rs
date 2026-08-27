@@ -92,6 +92,7 @@ impl HttpClient {
             vector,
             filter,
             limit,
+            routing: true,
         };
         self.post_ann_data(keyspace_name, index_name, &request)
             .await

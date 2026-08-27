@@ -99,6 +99,7 @@ async fn test_https_server_responds() {
             vector: vec![1.0].into(),
             filter: None,
             limit: NonZeroUsize::new(1).unwrap().into(),
+            routing: true,
         })
         .send()
         .await
@@ -111,6 +112,7 @@ async fn test_https_server_responds() {
             vector: vec![1.0].into(),
             filter: None,
             limit: NonZeroUsize::new(1).unwrap().into(),
+            routing: true,
         })
         .send()
         .await

@@ -734,12 +734,12 @@ async fn post_index_ann(
         let index_key = IndexKey::new(&keyspace, &index_name);
         let (equality_cols, range_cols) = restriction_columns(&request.filter);
         let allow_filtering = request.filter.as_ref().is_some_and(|f| f.allow_filtering);
-        let best_index_state =
-            state
-                .indexes
-                .read()
-                .unwrap()
-                .best_index(&index_key, &equality_cols, &range_cols);
+        let best_index_state = state.indexes.read().unwrap().best_index(
+            &index_key,
+            &equality_cols,
+            &range_cols,
+            request.routing,
+        );
         let (routed_key, index, primary_key_columns, filtering_columns, table_columns) =
             match best_index_state {
             indexes::BestIndexState::Serving {

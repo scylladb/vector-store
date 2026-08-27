@@ -371,6 +371,13 @@ pub struct PostIndexAnnRequest {
     pub filter: Option<PostIndexAnnFilter>,
     #[serde(default)]
     pub limit: Limit,
+    /// By default, the query may be routed to a different, better-matching index on the same column. Set to `false` to force the query to be served by exactly the index named in the URL.
+    #[serde(default = "default_routing")]
+    pub routing: bool,
+}
+
+fn default_routing() -> bool {
+    true
 }
 
 #[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
