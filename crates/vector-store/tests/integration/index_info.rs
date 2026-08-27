@@ -4,6 +4,7 @@
  */
 use crate::common::add_table;
 use crate::common::make_fts_index;
+use crate::common::make_fts_index_with_options;
 use crate::common::make_index_with_kind;
 use crate::common::ordered_timeuuid;
 use crate::common::setup;
@@ -21,6 +22,7 @@ use scylla::value::CqlValue;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::time::Duration;
+use vector_store::Analyzer;
 use vector_store::DbIndexPartitioning;
 use vector_store::IndexKind;
 use vector_store::IndexOptionsFts;
@@ -89,9 +91,22 @@ async fn index_info_reports_vector_index_options() {
 }
 
 #[rstest]
+#[case::defaults(IndexOptionsFts::default(), "standard", true)]
+#[case::non_defaults(
+    IndexOptionsFts {
+        analyzer: Analyzer::German,
+        positions: false.into(),
+    },
+    "german",
+    false
+)]
 #[timeout(Duration::from_secs(10))]
 #[tokio::test]
-async fn index_info_reports_fulltext_index_options() {
+async fn index_info_reports_fulltext_index_options(
+    #[case] options: IndexOptionsFts,
+    #[case] analyzer: &str,
+    #[case] positions: bool,
+) {
     crate::enable_tracing();
     let (client, db, _keep) = setup().await;
 
@@ -106,7 +121,14 @@ async fn index_info_reports_fulltext_index_options() {
         [],
     );
 
-    let index = make_fts_index("fulltext", &["pk"], 1, "content", ordered_timeuuid(1));
+    let index = make_fts_index_with_options(
+        "fulltext",
+        &["pk"],
+        1,
+        "content",
+        ordered_timeuuid(1),
+        options,
+    );
     db.add_index(
         index.clone(),
         Some(db_basic::scan_fn_documents([(
@@ -130,8 +152,8 @@ async fn index_info_reports_fulltext_index_options() {
     assert_eq!(
         info.options,
         IndexOptions::Fulltext(FulltextIndexOptions {
-            analyzer: "standard".to_string(),
-            positions: true,
+            analyzer: analyzer.to_string(),
+            positions,
         })
     );
 }
@@ -204,7 +226,7 @@ async fn indexes_lists_all_indexes_with_options() {
     )
     .unwrap();
 
-    let fts_options = IndexOptionsFts {};
+    let fts_options = IndexOptionsFts::default();
     let fts_index = make_fts_index("third", &["pk"], 1, "content", ordered_timeuuid(3));
     db.add_index(
         fts_index.clone(),

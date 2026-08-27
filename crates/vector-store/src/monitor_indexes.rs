@@ -198,7 +198,7 @@ async fn get_indexes(db: &Sender<Db>) -> anyhow::Result<HashSet<IndexMetadata>> 
                 };
                 kind
             }
-            DbIndexKind::FullTextSearch => IndexKind::Fts(IndexOptionsFts {}),
+            DbIndexKind::FullTextSearch => build_fts_index_kind(db, &idx).await?,
         };
 
         let metadata = IndexMetadata {
@@ -245,13 +245,13 @@ async fn build_vs_index_kind(
 
     let (connectivity, expansion_add, expansion_search, space_type, quantization) =
         if let Some(params) = db
-            .get_index_params(idx.keyspace.clone(), idx.table.clone(), idx.index.clone())
+            .get_vs_index_params(idx.keyspace.clone(), idx.table.clone(), idx.index.clone())
             .await
-            .inspect_err(|err| warn!("unable to get index params: {err}"))?
+            .inspect_err(|err| warn!("unable to get vector index params: {err}"))?
         {
             params
         } else {
-            debug!("get_indexes: no params for index {idx:?}");
+            debug!("get_indexes: no vector index params for index {idx:?}");
             (
                 Connectivity::default(),
                 ExpansionAdd::default(),
@@ -269,6 +269,18 @@ async fn build_vs_index_kind(
         space_type,
         quantization,
     })))
+}
+
+async fn build_fts_index_kind(db: &Sender<Db>, idx: &DbCustomIndex) -> anyhow::Result<IndexKind> {
+    let options = db
+        .get_fts_index_params(idx.keyspace.clone(), idx.table.clone(), idx.index.clone())
+        .await
+        .inspect_err(|err| warn!("unable to get full-text index params: {err}"))?
+        .unwrap_or_else(|| {
+            debug!("get_indexes: no full-text index params for index {idx:?}");
+            IndexOptionsFts::default()
+        });
+    Ok(IndexKind::Fts(options))
 }
 
 struct AddIndexesR {
@@ -376,6 +388,7 @@ fn discovered_indexes_simulator(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Analyzer;
     use crate::DbCustomIndex;
     use crate::DbIndexPartitioning;
     use crate::IndexKey;
@@ -430,7 +443,7 @@ mod tests {
             partitioning: DbIndexPartitioning::Global,
             filtering_columns: Arc::new([]),
             version: Uuid::new_v4().into(),
-            kind: IndexKind::Fts(IndexOptionsFts {}),
+            kind: IndexKind::Fts(IndexOptionsFts::default()),
         }
     }
 
@@ -674,7 +687,7 @@ mod tests {
             });
 
         mock_db
-            .expect_get_index_params()
+            .expect_get_vs_index_params()
             .returning(move |_, _, _, tx| {
                 async move {
                     // Return default params for all indexes
@@ -807,7 +820,7 @@ mod tests {
             });
 
         mock_db
-            .expect_get_index_params()
+            .expect_get_vs_index_params()
             .returning(move |_, _, _, tx| {
                 async move {
                     tx.send(Ok(Some((
@@ -886,38 +899,44 @@ mod tests {
         assert!(get_indexes(&db).await.is_err());
     }
 
-    #[tokio::test]
-    async fn get_indexes_returns_fts_index() {
+    fn mock_db_with_fts_index(options: Option<IndexOptionsFts>) -> MockSimDb {
         let mut mock_db = MockSimDb::new();
 
-        mock_db.expect_get_indexes().returning({
-            move |tx| {
-                async move {
-                    tx.send(Ok(vec![DbCustomIndex {
-                        keyspace: "ks".to_string().into(),
-                        index: "fts_idx".to_string().into(),
-                        table: "tbl".to_string().into(),
-                        primary_key_columns: NonemptyArc::new(["pk"]).unwrap(),
-                        partition_key_count: NonZeroUsize::new(1).unwrap(),
-                        target_columns: NonemptyArc::new(["content"]).unwrap(),
-                        partitioning: DbIndexPartitioning::Global,
-                        filtering_columns: Arc::new([]),
-                        kind: DbIndexKind::FullTextSearch,
-                    }]))
-                    .unwrap();
-                }
-                .boxed()
+        mock_db.expect_get_indexes().returning(move |tx| {
+            async move {
+                tx.send(Ok(vec![DbCustomIndex {
+                    keyspace: "ks".to_string().into(),
+                    index: "fts_idx".to_string().into(),
+                    table: "tbl".to_string().into(),
+                    primary_key_columns: NonemptyArc::new(["pk"]).unwrap(),
+                    partition_key_count: NonZeroUsize::new(1).unwrap(),
+                    target_columns: NonemptyArc::new(["content"]).unwrap(),
+                    partitioning: DbIndexPartitioning::Global,
+                    filtering_columns: Arc::new([]),
+                    kind: DbIndexKind::FullTextSearch,
+                }]))
+                .unwrap();
             }
+            .boxed()
         });
 
-        mock_db.expect_get_index_version().returning({
-            move |_, _, _, tx| {
+        mock_db
+            .expect_get_index_version()
+            .returning(move |_, _, _, tx| {
                 async move {
                     tx.send(Ok(Some(Uuid::new_v4().into()))).unwrap();
                 }
                 .boxed()
-            }
-        });
+            });
+
+        mock_db
+            .expect_get_fts_index_params()
+            .returning(move |_, _, _, tx| {
+                async move {
+                    tx.send(Ok(options)).unwrap();
+                }
+                .boxed()
+            });
 
         mock_db.expect_is_valid_index().returning(move |_, tx| {
             async move {
@@ -926,13 +945,33 @@ mod tests {
             .boxed()
         });
 
-        let db = db::tests::new(mock_db);
+        mock_db
+    }
+
+    #[tokio::test]
+    async fn get_indexes_returns_fts_index() {
+        let options = IndexOptionsFts {
+            analyzer: Analyzer::German,
+            positions: false.into(),
+        };
+        let db = db::tests::new(mock_db_with_fts_index(Some(options)));
+
         let result = get_indexes(&db).await.unwrap();
 
         assert_eq!(result.len(), 1);
         let idx = result.into_iter().next().unwrap();
         assert_eq!(idx.index_name.as_ref(), "fts_idx");
-        assert_eq!(idx.kind, IndexKind::Fts(IndexOptionsFts {}));
+        assert_eq!(idx.kind, IndexKind::Fts(options));
+    }
+
+    #[tokio::test]
+    async fn get_indexes_defaults_fts_options_when_db_has_none() {
+        let db = db::tests::new(mock_db_with_fts_index(None));
+
+        let result = get_indexes(&db).await.unwrap();
+
+        let idx = result.into_iter().next().unwrap();
+        assert_eq!(idx.kind, IndexKind::Fts(IndexOptionsFts::default()));
     }
 
     #[test]

@@ -743,7 +743,7 @@ mod tests {
     }
 
     fn fts_kind() -> IndexKind {
-        IndexKind::Fts(IndexOptionsFts {})
+        IndexKind::Fts(IndexOptionsFts::default())
     }
 
     #[test]

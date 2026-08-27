@@ -31,16 +31,21 @@ use tantivy::snippet::SnippetGenerator;
 use tantivy::tokenizer::Language;
 use tantivy::tokenizer::LowerCaser;
 use tantivy::tokenizer::SimpleTokenizer;
+use tantivy::tokenizer::Stemmer;
 use tantivy::tokenizer::StopWordFilter;
 use tantivy::tokenizer::TextAnalyzer;
+use tantivy::tokenizer::WhitespaceTokenizer;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tracing::debug;
 use tracing::error;
 
+use crate::Analyzer;
 use crate::AsyncInProgress;
 use crate::IndexKey;
 use crate::Limit;
+use crate::Positions;
+use crate::fts_index::factory::FtsIndexConfiguration;
 use crate::fts_index::factory::FtsIndexFactory;
 use crate::memory::Allocate;
 use crate::memory::Memory;
@@ -71,9 +76,13 @@ impl TantivyIndexFactory {
 }
 
 impl FtsIndexFactory for TantivyIndexFactory {
-    fn create_index(&self, key: IndexKey, table: Arc<RwLock<Table>>) -> mpsc::Sender<FtsIndex> {
+    fn create_index(
+        &self,
+        index: FtsIndexConfiguration,
+        table: Arc<RwLock<Table>>,
+    ) -> mpsc::Sender<FtsIndex> {
         new(
-            key,
+            index,
             table,
             self.worker.clone(),
             self.memory.clone(),
@@ -131,17 +140,17 @@ struct IndexState {
     schema: Schema,
 }
 
-const TOKENIZER_NAME: &str = "standard";
 const COMMIT_INTERVAL: Duration = Duration::from_secs(3);
 const MAX_UNCOMMITTED_THRESHOLD: usize = 10_000;
 
 impl IndexState {
-    fn new() -> anyhow::Result<Self> {
-        let schema = build_schema();
+    fn new(analyzer: Analyzer, positions: Positions) -> anyhow::Result<Self> {
+        let tokenizer = analyzer.to_string();
+        let schema = build_schema(&tokenizer, positions);
         let index = tantivy::Index::create_in_ram(schema.clone());
         index
             .tokenizers()
-            .register(TOKENIZER_NAME, build_standard_analyzer()?);
+            .register(&tokenizer, build_token_pipeline(analyzer)?);
         let options = IndexWriterOptions::builder()
             .num_worker_threads(perf::num_workers().into())
             .build();
@@ -165,26 +174,67 @@ impl IndexState {
     }
 }
 
-fn build_standard_analyzer() -> anyhow::Result<TextAnalyzer> {
-    let stop_words = StopWordFilter::new(Language::English)
-        .ok_or_else(|| anyhow!("fts: english stop words unavailable"))?;
+fn stop_words(language: Language) -> anyhow::Result<StopWordFilter> {
+    StopWordFilter::new(language)
+        .ok_or_else(|| anyhow!("fts: stop words unavailable for {language:?}"))
+}
+
+/// The same token pipeline runs over the indexed documents and over the queries,
+/// so both sides produce matching tokens.
+fn build_token_pipeline(analyzer: Analyzer) -> anyhow::Result<TextAnalyzer> {
+    // The language analyzers share the pipeline of `standard` and add the stop
+    // words and the stemming of their own language.
+    let language = match analyzer {
+        // Splits on whitespace only, keeping punctuation and letter case.
+        Analyzer::Whitespace => {
+            return Ok(TextAnalyzer::builder(WhitespaceTokenizer::default()).build());
+        }
+        // Splits on non-alphanumeric characters and lowercases, nothing more.
+        Analyzer::Simple => {
+            return Ok(TextAnalyzer::builder(SimpleTokenizer::default())
+                .filter(LowerCaser)
+                .build());
+        }
+        // Removes English stop words, but does not stem.
+        Analyzer::Standard => {
+            return Ok(TextAnalyzer::builder(SimpleTokenizer::default())
+                .filter(LowerCaser)
+                .filter(stop_words(Language::English)?)
+                .build());
+        }
+        Analyzer::English => Language::English,
+        Analyzer::German => Language::German,
+        Analyzer::French => Language::French,
+        Analyzer::Spanish => Language::Spanish,
+        Analyzer::Italian => Language::Italian,
+        Analyzer::Portuguese => Language::Portuguese,
+        Analyzer::Russian => Language::Russian,
+    };
     Ok(TextAnalyzer::builder(SimpleTokenizer::default())
         .filter(LowerCaser)
-        .filter(stop_words)
+        .filter(stop_words(language)?)
+        .filter(Stemmer::new(language))
         .build())
 }
 
-fn body_text_options() -> TextOptions {
+fn body_text_options(tokenizer: &str, positions: Positions) -> TextOptions {
+    // Positions are what phrase queries match on.
+    // Dropping them makes the index smaller at the cost of rejecting phrase queries against it.
+    let index_option = if *positions.as_ref() {
+        IndexRecordOption::WithFreqsAndPositions
+    } else {
+        IndexRecordOption::WithFreqs
+    };
     let indexing = TextFieldIndexing::default()
-        .set_tokenizer(TOKENIZER_NAME)
-        .set_index_option(IndexRecordOption::WithFreqsAndPositions);
+        .set_tokenizer(tokenizer)
+        .set_index_option(index_option);
     TextOptions::default().set_indexing_options(indexing)
 }
 
-fn build_schema() -> Schema {
+fn build_schema(tokenizer: &str, positions: Positions) -> Schema {
     let mut schema_builder = Schema::builder();
     schema_builder.add_u64_field("primary_id", INDEXED | STORED);
-    schema_builder.add_text_field("body", body_text_options());
+    schema_builder.add_text_field("body", body_text_options(tokenizer, positions));
     schema_builder.build()
 }
 
@@ -391,13 +441,14 @@ fn handle_stats(state: &IndexState) -> FtsStatsR {
 fn get_or_create_state<T: TableSearch>(
     states: &mut BTreeMap<IndexId, Arc<IndexState>>,
     table: &RwLock<T>,
-    key: &IndexKey,
+    index: &FtsIndexConfiguration,
 ) -> Option<Arc<IndexState>> {
+    let key = &index.key;
     let index_id = table.read().unwrap().index_id(key)?;
     if let Some(state) = states.get(&index_id) {
         return Some(Arc::clone(state));
     }
-    match IndexState::new() {
+    match IndexState::new(index.analyzer, index.positions) {
         Ok(state) => {
             let state = Arc::new(state);
             states.insert(index_id, Arc::clone(&state));
@@ -437,7 +488,7 @@ fn can_allocate_memory(
 }
 
 pub(crate) fn new(
-    key: IndexKey,
+    index: FtsIndexConfiguration,
     table: Arc<RwLock<impl TableSearch + Send + Sync + 'static>>,
     worker: async_channel::Sender<Worker>,
     memory: mpsc::Sender<Memory>,
@@ -446,6 +497,7 @@ pub(crate) fn new(
 ) -> mpsc::Sender<FtsIndex> {
     let (tx, mut rx) = mpsc::channel::<FtsIndex>(perf::channel_size().into());
     tokio::spawn(async move {
+        let key = index.key.clone();
         debug!("fts index actor starting for {key}");
         let mut states: BTreeMap<IndexId, Arc<IndexState>> = BTreeMap::new();
 
@@ -470,7 +522,7 @@ pub(crate) fn new(
                             let Some(state) = get_or_create_state(
                                 &mut states,
                                 table.as_ref(),
-                                &key,
+                                &index,
                             ) else {
                                 continue;
                             };
@@ -499,7 +551,7 @@ pub(crate) fn new(
                             let Some(state) = get_or_create_state(
                                 &mut states,
                                 table.as_ref(),
-                                &key,
+                                &index,
                             ) else {
                                 continue;
                             };
@@ -648,11 +700,30 @@ mod tests {
     const TEST_COMMIT_INTERVAL: Duration = Duration::from_millis(50);
     const TEST_COMMIT_THRESHOLD: usize = 3;
 
+    fn make_configuration() -> FtsIndexConfiguration {
+        FtsIndexConfiguration {
+            key: make_index_key(),
+            analyzer: Analyzer::default(),
+            positions: Positions::default(),
+        }
+    }
+
     fn make_sender(table: Arc<RwLock<MockTableSearch>>) -> mpsc::Sender<FtsIndex> {
-        let key = make_index_key();
+        make_sender_with_options(table, Analyzer::default(), Positions::default())
+    }
+
+    fn make_sender_with_options(
+        table: Arc<RwLock<MockTableSearch>>,
+        analyzer: Analyzer,
+        positions: Positions,
+    ) -> mpsc::Sender<FtsIndex> {
         let memory = make_memory_actor();
         new(
-            key,
+            FtsIndexConfiguration {
+                analyzer,
+                positions,
+                ..make_configuration()
+            },
             table,
             worker::new(),
             memory,
@@ -698,14 +769,18 @@ mod tests {
         tx
     }
 
-    fn tokenize_with_standard_analyzer(text: &str) -> Vec<String> {
-        let mut analyzer = build_standard_analyzer().unwrap();
+    fn tokenize_with(analyzer: Analyzer, text: &str) -> Vec<String> {
+        let mut analyzer = build_token_pipeline(analyzer).unwrap();
         let mut stream = analyzer.token_stream(text);
         let mut tokens = Vec::new();
         while stream.advance() {
             tokens.push(stream.token().text.clone());
         }
         tokens
+    }
+
+    fn tokenize_with_standard_analyzer(text: &str) -> Vec<String> {
+        tokenize_with(Analyzer::Standard, text)
     }
 
     #[rstest]
@@ -879,10 +954,9 @@ mod tests {
     #[tokio::test]
     async fn add_document_rejected_when_memory_exhausted() {
         let table = make_table_with_keys();
-        let key = make_index_key();
         let memory = make_memory_actor_cannot_allocate();
         let sender = new(
-            key,
+            make_configuration(),
             table,
             worker::new(),
             memory,
@@ -902,10 +976,9 @@ mod tests {
     #[tokio::test]
     async fn threshold_forces_commit_before_interval() {
         let table = make_table_with_keys();
-        let key = make_index_key();
         let memory = make_memory_actor();
         let sender = new(
-            key.clone(),
+            make_configuration(),
             table,
             worker::new(),
             memory,
@@ -929,7 +1002,7 @@ mod tests {
         // when the threshold-forced commit clears the guards - i.e. once the commit has completed.
         drop(tx);
         rx.recv().await;
-        let count = sender.count(key).await.unwrap();
+        let count = sender.count(make_index_key()).await.unwrap();
 
         assert_eq!(count, TEST_COMMIT_THRESHOLD);
     }
@@ -1192,6 +1265,22 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[tokio::test]
+    async fn highlight_uses_the_configured_analyzer() {
+        let table = make_table_with_keys();
+        let sender = make_sender_with_options(table, Analyzer::English, Positions::default());
+        add_doc(&sender, 1, "the runners are running").await;
+
+        // The English analyzer stems both the query and the highlighted text,
+        // so "run" marks the "running" occurrence in the caller-supplied document.
+        let highlights = highlight(&sender, "run", &["a story about running fast"]).await;
+
+        assert_eq!(
+            highlights[0].as_deref(),
+            Some("a story about <b>running</b> fast")
+        );
+    }
+
     #[test]
     fn tokenize_lowercases_mixed_case() {
         assert_eq!(
@@ -1237,5 +1326,133 @@ mod tests {
     #[test]
     fn tokenize_punctuation_only_yields_no_tokens() {
         assert!(tokenize_with_standard_analyzer("!@#$ ,.;:").is_empty());
+    }
+
+    #[test]
+    fn standard_analyzer_does_not_stem() {
+        assert_eq!(
+            tokenize_with_standard_analyzer("the running runners"),
+            vec!["running", "runners"]
+        );
+    }
+
+    #[rstest]
+    #[case(Analyzer::English, "the running runners", vec!["run", "runner"])]
+    #[case(Analyzer::German, "die laufenden Läufer", vec!["laufend", "lauf"])]
+    #[case(Analyzer::French, "les coureurs courants", vec!["coureur", "cour"])]
+    #[case(Analyzer::Spanish, "los corredores corriendo", vec!["corredor", "corr"])]
+    #[case(Analyzer::Italian, "i corridori correnti", vec!["corridor", "corrent"])]
+    #[case(Analyzer::Portuguese, "os corredores correndo", vec!["corredor", "corr"])]
+    #[case(Analyzer::Russian, "и бегущие бегуны", vec!["бегущ", "бегун"])]
+    fn language_analyzers_stem_and_remove_stop_words(
+        #[case] analyzer: Analyzer,
+        #[case] text: &str,
+        #[case] expected: Vec<&str>,
+    ) {
+        assert_eq!(tokenize_with(analyzer, text), expected);
+    }
+
+    #[test]
+    fn simple_analyzer_lowercases_without_stop_words_or_stemming() {
+        assert_eq!(
+            tokenize_with(Analyzer::Simple, "The Running Runners, and a dog"),
+            vec!["the", "running", "runners", "and", "a", "dog"]
+        );
+    }
+
+    #[test]
+    fn whitespace_analyzer_keeps_case_and_punctuation() {
+        assert_eq!(
+            tokenize_with(Analyzer::Whitespace, "The Running, Runners!"),
+            vec!["The", "Running,", "Runners!"]
+        );
+    }
+
+    async fn search_phrase(positions: bool) -> FtsSearchR {
+        let sender = make_sender_with_options(
+            make_table_with_keys(),
+            Analyzer::default(),
+            Positions::from(positions),
+        );
+
+        add_doc(&sender, 1, "quick brown fox").await;
+        add_doc(&sender, 2, "brown quick fox").await;
+
+        sender
+            .search(
+                make_index_key(),
+                "\"quick brown\"".into(),
+                Limit::from(std::num::NonZeroUsize::new(10).unwrap()),
+            )
+            .await
+    }
+
+    #[rstest]
+    #[timeout(Duration::from_secs(10))]
+    #[tokio::test]
+    async fn phrase_query_matches_with_positions() {
+        let (keys, _) = search_phrase(true).await.unwrap();
+
+        assert_eq!(keys.len(), 1);
+    }
+
+    #[rstest]
+    #[timeout(Duration::from_secs(10))]
+    #[tokio::test]
+    async fn phrase_query_is_rejected_without_positions() {
+        let err = search_phrase(false)
+            .await
+            .expect_err("phrase query should not be answerable");
+
+        // A QueryError is what makes the endpoint answer 400 rather than 500.
+        // The index cannot serve the query, but the service is healthy.
+        assert!(
+            err.downcast_ref::<QueryError>().is_some(),
+            "expected a query error, got: {err}"
+        );
+    }
+
+    #[rstest]
+    #[timeout(Duration::from_secs(10))]
+    #[tokio::test]
+    async fn term_query_works_without_positions() {
+        let table = make_table_with_keys();
+        let sender = make_sender_with_options(table, Analyzer::default(), Positions::from(false));
+
+        add_doc(&sender, 1, "quick brown fox").await;
+        add_doc(&sender, 2, "lazy dog").await;
+
+        let (keys, _) = sender
+            .search(
+                make_index_key(),
+                "fox".into(),
+                Limit::from(std::num::NonZeroUsize::new(10).unwrap()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(keys.len(), 1);
+    }
+
+    #[rstest]
+    #[timeout(Duration::from_secs(10))]
+    #[tokio::test]
+    async fn search_uses_the_configured_analyzer() {
+        let table = make_table_with_keys();
+        let sender = make_sender_with_options(table, Analyzer::English, Positions::default());
+
+        add_doc(&sender, 1, "the runners are running").await;
+
+        // Only an analyzer that stems both sides matches "run" against "running".
+        let (keys, _) = sender
+            .search(
+                make_index_key(),
+                "run".into(),
+                Limit::from(std::num::NonZeroUsize::new(10).unwrap()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(keys.len(), 1);
     }
 }

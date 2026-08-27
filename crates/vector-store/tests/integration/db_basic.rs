@@ -404,7 +404,7 @@ fn process_db(db: &DbBasic, msg: Db, node_state: Sender<NodeState>) {
             .map_err(|_| anyhow!("Db::GetIndexTargetType: unable to send response"))
             .unwrap(),
 
-        Db::GetIndexParams {
+        Db::GetVsIndexParams {
             keyspace,
             table: _,
             index,
@@ -428,7 +428,24 @@ fn process_db(db: &DbBasic, msg: Db, node_state: Sender<NodeState>) {
                         )
                     })
                 })))
-            .map_err(|_| anyhow!("Db::GetIndexParams: unable to send response"))
+            .map_err(|_| anyhow!("Db::GetVsIndexParams: unable to send response"))
+            .unwrap(),
+
+        Db::GetFtsIndexParams {
+            keyspace,
+            table: _,
+            index,
+            tx,
+        } => tx
+            .send(Ok(db
+                .0
+                .read()
+                .unwrap()
+                .keyspaces
+                .get(&keyspace)
+                .and_then(|keyspace| keyspace.indexes.get(&index))
+                .and_then(|index| index.metadata.fts().copied())))
+            .map_err(|_| anyhow!("Db::GetFtsIndexParams: unable to send response"))
             .unwrap(),
 
         Db::IsValidIndex { tx, .. } => tx

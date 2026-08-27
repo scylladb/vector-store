@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+use crate::Analyzer;
 use crate::AsyncInProgress;
 use crate::ColumnName;
 use crate::Config;
@@ -17,11 +18,13 @@ use crate::ExpansionAdd;
 use crate::ExpansionSearch;
 use crate::IndexMetadata;
 use crate::IndexName;
+use crate::IndexOptionsFts;
 use crate::IndexVersion;
 use crate::KeyspaceName;
 use crate::Metrics;
 use crate::NonemptyArc;
 use crate::NonemptyIteratorExt;
+use crate::Positions;
 use crate::Quantization;
 use crate::SpaceType;
 use crate::TableName;
@@ -54,6 +57,7 @@ use scylla::value::CqlTimeuuid;
 use secrecy::ExposeSecret;
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tap::Pipe;
@@ -79,7 +83,7 @@ pub(crate) type LatestSchemaVersionR = anyhow::Result<Option<CqlTimeuuid>>;
 type GetIndexesR = anyhow::Result<Vec<DbCustomIndex>>;
 type GetIndexVersionR = anyhow::Result<Option<IndexVersion>>;
 type GetIndexTargetTypeR = anyhow::Result<Option<Dimensions>>;
-type GetIndexParamsR = anyhow::Result<
+type GetVsIndexParamsR = anyhow::Result<
     Option<(
         Connectivity,
         ExpansionAdd,
@@ -88,6 +92,7 @@ type GetIndexParamsR = anyhow::Result<
         Quantization,
     )>,
 >;
+type GetFtsIndexParamsR = anyhow::Result<Option<IndexOptionsFts>>;
 type IsValidIndexR = bool;
 
 const RECONNECT_TIMEOUT: Duration = Duration::from_secs(1);
@@ -121,11 +126,18 @@ pub enum Db {
         tx: oneshot::Sender<GetIndexTargetTypeR>,
     },
 
-    GetIndexParams {
+    GetVsIndexParams {
         keyspace: KeyspaceName,
         table: TableName,
         index: IndexName,
-        tx: oneshot::Sender<GetIndexParamsR>,
+        tx: oneshot::Sender<GetVsIndexParamsR>,
+    },
+
+    GetFtsIndexParams {
+        keyspace: KeyspaceName,
+        table: TableName,
+        index: IndexName,
+        tx: oneshot::Sender<GetFtsIndexParamsR>,
     },
 
     // Schema changes are concurrent processes without an atomic view from the client/driver side.
@@ -163,12 +175,19 @@ pub(crate) trait DbExt {
         index: IndexName,
     ) -> GetIndexTargetTypeR;
 
-    async fn get_index_params(
+    async fn get_vs_index_params(
         &self,
         keyspace: KeyspaceName,
         table: TableName,
         index: IndexName,
-    ) -> GetIndexParamsR;
+    ) -> GetVsIndexParamsR;
+
+    async fn get_fts_index_params(
+        &self,
+        keyspace: KeyspaceName,
+        table: TableName,
+        index: IndexName,
+    ) -> GetFtsIndexParamsR;
 
     async fn is_valid_index(&self, metadata: IndexMetadata) -> IsValidIndexR;
 }
@@ -228,14 +247,31 @@ impl DbExt for mpsc::Sender<Db> {
         rx.await?
     }
 
-    async fn get_index_params(
+    async fn get_vs_index_params(
         &self,
         keyspace: KeyspaceName,
         table: TableName,
         index: IndexName,
-    ) -> GetIndexParamsR {
+    ) -> GetVsIndexParamsR {
         let (tx, rx) = oneshot::channel();
-        self.send(Db::GetIndexParams {
+        self.send(Db::GetVsIndexParams {
+            keyspace,
+            table,
+            index,
+            tx,
+        })
+        .await?;
+        rx.await?
+    }
+
+    async fn get_fts_index_params(
+        &self,
+        keyspace: KeyspaceName,
+        table: TableName,
+        index: IndexName,
+    ) -> GetFtsIndexParamsR {
+        let (tx, rx) = oneshot::channel();
+        self.send(Db::GetFtsIndexParams {
             keyspace,
             table,
             index,
@@ -383,7 +419,10 @@ fn respond_with_error(msg: Db, error: anyhow::Error) {
         Db::GetIndexTargetType { tx, .. } => {
             let _ = tx.send(Err(error));
         }
-        Db::GetIndexParams { tx, .. } => {
+        Db::GetVsIndexParams { tx, .. } => {
+            let _ = tx.send(Err(error));
+        }
+        Db::GetFtsIndexParams { tx, .. } => {
             let _ = tx.send(Err(error));
         }
         Db::IsValidIndex { tx, .. } => {
@@ -441,19 +480,44 @@ async fn process(
             )
             .unwrap_or_else(|_| trace!("process: Db::GetIndexTargetType: unable to send response")),
 
-        Db::GetIndexParams {
+        Db::GetVsIndexParams {
             keyspace,
             table,
             index,
             tx,
         } => tx
-            .send(statements.get_index_params(keyspace, table, index).await)
-            .unwrap_or_else(|_| trace!("process: Db::GetIndexParams: unable to send response")),
+            .send(statements.get_vs_index_params(keyspace, table, index).await)
+            .unwrap_or_else(|_| trace!("process: Db::GetVsIndexParams: unable to send response")),
+
+        Db::GetFtsIndexParams {
+            keyspace,
+            table,
+            index,
+            tx,
+        } => tx
+            .send(
+                statements
+                    .get_fts_index_params(keyspace, table, index)
+                    .await,
+            )
+            .unwrap_or_else(|_| trace!("process: Db::GetFtsIndexParams: unable to send response")),
 
         Db::IsValidIndex { metadata, tx } => tx
             .send(statements.is_valid_index(metadata).await)
             .unwrap_or_else(|_| trace!("process: Db::IsValidIndex: unable to send response")),
     }
+}
+
+/// Parses a single value of an index `options` map, falling back to its default
+/// when the option is absent or carries an unsupported value.
+fn parse_index_option<T: FromStr + Default>(options: &BTreeMap<String, String>, name: &str) -> T {
+    let Some(value) = options.get(name) else {
+        return T::default();
+    };
+    value.parse().unwrap_or_else(|_| {
+        warn!("unsupported value '{value}' of the index option '{name}', using the default");
+        T::default()
+    })
 }
 
 fn reconnect_reasons(old_config: &Config, new_config: &Config) -> Vec<&'static str> {
@@ -899,48 +963,42 @@ impl Statements {
         }))
     }
 
-    async fn get_index_params(
+    async fn get_index_options(
         &self,
         keyspace: KeyspaceName,
         table: TableName,
         index: IndexName,
-    ) -> GetIndexParamsR {
+    ) -> anyhow::Result<Option<BTreeMap<String, String>>> {
         let session = self
             .session_rx
             .borrow()
             .clone()
             .ok_or_else(|| anyhow::anyhow!("No active session"))?;
-        let options = session
+        Ok(session
             .execute_iter(self.st_get_index_options.clone(), (keyspace, table, index))
             .await?
             .rows_stream::<(BTreeMap<String, String>,)>()?
             .try_next()
             .await?
-            .map(|(options,)| options);
-        Ok(options.map(|mut options| {
-            let connectivity = options
-                .remove("maximum_node_connections")
-                .and_then(|s| s.parse::<usize>().ok())
-                .map(Connectivity)
-                .unwrap_or_default();
-            let expansion_add = options
-                .remove("construction_beam_width")
-                .and_then(|s| s.parse::<usize>().ok())
-                .map(ExpansionAdd)
-                .unwrap_or_default();
-            let expansion_search = options
-                .remove("search_beam_width")
-                .and_then(|s| s.parse::<usize>().ok())
-                .map(ExpansionSearch)
-                .unwrap_or_default();
-            let space_type = options
-                .remove("similarity_function")
-                .and_then(|s| s.parse().ok())
-                .unwrap_or_default();
-            let quantization = options
-                .remove("quantization")
-                .and_then(|s| s.parse::<Quantization>().ok())
-                .unwrap_or_default();
+            .map(|(options,)| options))
+    }
+
+    async fn get_vs_index_params(
+        &self,
+        keyspace: KeyspaceName,
+        table: TableName,
+        index: IndexName,
+    ) -> GetVsIndexParamsR {
+        let options = self.get_index_options(keyspace, table, index).await?;
+        Ok(options.map(|options| {
+            let connectivity: Connectivity =
+                parse_index_option(&options, "maximum_node_connections");
+            let expansion_add: ExpansionAdd =
+                parse_index_option(&options, "construction_beam_width");
+            let expansion_search: ExpansionSearch =
+                parse_index_option(&options, "search_beam_width");
+            let space_type: SpaceType = parse_index_option(&options, "similarity_function");
+            let quantization: Quantization = parse_index_option(&options, "quantization");
             (
                 connectivity,
                 expansion_add,
@@ -948,6 +1006,23 @@ impl Statements {
                 space_type,
                 quantization,
             )
+        }))
+    }
+
+    async fn get_fts_index_params(
+        &self,
+        keyspace: KeyspaceName,
+        table: TableName,
+        index: IndexName,
+    ) -> GetFtsIndexParamsR {
+        let options = self.get_index_options(keyspace, table, index).await?;
+        Ok(options.map(|options| {
+            let analyzer: Analyzer = parse_index_option(&options, "analyzer");
+            let positions: Positions = parse_index_option(&options, "positions");
+            IndexOptionsFts {
+                analyzer,
+                positions,
+            }
         }))
     }
 
@@ -1199,12 +1274,20 @@ pub(crate) mod tests {
             tx: oneshot::Sender<GetIndexTargetTypeR>,
         ) -> impl Future<Output = ()> + Send + 'static;
 
-        fn get_index_params(
+        fn get_vs_index_params(
             &self,
             keyspace: KeyspaceName,
             table: TableName,
             index: IndexName,
-            tx: oneshot::Sender<GetIndexParamsR>,
+            tx: oneshot::Sender<GetVsIndexParamsR>,
+        ) -> impl Future<Output = ()> + Send + 'static;
+
+        fn get_fts_index_params(
+            &self,
+            keyspace: KeyspaceName,
+            table: TableName,
+            index: IndexName,
+            tx: oneshot::Sender<GetFtsIndexParamsR>,
         ) -> impl Future<Output = ()> + Send + 'static;
 
         fn is_valid_index(
@@ -1251,12 +1334,19 @@ pub(crate) mod tests {
                                 .await
                         }
 
-                        Db::GetIndexParams {
+                        Db::GetVsIndexParams {
                             keyspace,
                             table,
                             index,
                             tx,
-                        } => sim.get_index_params(keyspace, table, index, tx).await,
+                        } => sim.get_vs_index_params(keyspace, table, index, tx).await,
+
+                        Db::GetFtsIndexParams {
+                            keyspace,
+                            table,
+                            index,
+                            tx,
+                        } => sim.get_fts_index_params(keyspace, table, index, tx).await,
 
                         Db::IsValidIndex { metadata, tx } => sim.is_valid_index(metadata, tx).await,
                     }
@@ -1268,6 +1358,34 @@ pub(crate) mod tests {
         );
 
         tx
+    }
+
+    #[test]
+    fn index_option_is_parsed_when_supported() {
+        let options = BTreeMap::from([("maximum_node_connections".to_string(), "48".to_string())]);
+
+        assert_eq!(
+            parse_index_option::<Connectivity>(&options, "maximum_node_connections"),
+            Connectivity::from(48)
+        );
+    }
+
+    #[test]
+    fn index_option_falls_back_to_default_when_unsupported() {
+        let options = BTreeMap::from([("search_beam_width".to_string(), "many".to_string())]);
+
+        assert_eq!(
+            parse_index_option::<ExpansionSearch>(&options, "search_beam_width"),
+            ExpansionSearch::default()
+        );
+    }
+
+    #[test]
+    fn index_option_falls_back_to_default_when_missing() {
+        assert_eq!(
+            parse_index_option::<Connectivity>(&BTreeMap::new(), "maximum_node_connections"),
+            Connectivity::default()
+        );
     }
 
     #[test]

@@ -259,14 +259,10 @@ impl From<&IndexOptionsVs> for VectorIndexOptions {
 }
 
 impl From<&IndexOptionsFts> for FulltextIndexOptions {
-    fn from(_options: &IndexOptionsFts) -> Self {
-        // The service does not yet track per-index full-text options,
-        // and the full-text backend applies a fixed "standard" analyzer with
-        // token positions enabled.
-        // Report those defaults until the options are modeled.
+    fn from(options: &IndexOptionsFts) -> Self {
         FulltextIndexOptions {
-            analyzer: "standard".to_string(),
-            positions: true,
+            analyzer: options.analyzer.to_string(),
+            positions: *options.positions.as_ref(),
         }
     }
 }
@@ -1735,6 +1731,7 @@ async fn get_internal_session_counters(State(state): State<RoutesInnerState>) ->
 mod tests {
 
     use super::*;
+    use crate::Analyzer;
     use uuid::Uuid;
 
     #[test]
@@ -2487,10 +2484,20 @@ mod tests {
     #[test]
     fn fulltext_index_option_conversion() {
         assert_eq!(
-            FulltextIndexOptions::from(&IndexOptionsFts {}),
+            FulltextIndexOptions::from(&IndexOptionsFts::default()),
             FulltextIndexOptions {
                 analyzer: "standard".to_string(),
                 positions: true,
+            }
+        );
+        assert_eq!(
+            FulltextIndexOptions::from(&IndexOptionsFts {
+                analyzer: Analyzer::German,
+                positions: false.into(),
+            }),
+            FulltextIndexOptions {
+                analyzer: "german".to_string(),
+                positions: false,
             }
         );
     }

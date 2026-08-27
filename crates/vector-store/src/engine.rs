@@ -14,6 +14,7 @@ use crate::db::DbExt;
 use crate::db_index::DbIndex;
 use crate::db_index::DbIndexExt;
 use crate::fts_index::FtsIndex;
+use crate::fts_index::FtsIndexConfiguration;
 use crate::fts_index::FtsIndexFactory;
 use crate::indexes::Indexes;
 use crate::monitor_indexes;
@@ -305,10 +306,17 @@ async fn add_index_vs(ctx: AddIndexContext<'_>) -> anyhow::Result<()> {
 }
 
 async fn add_index_fts(ctx: AddIndexContext<'_>) -> anyhow::Result<()> {
-    let fts_sender = ctx
-        .index_factories
-        .fts
-        .create_index(ctx.key.clone(), Arc::clone(&ctx.table));
+    let options = ctx.metadata.fts().ok_or_else(|| {
+        anyhow::anyhow!("add_index_fts must be called with a full-text-search index")
+    })?;
+    let fts_sender = ctx.index_factories.fts.create_index(
+        FtsIndexConfiguration {
+            key: ctx.key.clone(),
+            analyzer: options.analyzer,
+            positions: options.positions,
+        },
+        Arc::clone(&ctx.table),
+    );
 
     let monitor_actor = monitor_items::new(
         ctx.key.clone(),

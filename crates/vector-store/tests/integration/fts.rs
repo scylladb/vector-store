@@ -49,7 +49,7 @@ fn fts_index_metadata(primary_key_columns: impl IntoIterator<Item = ColumnName>)
         partitioning: DbIndexPartitioning::Global,
         filtering_columns: Arc::new([]),
         version: Uuid::new_v4().into(),
-        kind: IndexKind::Fts(IndexOptionsFts {}),
+        kind: IndexKind::Fts(IndexOptionsFts::default()),
     }
 }
 
