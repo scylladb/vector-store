@@ -153,6 +153,13 @@ pub async fn prepare(db) {
         }
         println!("Loaded {} query vectors / {} ground-truth rows (bucket={})",
                  db.data.query_vectors.len(), db.data.ground_truth.len(), BUCKET);
+        if db.data.query_vectors.len() == 0 {
+            return Err(`no query vectors loaded (bucket=${BUCKET}; empty file?)`);
+        }
+        if db.data.query_vectors.len() != db.data.ground_truth.len() {
+            return Err(`query/ground-truth mismatch (bucket=${BUCKET}): ${db.data.query_vectors.len()} query \
+                vectors vs ${db.data.ground_truth.len()} ground-truth rows`);
+        }
 
         // recall is better when higher; record run context so the report is self-describing.
         db.declare_metric("recall", "higher");
