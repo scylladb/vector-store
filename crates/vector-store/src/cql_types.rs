@@ -8,6 +8,7 @@ use anyhow::bail;
 use bigdecimal::BigDecimal;
 use num_bigint::BigInt;
 use regex::Regex;
+use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
 use scylla::value::CqlDecimal;
 use scylla::value::CqlDecimalBorrowed;
@@ -27,6 +28,31 @@ use time::Time;
 use time::format_description::well_known::Iso8601;
 use time::format_description::well_known::iso8601::Config;
 use time::format_description::well_known::iso8601::TimePrecision;
+
+pub(crate) const SUPPORTED: &[NativeType] = &[
+    NativeType::Ascii,
+    NativeType::BigInt,
+    NativeType::Blob,
+    NativeType::Boolean,
+    NativeType::Date,
+    NativeType::Decimal,
+    NativeType::Double,
+    NativeType::Float,
+    NativeType::Inet,
+    NativeType::Int,
+    NativeType::SmallInt,
+    NativeType::Text,
+    NativeType::Time,
+    NativeType::Timestamp,
+    NativeType::Timeuuid,
+    NativeType::TinyInt,
+    NativeType::Uuid,
+    NativeType::Varint,
+];
+
+pub(crate) fn is_supported(column_type: &ColumnType) -> bool {
+    matches!(column_type, ColumnType::Native(typ) if SUPPORTED.contains(typ))
+}
 
 pub(crate) fn to_json(value: CqlValue) -> anyhow::Result<Value> {
     match value {
