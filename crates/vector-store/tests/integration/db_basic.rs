@@ -610,6 +610,11 @@ async fn spawn_process_db_index(
                 })
                 .map_err(|_| anyhow!("DbIndex::GetTargetColumn: unable to send response"))
                 .unwrap(),
+
+            DbIndex::GetVectors { keys, tx } => tx
+                .send(Ok(vec![None; keys.len()]))
+                .map_err(|_| anyhow!("DbIndex::GetVectors: unable to send response"))
+                .unwrap(),
         }
     });
 }
