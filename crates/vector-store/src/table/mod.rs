@@ -1137,6 +1137,18 @@ pub(crate) trait TableSearch {
         primary_id: PrimaryId,
         restriction: &Restriction,
     ) -> bool;
+
+    /// Return the stored values for the given filtering columns for a single
+    /// row identified by `primary_id`. Columns that have no stored value
+    /// (e.g. the attribute was absent when the row was indexed) are omitted
+    /// from the returned map. Returns an empty map when `columns` is empty
+    /// or the `primary_id` is invalid.
+    fn column_values_for(
+        &self,
+        partition_id: PartitionId,
+        primary_id: PrimaryId,
+        columns: &[ColumnName],
+    ) -> BTreeMap<ColumnName, CqlValue>;
 }
 
 impl TableSearch for Table {
@@ -1273,6 +1285,27 @@ impl TableSearch for Table {
                     .is_some_and(|ord| ord.is_ge())
             }
         }
+    }
+
+    #[hotpath::measure]
+    fn column_values_for(
+        &self,
+        partition_id: PartitionId,
+        primary_id: PrimaryId,
+        columns: &[ColumnName],
+    ) -> BTreeMap<ColumnName, CqlValue> {
+        if !self.is_valid_primary_id(partition_id, primary_id) {
+            return BTreeMap::new();
+        }
+        columns
+            .iter()
+            .filter_map(|col_name| {
+                self.columns
+                    .get(col_name)
+                    .and_then(|col| col.get(primary_id, &self.primary_keys))
+                    .map(|value| (col_name.clone(), value))
+            })
+            .collect()
     }
 }
 
