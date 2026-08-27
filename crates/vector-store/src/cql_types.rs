@@ -340,6 +340,103 @@ mod tests {
     use std::net::Ipv6Addr;
     use uuid::Uuid;
 
+    pub(crate) fn sample_value(typ: &NativeType) -> CqlValue {
+        match typ {
+            NativeType::Ascii => CqlValue::Ascii("ascii".to_string()),
+            NativeType::BigInt => CqlValue::BigInt(20),
+            NativeType::Blob => CqlValue::Blob(vec![0xde, 0xad, 0xbe, 0xef]),
+            NativeType::Boolean => CqlValue::Boolean(true),
+            NativeType::Date => CqlValue::Date(
+                Date::from_calendar_date(2025, time::Month::September, 1)
+                    .expect("valid date")
+                    .into(),
+            ),
+            NativeType::Decimal => CqlValue::Decimal(
+                CqlDecimal::try_from("-1.25".parse::<BigDecimal>().expect("valid decimal"))
+                    .expect("in range"),
+            ),
+            NativeType::Double => CqlValue::Double(101.5),
+            NativeType::Float => CqlValue::Float(201.5),
+            NativeType::Inet => CqlValue::Inet(IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1))),
+            NativeType::Int => CqlValue::Int(10),
+            NativeType::SmallInt => CqlValue::SmallInt(30),
+            NativeType::Text => CqlValue::Text("text".to_string()),
+            NativeType::Time => {
+                CqlValue::Time(Time::from_hms(12, 10, 10).expect("valid time").into())
+            }
+            NativeType::Timestamp => CqlValue::Timestamp(
+                OffsetDateTime::from_unix_timestamp(1_700_000_000)
+                    .expect("valid timestamp")
+                    .into(),
+            ),
+            NativeType::Timeuuid => CqlValue::Timeuuid(CqlTimeuuid::from_bytes([
+                0x84, 0x16, 0x85, 0xb2, 0x88, 0x03, 0x11, 0xf0, 0x8d, 0xe9, 0x02, 0x42, 0xac, 0x12,
+                0x00, 0x02,
+            ])),
+            NativeType::TinyInt => CqlValue::TinyInt(40),
+            NativeType::Uuid => {
+                CqlValue::Uuid(Uuid::from_u128(0x1234_5678_9abc_4def_8000_0000_0000_0001))
+            }
+            NativeType::Varint => CqlValue::Varint(CqlVarint::from(
+                "-98765432109876543210"
+                    .parse::<BigInt>()
+                    .expect("valid varint"),
+            )),
+            other => panic!("sample_value: {other:?} is not in SUPPORTED"),
+        }
+    }
+
+    pub(crate) const CMP_UNSUPPORTED: &[NativeType] = &[
+        NativeType::Blob,
+        NativeType::Boolean,
+        NativeType::Timeuuid,
+        NativeType::Uuid,
+    ];
+
+    #[test]
+    fn every_supported_type_is_handled() {
+        for typ in SUPPORTED {
+            let value = sample_value(typ);
+            assert!(
+                is_supported(&ColumnType::Native(typ.clone())),
+                "{typ:?}: is_supported"
+            );
+            let json =
+                to_json(value.clone()).unwrap_or_else(|err| panic!("{typ:?}: to_json: {err}"));
+            let back = from_json(json.clone(), typ)
+                .unwrap_or_else(|err| panic!("{typ:?}: from_json({json}): {err}"));
+            assert_eq!(back, value, "{typ:?}: JSON round trip");
+            if CMP_UNSUPPORTED.contains(typ) {
+                assert_eq!(
+                    cmp(&value, &value),
+                    None,
+                    "{typ:?}: comparable - drop it from CMP_UNSUPPORTED"
+                );
+            } else {
+                assert_eq!(
+                    cmp(&value, &value),
+                    Some(Ordering::Equal),
+                    "{typ:?}: a value must compare equal to itself"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_types_are_rejected() {
+        assert!(!is_supported(&ColumnType::Native(NativeType::Counter)));
+        assert!(!is_supported(&ColumnType::Native(NativeType::Duration)));
+        assert!(!is_supported(&ColumnType::Tuple(vec![ColumnType::Native(
+            NativeType::Int
+        )])));
+        assert!(!is_supported(&ColumnType::Collection {
+            frozen: true,
+            typ: scylla::cluster::metadata::CollectionType::List(Box::new(ColumnType::Native(
+                NativeType::Int
+            ))),
+        }));
+    }
+
     #[test]
     fn to_json_conversion() {
         assert_eq!(
