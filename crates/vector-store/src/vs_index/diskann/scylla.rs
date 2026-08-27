@@ -140,7 +140,6 @@ pub(super) struct BaseTableSource<T> {
 }
 
 impl<T> BaseTableSource<T> {
-    #[allow(dead_code, reason = "wired into DiskannIndexFactory in a follow-up")]
     pub(super) fn new(table: Arc<RwLock<T>>, db_index: mpsc::Sender<DbIndex>) -> Self {
         Self { table, db_index }
     }
@@ -207,7 +206,6 @@ pub(super) struct ScyllaBackend {
 }
 
 impl ScyllaBackend {
-    #[allow(dead_code, reason = "wired into DiskannIndexFactory in a follow-up")]
     pub(super) fn new(source: Arc<dyn VectorSource>) -> Self {
         Self {
             strategy: ScyllaStrategy::default(),

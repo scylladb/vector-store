@@ -6,6 +6,7 @@
 use crate::Config;
 use crate::Dimensions;
 use crate::DiskannAlpha;
+use crate::DiskannBackendKind;
 use crate::Distance;
 use crate::IndexKey;
 use crate::Limit;
@@ -104,6 +105,7 @@ pub struct DiskannIndexFactory {
     memory: mpsc::Sender<Memory>,
     alpha: DiskannAlpha,
     max_points: NonZeroUsize,
+    backend: DiskannBackendKind,
 }
 
 impl VsIndexFactory for DiskannIndexFactory {
@@ -116,14 +118,27 @@ impl VsIndexFactory for DiskannIndexFactory {
         let params = DiskannParams::new(&index, self.alpha, self.max_points)
             .context("failed to create DiskANN parameters")?;
 
-        new(
-            inmem::InmemBackend::new(),
-            index.key,
-            self.worker.clone(),
-            self.memory.clone(),
-            table,
-            params,
-        )
+        match self.backend {
+            DiskannBackendKind::Inmem => new(
+                inmem::InmemBackend::new(),
+                index.key,
+                self.worker.clone(),
+                self.memory.clone(),
+                table,
+                params,
+            ),
+            DiskannBackendKind::Scylla => {
+                let source = Arc::new(scylla::BaseTableSource::new(Arc::clone(&table), db_index));
+                new(
+                    scylla::ScyllaBackend::new(source),
+                    index.key,
+                    self.worker.clone(),
+                    self.memory.clone(),
+                    table,
+                    params,
+                )
+            }
+        }
     }
 
     fn index_engine_version(&self) -> String {
@@ -147,6 +162,7 @@ pub fn new_diskann(
         max_points: config
             .diskann_max_points
             .unwrap_or(DISKANN_DEFAULT_MAX_POINTS),
+        backend: config.diskann_backend.unwrap_or_default(),
     })
 }
 
