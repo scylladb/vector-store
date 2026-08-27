@@ -14,6 +14,7 @@ use crate::PrimaryId;
 use crate::SpaceType;
 use crate::Vector;
 use crate::VsIndexFactory;
+use crate::db_index::DbIndex;
 use crate::memory::Allocate;
 use crate::memory::Memory;
 use crate::memory::MemoryExt;
@@ -110,6 +111,7 @@ impl VsIndexFactory for DiskannIndexFactory {
         &self,
         index: VsIndexConfiguration,
         table: Arc<RwLock<Table>>,
+        db_index: mpsc::Sender<DbIndex>,
     ) -> anyhow::Result<(mpsc::Sender<VsIndexModify>, mpsc::Sender<VsIndexSearch>)> {
         let params = DiskannParams::new(&index, self.alpha, self.max_points)
             .context("failed to create DiskANN parameters")?;
