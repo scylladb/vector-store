@@ -37,6 +37,7 @@ use vector_store::Config;
 use vector_store::Connectivity;
 use vector_store::DbIndexPartitioning;
 use vector_store::Dimensions;
+use vector_store::DiskannBackendKind;
 use vector_store::ExpansionAdd;
 use vector_store::ExpansionSearch;
 use vector_store::HttpServerExt;
@@ -61,7 +62,7 @@ pub(crate) fn usearch_test_config() -> Config {
 fn diskann_test_config() -> Config {
     Config {
         vector_store_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
-        use_diskann: true,
+        diskann_backend: Some(DiskannBackendKind::Inmem),
         ..Default::default()
     }
 }
