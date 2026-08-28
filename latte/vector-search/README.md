@@ -92,3 +92,14 @@ The bucketed workload is text-only (fbin has no bucket column).
 
 All formats are currently read into memory up front, which does not scale to
 billion-vector datasets.
+
+## Smoke test
+
+`fbin_dataset_test.rn` checks the binary loaders against the fixture files in
+`testdata/` - valid files, both ground-truth layouts, and the error paths. It
+needs a CQL endpoint but no vector-store:
+
+```sh
+cd latte/vector-search
+latte run -f smoke fbin_dataset_test.rn <node> -d 1
+```
