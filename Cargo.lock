@@ -1864,6 +1864,7 @@ dependencies = [
  "half",
  "rand 0.9.4",
  "rand_distr",
+ "rayon",
  "thiserror 2.0.18",
 ]
 
@@ -6162,6 +6163,7 @@ dependencies = [
  "derive_more",
  "diskann",
  "diskann-inmem",
+ "diskann-utils",
  "diskann-vector",
  "dotenvy",
  "futures",

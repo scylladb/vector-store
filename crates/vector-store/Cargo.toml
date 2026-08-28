@@ -42,6 +42,7 @@ derive_more.workspace = true
 diskann.workspace = true
 diskann-vector.workspace = true
 diskann-inmem.workspace = true
+diskann-utils.workspace = true
 dotenvy.workspace = true
 futures.workspace = true
 hotpath.workspace = true
