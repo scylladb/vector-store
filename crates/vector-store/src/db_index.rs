@@ -32,6 +32,7 @@ use crate::node_state::NodeState;
 use crate::node_state::NodeStateExt;
 use crate::perf;
 use crate::timestamp::Timestamped;
+use crate::vector::VectorColumn;
 use anyhow::Context;
 use anyhow::anyhow;
 use anyhow::bail;
@@ -505,11 +506,15 @@ impl Statements {
             .execute_unpaged(&self.st_fetch_vector, &key)
             .await?
             .into_rows_result()?;
-        let Some(row) = rows_result.maybe_first_row::<Row>()? else {
+
+        let Some((vector, _writetime)) =
+            rows_result.maybe_first_row::<(Option<VectorColumn>, Option<CqlValue>)>()?
+        else {
             // The row is gone from the base table.
             return Ok(None);
         };
-        parse_vector_row(row.columns)
+
+        Ok(vector.map(VectorColumn::into_vector))
     }
 
     async fn preform_range_scan(&self, begin: Token, end: Token) -> RangeScanResult {
@@ -904,23 +909,6 @@ fn parse_indexed_value(value: CqlValue, kind: &IndexKind) -> anyhow::Result<DbIn
     }
 }
 
-/// Parse a row of `[value, writetime(value)]`.
-fn parse_vector_row(columns: Vec<Option<CqlValue>>) -> anyhow::Result<Option<Vector>> {
-    const EXPECTED_COLUMNS: usize = 2;
-    if columns.len() != EXPECTED_COLUMNS {
-        bail!(
-            "parse_vector_row: expected {EXPECTED_COLUMNS} columns, got {}",
-            columns.len()
-        );
-    }
-    columns
-        .into_iter()
-        .next()
-        .unwrap()
-        .map(|value| Vector::try_from(value).map_err(|err| anyhow!("parse_vector_row: {err}")))
-        .transpose()
-}
-
 fn concurrency_limit() -> usize {
     const RATIO: usize = 3;
     perf::num_workers().get() * RATIO
@@ -1062,43 +1050,6 @@ mod tests {
         let cql = CqlValue::Int(42);
         let result = parse_indexed_value(cql, &fts_kind());
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn parse_vector_row_returns_the_vector() {
-        let columns = vec![
-            Some(CqlValue::Vector(vec![
-                CqlValue::Float(1.0),
-                CqlValue::Float(2.0),
-            ])),
-            Some(CqlValue::BigInt(12345)),
-        ];
-        let result = parse_vector_row(columns);
-        assert_eq!(result.unwrap(), Some(Vector::from(vec![1.0, 2.0])));
-    }
-
-    #[test]
-    fn parse_vector_row_null_value_is_none() {
-        let columns = vec![None, Some(CqlValue::BigInt(12345))];
-        let result = parse_vector_row(columns);
-        assert_eq!(result.unwrap(), None);
-    }
-
-    #[test]
-    fn parse_vector_row_rejects_a_wrong_column_count() {
-        let columns = vec![Some(CqlValue::Vector(vec![CqlValue::Float(1.0)]))];
-        assert!(parse_vector_row(columns).is_err());
-
-        assert!(parse_vector_row(vec![]).is_err());
-    }
-
-    #[test]
-    fn parse_vector_row_rejects_a_non_vector_value() {
-        let columns = vec![
-            Some(CqlValue::Text("not a vector".to_string())),
-            Some(CqlValue::BigInt(12345)),
-        ];
-        assert!(parse_vector_row(columns).is_err());
     }
 
     #[test]
