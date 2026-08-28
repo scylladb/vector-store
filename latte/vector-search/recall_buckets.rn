@@ -23,7 +23,7 @@
 //!   # per-stratum sweep off the SAME data: drop the global index, build a local
 //!   # per-bucket index, then query strata (defaults: vector_bench.vectors_bucketed_ann_idx):
 //!   cqlsh -e "DROP INDEX vector_bench.vectors_bucketed_ann_idx"
-//!   latte run -f build_index latte/vector-search/recall_buckets.rn <node> -d 1 \
+//!   latte run -f build_index latte/vector-search/recall_buckets.rn <node> -d 9 \
 //!       -P build_index=true -P local_index=true
 //!   latte run -f search      latte/vector-search/recall_buckets.rn <node> -d 30s --concurrency 32 -P bucket=0 \
 //!       -P 'vector_data_dir="<dir>/"' --generate-report -o bucket0.json
@@ -56,10 +56,13 @@ const INDEX_BEFORE_LOAD = latte::param!("index_before_load", false);
 
 // Search / stratification
 const ANN_LIMIT = latte::param!("ann_limit", 10);   // k for recall@k
-// -1 => full dataset via the global index; 0..8 => one stratum via the local per-bucket index.
+// -1 => full dataset via the global index; 0..bucket_count-1 => one stratum via the local per-bucket index.
 const BUCKET = latte::param!("bucket", -1);
 // Build the local per-bucket index in `schema` instead of the global one.
 const LOCAL_INDEX = latte::param!("local_index", false);
+// Number of strata (bucket/test_bucket0..<N-1> files). With local_index=true,
+// build_index probes strata round-robin, so give it at least this many cycles.
+const BUCKET_COUNT = latte::param!("bucket_count", 9);
 
 // Dataset files (text)
 const VECTOR_DATA_DIR = latte::param!("vector_data_dir", "./");
@@ -124,6 +127,9 @@ pub async fn prepare(db) {
         db.load_cycle_count = db.data.dataset.len();
         println!("Loaded {} bucketed dataset rows for insert", db.data.dataset.len());
     } else if BUILD_INDEX {
+        if LOCAL_INDEX && BUCKET_COUNT <= 0 {
+            return Err(`bucket_count must be positive (got ${BUCKET_COUNT})`);
+        }
         // after_load: create the index now that the table is full; before_load:
         // a no-op create. The `build_index` probe below waits until it is built.
         create_index(db).await?;
@@ -170,10 +176,11 @@ pub async fn load(db, i) {
 pub async fn build_index(db, i) {
     // A single ANN probe. latte retries execution errors, so the "index not built
     // yet" error is retried (absorbed by warmup) until the async build completes;
-    // the index is fully built by the time this returns. For a local per-bucket
-    // index, probe one populated stratum (bucket 0) — one build covers all buckets.
+    // the index is fully built by the time this returns. Each bucket of a local
+    // index builds its own sub-index independently, so probe the strata
+    // round-robin; the phase only passes once every bucket answers.
     let params = if LOCAL_INDEX {
-        #{ "bucket": 0, "vector": db.data.probe }
+        #{ "bucket": i % BUCKET_COUNT, "vector": db.data.probe }
     } else {
         #{ "vector": db.data.probe }
     };
