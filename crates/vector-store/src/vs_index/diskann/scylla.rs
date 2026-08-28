@@ -42,7 +42,11 @@ use super::DiskannBackend;
 use super::DiskannParams;
 use crate::PartitionId;
 use crate::PrimaryId;
+use crate::PrimaryKey;
 use crate::Vector;
+use crate::db_index::DbIndex;
+use crate::db_index::DbIndexExt;
+use crate::table::TableSearch;
 use anyhow::Context as _;
 use anyhow::bail;
 use async_trait::async_trait;
@@ -75,10 +79,12 @@ use diskann_vector::distance::Metric;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::btree_map::Entry;
+use std::fmt;
 use std::fmt::Debug;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::RwLock;
+use tokio::sync::mpsc;
 use tracing::warn;
 
 /// Lets a [`Vector`] be stored in DiskANN's working set and handed back as a
@@ -125,6 +131,72 @@ pub(super) trait VectorSource: Debug + Send + Sync + 'static {
         partition_id: PartitionId,
         ids: &[PrimaryId],
     ) -> anyhow::Result<Vec<Option<Vector>>>;
+}
+
+/// A [`VectorSource`] reading vectors back from the index's base table.
+pub(super) struct BaseTableSource<T> {
+    table: Arc<RwLock<T>>,
+    db_index: mpsc::Sender<DbIndex>,
+}
+
+impl<T> BaseTableSource<T> {
+    #[allow(dead_code, reason = "wired into DiskannIndexFactory in a follow-up")]
+    pub(super) fn new(table: Arc<RwLock<T>>, db_index: mpsc::Sender<DbIndex>) -> Self {
+        Self { table, db_index }
+    }
+}
+
+impl<T> Debug for BaseTableSource<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BaseTableSource").finish_non_exhaustive()
+    }
+}
+
+#[async_trait]
+impl<T> VectorSource for BaseTableSource<T>
+where
+    T: TableSearch + Send + Sync + 'static,
+{
+    async fn get(
+        &self,
+        partition_id: PartitionId,
+        ids: &[PrimaryId],
+    ) -> anyhow::Result<Vec<Option<Vector>>> {
+        // Filter out ids that have no row in the table.
+        let keys: Vec<Option<PrimaryKey>> = {
+            let table = self.table.read().unwrap();
+            ids.iter()
+                .map(|&id| table.primary_key(partition_id, id))
+                .collect()
+        };
+
+        let wanted: Vec<PrimaryKey> = keys.iter().flatten().cloned().collect();
+        if wanted.is_empty() {
+            return Ok(vec![None; ids.len()]);
+        }
+
+        let requested = wanted.len();
+        let fetched = self.db_index.get_vectors(wanted).await.with_context(|| {
+            format!(
+                "BaseTableSource::get: failed to read {requested} vectors \
+                 for partition {partition_id:?}"
+            )
+        })?;
+
+        if fetched.len() != requested {
+            bail!(
+                "BaseTableSource::get: expected {requested} vectors, got {}",
+                fetched.len()
+            );
+        }
+
+        // Spread the key-aligned answers back over the id positions.
+        let mut fetched = fetched.into_iter();
+        Ok(keys
+            .into_iter()
+            .map(|key| key.and_then(|_| fetched.next().unwrap()))
+            .collect())
+    }
 }
 
 #[derive(Clone)]
@@ -963,5 +1035,107 @@ impl<'a> glue::SearchPostProcess<ScyllaSearchAccessor<'a>, &'a [f32], PrimaryId>
         }
 
         std::future::ready(Ok(output.current_len() - start_len))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Vector;
+    use crate::table::MockTableSearch;
+    use scylla::value::CqlValue;
+
+    fn key(id: u64) -> PrimaryKey {
+        PrimaryKey::from([CqlValue::BigInt(id as i64)])
+    }
+
+    #[tokio::test]
+    async fn get_aligns_answers_with_the_requested_ids() {
+        let mut table = MockTableSearch::new();
+        // Ids 1, 3 and 4 resolve to primary keys; id 2 does not.
+        table.expect_primary_key().returning(|_, id| {
+            [1, 3, 4]
+                .contains(&u64::from(id))
+                .then(|| key(u64::from(id)))
+        });
+
+        let (db_index, mut rx) = mpsc::channel(1);
+
+        let responder = async {
+            let Some(DbIndex::GetVectors { keys, tx }) = rx.recv().await else {
+                panic!("expected a GetVectors request");
+            };
+            tx.send(Ok(vec![Some(Vector::from(vec![1.0, 2.0])), None]))
+                .unwrap();
+            keys
+        };
+
+        let ids = [
+            PrimaryId::from(1u64),
+            PrimaryId::from(2u64),
+            PrimaryId::from(3u64),
+        ];
+        let source = BaseTableSource::new(Arc::new(RwLock::new(table)), db_index);
+        let (keys, vectors) = tokio::join!(responder, source.get(PartitionId::from(0u64), &ids));
+
+        assert_eq!(keys, vec![key(1), key(3)]);
+        assert_eq!(
+            vectors.unwrap(),
+            vec![Some(Vector::from(vec![1.0, 2.0])), None, None,]
+        );
+    }
+
+    fn table_with_all_keys() -> MockTableSearch {
+        let mut table = MockTableSearch::new();
+        table
+            .expect_primary_key()
+            .returning(|_, id| Some(key(u64::from(id))));
+        table
+    }
+
+    #[tokio::test]
+    async fn get_propagates_a_source_failure() {
+        let (db_index, mut rx) = mpsc::channel(1);
+
+        let responder = async {
+            let Some(DbIndex::GetVectors { tx, .. }) = rx.recv().await else {
+                panic!("expected a GetVectors request");
+            };
+            tx.send(Err(anyhow::anyhow!("scylla is down"))).unwrap();
+        };
+
+        let ids = [PrimaryId::from(1u64), PrimaryId::from(2u64)];
+        let source = BaseTableSource::new(Arc::new(RwLock::new(table_with_all_keys())), db_index);
+        let (_, result) = tokio::join!(responder, source.get(PartitionId::from(7u64), &ids));
+
+        // The failure must not masquerade as a batch of missing rows.
+        let err = result.expect_err("a source failure must not be reported as absent rows");
+        let err = format!("{err:#}");
+        assert!(err.contains("PartitionId(7)"), "{err}");
+        assert!(err.contains("scylla is down"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn get_rejects_a_short_answer() {
+        let (db_index, mut rx) = mpsc::channel(1);
+
+        let responder = async {
+            let Some(DbIndex::GetVectors { tx, .. }) = rx.recv().await else {
+                panic!("expected a GetVectors request");
+            };
+            // Two keys were asked for, one vector comes back.
+            tx.send(Ok(vec![Some(Vector::from(vec![1.0, 2.0]))]))
+                .unwrap();
+        };
+
+        let ids = [PrimaryId::from(1u64), PrimaryId::from(2u64)];
+        let source = BaseTableSource::new(Arc::new(RwLock::new(table_with_all_keys())), db_index);
+        let (_, result) = tokio::join!(responder, source.get(PartitionId::from(0u64), &ids));
+
+        let err = format!(
+            "{:#}",
+            result.expect_err("a short answer is a broken contract")
+        );
+        assert!(err.contains("expected 2 vectors, got 1"), "{err}");
     }
 }
