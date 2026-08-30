@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+use crate::ColumnName;
 use crate::Config;
 use crate::DbIndexPartitioning;
 use crate::IndexKey;
@@ -26,6 +27,8 @@ use crate::table::Table;
 use crate::vs_index::VsIndexConfiguration;
 use crate::vs_index::VsIndexFactory;
 use crate::vs_index::VsIndexSearch;
+use scylla::cluster::metadata::NativeType;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Duration;
@@ -180,6 +183,31 @@ pub(crate) async fn new(
     Ok(tx)
 }
 
+/// Builds the in-memory `Table` for `metadata`, given the native-typed columns of the
+/// underlying CQL table.
+fn build_table(
+    key: &IndexKey,
+    metadata: &IndexMetadata,
+    table_columns: Arc<HashMap<ColumnName, NativeType>>,
+) -> anyhow::Result<Table> {
+    let partition_key_columns = match &metadata.partitioning {
+        DbIndexPartitioning::Local(partition_key_columns) => Some(partition_key_columns.clone()),
+        DbIndexPartitioning::Global => None,
+    };
+    // Must match the columns db_index.rs/db_cdc actually fetch a value for,
+    // or Table::new()'s column list goes out of sync with update_columns().
+    let filtering_columns: Arc<[_]> = metadata.nonpk_filtering_columns().cloned().collect();
+    Table::new(
+        key.clone(),
+        metadata.primary_key_columns.clone(),
+        metadata.partition_key_count,
+        partition_key_columns,
+        metadata.target_columns.len(),
+        filtering_columns,
+        table_columns,
+    )
+}
+
 async fn add_index(
     metadata: IndexMetadata,
     tx: oneshot::Sender<AddIndexR>,
@@ -209,19 +237,7 @@ async fn add_index(
     };
 
     let table_columns = db_index.get_table_columns().await;
-    let partition_key_columns = match &metadata.partitioning {
-        DbIndexPartitioning::Local(partition_key_columns) => Some(partition_key_columns.clone()),
-        DbIndexPartitioning::Global => None,
-    };
-    let table = match Table::new(
-        key.clone(),
-        metadata.primary_key_columns.clone(),
-        metadata.partition_key_count,
-        partition_key_columns,
-        metadata.target_columns.len(),
-        Arc::clone(&metadata.filtering_columns),
-        table_columns,
-    ) {
+    let table = match build_table(&key, &metadata, table_columns) {
         Ok(table) => Arc::new(RwLock::new(table)),
         Err(err) => {
             debug!("unable to create a table cache for an index {key}: {err}");
@@ -467,5 +483,130 @@ pub(crate) mod tests {
         );
 
         tx
+    }
+
+    /// A local index can declare a filtering column ("ck") that is also one of the base
+    /// table's primary-key columns. This drives build_table() - the code that add_index()
+    /// actually calls - end to end with the real (undeduped) metadata.filtering_columns,
+    /// then upserts a row the way db_index.rs/db_cdc really would (no fetched value for
+    /// "ck", since it comes from the primary key) and checks the target vector and the
+    /// other filtering column ("f") land on the right columns. Unlike
+    /// table::tests::local_index_filtering_on_primary_key_column_stays_aligned, which
+    /// hands Table::new() an already-deduped column list, this test would fail if
+    /// build_table() ever went back to passing metadata.filtering_columns through as-is.
+    #[test]
+    fn build_table_dedupes_filtering_column_shared_with_primary_key() {
+        use crate::Connectivity;
+        use crate::CqlValue;
+        use crate::DbIndexedValue;
+        use crate::Dimensions;
+        use crate::ExpansionAdd;
+        use crate::ExpansionSearch;
+        use crate::IndexOptionsVs;
+        use crate::NonemptyArc;
+        use crate::NonemptyBox;
+        use crate::PrimaryKey;
+        use crate::Quantization;
+        use crate::Restriction;
+        use crate::SpaceType;
+        use crate::Timestamp;
+        use crate::table::Operation;
+        use crate::table::TableModify;
+        use crate::table::TableSearch;
+        use crate::timestamp::Timestamped;
+        use std::num::NonZeroUsize;
+        use uuid::Uuid;
+
+        let metadata = IndexMetadata {
+            keyspace_name: "ks".into(),
+            index_name: "idx".into(),
+            table_name: "tbl".into(),
+            // The base table's primary key: "pk" is the partition key, "ck" a
+            // clustering key.
+            primary_key_columns: NonemptyArc::new(["pk", "ck"]).unwrap(),
+            partition_key_count: NonZeroUsize::new(1).unwrap(),
+            target_columns: NonemptyArc::new(["embedding"]).unwrap(),
+            // The local index is partitioned by "pk" alone, so "ck" is not part of
+            // its own partition key either.
+            partitioning: DbIndexPartitioning::Local(NonemptyArc::new(["pk"]).unwrap()),
+            // Declares "ck" (a primary-key column) and "f" (a genuine value column)
+            // as filtering columns, exactly as metadata coming from the DB would.
+            filtering_columns: Arc::new(["ck".into(), "f".into()]),
+            version: Uuid::new_v4().into(),
+            kind: IndexKind::Vs(IndexOptionsVs {
+                dimensions: Dimensions(NonZeroUsize::new(3).unwrap()),
+                connectivity: Connectivity::default(),
+                expansion_add: ExpansionAdd::default(),
+                expansion_search: ExpansionSearch::default(),
+                space_type: SpaceType::default(),
+                quantization: Quantization::default(),
+            }),
+        };
+
+        let table_columns = Arc::new(
+            [
+                ("pk".into(), NativeType::Int),
+                ("ck".into(), NativeType::Int),
+                ("f".into(), NativeType::Int),
+            ]
+            .into_iter()
+            .collect(),
+        );
+
+        let mut table = build_table(&metadata.key(), &metadata, table_columns).unwrap();
+
+        // A row fetched by the real pipeline: a value for the target vector, then a
+        // value for each *non*-primary-key filtering column - "ck" has no value of
+        // its own here, matching db_index.rs/db_cdc.
+        let primary_key: PrimaryKey = [CqlValue::Int(1), CqlValue::Int(2)].into();
+        let values = NonemptyBox::<Timestamped<DbIndexedValue>>::new([
+            Timestamped::new(
+                Timestamp::from_millis(100),
+                Some(DbIndexedValue::Vector(vec![0.1, 0.2, 0.3].into())),
+            ),
+            Timestamped::new(
+                Timestamp::from_millis(100),
+                Some(DbIndexedValue::Filtering(CqlValue::Int(42))),
+            ),
+        ])
+        .unwrap();
+
+        let operations = table
+            .upsert(&metadata.key(), primary_key.clone(), values)
+            .unwrap();
+        assert_eq!(operations.len(), 1);
+        let (primary_id, partition_id) = match operations.first().unwrap() {
+            Operation::AddVector {
+                primary_id,
+                partition_id,
+                vector,
+                is_update: false,
+            } => {
+                assert_eq!(vector, &vec![0.1, 0.2, 0.3].into());
+                (*primary_id, *partition_id)
+            }
+            _ => panic!("Expected AddVector operation"),
+        };
+
+        assert_eq!(
+            table.primary_key(partition_id, primary_id).unwrap(),
+            primary_key
+        );
+        assert!(table.is_valid_for(
+            partition_id,
+            primary_id,
+            &Restriction::Eq {
+                lhs: "ck".into(),
+                rhs: CqlValue::Int(2),
+            }
+        ));
+        assert!(table.is_valid_for(
+            partition_id,
+            primary_id,
+            &Restriction::Eq {
+                lhs: "f".into(),
+                rhs: CqlValue::Int(42),
+            }
+        ));
     }
 }

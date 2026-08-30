@@ -748,6 +748,75 @@ async fn local_index_filter_by_filtering_columns(actors: Arc<TestActors>) {
     info!("finished");
 }
 
+/// Regression test for VECTOR-892: a vector index can declare a filtering
+/// column that is also one of the base table's primary-key columns. But
+/// vector-store used to misalign the stored column values in that case:
+/// every upserted row failed with "cannot insert value into a PrimaryKey
+/// column", so the index stayed fully "built" at 0 rows and ANN queries
+/// against it silently returned nothing.
+///
+/// The order of the declared filtering columns matters: "ck" (the
+/// primary-key column) must come before "f" for the misalignment to
+/// manifest - the other order happens to leave "f" correctly aligned and
+/// just drops "ck", which produces no visible symptom for this test.
+#[e2etest::test(group = filtering)]
+async fn global_index_filter_by_filtering_column_shared_with_primary_key(actors: Arc<TestActors>) {
+    info!("started");
+
+    let (session, clients) = prepare_connection(&actors).await;
+
+    let keyspace = create_keyspace(&session).await;
+    let table = create_table(
+        &session,
+        "pk INT, ck INT, f INT, v VECTOR<FLOAT, 3>, PRIMARY KEY (pk, ck)",
+        None,
+    )
+    .await;
+
+    session
+        .query_unpaged(
+            format!("INSERT INTO {table} (pk, ck, f, v) VALUES (1, 2, 10, [0.1, 0.2, 0.3])"),
+            (),
+        )
+        .await
+        .expect("failed to insert data");
+
+    // No .partition_columns() -> global index. "ck" is a clustering-key column.
+    let index = create_index(
+        CreateIndexQuery::new(&session, &clients, &table, "v").filter_columns(["ck", "f"]),
+    )
+    .await;
+
+    for client in &clients {
+        let index_status = wait_for_index(client, &index).await;
+        assert_eq!(index_status.count, 1, "Expected 1 vector to be indexed");
+    }
+
+    let results = get_query_results(
+        format!(
+            "SELECT pk FROM {table} WHERE ck = 2 AND f = 10 \
+            ORDER BY v ANN OF [0.1, 0.2, 0.3] LIMIT 1 ALLOW FILTERING"
+        ),
+        &session,
+    )
+    .await;
+    assert_eq!(
+        results
+            .rows::<(i32,)>()
+            .expect("failed to get rows")
+            .rows_remaining(),
+        1,
+        "expected the row back"
+    );
+
+    session
+        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
+        .await
+        .expect("failed to drop a keyspace");
+
+    info!("finished");
+}
+
 /// Test ANN search filtered by partition key equality on a local index.
 ///
 /// Create a local index partitioned by pk. Insert rows across multiple

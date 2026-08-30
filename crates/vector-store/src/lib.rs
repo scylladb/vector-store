@@ -747,6 +747,15 @@ impl IndexMetadata {
             ),
         }
     }
+
+    /// The subset of `filtering_columns` not already in `primary_key_columns`.
+    /// Table::new() stores a primary-key column as Column::PrimaryKey, not a
+    /// value slot, so it can't also be fetched/stored as a filtering column.
+    fn nonpk_filtering_columns(&self) -> impl Iterator<Item = &ColumnName> {
+        self.filtering_columns
+            .iter()
+            .filter(|col| !self.primary_key_columns.contains(col))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -1017,5 +1026,33 @@ mod tests {
     #[test]
     fn positions_defaults_to_enabled() {
         assert!(*Positions::default().as_ref());
+    }
+
+    #[test]
+    fn nonpk_filtering_columns_excludes_primary_key_columns() {
+        let metadata = IndexMetadata {
+            keyspace_name: "ks".into(),
+            index_name: "idx".into(),
+            table_name: "tbl".into(),
+            // "pk" is the partition key, "ck" a clustering key.
+            primary_key_columns: NonemptyArc::new(["pk", "ck"]).unwrap(),
+            partition_key_count: NonZeroUsize::new(1).unwrap(),
+            target_columns: NonemptyArc::new(["embedding"]).unwrap(),
+            partitioning: DbIndexPartitioning::Local(NonemptyArc::new(["pk"]).unwrap()),
+            // "ck" is also a primary-key column; "f" is a genuine value column.
+            filtering_columns: Arc::new(["ck".into(), "f".into()]),
+            version: Uuid::new_v4().into(),
+            kind: IndexKind::Vs(IndexOptionsVs {
+                dimensions: Dimensions(NonZeroUsize::new(3).unwrap()),
+                connectivity: Default::default(),
+                expansion_add: Default::default(),
+                expansion_search: Default::default(),
+                space_type: Default::default(),
+                quantization: Default::default(),
+            }),
+        };
+
+        let filtering_columns: Vec<_> = metadata.nonpk_filtering_columns().cloned().collect();
+        assert_eq!(filtering_columns, vec!["f".into()]);
     }
 }
