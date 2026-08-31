@@ -79,6 +79,10 @@ pub(crate) fn to_json(value: CqlValue) -> anyhow::Result<Value> {
 
         CqlValue::Decimal(value) => Ok(Value::String(BigDecimal::from(value).to_string())),
 
+        CqlValue::Empty => {
+            bail!("a primary key column holds an empty value, which has no JSON representation")
+        }
+
         _ => bail!("unsupported CQL type for a primary key column"),
     }
 }
@@ -413,6 +417,7 @@ mod tests {
         );
 
         assert!(to_json(CqlValue::Counter(Counter(1))).is_err());
+        assert!(to_json(CqlValue::Empty).is_err());
         assert!(
             to_json(CqlValue::Duration(CqlDuration {
                 months: 1,
