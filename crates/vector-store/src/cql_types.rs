@@ -18,6 +18,7 @@ use scylla::value::CqlVarintBorrowed;
 use serde_json::Number;
 use serde_json::Value;
 use std::cmp::Ordering;
+use std::net::IpAddr;
 use std::num::NonZero;
 use std::sync::LazyLock;
 use time::Date;
@@ -78,6 +79,8 @@ pub(crate) fn to_json(value: CqlValue) -> anyhow::Result<Value> {
         CqlValue::Varint(value) => Ok(Value::String(BigInt::from(value).to_string())),
 
         CqlValue::Decimal(value) => Ok(Value::String(BigDecimal::from(value).to_string())),
+
+        CqlValue::Inet(value) => Ok(Value::String(value.to_string())),
 
         CqlValue::Empty => {
             bail!("a primary key column holds an empty value, which has no JSON representation")
@@ -157,6 +160,12 @@ pub(crate) fn from_json(value: Value, cql_type: &NativeType) -> anyhow::Result<C
                 Ok(CqlValue::Decimal(CqlDecimal::try_from(bd).map_err(
                     |err| anyhow!("Decimal value out of range: {err}"),
                 )?))
+            }
+            NativeType::Inet => {
+                let addr: IpAddr = value
+                    .parse()
+                    .map_err(|err| anyhow!("Failed to parse Inet from string '{value}': {err}"))?;
+                Ok(CqlValue::Inet(addr))
             }
             _ => bail!("Cannot convert string to CqlValue::{cql_type:?}, unsupported type"),
         },
@@ -279,8 +288,19 @@ pub(crate) fn cmp(lhs: &CqlValue, rhs: &CqlValue) -> Option<Ordering> {
         (CqlValue::Date(a), CqlValue::Date(b)) => Some(a.0.cmp(&b.0)),
         (CqlValue::Time(a), CqlValue::Time(b)) => Some(a.0.cmp(&b.0)),
         (CqlValue::Timestamp(a), CqlValue::Timestamp(b)) => Some(a.0.cmp(&b.0)),
+        // Inet type
+        (CqlValue::Inet(a), CqlValue::Inet(b)) => Some(inet_cmp(a, b)),
         // Unsupported or mismatched types
         _ => None,
+    }
+}
+
+fn inet_cmp(lhs: &IpAddr, rhs: &IpAddr) -> Ordering {
+    match (lhs, rhs) {
+        (IpAddr::V4(lhs), IpAddr::V4(rhs)) => lhs.octets().cmp(&rhs.octets()),
+        (IpAddr::V6(lhs), IpAddr::V6(rhs)) => lhs.octets().cmp(&rhs.octets()),
+        (IpAddr::V4(lhs), IpAddr::V6(rhs)) => lhs.octets().as_slice().cmp(rhs.octets().as_slice()),
+        (IpAddr::V6(lhs), IpAddr::V4(rhs)) => lhs.octets().as_slice().cmp(rhs.octets().as_slice()),
     }
 }
 
@@ -290,6 +310,8 @@ mod tests {
     use scylla::value::Counter;
     use scylla::value::CqlDecimal;
     use scylla::value::CqlDuration;
+    use std::net::Ipv4Addr;
+    use std::net::Ipv6Addr;
     use uuid::Uuid;
 
     #[test]
@@ -414,6 +436,22 @@ mod tests {
             ))
             .unwrap(),
             Value::String("-98765432109876543210.123456789".to_string())
+        );
+
+        assert_eq!(
+            to_json(CqlValue::Inet(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))).unwrap(),
+            Value::String("10.0.0.1".to_string())
+        );
+        assert_eq!(
+            to_json(CqlValue::Inet(IpAddr::V6(Ipv6Addr::LOCALHOST))).unwrap(),
+            Value::String("::1".to_string())
+        );
+        assert_eq!(
+            to_json(CqlValue::Inet(IpAddr::V6(Ipv6Addr::new(
+                0x2001, 0xdb8, 0, 0, 0, 0, 0, 1
+            ))))
+            .unwrap(),
+            Value::String("2001:db8::1".to_string())
         );
 
         assert!(to_json(CqlValue::Counter(Counter(1))).is_err());
@@ -680,6 +718,22 @@ mod tests {
                 CqlDecimal::try_from("-1.25".parse::<BigDecimal>().unwrap()).unwrap()
             )
         );
+
+        assert_eq!(
+            from_json(Value::String("10.0.0.1".to_string()), &NativeType::Inet).unwrap(),
+            CqlValue::Inet(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))
+        );
+        assert_eq!(
+            from_json(Value::String("::1".to_string()), &NativeType::Inet).unwrap(),
+            CqlValue::Inet(IpAddr::V6(Ipv6Addr::LOCALHOST))
+        );
+        assert_eq!(
+            from_json(Value::String("2001:db8::1".to_string()), &NativeType::Inet).unwrap(),
+            CqlValue::Inet(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)))
+        );
+        assert!(from_json(Value::String("not-an-ip".to_string()), &NativeType::Inet).is_err());
+        assert!(from_json(Value::String("10.0.0.256".to_string()), &NativeType::Inet).is_err());
+        assert!(from_json(Value::Number(10.into()), &NativeType::Inet).is_err());
     }
 
     #[test]
@@ -874,5 +928,37 @@ mod tests {
             cmp(&CqlValue::Boolean(true), &CqlValue::Boolean(false)),
             None
         );
+    }
+
+    #[test]
+    fn cmp_inet() {
+        let v4 = |a, b, c, d| CqlValue::Inet(IpAddr::V4(Ipv4Addr::new(a, b, c, d)));
+        let v6 = |s: &str| CqlValue::Inet(IpAddr::V6(s.parse::<Ipv6Addr>().expect("valid addr")));
+
+        assert_eq!(
+            cmp(&v4(10, 0, 0, 1), &v4(10, 0, 0, 1)),
+            Some(Ordering::Equal)
+        );
+        assert_eq!(
+            cmp(&v4(10, 0, 0, 1), &v4(10, 0, 0, 2)),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            cmp(&v4(10, 0, 1, 0), &v4(10, 0, 0, 255)),
+            Some(Ordering::Greater)
+        );
+        assert_eq!(cmp(&v6("::1"), &v6("::2")), Some(Ordering::Less));
+
+        // Serialized byte order.
+        assert_eq!(
+            cmp(&v4(255, 255, 255, 255), &v6("::")),
+            Some(Ordering::Greater)
+        );
+        assert_eq!(
+            cmp(&v6("2001:db8::1"), &v4(255, 255, 255, 255)),
+            Some(Ordering::Less)
+        );
+        // On an equal prefix the shorter IPv4 form sorts first.
+        assert_eq!(cmp(&v4(0, 0, 0, 0), &v6("::")), Some(Ordering::Less));
     }
 }

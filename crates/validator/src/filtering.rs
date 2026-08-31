@@ -8,6 +8,7 @@ use crate::common::*;
 use httpapi::KeyspaceName;
 use scylla::client::session::Session;
 use std::collections::HashSet;
+use std::net::IpAddr;
 use std::sync::Arc;
 use tracing::info;
 
@@ -299,6 +300,96 @@ async fn ann_filter_by_clustering_key_gt(actors: Arc<TestActors>) {
         .collect();
 
     assert_eq!(cks, HashSet::from([8, 9]));
+
+    session
+        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
+        .await
+        .expect("failed to drop a keyspace");
+
+    info!("finished");
+}
+
+#[e2etest::test(group = filtering)]
+async fn ann_filter_by_inet_clustering_key_gt(actors: Arc<TestActors>) {
+    info!("started");
+
+    let (session, clients) = prepare_connection(&actors).await;
+
+    let keyspace = create_keyspace(&session).await;
+    let table = create_table(
+        &session,
+        "pk INT, ck INET, v VECTOR<FLOAT, 3>, PRIMARY KEY (pk, ck)",
+        None,
+    )
+    .await;
+
+    let addrs = [
+        "0.0.0.0",
+        "10.0.0.1",
+        "255.255.255.255",
+        "::",
+        "::1",
+        "2001:db8::1",
+    ];
+    for (idx, addr) in addrs.iter().enumerate() {
+        session
+            .query_unpaged(
+                format!("INSERT INTO {table} (pk, ck, v) VALUES (0, '{addr}', ?)"),
+                (&vec![idx as f32, 0.0, 0.0],),
+            )
+            .await
+            .expect("failed to insert data");
+    }
+
+    let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
+
+    for client in &clients {
+        let index_status = wait_for_index(client, &index).await;
+        assert_eq!(
+            index_status.count,
+            addrs.len(),
+            "Expected every address to be indexed"
+        );
+    }
+
+    // ScyllaDB owns the ordering, so take the expected rows from a plain query.
+    let expected: HashSet<IpAddr> = get_query_results(
+        format!("SELECT ck FROM {table} WHERE pk = 0 AND ck > '::'"),
+        &session,
+    )
+    .await
+    .rows::<(IpAddr,)>()
+    .expect("failed to get rows")
+    .map(|row| row.expect("failed to get row").0)
+    .collect();
+
+    assert!(
+        expected.iter().any(|addr| addr.is_ipv4()) && expected.iter().any(|addr| addr.is_ipv6()),
+        "Expected both address families above '::', got: {expected:?}"
+    );
+
+    let result: HashSet<IpAddr> = wait_for_value(
+        || async {
+            let result = get_opt_query_results(
+                format!(
+                    "SELECT ck FROM {table} WHERE pk = 0 AND ck > '::' \
+                    ORDER BY v ANN OF [-1.0, 0.0, 0.0] LIMIT 10 ALLOW FILTERING"
+                ),
+                &session,
+            )
+            .await;
+            result.filter(|result| result.rows_num() == expected.len())
+        },
+        "Waiting for the inet filtered ANN query to return every matching row",
+        DEFAULT_OPERATION_TIMEOUT,
+    )
+    .await
+    .rows::<(IpAddr,)>()
+    .expect("failed to get rows")
+    .map(|row| row.expect("failed to get row").0)
+    .collect();
+
+    assert_eq!(result, expected);
 
     session
         .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())

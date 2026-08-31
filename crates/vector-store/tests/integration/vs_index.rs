@@ -24,6 +24,9 @@ use scylla::value::Counter;
 use scylla::value::CqlValue;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::net::IpAddr;
+use std::net::Ipv4Addr;
+use std::net::Ipv6Addr;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -716,6 +719,128 @@ async fn ann_failed_when_wrong_number_of_primary_keys(#[case] config: Config) {
         "Waiting for index to be return internal server error on ANN",
     )
     .await;
+}
+
+/// Regression for VECTOR-878.
+/// An inet primary key must not panic the worker.
+#[rstest]
+#[case::usearch(usearch_test_config())]
+#[case::diskann(diskann_test_config())]
+#[tokio::test]
+async fn ann_returns_inet_primary_key(#[case] config: Config) {
+    crate::enable_tracing();
+    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+        config,
+        DbIndexPartitioning::Global,
+        vec!["addr".into()],
+        1,
+        [("addr".into(), NativeType::Inet)],
+        Some(db_basic::scan_fn_vectors([
+            (
+                [CqlValue::Inet(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))].into(),
+                Some(vec![1., 0., 0.].into()),
+                [].into(),
+                Timestamp::from_millis(10),
+            ),
+            (
+                [CqlValue::Inet(IpAddr::V6(Ipv6Addr::new(
+                    0x2001, 0xdb8, 0, 0, 0, 0, 0, 1,
+                )))]
+                .into(),
+                Some(vec![0., 1., 0.].into()),
+                [].into(),
+                Timestamp::from_millis(10),
+            ),
+        ])),
+        None,
+        Some(2),
+    )
+    .await;
+
+    let keyspace_name = index.keyspace_name.clone().into();
+    let index_name = index.index_name.clone().into();
+
+    let (primary_keys, distances, _) = client
+        .ann(
+            &keyspace_name,
+            &index_name,
+            vec![1.0, 0.0, 0.0].into(),
+            None,
+            NonZeroUsize::new(2).unwrap().into(),
+        )
+        .await;
+
+    assert_eq!(distances.len(), 2);
+    let addrs = primary_keys.get(&"addr".into()).unwrap();
+    assert_eq!(addrs.len(), 2);
+
+    // Nearest neighbour is the IPv4 row.
+    assert_eq!(addrs.first().unwrap().as_str().unwrap(), "10.0.0.1");
+    assert_eq!(
+        addrs
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect::<HashSet<_>>(),
+        ["10.0.0.1", "2001:db8::1"].into_iter().collect()
+    );
+}
+
+/// An `inet` filter must match rows, not silently exclude them.
+#[rstest]
+#[timeout(Duration::from_secs(10))]
+#[tokio::test]
+async fn ann_filter_inet_eq() {
+    crate::enable_tracing();
+    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+        usearch_test_config(),
+        DbIndexPartitioning::Global,
+        vec!["addr".into()],
+        1,
+        [("addr".into(), NativeType::Inet)],
+        Some(db_basic::scan_fn_vectors([
+            (
+                [CqlValue::Inet(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))].into(),
+                Some(vec![1., 0., 0.].into()),
+                [].into(),
+                Timestamp::from_millis(10),
+            ),
+            (
+                [CqlValue::Inet(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)))].into(),
+                Some(vec![0., 1., 0.].into()),
+                [].into(),
+                Timestamp::from_millis(10),
+            ),
+        ])),
+        None,
+        Some(2),
+    )
+    .await;
+
+    let addr_column: httpapi::ColumnName = "addr".into();
+    let keyspace_name = index.keyspace_name.clone().into();
+    let index_name = index.index_name.clone().into();
+
+    let (primary_keys, distances, _) = client
+        .ann(
+            &keyspace_name,
+            &index_name,
+            vec![1.0, 0.0, 0.0].into(),
+            Some(PostIndexAnnFilter {
+                restrictions: vec![PostIndexAnnRestriction::Eq {
+                    lhs: addr_column.clone(),
+                    rhs: "10.0.0.2".into(),
+                }],
+                allow_filtering: true,
+            }),
+            NonZeroUsize::new(10).unwrap().into(),
+        )
+        .await;
+
+    // Exactly the filtered row, not an empty result set.
+    assert_eq!(distances.len(), 1);
+    let addrs = primary_keys.get(&addr_column).unwrap();
+    assert_eq!(addrs.len(), 1);
+    assert_eq!(addrs.first().unwrap().as_str().unwrap(), "10.0.0.2");
 }
 
 /// Regression for VECTOR-878.
