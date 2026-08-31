@@ -20,6 +20,7 @@ use httpclient::HttpClient;
 use reqwest::StatusCode;
 use rstest::rstest;
 use scylla::cluster::metadata::NativeType;
+use scylla::value::Counter;
 use scylla::value::CqlValue;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -715,6 +716,51 @@ async fn ann_failed_when_wrong_number_of_primary_keys(#[case] config: Config) {
         "Waiting for index to be return internal server error on ANN",
     )
     .await;
+}
+
+/// Regression for VECTOR-878.
+/// An unsupported key type must fail the request, not panic the worker.
+#[rstest]
+#[timeout(Duration::from_secs(10))]
+#[tokio::test]
+async fn ann_returns_error_for_unsupported_primary_key_type() {
+    crate::enable_tracing();
+    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+        usearch_test_config(),
+        DbIndexPartitioning::Global,
+        vec!["pk".into()],
+        1,
+        [("pk".into(), NativeType::Int)],
+        Some(db_basic::scan_fn_vectors([(
+            [CqlValue::Counter(Counter(1))].into(),
+            Some(vec![1., 1., 1.].into()),
+            [].into(),
+            Timestamp::from_millis(10),
+        )])),
+        None,
+        Some(1),
+    )
+    .await;
+
+    let keyspace_name = index.keyspace_name.clone().into();
+    let index_name = index.index_name.clone().into();
+
+    let response = client
+        .post_ann(
+            &keyspace_name,
+            &index_name,
+            vec![1.0, 1.0, 1.0].into(),
+            None,
+            NonZeroUsize::new(1).unwrap().into(),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let message = response.text().await.unwrap();
+    assert!(
+        message.contains("unsupported CQL type"),
+        "error should report the unsupported type, got: {message}"
+    );
 }
 
 #[rstest]

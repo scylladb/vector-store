@@ -79,7 +79,7 @@ pub(crate) fn to_json(value: CqlValue) -> anyhow::Result<Value> {
 
         CqlValue::Decimal(value) => Ok(Value::String(BigDecimal::from(value).to_string())),
 
-        _ => unimplemented!(),
+        _ => bail!("unsupported CQL type for a primary key column"),
     }
 }
 
@@ -283,7 +283,9 @@ pub(crate) fn cmp(lhs: &CqlValue, rhs: &CqlValue) -> Option<Ordering> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use scylla::value::Counter;
     use scylla::value::CqlDecimal;
+    use scylla::value::CqlDuration;
     use uuid::Uuid;
 
     #[test]
@@ -408,6 +410,26 @@ mod tests {
             ))
             .unwrap(),
             Value::String("-98765432109876543210.123456789".to_string())
+        );
+
+        assert!(to_json(CqlValue::Counter(Counter(1))).is_err());
+        assert!(
+            to_json(CqlValue::Duration(CqlDuration {
+                months: 1,
+                days: 2,
+                nanoseconds: 3
+            }))
+            .is_err()
+        );
+        assert!(to_json(CqlValue::List(vec![CqlValue::Int(1)])).is_err());
+        assert!(to_json(CqlValue::Tuple(vec![Some(CqlValue::Int(1))])).is_err());
+        assert!(
+            to_json(CqlValue::UserDefinedType {
+                keyspace: "ks".to_string(),
+                name: "udt".to_string(),
+                fields: vec![],
+            })
+            .is_err()
         );
     }
 
