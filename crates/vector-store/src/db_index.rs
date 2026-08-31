@@ -338,12 +338,7 @@ impl Statements {
         );
 
         let target_columns = metadata.target_columns.clone();
-        let filtering_columns: Arc<[_]> = metadata
-            .filtering_columns
-            .iter()
-            .filter(|column| !primary_key_columns.contains(column))
-            .cloned()
-            .collect();
+        let filtering_columns: Arc<[_]> = metadata.nonpk_filtering_columns().cloned().collect();
 
         let table_columns = Arc::new(
             table
