@@ -344,6 +344,7 @@ impl Statements {
         let target_columns = metadata.target_columns.clone();
         let filtering_columns: Arc<[_]> = metadata.nonpk_filtering_columns().cloned().collect();
 
+        let is_alternator = KeyspaceIdentifier::from(&metadata.keyspace_name).is_alternator();
         let real_columns: HashMap<ColumnName, NativeType> = table
             .columns
             .iter()
@@ -355,21 +356,14 @@ impl Statements {
                 }
             })
             .collect();
-        // Merge in synthesized types for Alternator attributes with no real
-        // column (see IndexMetadata::alternator_attribute_types); real
-        // columns come last so they win on any name collision.
-        let table_columns = Arc::new(
-            metadata
-                .alternator_attribute_types
-                .keys()
-                .filter_map(|name| Some((name.clone(), metadata.alternator_native_type(name)?)))
-                .chain(
-                    real_columns
-                        .iter()
-                        .map(|(name, typ)| (name.clone(), typ.clone())),
-                )
-                .collect(),
-        );
+        let table_columns = Arc::new(merge_table_columns(
+            &metadata,
+            &filtering_columns,
+            real_columns
+                .iter()
+                .map(|(name, typ)| (name.clone(), typ.clone())),
+            is_alternator,
+        ));
         let alternator_decode_types = alternator_decode_types(
             nonpk_partition_key_columns
                 .iter()
@@ -652,12 +646,57 @@ impl Statements {
     }
 }
 
+/// Builds the `table_columns` lookup Table::new() uses to size and type
+/// in-memory column storage: the table's genuine, natively-typed CQL
+/// columns (`real_columns`), plus synthesized types for Alternator's
+/// virtual SearchSchema attributes (see
+/// IndexMetadata::alternator_attribute_types) and, only for an Alternator
+/// table, a raw-Blob entry for any other filtering column with no real
+/// column (see Alternator's compute_extra_fc_attributes()) so it can still
+/// be stored for projection/return purposes. Real columns win on any name
+/// collision with a synthesized one.
+///
+/// For a CQL-native table (`is_alternator` false), a filtering column with
+/// no real `real_columns` entry gets no entry here either: that's a
+/// genuine misconfiguration (e.g. schema drift), and must still fail
+/// through Table::new()'s "Column {name} not found in table columns"
+/// check rather than be papered over.
+pub(crate) fn merge_table_columns(
+    metadata: &IndexMetadata,
+    filtering_columns: &[ColumnName],
+    real_columns: impl IntoIterator<Item = (ColumnName, NativeType)>,
+    is_alternator: bool,
+) -> HashMap<ColumnName, NativeType> {
+    let real_columns: HashMap<ColumnName, NativeType> = real_columns.into_iter().collect();
+    metadata
+        .alternator_attribute_types
+        .keys()
+        .filter_map(|name| Some((name.clone(), metadata.alternator_native_type(name)?)))
+        .chain(
+            real_columns
+                .iter()
+                .map(|(name, typ)| (name.clone(), typ.clone())),
+        )
+        .chain(
+            filtering_columns
+                .iter()
+                .filter(|name| {
+                    is_alternator
+                        && !metadata.alternator_attribute_types.contains_key(*name)
+                        && !real_columns.contains_key(*name)
+                })
+                .map(|name| (name.clone(), NativeType::Blob)),
+        )
+        .collect()
+}
+
 /// Builds parse_values()'s alternator_decode_types parameter: for each of
 /// `columns`, its NativeType from `metadata.alternator_native_type()` - or
 /// None if `column` is a real table column, even if it also has a declared
-/// Alternator type. A real column's raw value is whatever the CQL driver
-/// decoded it as, never a tagged Alternator blob, so it must never be run
-/// through parse_alternator_scalar().
+/// Alternator type (see merge_table_columns(), which gives real columns the
+/// same precedence for table_columns). A real column's raw value is
+/// whatever the CQL driver decoded it as, never a tagged Alternator blob,
+/// so it must never be run through parse_alternator_scalar().
 pub(crate) fn alternator_decode_types<'a>(
     columns: impl IntoIterator<Item = &'a ColumnName>,
     metadata: &IndexMetadata,
@@ -790,7 +829,6 @@ mod tests {
     use crate::Quantization;
     use crate::SpaceType;
     use std::assert_matches;
-    use std::collections::BTreeMap;
     use uuid::Uuid;
 
     fn vs_kind() -> IndexKind {
@@ -1085,14 +1123,10 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn alternator_decode_types_excludes_real_columns() {
-        // "color" is both a declared SearchSchema attribute (typed "S") and
-        // a genuine real column in the table (e.g. it's also the base
-        // table's own hash key). Its raw value is whatever the CQL driver
-        // decoded it as, not a tagged Alternator blob, so it must not be
-        // run through parse_alternator_scalar().
-        let metadata = IndexMetadata {
+    fn metadata_with_alternator_types(
+        types: impl IntoIterator<Item = (&'static str, NativeType)>,
+    ) -> IndexMetadata {
+        IndexMetadata {
             keyspace_name: "ks".into(),
             index_name: "idx".into(),
             table_name: "tbl".into(),
@@ -1101,13 +1135,77 @@ mod tests {
             target_columns: NonemptyArc::new(["embedding"]).unwrap(),
             partitioning: DbIndexPartitioning::Global,
             filtering_columns: Arc::new([]),
-            alternator_attribute_types: Arc::new(BTreeMap::from([
-                (ColumnName::from("color"), NativeType::Text),
-                (ColumnName::from("size"), NativeType::Decimal),
-            ])),
+            alternator_attribute_types: Arc::new(
+                types
+                    .into_iter()
+                    .map(|(name, typ)| (ColumnName::from(name), typ))
+                    .collect(),
+            ),
             version: Uuid::new_v4().into(),
             kind: vs_kind(),
-        };
+        }
+    }
+
+    #[test]
+    fn merge_table_columns_cql_missing_filtering_column_is_not_papered_over() {
+        // A filtering column with no real table_columns entry, on a
+        // CQL-native table (is_alternator = false), is a genuine
+        // misconfiguration (e.g. schema drift) - it must NOT get a
+        // synthesized entry, so Table::new() still rejects it with
+        // "Column {name} not found in table columns" instead of silently
+        // treating it as an opaque, always-empty Blob column.
+        let metadata = metadata_with_alternator_types([]);
+        let table_columns =
+            merge_table_columns(&metadata, &["missing".into()], std::iter::empty(), false);
+        assert!(!table_columns.contains_key(&ColumnName::from("missing")));
+    }
+
+    #[test]
+    fn merge_table_columns_alternator_untyped_filtering_column_gets_blob() {
+        // Same missing-column scenario, but on an Alternator table: a
+        // filtering column added purely for a Projection's sake (no
+        // declared type) must still get a table_columns entry, as a raw
+        // Blob, so Table::new() can store it.
+        let metadata = metadata_with_alternator_types([]);
+        let table_columns =
+            merge_table_columns(&metadata, &["photo".into()], std::iter::empty(), true);
+        assert_eq!(
+            table_columns.get(&ColumnName::from("photo")),
+            Some(&NativeType::Blob)
+        );
+    }
+
+    #[test]
+    fn merge_table_columns_real_column_wins_over_synthesized_type() {
+        // "color" is both a declared SearchSchema attribute (typed "S")
+        // and a genuine real column in the table - the real column's type
+        // must win.
+        let metadata = metadata_with_alternator_types([("color", NativeType::Text)]);
+        let table_columns = merge_table_columns(
+            &metadata,
+            &["color".into()],
+            [(ColumnName::from("color"), NativeType::Ascii)],
+            true,
+        );
+        assert_eq!(
+            table_columns.get(&ColumnName::from("color")),
+            Some(&NativeType::Ascii)
+        );
+    }
+
+    #[test]
+    fn alternator_decode_types_excludes_real_columns() {
+        // "color" is both a declared SearchSchema attribute (typed "S") and
+        // a genuine real column in the table (e.g. it's also the base
+        // table's own hash key). Its raw value is whatever the CQL driver
+        // decoded it as, not a tagged Alternator blob, so it must not be
+        // run through parse_alternator_scalar() - unlike merge_table_columns()
+        // above, which only decides the *storage* type, this decides
+        // whether parse_values() attempts to decode the value at all.
+        let metadata = metadata_with_alternator_types([
+            ("color", NativeType::Text),
+            ("size", NativeType::Decimal),
+        ]);
         let real_columns = HashMap::from([(ColumnName::from("color"), NativeType::Blob)]);
         let decode_types = alternator_decode_types(
             [&ColumnName::from("color"), &ColumnName::from("size")],
