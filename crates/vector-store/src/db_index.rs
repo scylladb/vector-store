@@ -748,7 +748,7 @@ pub(crate) fn parse_values(
                 let value = value
                     .map(|value| match (value, native_type) {
                         (CqlValue::Blob(bytes), Some(native_type)) => {
-                            crate::vector::parse_alternator_scalar(&bytes, &native_type)
+                            crate::alternator::parse_alternator_scalar(&bytes, &native_type)
                         }
                         (value, _) => Ok(value),
                     })

@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+mod alternator;
 mod async_in_progress;
 mod config_manager;
 pub mod db;
