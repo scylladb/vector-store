@@ -14,6 +14,7 @@ use crate::wait_for_value;
 use httpapi::IndexNotReadyReason;
 use httpapi::IndexStatus;
 use httpapi::PostIndexAnnFilter;
+use httpapi::PostIndexAnnRequest;
 use httpapi::PostIndexAnnResponse;
 use httpapi::PostIndexAnnRestriction;
 use httpclient::HttpClient;
@@ -21,6 +22,7 @@ use reqwest::StatusCode;
 use rstest::rstest;
 use scylla::cluster::metadata::NativeType;
 use scylla::value::CqlValue;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -436,6 +438,192 @@ async fn failed_db_index_create(#[case] config: Config) {
     assert_eq!(indexes.len(), 2);
     assert!(indexes.contains(&httpapi::IndexInfo::new("vector", "ann")));
     assert!(indexes.contains(&httpapi::IndexInfo::new("vector", "ann3")));
+}
+
+#[rstest]
+#[case::usearch(usearch_test_config())]
+#[case::diskann(diskann_test_config())]
+#[tokio::test]
+async fn ann_returns_requested_column_values(#[case] config: Config) {
+    crate::enable_tracing();
+
+    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+        config,
+        DbIndexPartitioning::Global,
+        ["pk".into()],
+        1,
+        [
+            ("pk".to_string().into(), NativeType::Int),
+            ("color".to_string().into(), NativeType::Text),
+        ],
+        Some(db_basic::scan_fn_vectors([
+            (
+                [CqlValue::Int(1)].into(),
+                Some(vec![1., 1., 1.].into()),
+                [Some(CqlValue::Text("red".to_string()))].into(),
+                Timestamp::from_millis(10),
+            ),
+            (
+                // No "color" stored for this row: it must come back as
+                // null, not be silently omitted or default to a bogus
+                // value.
+                [CqlValue::Int(2)].into(),
+                Some(vec![2., -2., 2.].into()),
+                [None].into(),
+                Timestamp::from_millis(20),
+            ),
+            (
+                [CqlValue::Int(3)].into(),
+                Some(vec![3., 3., 3.].into()),
+                [Some(CqlValue::Text("blue".to_string()))].into(),
+                Timestamp::from_millis(30),
+            ),
+        ])),
+        None,
+        Some(3),
+    )
+    .await;
+
+    let response = client
+        .post_ann_data(
+            &index.keyspace_name.into(),
+            &index.index_name.into(),
+            &PostIndexAnnRequest {
+                vector: vec![2.1, -2., 2.].into(),
+                filter: None,
+                limit: NonZeroUsize::new(3).unwrap().into(),
+                routing: true,
+                return_columns: vec!["color".into()],
+            },
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response: PostIndexAnnResponse = response.json().await.unwrap();
+
+    let pks = response.primary_keys.get(&"pk".into()).unwrap();
+    let colors = response.column_values.get(&"color".into()).unwrap();
+    assert_eq!(pks.len(), 3);
+    assert_eq!(colors.len(), 3);
+
+    // primary_keys, column_values and similarity_scores are aligned
+    // row-by-row, not necessarily in insertion order, so recover the
+    // per-row correspondence from the response itself.
+    let color_by_pk: HashMap<i64, Option<String>> = pks
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .zip(
+            colors
+                .iter()
+                .map(|v| v.as_ref().map(|v| v.as_str().unwrap().to_string())),
+        )
+        .collect();
+    assert_eq!(color_by_pk[&1].as_deref(), Some("red"));
+    assert_eq!(color_by_pk[&2], None);
+    assert_eq!(color_by_pk[&3].as_deref(), Some("blue"));
+}
+
+#[rstest]
+#[timeout(Duration::from_secs(10))]
+#[tokio::test]
+async fn ann_return_columns_rejects_column_not_in_index() {
+    crate::enable_tracing();
+
+    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+        usearch_test_config(),
+        DbIndexPartitioning::Global,
+        ["pk".into()],
+        1,
+        [("pk".to_string().into(), NativeType::Int)],
+        Some(db_basic::scan_fn_vectors([(
+            [CqlValue::Int(1)].into(),
+            Some(vec![1., 1., 1.].into()),
+            [].into(),
+            Timestamp::from_millis(10),
+        )])),
+        None,
+        Some(1),
+    )
+    .await;
+
+    let response = client
+        .post_ann_data(
+            &index.keyspace_name.into(),
+            &index.index_name.into(),
+            &PostIndexAnnRequest {
+                vector: vec![1., 1., 1.].into(),
+                filter: None,
+                limit: NonZeroUsize::new(1).unwrap().into(),
+                routing: true,
+                return_columns: vec!["not_a_real_column".into()],
+            },
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn ann_filtered_ann_returns_requested_column_values() {
+    crate::enable_tracing();
+
+    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+        usearch_test_config(),
+        DbIndexPartitioning::Global,
+        ["pk".into()],
+        1,
+        [
+            ("pk".to_string().into(), NativeType::Int),
+            ("color".to_string().into(), NativeType::Text),
+        ],
+        Some(db_basic::scan_fn_vectors([
+            (
+                [CqlValue::Int(1)].into(),
+                Some(vec![1., 1., 1.].into()),
+                [Some(CqlValue::Text("red".to_string()))].into(),
+                Timestamp::from_millis(10),
+            ),
+            (
+                [CqlValue::Int(2)].into(),
+                Some(vec![1., 1., 1.].into()),
+                [Some(CqlValue::Text("blue".to_string()))].into(),
+                Timestamp::from_millis(20),
+            ),
+        ])),
+        None,
+        Some(2),
+    )
+    .await;
+
+    let response = client
+        .post_ann_data(
+            &index.keyspace_name.into(),
+            &index.index_name.into(),
+            &PostIndexAnnRequest {
+                vector: vec![1., 1., 1.].into(),
+                filter: Some(PostIndexAnnFilter {
+                    restrictions: vec![PostIndexAnnRestriction::Eq {
+                        lhs: "pk".into(),
+                        rhs: 1.into(),
+                    }],
+                    allow_filtering: true,
+                }),
+                limit: NonZeroUsize::new(10).unwrap().into(),
+                routing: true,
+                return_columns: vec!["color".into()],
+            },
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response: PostIndexAnnResponse = response.json().await.unwrap();
+
+    assert_eq!(
+        response.primary_keys.get(&"pk".into()).unwrap(),
+        &[Value::from(1)]
+    );
+    assert_eq!(
+        response.column_values.get(&"color".into()).unwrap(),
+        &[Some(Value::from("red"))]
+    );
 }
 
 #[rstest]

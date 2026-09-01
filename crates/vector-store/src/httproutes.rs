@@ -820,9 +820,26 @@ async fn post_index_ann(
             ))
             .await;
 
-        // The HTTP API doesn't let callers request stored column values back
-        // yet, so ann()/filtered_ann() are never asked for any.
-        let return_columns: Arc<[crate::ColumnName]> = Arc::from([]);
+        // Filtering-column names whose stored values the caller wants back
+        // alongside the primary keys, instead of having to separately read
+        // every result row from the base table.
+        let return_columns: Vec<crate::ColumnName> = request
+            .return_columns
+            .into_iter()
+            .map(crate::ColumnName::from)
+            .collect();
+        for column in &return_columns {
+            if !filtering_columns.contains(column) {
+                timer.observe_duration();
+
+                let msg = format!(
+                    "Column '{column}' in return_columns is not part of the primary key or filtering columns, and cannot be returned"
+                );
+                debug!("post_index_ann: {msg}");
+                return (StatusCode::BAD_REQUEST, msg).into_response();
+            }
+        }
+        let return_columns: Arc<[crate::ColumnName]> = return_columns.into();
 
         let search_result = if let Some(filter) = request.filter {
             let filter = match try_from_post_index_ann_filter(
@@ -868,7 +885,7 @@ async fn post_index_ann(
                     (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
                 }
             },
-            Ok((primary_keys, distances, _column_values_per_row)) => {
+            Ok((primary_keys, distances, column_values_per_row)) => {
                 if primary_keys.len() != distances.len() {
                     let msg = format!(
                         "wrong size of an ann response: \
@@ -894,15 +911,35 @@ async fn post_index_ann(
                             debug!("post_index_ann: {err}");
                             (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
                         }
-                        Ok(primary_keys) => (
-                            StatusCode::OK,
-                            response::Json(httpapi::PostIndexAnnResponse {
-                                primary_keys,
-                                distances: distances.into_iter().map(|d| d.into()).collect(),
-                                similarity_scores,
-                            }),
-                        )
-                            .into_response(),
+                        Ok(primary_keys) => {
+                            let column_values: HashMap<
+                                httpapi::ColumnName,
+                                Vec<Option<Value>>,
+                            > = return_columns
+                                .iter()
+                                .map(|col_name| {
+                                    let values = column_values_per_row
+                                        .iter()
+                                        .map(|row_vals| {
+                                            row_vals
+                                                .get(col_name)
+                                                .and_then(|v| try_to_json(v.clone()).ok())
+                                        })
+                                        .collect();
+                                    (col_name.clone().into(), values)
+                                })
+                                .collect();
+                            (
+                                StatusCode::OK,
+                                response::Json(httpapi::PostIndexAnnResponse {
+                                    primary_keys,
+                                    distances: distances.into_iter().map(|d| d.into()).collect(),
+                                    similarity_scores,
+                                    column_values,
+                                }),
+                            )
+                                .into_response()
+                        }
                     }
                 }
             }
