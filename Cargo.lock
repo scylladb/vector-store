@@ -6155,6 +6155,7 @@ dependencies = [
  "axum-server-dual-protocol",
  "axum-test",
  "bigdecimal",
+ "bytemuck",
  "clap",
  "console-subscriber",
  "const-hex",

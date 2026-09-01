@@ -28,6 +28,7 @@ axum-server-dual-protocol = "0.8.0"
 axum-test = "20.0.0"
 bcrypt = "0.15"
 bigdecimal = "0.4"
+bytemuck = { version = "1.23.0", features = ["derive"] }
 bytes = "1.12.0"
 const-hex = "1.18.1"
 clap = { version = "4.5.40", features = ["derive"] }
