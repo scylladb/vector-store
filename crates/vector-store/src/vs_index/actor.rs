@@ -4,6 +4,7 @@
  */
 
 use crate::AsyncInProgress;
+use crate::ColumnName;
 use crate::Distance;
 use crate::Filter;
 use crate::IndexKey;
@@ -12,10 +13,17 @@ use crate::PrimaryKey;
 use crate::Vector;
 use crate::table::PartitionId;
 use crate::table::PrimaryId;
+use scylla::value::CqlValue;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
-pub(crate) type AnnR = anyhow::Result<(Vec<PrimaryKey>, Vec<Distance>)>;
+pub(crate) type AnnR = anyhow::Result<(
+    Vec<PrimaryKey>,
+    Vec<Distance>,
+    Vec<BTreeMap<ColumnName, CqlValue>>,
+)>;
 pub(crate) type CountR = anyhow::Result<usize>;
 
 pub enum VsIndexModify {
@@ -40,6 +48,7 @@ pub enum VsIndexSearch {
         index_key: IndexKey,
         embedding: Vector,
         limit: Limit,
+        return_columns: Arc<[ColumnName]>,
         tx: oneshot::Sender<AnnR>,
     },
     FilteredAnn {
@@ -47,6 +56,7 @@ pub enum VsIndexSearch {
         embedding: Vector,
         filter: Filter,
         limit: Limit,
+        return_columns: Arc<[ColumnName]>,
         tx: oneshot::Sender<AnnR>,
     },
     Count {
@@ -78,13 +88,20 @@ pub(crate) trait VsIndexModifyExt {
 }
 
 pub(crate) trait VsIndexSearchExt {
-    async fn ann(&self, index_key: IndexKey, embedding: Vector, limit: Limit) -> AnnR;
+    async fn ann(
+        &self,
+        index_key: IndexKey,
+        embedding: Vector,
+        limit: Limit,
+        return_columns: Arc<[ColumnName]>,
+    ) -> AnnR;
     async fn filtered_ann(
         &self,
         index_key: IndexKey,
         embedding: Vector,
         filter: Filter,
         limit: Limit,
+        return_columns: Arc<[ColumnName]>,
     ) -> AnnR;
     async fn count(&self, index_key: IndexKey) -> CountR;
 }
@@ -134,12 +151,19 @@ impl VsIndexModifyExt for mpsc::Sender<VsIndexModify> {
 
 impl VsIndexSearchExt for mpsc::Sender<VsIndexSearch> {
     #[hotpath::measure]
-    async fn ann(&self, index_key: IndexKey, embedding: Vector, limit: Limit) -> AnnR {
+    async fn ann(
+        &self,
+        index_key: IndexKey,
+        embedding: Vector,
+        limit: Limit,
+        return_columns: Arc<[ColumnName]>,
+    ) -> AnnR {
         let (tx, rx) = oneshot::channel();
         self.send(VsIndexSearch::Ann {
             index_key,
             embedding,
             limit,
+            return_columns,
             tx,
         })
         .await?;
@@ -153,6 +177,7 @@ impl VsIndexSearchExt for mpsc::Sender<VsIndexSearch> {
         embedding: Vector,
         filter: Filter,
         limit: Limit,
+        return_columns: Arc<[ColumnName]>,
     ) -> AnnR {
         let (tx, rx) = oneshot::channel();
         self.send(VsIndexSearch::FilteredAnn {
@@ -160,6 +185,7 @@ impl VsIndexSearchExt for mpsc::Sender<VsIndexSearch> {
             embedding,
             filter,
             limit,
+            return_columns,
             tx,
         })
         .await?;

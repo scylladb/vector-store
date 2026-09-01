@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
+use crate::ColumnName;
 use crate::Config;
 use crate::Dimensions;
 use crate::DiskannAlpha;
@@ -48,7 +49,6 @@ use diskann::provider::DataProvider;
 use diskann::provider::Delete;
 use diskann::provider::SetElement;
 use diskann_vector::distance::Metric;
-use itertools::Itertools;
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 use std::num::NonZeroUsize;
@@ -255,16 +255,17 @@ where
             index_key,
             embedding,
             limit,
+            return_columns,
             tx,
         }) => {
             let Some((partition_id, _)) = table.read().unwrap().partition_id(&index_key, None)
             else {
                 warn!("partition id not found for index key {index_key} during ann");
-                _ = tx.send(Ok((vec![], vec![])));
+                _ = tx.send(Ok((vec![], vec![], vec![])));
                 return None;
             };
             let Some(partition) = partitions.get(&partition_id).cloned() else {
-                _ = tx.send(Ok((vec![], vec![])));
+                _ = tx.send(Ok((vec![], vec![], vec![])));
                 return None;
             };
             let size = Arc::clone(sizes.entry(partition_id.index_id()).or_default());
@@ -275,6 +276,7 @@ where
                     index_key,
                     embedding,
                     limit,
+                    return_columns,
                     tx,
                 }),
             ))
@@ -370,6 +372,7 @@ async fn process<T, B>(
         Message::Search(VsIndexSearch::Ann {
             embedding,
             limit,
+            return_columns,
             tx,
             ..
         }) => {
@@ -382,6 +385,7 @@ async fn process<T, B>(
                         &params,
                         embedding,
                         limit,
+                        return_columns,
                     )
                     .await,
                 );
@@ -493,6 +497,7 @@ async fn ann<T, B>(
     params: &DiskannParams,
     embedding: Vector,
     limit: Limit,
+    return_columns: Arc<[ColumnName]>,
 ) -> AnnR
 where
     T: TableSearch + Send + Sync + 'static,
@@ -504,22 +509,28 @@ where
 
     let partition_id = partition.partition_id;
     let table = table.read().unwrap();
-    let (primary_keys, distances) = itertools::process_results(
-        matches.filter_map_ok(|(primary_id, distance)| {
-            table
-                .primary_key(partition_id, primary_id)
-                .or_else(|| {
-                    debug!(
-                        "not defined primary key for partition_id {partition_id:?} \
-                                    and primary_id {primary_id:?}",
-                    );
-                    None
-                })
-                .map(|primary_key| (primary_key, distance))
-        }),
-        |it| it.unzip(),
-    )?;
-    Ok((primary_keys, distances))
+    let mut primary_keys = Vec::new();
+    let mut distances = Vec::new();
+    let mut column_values_vec = Vec::new();
+    for result in matches {
+        let (primary_id, distance) = result?;
+        let Some(primary_key) = table.primary_key(partition_id, primary_id) else {
+            debug!(
+                "not defined primary key for partition_id {partition_id:?} \
+                            and primary_id {primary_id:?}",
+            );
+            continue;
+        };
+        let col_vals = if return_columns.is_empty() {
+            BTreeMap::new()
+        } else {
+            table.column_values_for(partition_id, primary_id, &return_columns)
+        };
+        primary_keys.push(primary_key);
+        distances.push(distance);
+        column_values_vec.push(col_vals);
+    }
+    Ok((primary_keys, distances, column_values_vec))
 }
 
 #[hotpath::measure]
