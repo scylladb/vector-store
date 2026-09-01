@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
+use crate::ColumnName;
 use crate::Connectivity;
 use crate::Dimensions;
 use crate::Distance;
@@ -54,6 +55,7 @@ use tracing::warn;
 
 use super::actor::AnnR;
 use super::actor::CountR;
+use super::actor::empty_column_values;
 
 pub struct OpenSearchIndexFactory {
     client: Arc<OpenSearch>,
@@ -299,11 +301,20 @@ async fn process(
         Message::Search(VsIndexSearch::Ann {
             embedding,
             limit,
+            return_columns,
             tx,
             ..
         }) => {
             ann(
-                index_key, tx, embedding, dimensions, limit, space_type, table, client,
+                index_key,
+                tx,
+                embedding,
+                dimensions,
+                limit,
+                space_type,
+                return_columns,
+                table,
+                client,
             )
             .await
         }
@@ -364,6 +375,7 @@ async fn ann(
     dimensions: Dimensions,
     limit: Limit,
     space_type: SpaceType,
+    return_columns: Arc<[ColumnName]>,
     table: Arc<RwLock<impl TableSearch>>,
     client: Arc<OpenSearch>,
 ) {
@@ -421,21 +433,25 @@ async fn ann(
     let index_id = IndexIdGenerator::new().next(true).unwrap();
     let partition_id = PartitionId::global(index_id);
 
-    let hits = {
+    let (keys, scores, column_values) = {
         let table = table.read().unwrap();
-        hits.unwrap()
-            .iter()
-            .map(|hit| {
-                let id = hit["_id"].as_str().unwrap();
-                let score = hit["_score"].as_f64().unwrap();
-                let primary_id = PrimaryId::from(id.parse::<u64>().unwrap());
-                let primary_key = table.primary_key(partition_id, primary_id).unwrap();
-                (primary_key, score)
-            })
-            .collect::<Vec<_>>()
+        let mut keys = Vec::new();
+        let mut scores = Vec::new();
+        let mut column_values = empty_column_values(&return_columns);
+        for hit in hits.unwrap() {
+            let id = hit["_id"].as_str().unwrap();
+            let score = hit["_score"].as_f64().unwrap();
+            let primary_id = PrimaryId::from(id.parse::<u64>().unwrap());
+            let primary_key = table.primary_key(partition_id, primary_id).unwrap();
+            keys.push(primary_key);
+            scores.push(score);
+            for (column, values) in &mut column_values {
+                values.push(table.column_value_for(partition_id, primary_id, column));
+            }
+        }
+        (keys, scores, column_values)
     };
 
-    let (keys, scores): (Vec<_>, Vec<_>) = hits.iter().cloned().unzip();
     let distances: anyhow::Result<Vec<_>> = scores
         .iter()
         .map(|score| Distance::try_from((*score as f32, space_type, Some(dimensions))))
@@ -449,7 +465,7 @@ async fn ann(
     };
 
     tx_ann
-        .send(Ok((keys, distances)))
+        .send(Ok((keys, distances, column_values)))
         .unwrap_or_else(|_| trace!("ann: unable to send response"));
 }
 
