@@ -805,6 +805,10 @@ async fn post_index_ann(
             ))
             .await;
 
+        // The HTTP API doesn't let callers request stored column values back
+        // yet, so ann()/filtered_ann() are never asked for any.
+        let return_columns: Arc<[crate::ColumnName]> = Arc::from([]);
+
         let search_result = if let Some(filter) = request.filter {
             let filter = match try_from_post_index_ann_filter(
                 filter,
@@ -823,11 +827,17 @@ async fn post_index_ann(
                     request.vector.into(),
                     filter,
                     request.limit.into(),
+                    Arc::clone(&return_columns),
                 )
                 .await
         } else {
             index
-                .ann(routed_key, request.vector.into(), request.limit.into())
+                .ann(
+                    routed_key,
+                    request.vector.into(),
+                    request.limit.into(),
+                    Arc::clone(&return_columns),
+                )
                 .await
         };
 
@@ -843,7 +853,7 @@ async fn post_index_ann(
                     (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
                 }
             },
-            Ok((primary_keys, distances)) => {
+            Ok((primary_keys, distances, _column_values_per_row)) => {
                 if primary_keys.len() != distances.len() {
                     let msg = format!(
                         "wrong size of an ann response: \
