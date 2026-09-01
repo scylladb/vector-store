@@ -284,6 +284,10 @@ struct Statements {
     nonpk_partition_key_columns: Box<[ColumnName]>,
     filtering_columns: Arc<[ColumnName]>,
     table_columns: GetTableColumnsR,
+    /// Aligned with nonpk_partition_key_columns + filtering_columns: the
+    /// NativeType to decode each one's raw ":attrs" value as, or None for a
+    /// real CQL column. See parse_values().
+    alternator_decode_types: Box<[Option<NativeType>]>,
     st_range_scan: PreparedStatement,
     kind: IndexKind,
 }
@@ -340,18 +344,32 @@ impl Statements {
         let target_columns = metadata.target_columns.clone();
         let filtering_columns: Arc<[_]> = metadata.nonpk_filtering_columns().cloned().collect();
 
-        let table_columns = Arc::new(
-            table
-                .columns
+        let is_alternator = KeyspaceIdentifier::from(&metadata.keyspace_name).is_alternator();
+        let real_columns: HashMap<ColumnName, NativeType> = table
+            .columns
+            .iter()
+            .filter_map(|(name, coltype)| {
+                if let ColumnType::Native(typ) = &coltype.typ {
+                    Some((ColumnName::from(name.clone()), typ.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let table_columns = Arc::new(merge_table_columns(
+            &metadata,
+            &filtering_columns,
+            real_columns
                 .iter()
-                .filter_map(|(name, coltype)| {
-                    if let ColumnType::Native(typ) = &coltype.typ {
-                        Some((ColumnName::from(name.clone()), typ.clone()))
-                    } else {
-                        None
-                    }
-                })
-                .collect(),
+                .map(|(name, typ)| (name.clone(), typ.clone())),
+            is_alternator,
+        ));
+        let alternator_decode_types = alternator_decode_types(
+            nonpk_partition_key_columns
+                .iter()
+                .chain(filtering_columns.iter()),
+            &metadata,
+            &real_columns,
         );
         let st_partition_key_list = table
             .partition_key
@@ -389,6 +407,7 @@ impl Statements {
             target_columns,
             filtering_columns,
             table_columns,
+            alternator_decode_types,
             st_range_scan,
             session_rx,
             kind: metadata.kind.clone(),
@@ -569,6 +588,7 @@ impl Statements {
         let target_columns_offset = self.primary_key_columns.len().get();
         let target_columns_len = self.target_columns.len();
         let kind = self.kind.clone();
+        let alternator_decode_types = self.alternator_decode_types.clone();
 
         // wait for an active session
         let session = {
@@ -604,6 +624,7 @@ impl Statements {
                     None,
                     target_columns_len,
                     &kind,
+                    &alternator_decode_types,
                 )
                 .inspect_err(|err| error!("Error while parsing values: {err}"))
                 .ok()?;
@@ -625,11 +646,80 @@ impl Statements {
     }
 }
 
+/// Builds the `table_columns` lookup Table::new() uses to size and type
+/// in-memory column storage: the table's genuine, natively-typed CQL
+/// columns (`real_columns`), plus synthesized types for Alternator's
+/// virtual SearchSchema attributes (see
+/// IndexMetadata::alternator_attribute_types) and, only for an Alternator
+/// table, a raw-Blob entry for any other filtering column with no real
+/// column (see Alternator's compute_extra_fc_attributes()) so it can still
+/// be stored for projection/return purposes. Real columns win on any name
+/// collision with a synthesized one.
+///
+/// For a CQL-native table (`is_alternator` false), a filtering column with
+/// no real `real_columns` entry gets no entry here either: that's a
+/// genuine misconfiguration (e.g. schema drift), and must still fail
+/// through Table::new()'s "Column {name} not found in table columns"
+/// check rather than be papered over.
+pub(crate) fn merge_table_columns(
+    metadata: &IndexMetadata,
+    filtering_columns: &[ColumnName],
+    real_columns: impl IntoIterator<Item = (ColumnName, NativeType)>,
+    is_alternator: bool,
+) -> HashMap<ColumnName, NativeType> {
+    let real_columns: HashMap<ColumnName, NativeType> = real_columns.into_iter().collect();
+    metadata
+        .alternator_attribute_types
+        .keys()
+        .filter_map(|name| Some((name.clone(), metadata.alternator_native_type(name)?)))
+        .chain(
+            real_columns
+                .iter()
+                .map(|(name, typ)| (name.clone(), typ.clone())),
+        )
+        .chain(
+            filtering_columns
+                .iter()
+                .filter(|name| {
+                    is_alternator
+                        && !metadata.alternator_attribute_types.contains_key(*name)
+                        && !real_columns.contains_key(*name)
+                })
+                .map(|name| (name.clone(), NativeType::Blob)),
+        )
+        .collect()
+}
+
+/// Builds parse_values()'s alternator_decode_types parameter: for each of
+/// `columns`, its NativeType from `metadata.alternator_native_type()` - or
+/// None if `column` is a real table column, even if it also has a declared
+/// Alternator type (see merge_table_columns(), which gives real columns the
+/// same precedence for table_columns). A real column's raw value is
+/// whatever the CQL driver decoded it as, never a tagged Alternator blob,
+/// so it must never be run through parse_alternator_scalar().
+pub(crate) fn alternator_decode_types<'a>(
+    columns: impl IntoIterator<Item = &'a ColumnName>,
+    metadata: &IndexMetadata,
+    real_columns: &HashMap<ColumnName, NativeType>,
+) -> Box<[Option<NativeType>]> {
+    columns
+        .into_iter()
+        .map(|column| {
+            if real_columns.contains_key(column) {
+                None
+            } else {
+                metadata.alternator_native_type(column)
+            }
+        })
+        .collect()
+}
+
 pub(crate) fn parse_values(
     columns: impl IntoIterator<Item = Option<CqlValue>>,
     default_timestamp: Option<Timestamp>,
     target_columns_len: NonZeroUsize,
     kind: &IndexKind,
+    alternator_decode_types: &[Option<NativeType>],
 ) -> anyhow::Result<NonemptyBox<Timestamped<DbIndexedValue>>> {
     let default_timestamp = default_timestamp.unwrap_or(Timestamp::MIN);
     let values = columns
@@ -649,7 +739,20 @@ pub(crate) fn parse_values(
                     None
                 }
             } else {
-                // filtering columns
+                // filtering columns: a virtual Alternator attribute's raw
+                // value is a tagged blob that needs decoding first.
+                let native_type = alternator_decode_types
+                    .get(idx - target_columns_len.get())
+                    .cloned()
+                    .flatten();
+                let value = value
+                    .map(|value| match (value, native_type) {
+                        (CqlValue::Blob(bytes), Some(native_type)) => {
+                            crate::alternator::parse_alternator_scalar(&bytes, &native_type)
+                        }
+                        (value, _) => Ok(value),
+                    })
+                    .transpose()?;
                 value.map(DbIndexedValue::Filtering)
             };
 
@@ -717,6 +820,7 @@ mod tests {
 
     use super::*;
     use crate::Connectivity;
+    use crate::DbIndexPartitioning;
     use crate::Dimensions;
     use crate::ExpansionAdd;
     use crate::ExpansionSearch;
@@ -725,6 +829,7 @@ mod tests {
     use crate::Quantization;
     use crate::SpaceType;
     use std::assert_matches;
+    use uuid::Uuid;
 
     fn vs_kind() -> IndexKind {
         IndexKind::Vs(IndexOptionsVs {
@@ -823,6 +928,7 @@ mod tests {
             None,
             NonZeroUsize::new(1).unwrap(),
             &vs_kind(),
+            &[],
         )
         .unwrap();
         let result = result.as_slice();
@@ -848,6 +954,7 @@ mod tests {
             Some(Timestamp::from_millis(1)),
             NonZeroUsize::new(1).unwrap(),
             &vs_kind(),
+            &[],
         )
         .unwrap();
         let result = result.as_slice();
@@ -868,6 +975,7 @@ mod tests {
             None,
             NonZeroUsize::new(1).unwrap(),
             &vs_kind(),
+            &[],
         );
         assert_matches!(
             result
@@ -885,6 +993,7 @@ mod tests {
             None,
             NonZeroUsize::new(1).unwrap(),
             &vs_kind(),
+            &[],
         );
         assert_matches!(
             result
@@ -906,6 +1015,7 @@ mod tests {
             None,
             NonZeroUsize::new(1).unwrap(),
             &vs_kind(),
+            &[],
         );
         assert_matches!(
             result
@@ -928,6 +1038,7 @@ mod tests {
             None,
             NonZeroUsize::new(3).unwrap(),
             &vs_kind(),
+            &[],
         );
         assert_matches!(
             result
@@ -935,5 +1046,172 @@ mod tests {
                 .to_string(),
                 err if err.contains("target len (3) is greater than values len (2)")
         );
+    }
+
+    #[test]
+    fn parse_values_decodes_alternator_filtering_column() {
+        // Tag 0 = ALTERNATOR_TYPE_S (string), per vector.rs.
+        let mut tagged_name = vec![0u8];
+        tagged_name.extend_from_slice(b"red");
+
+        let columns = vec![
+            Some(CqlValue::Vector(vec![CqlValue::Float(1.0)])),
+            Some(CqlValue::BigInt(1234567890)),
+            Some(CqlValue::Blob(tagged_name)),
+            Some(CqlValue::BigInt(1234567890)),
+        ];
+        let result = parse_values(
+            columns,
+            None,
+            NonZeroUsize::new(1).unwrap(),
+            &vs_kind(),
+            &[Some(NativeType::Text)],
+        )
+        .unwrap();
+        let result = result.as_slice();
+        assert_eq!(result.len(), 2);
+        assert_eq!(
+            result.get(1).unwrap().value().unwrap(),
+            &DbIndexedValue::Filtering(CqlValue::Text("red".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_values_leaves_real_column_undecoded() {
+        // alternator_decode_types has no entry (None) for this column,
+        // because it's a real CQL column, not a virtual Alternator
+        // attribute - its raw value must pass through unchanged.
+        let columns = vec![
+            Some(CqlValue::Vector(vec![CqlValue::Float(1.0)])),
+            Some(CqlValue::BigInt(1234567890)),
+            Some(CqlValue::Int(42)),
+            Some(CqlValue::BigInt(1234567890)),
+        ];
+        let result = parse_values(
+            columns,
+            None,
+            NonZeroUsize::new(1).unwrap(),
+            &vs_kind(),
+            &[None],
+        )
+        .unwrap();
+        let result = result.as_slice();
+        assert_eq!(
+            result.get(1).unwrap().value().unwrap(),
+            &DbIndexedValue::Filtering(CqlValue::Int(42))
+        );
+    }
+
+    #[test]
+    fn parse_values_rejects_mismatched_alternator_tag() {
+        // Tag 1 = ALTERNATOR_TYPE_B (bytes), but the column is declared
+        // "S" (Text) - parse_alternator_scalar() must reject this rather
+        // than silently misinterpreting the payload.
+        let columns = vec![
+            Some(CqlValue::Vector(vec![CqlValue::Float(1.0)])),
+            Some(CqlValue::BigInt(1234567890)),
+            Some(CqlValue::Blob(vec![1u8, 0xDE, 0xAD])),
+            Some(CqlValue::BigInt(1234567890)),
+        ];
+        let result = parse_values(
+            columns,
+            None,
+            NonZeroUsize::new(1).unwrap(),
+            &vs_kind(),
+            &[Some(NativeType::Text)],
+        );
+        assert!(result.is_err());
+    }
+
+    fn metadata_with_alternator_types(
+        types: impl IntoIterator<Item = (&'static str, NativeType)>,
+    ) -> IndexMetadata {
+        IndexMetadata {
+            keyspace_name: "ks".into(),
+            index_name: "idx".into(),
+            table_name: "tbl".into(),
+            primary_key_columns: NonemptyArc::new(["pk"]).unwrap(),
+            partition_key_count: NonZeroUsize::new(1).unwrap(),
+            target_columns: NonemptyArc::new(["embedding"]).unwrap(),
+            partitioning: DbIndexPartitioning::Global,
+            filtering_columns: Arc::new([]),
+            alternator_attribute_types: Arc::new(
+                types
+                    .into_iter()
+                    .map(|(name, typ)| (ColumnName::from(name), typ))
+                    .collect(),
+            ),
+            version: Uuid::new_v4().into(),
+            kind: vs_kind(),
+        }
+    }
+
+    #[test]
+    fn merge_table_columns_cql_missing_filtering_column_is_not_papered_over() {
+        // A filtering column with no real table_columns entry, on a
+        // CQL-native table (is_alternator = false), is a genuine
+        // misconfiguration (e.g. schema drift) - it must NOT get a
+        // synthesized entry, so Table::new() still rejects it with
+        // "Column {name} not found in table columns" instead of silently
+        // treating it as an opaque, always-empty Blob column.
+        let metadata = metadata_with_alternator_types([]);
+        let table_columns =
+            merge_table_columns(&metadata, &["missing".into()], std::iter::empty(), false);
+        assert!(!table_columns.contains_key(&ColumnName::from("missing")));
+    }
+
+    #[test]
+    fn merge_table_columns_alternator_untyped_filtering_column_gets_blob() {
+        // Same missing-column scenario, but on an Alternator table: a
+        // filtering column added purely for a Projection's sake (no
+        // declared type) must still get a table_columns entry, as a raw
+        // Blob, so Table::new() can store it.
+        let metadata = metadata_with_alternator_types([]);
+        let table_columns =
+            merge_table_columns(&metadata, &["photo".into()], std::iter::empty(), true);
+        assert_eq!(
+            table_columns.get(&ColumnName::from("photo")),
+            Some(&NativeType::Blob)
+        );
+    }
+
+    #[test]
+    fn merge_table_columns_real_column_wins_over_synthesized_type() {
+        // "color" is both a declared SearchSchema attribute (typed "S")
+        // and a genuine real column in the table - the real column's type
+        // must win.
+        let metadata = metadata_with_alternator_types([("color", NativeType::Text)]);
+        let table_columns = merge_table_columns(
+            &metadata,
+            &["color".into()],
+            [(ColumnName::from("color"), NativeType::Ascii)],
+            true,
+        );
+        assert_eq!(
+            table_columns.get(&ColumnName::from("color")),
+            Some(&NativeType::Ascii)
+        );
+    }
+
+    #[test]
+    fn alternator_decode_types_excludes_real_columns() {
+        // "color" is both a declared SearchSchema attribute (typed "S") and
+        // a genuine real column in the table (e.g. it's also the base
+        // table's own hash key). Its raw value is whatever the CQL driver
+        // decoded it as, not a tagged Alternator blob, so it must not be
+        // run through parse_alternator_scalar() - unlike merge_table_columns()
+        // above, which only decides the *storage* type, this decides
+        // whether parse_values() attempts to decode the value at all.
+        let metadata = metadata_with_alternator_types([
+            ("color", NativeType::Text),
+            ("size", NativeType::Decimal),
+        ]);
+        let real_columns = HashMap::from([(ColumnName::from("color"), NativeType::Blob)]);
+        let decode_types = alternator_decode_types(
+            [&ColumnName::from("color"), &ColumnName::from("size")],
+            &metadata,
+            &real_columns,
+        );
+        assert_eq!(&*decode_types, &[None, Some(NativeType::Decimal)]);
     }
 }

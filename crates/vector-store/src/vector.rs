@@ -4,6 +4,7 @@
  */
 
 use crate::Dimensions;
+use crate::alternator;
 use anyhow::anyhow;
 use anyhow::bail;
 use scylla::value::CqlValue;
@@ -50,7 +51,7 @@ impl TryFrom<CqlValue> for Vector {
                     Ok(f)
                 })
                 .collect(),
-            CqlValue::Blob(bytes) => parse_alternator_vector(&bytes),
+            CqlValue::Blob(bytes) => alternator::parse_alternator_vector(&bytes),
             other => Err(anyhow!(
                 "unsupported CQL type for embedding column: {other:?}"
             )),
@@ -59,78 +60,11 @@ impl TryFrom<CqlValue> for Vector {
     }
 }
 
-/// Alternator type tag for unoptimized JSON encoding.
-/// Type `0x04` (`NOT_SUPPORTED_YET`) is used for any type that does not have an optimized encoding.
-/// The payload is an unoptimized JSON value.
-const ALTERNATOR_TYPE_JSON: u8 = 4;
-
-/// Alternator type tag for the optimized `FLOAT32VECTOR` type.
-/// The value is serialized as this 1-byte tag followed by sequential 32-bit big-endian floats,
-/// matching the CQL `VECTOR<float, N>` on-wire encoding.
-const ALTERNATOR_TYPE_FLOAT32VECTOR: u8 = 5;
-
-/// Parses an Alternator-encoded vector stored as raw bytes.
-///
-/// Alternator prefixes each attribute value in the `:attrs` map column with a 1-byte type discriminator.
-/// Handles two representations based on the discriminator:
-/// - [`ALTERNATOR_TYPE_FLOAT32VECTOR`]: optimized sequential 32-bit big-endian floats.
-/// - [`ALTERNATOR_TYPE_JSON`]: unoptimized JSON representing List values.
-fn parse_alternator_vector(bytes: &[u8]) -> anyhow::Result<Vec<f32>> {
-    match bytes.first() {
-        Some(&ALTERNATOR_TYPE_FLOAT32VECTOR) => parse_alternator_vector_binary(&bytes[1..]),
-        Some(&ALTERNATOR_TYPE_JSON) => parse_alternator_list_json(&bytes[1..]),
-        Some(tag) => bail!("unsupported Alternator type tag: {tag:#04x}"),
-        None => bail!("empty blob for Alternator attribute value"),
-    }
-}
-
-/// Parses the optimized Alternator vector encoding: sequential 32-bit big-endian floats.
-fn parse_alternator_vector_binary(bytes: &[u8]) -> anyhow::Result<Vec<f32>> {
-    let chunks = bytes.chunks_exact(4);
-
-    if !chunks.remainder().is_empty() {
-        bail!(
-            "invalid Alternator vector encoding: byte length {} is not a multiple of 4",
-            bytes.len()
-        );
-    }
-
-    Ok(chunks
-        .map(|chunk| {
-            let arr: [u8; 4] = chunk.try_into().expect("chunks_exact guarantees 4 bytes");
-            f32::from_be_bytes(arr)
-        })
-        .collect())
-}
-
-/// Parses an Alternator JSON list of numbers: `{"L": [{"N": "..."}, ...]}`.
-fn parse_alternator_list_json(bytes: &[u8]) -> anyhow::Result<Vec<f32>> {
-    #[derive(serde::Deserialize)]
-    struct DynamoDbList {
-        #[serde(rename = "L")]
-        l: Vec<DynamoDbNumber>,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct DynamoDbNumber {
-        #[serde(rename = "N")]
-        n: String,
-    }
-
-    let list: DynamoDbList = serde_json::from_slice(bytes)?;
-    list.l
-        .into_iter()
-        .map(|item| {
-            item.n
-                .parse::<f32>()
-                .map_err(|e| anyhow!("invalid value in Alternator list element: {e}"))
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alternator::ALTERNATOR_TYPE_FLOAT32VECTOR;
+    use alternator::ALTERNATOR_TYPE_JSON;
 
     /// Prepend the [`ALTERNATOR_TYPE_JSON`] tag to a DynamoDB JSON string,
     /// mirroring how Alternator serialises List values.

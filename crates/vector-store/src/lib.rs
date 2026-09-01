@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+mod alternator;
 mod async_in_progress;
 mod config_manager;
 pub mod db;
@@ -64,12 +65,14 @@ pub use crate::vector::Vector;
 use crate::vs_index::VsIndexFactory;
 use db::Db;
 use scylla::cluster::metadata::ColumnType;
+use scylla::cluster::metadata::NativeType;
 use scylla::serialize::SerializationError;
 use scylla::serialize::value::SerializeValue;
 use scylla::serialize::writers::CellWriter;
 use scylla::serialize::writers::WrittenCellProof;
 use scylla::value::CqlValue;
 use scylla_cdc::CqlIdentifier;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::net::SocketAddr;
@@ -703,7 +706,7 @@ impl IndexKind {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 /// Information about an index
 pub struct IndexMetadata {
     pub keyspace_name: KeyspaceName,
@@ -714,8 +717,37 @@ pub struct IndexMetadata {
     pub target_columns: NonemptyArc<ColumnName>,
     pub partitioning: DbIndexPartitioning,
     pub filtering_columns: Arc<[ColumnName]>,
+    /// For Alternator tables: the NativeType to decode each partition-key/
+    /// filtering column with no real column in the table's CQL schema as
+    /// (its value lives only in the ":attrs" map), derived from its
+    /// declared DynamoDB type ("S", "N" or "B"). Empty for CQL-native
+    /// tables and for columns that are real columns.
+    pub alternator_attribute_types: Arc<BTreeMap<ColumnName, NativeType>>,
     pub version: IndexVersion,
     pub kind: IndexKind,
+}
+
+// Manual impl because `NativeType` (in `alternator_attribute_types`) doesn't
+// implement `Hash`. Its variants are all fieldless, so hashing by
+// `mem::discriminant` is exactly as precise as hashing the value itself.
+impl std::hash::Hash for IndexMetadata {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.keyspace_name.hash(state);
+        self.index_name.hash(state);
+        self.table_name.hash(state);
+        self.primary_key_columns.hash(state);
+        self.partition_key_count.hash(state);
+        self.target_columns.hash(state);
+        self.partitioning.hash(state);
+        self.filtering_columns.hash(state);
+        self.alternator_attribute_types.len().hash(state);
+        for (name, native_type) in self.alternator_attribute_types.iter() {
+            name.hash(state);
+            std::mem::discriminant(native_type).hash(state);
+        }
+        self.version.hash(state);
+        self.kind.hash(state);
+    }
 }
 
 impl IndexMetadata {
@@ -729,6 +761,12 @@ impl IndexMetadata {
 
     pub fn fts(&self) -> Option<&IndexOptionsFts> {
         self.kind.as_fts()
+    }
+
+    /// The NativeType to treat `column` as, if it's a virtual Alternator
+    /// attribute (see alternator_attribute_types) - None otherwise.
+    pub fn alternator_native_type(&self, column: &ColumnName) -> Option<NativeType> {
+        self.alternator_attribute_types.get(column).cloned()
     }
 
     fn discard_version(&self) -> Self {
@@ -781,6 +819,8 @@ pub struct DbCustomIndex {
     pub target_columns: NonemptyArc<ColumnName>,
     pub partitioning: DbIndexPartitioning,
     pub filtering_columns: Arc<[ColumnName]>,
+    /// See IndexMetadata::alternator_attribute_types.
+    pub alternator_attribute_types: Arc<BTreeMap<ColumnName, NativeType>>,
     pub kind: DbIndexKind,
 }
 
@@ -1009,6 +1049,51 @@ mod tests {
         assert!("klingon".parse::<Analyzer>().is_err());
     }
 
+    fn index_metadata_with_alternator_types(
+        types: impl IntoIterator<Item = (&'static str, NativeType)>,
+    ) -> IndexMetadata {
+        IndexMetadata {
+            keyspace_name: "alternator_ks".into(),
+            index_name: "idx".into(),
+            table_name: "tbl".into(),
+            primary_key_columns: NonemptyArc::new(["pk"]).unwrap(),
+            partition_key_count: NonZeroUsize::new(1).unwrap(),
+            target_columns: NonemptyArc::new(["embedding"]).unwrap(),
+            partitioning: DbIndexPartitioning::Global,
+            filtering_columns: Arc::new([]),
+            alternator_attribute_types: Arc::new(
+                types
+                    .into_iter()
+                    .map(|(name, typ)| (ColumnName::from(name), typ))
+                    .collect(),
+            ),
+            version: IndexVersion(Uuid::new_v4()),
+            kind: IndexKind::Vs(IndexOptionsVs {
+                dimensions: NonZeroUsize::new(3).unwrap().into(),
+                connectivity: Default::default(),
+                expansion_add: Default::default(),
+                expansion_search: Default::default(),
+                space_type: SpaceType::Euclidean,
+                quantization: Default::default(),
+            }),
+        }
+    }
+
+    #[test]
+    fn alternator_native_type_none_for_unknown_column() {
+        let metadata = index_metadata_with_alternator_types([("color", NativeType::Text)]);
+        assert_eq!(metadata.alternator_native_type(&"size".into()), None);
+    }
+
+    #[test]
+    fn alternator_native_type_returns_declared_type() {
+        let metadata = index_metadata_with_alternator_types([("color", NativeType::Text)]);
+        assert_eq!(
+            metadata.alternator_native_type(&"color".into()),
+            Some(NativeType::Text)
+        );
+    }
+
     #[test]
     fn analyzer_defaults_to_standard() {
         assert_eq!(Analyzer::default(), Analyzer::Standard);
@@ -1041,6 +1126,7 @@ mod tests {
             partitioning: DbIndexPartitioning::Local(NonemptyArc::new(["pk"]).unwrap()),
             // "ck" is also a primary-key column; "f" is a genuine value column.
             filtering_columns: Arc::new(["ck".into(), "f".into()]),
+            alternator_attribute_types: Arc::new(BTreeMap::new()),
             version: Uuid::new_v4().into(),
             kind: IndexKind::Vs(IndexOptionsVs {
                 dimensions: Dimensions(NonZeroUsize::new(3).unwrap()),
