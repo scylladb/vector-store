@@ -28,6 +28,7 @@ use time::Time;
 use time::format_description::well_known::Iso8601;
 use time::format_description::well_known::iso8601::Config;
 use time::format_description::well_known::iso8601::TimePrecision;
+use uuid::Uuid;
 
 pub(crate) const SUPPORTED: &[NativeType] = &[
     NativeType::Ascii,
@@ -274,8 +275,58 @@ pub(crate) fn from_json(value: Value, cql_type: &NativeType) -> anyhow::Result<C
     }
 }
 
+/// Orders two regular (non-time) UUIDs the way ScyllaDB's `uuid_type_impl`
+/// comparator does: by version nibble first; version-1 (time-based) UUIDs
+/// then compare by reassembled timestamp and, on a timestamp tie, by
+/// bytes 8..16 as plain unsigned bytes (`utils::uuid_tri_compare_timeuuid`
+/// in UUID.hh); everything else compares by unsigned bytes.
+///
+/// The timestamp tie-break is deliberately NOT `CqlTimeuuid: Ord` /
+/// `a.cmp(b)` on the raw bytes: those match `utils::timeuuid_tri_compare`,
+/// which is the *TIMEUUID-column* comparator - it XORs bytes 8..16 with
+/// 0x80 (a signed-byte compare, kept for legacy Cassandra sstable
+/// ordering) before comparing. That disagrees with the plain-UUID-column
+/// comparator above whenever two version-1 UUIDs share a timestamp and
+/// their tie-break bytes straddle the 0x7f/0x80 boundary - confirmed
+/// against a live scylladb/scylla:2026.4.0 (see the pinned unit test
+/// below and the boundary case in ann_filter_by_uuid_column_ordering_matches_scylla).
+///
+/// Plain `uuid::Uuid: Ord` is a raw 128-bit byte compare and would
+/// disagree with ScyllaDB too.
+fn uuid_cmp(a: &Uuid, b: &Uuid) -> Ordering {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    let va = (a[6] >> 4) & 0x0f;
+    let vb = (b[6] >> 4) & 0x0f;
+    if va != vb {
+        return va.cmp(&vb);
+    }
+    if va == 1 {
+        // && vb == 1
+        return uuid_timeuuid_msb(a)
+            .cmp(&uuid_timeuuid_msb(b))
+            .then_with(|| a[8..].cmp(&b[8..]));
+    }
+    a.cmp(b)
+}
+
+/// Reassembles the 60-bit timeuuid timestamp (time_hi | time_mid |
+/// time_low) into a directly comparable `u64`, matching ScyllaDB's
+/// `timeuuid_read_msb` (UUID.hh) exactly.
+fn uuid_timeuuid_msb(bytes: &[u8; 16]) -> u64 {
+    u64::from(bytes[6] & 0x0f) << 56
+        | u64::from(bytes[7]) << 48
+        | u64::from(bytes[4]) << 40
+        | u64::from(bytes[5]) << 32
+        | u64::from(bytes[0]) << 24
+        | u64::from(bytes[1]) << 16
+        | u64::from(bytes[2]) << 8
+        | u64::from(bytes[3])
+}
+
 /// Compare two CqlValues, returning an Ordering if they are comparable. `None` means "does
-/// not match" to callers, not an error, so a missing arm silently matches no rows.
+/// not match" to callers, not an error, so a missing arm silently matches no rows. Supports
+/// Numeric, Text, Date, Time, Timestamp, Inet, Blob, Boolean, Uuid, and Timeuuid types.
 pub(crate) fn cmp(lhs: &CqlValue, rhs: &CqlValue) -> Option<Ordering> {
     match (lhs, rhs) {
         // Numeric types
@@ -316,6 +367,15 @@ pub(crate) fn cmp(lhs: &CqlValue, rhs: &CqlValue) -> Option<Ordering> {
         (CqlValue::Timestamp(a), CqlValue::Timestamp(b)) => Some(a.0.cmp(&b.0)),
         // Inet type
         (CqlValue::Inet(a), CqlValue::Inet(b)) => Some(inet_cmp(a, b)),
+        // Blob: byte-wise unsigned comparison, matching Cassandra's BytesType.
+        (CqlValue::Blob(a), CqlValue::Blob(b)) => Some(a.cmp(b)),
+        // Boolean: false < true, matching a single 0/1 byte comparison.
+        (CqlValue::Boolean(a), CqlValue::Boolean(b)) => Some(a.cmp(b)),
+        // Timeuuid: the driver's CqlTimeuuid: Ord already implements
+        // ScyllaDB's timeuuid ordering exactly (see uuid_cmp's doc comment).
+        (CqlValue::Timeuuid(a), CqlValue::Timeuuid(b)) => Some(a.cmp(b)),
+        // Uuid: version-aware comparison, see uuid_cmp().
+        (CqlValue::Uuid(a), CqlValue::Uuid(b)) => Some(uuid_cmp(a, b)),
         // Unsupported or mismatched types
         _ => None,
     }
@@ -386,12 +446,7 @@ mod tests {
         }
     }
 
-    pub(crate) const CMP_UNSUPPORTED: &[NativeType] = &[
-        NativeType::Blob,
-        NativeType::Boolean,
-        NativeType::Timeuuid,
-        NativeType::Uuid,
-    ];
+    pub(crate) const CMP_UNSUPPORTED: &[NativeType] = &[];
 
     #[test]
     fn every_supported_type_is_handled() {
@@ -1040,16 +1095,129 @@ mod tests {
 
     #[test]
     fn cmp_unsupported_types_return_none() {
+        // Duration and other complex/collection types still have no cmp arm.
+        use scylla::value::CqlDuration;
+        let duration = CqlDuration {
+            months: 0,
+            days: 0,
+            nanoseconds: 0,
+        };
+        assert_eq!(
+            cmp(&CqlValue::Duration(duration), &CqlValue::Duration(duration)),
+            None
+        );
+    }
+
+    // Regression tests for VECTOR-889: cmp() had no arm for Blob, Boolean,
+    // Uuid or Timeuuid, so an ANN filter restriction on a column of any of
+    // these types silently matched zero rows - even a value compared against
+    // itself.
+    #[test]
+    fn cmp_blob() {
         assert_eq!(
             cmp(
                 &CqlValue::Blob(vec![1, 2, 3]),
                 &CqlValue::Blob(vec![1, 2, 3])
             ),
-            None
+            Some(Ordering::Equal)
+        );
+        assert_eq!(
+            cmp(&CqlValue::Blob(vec![1, 2]), &CqlValue::Blob(vec![1, 2, 3])),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            cmp(&CqlValue::Blob(vec![1, 3]), &CqlValue::Blob(vec![1, 2, 3])),
+            Some(Ordering::Greater)
+        );
+    }
+
+    #[test]
+    fn cmp_boolean() {
+        assert_eq!(
+            cmp(&CqlValue::Boolean(true), &CqlValue::Boolean(true)),
+            Some(Ordering::Equal)
+        );
+        assert_eq!(
+            cmp(&CqlValue::Boolean(false), &CqlValue::Boolean(true)),
+            Some(Ordering::Less)
         );
         assert_eq!(
             cmp(&CqlValue::Boolean(true), &CqlValue::Boolean(false)),
-            None
+            Some(Ordering::Greater)
+        );
+    }
+
+    #[test]
+    fn cmp_timeuuid() {
+        let make = |bytes: [u8; 16]| CqlValue::Timeuuid(CqlTimeuuid::from_bytes(bytes));
+        let t = [
+            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x11, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
+            0xff, 0x00,
+        ];
+        assert_eq!(cmp(&make(t), &make(t)), Some(Ordering::Equal));
+        // Earlier timestamp (lower first byte of the time-low field) orders first.
+        let mut earlier = t;
+        earlier[0] = 0x01;
+        assert_eq!(cmp(&make(earlier), &make(t)), Some(Ordering::Less));
+        assert_eq!(cmp(&make(t), &make(earlier)), Some(Ordering::Greater));
+    }
+
+    #[test]
+    fn cmp_uuid_equality() {
+        let u = Uuid::parse_str("841685b2-8803-11f0-8de9-0242ac120002").unwrap();
+        assert_eq!(
+            cmp(&CqlValue::Uuid(u), &CqlValue::Uuid(u)),
+            Some(Ordering::Equal)
+        );
+    }
+
+    // Pins the authoritative clustering order for a mixed-version set of
+    // UUIDs, verified against a live scylladb/scylla:2026.2.2 (see
+    // VECTOR-889): version orders first, and version-1 (time-based) UUIDs
+    // order by timestamp rather than by raw bytes.
+    #[test]
+    fn cmp_uuid_mixed_versions_matches_scylladb_order() {
+        let ordered_uuids = [
+            "00000000-0000-1000-8000-000000000000", // v1
+            "841685b2-8803-11f0-8de9-0242ac120002", // v1
+            "ffffffff-ffff-1fff-bfff-ffffffffffff", // v1
+            "00000000-0000-3000-8000-000000000000", // v3
+            "00000000-0000-4000-8000-000000000000", // v4
+            "7fffffff-ffff-4fff-7fff-ffffffffffff", // v4
+            "ffffffff-ffff-4fff-bfff-ffffffffffff", // v4
+            "00000000-0000-5000-8000-000000000000", // v5
+        ]
+        .map(|s| Uuid::parse_str(s).unwrap());
+
+        for pair in ordered_uuids.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            assert_eq!(
+                cmp(&CqlValue::Uuid(a), &CqlValue::Uuid(b)),
+                Some(Ordering::Less),
+                "expected {a} < {b}"
+            );
+        }
+    }
+
+    /// Regression test: two version-1 UUIDs with the *same* reassembled
+    /// timestamp, but tie-break bytes (8..16) straddling the 0x7f/0x80
+    /// boundary. `uuid_type_impl`'s `UUID`-column comparator
+    /// (`uuid_tri_compare_timeuuid`) breaks the tie by plain unsigned
+    /// bytes, so `0x7f... < 0x80...` - confirmed against a live
+    /// scylladb/scylla 2026.4.0 with a UUID-clustering-key table. This is
+    /// the opposite of what `CqlTimeuuid: Ord` (the *TIMEUUID*-column
+    /// comparator, `utils::timeuuid_tri_compare`, which XORs those same
+    /// bytes with 0x80 - a signed compare) would give, confirmed against
+    /// the same live cluster with a TIMEUUID-clustering-key table instead.
+    /// `cmp_uuid_mixed_versions_matches_scylladb_order` above never
+    /// exercises this because none of its UUIDs share a timestamp.
+    #[test]
+    fn cmp_uuid_same_timestamp_lsb_tie_break_is_unsigned() {
+        let lo = Uuid::parse_str("00000000-0000-1000-7f00-000000000000").unwrap();
+        let hi = Uuid::parse_str("00000000-0000-1000-8000-000000000000").unwrap();
+        assert_eq!(
+            cmp(&CqlValue::Uuid(lo), &CqlValue::Uuid(hi)),
+            Some(Ordering::Less)
         );
     }
 
