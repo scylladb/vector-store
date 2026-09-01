@@ -357,6 +357,10 @@ fn process_db(db: &DbBasic, msg: Db, node_state: Sender<NodeState>) {
                                 target_columns: index.metadata.target_columns.clone(),
                                 partitioning: index.metadata.partitioning.clone(),
                                 filtering_columns: index.metadata.filtering_columns.clone(),
+                                alternator_attribute_types: index
+                                    .metadata
+                                    .alternator_attribute_types
+                                    .clone(),
                                 kind: match index.metadata.kind {
                                     IndexKind::Vs(_) => DbIndexKind::VectorSearch,
                                     IndexKind::Fts(_) => DbIndexKind::FullTextSearch,

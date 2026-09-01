@@ -514,6 +514,7 @@ pub(crate) mod tests {
         use crate::table::TableModify;
         use crate::table::TableSearch;
         use crate::timestamp::Timestamped;
+        use std::collections::BTreeMap;
         use std::num::NonZeroUsize;
         use uuid::Uuid;
 
@@ -532,6 +533,7 @@ pub(crate) mod tests {
             // Declares "ck" (a primary-key column) and "f" (a genuine value column)
             // as filtering columns, exactly as metadata coming from the DB would.
             filtering_columns: Arc::new(["ck".into(), "f".into()]),
+            alternator_attribute_types: Arc::new(BTreeMap::new()),
             version: Uuid::new_v4().into(),
             kind: IndexKind::Vs(IndexOptionsVs {
                 dimensions: Dimensions(NonZeroUsize::new(3).unwrap()),

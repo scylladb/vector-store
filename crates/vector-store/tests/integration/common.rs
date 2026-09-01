@@ -142,6 +142,7 @@ pub(crate) fn make_index_with_kind(
             .iter()
             .map(|s| ColumnName::from(*s))
             .collect(),
+        alternator_attribute_types: Default::default(),
         version: version.into(),
         kind,
     }

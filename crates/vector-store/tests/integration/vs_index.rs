@@ -127,6 +127,7 @@ pub(crate) async fn setup_store_with_quantization(
         target_columns: NonemptyArc::new(["embedding"]).unwrap(),
         partitioning,
         filtering_columns,
+        alternator_attribute_types: Default::default(),
         version: Uuid::new_v4().into(),
         kind: IndexKind::Vs(IndexOptionsVs {
             dimensions: dimension,
@@ -329,6 +330,7 @@ async fn failed_db_index_create(#[case] config: Config) {
         target_columns: NonemptyArc::new(["embedding"]).unwrap(),
         partitioning: DbIndexPartitioning::Global,
         filtering_columns: Arc::new([]),
+        alternator_attribute_types: Default::default(),
         version: Uuid::new_v4().into(),
         kind: IndexKind::Vs(IndexOptionsVs {
             dimensions: NonZeroUsize::new(3).unwrap().into(),
@@ -1764,6 +1766,7 @@ async fn similarity_scores_are_decreasing_and_correctly_converted(#[case] config
         target_columns: NonemptyArc::new(["embedding"]).unwrap(),
         partitioning: DbIndexPartitioning::Global,
         filtering_columns: Arc::new([]),
+        alternator_attribute_types: Default::default(),
         version: Uuid::new_v4().into(),
         kind: IndexKind::Vs(IndexOptionsVs {
             dimensions: NonZeroUsize::new(1).unwrap().into(),

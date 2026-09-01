@@ -856,6 +856,14 @@ impl Statements {
                         })?;
                     let partition_key_count = NonZeroUsize::new(table.partition_key.len()).unwrap();
                     let is_alternator = KeyspaceName::from(&keyspace_name).is_alternator();
+                    let alternator_attribute_types = Arc::new(if is_alternator {
+                        options
+                            .remove("alternator_attribute_types")
+                            .map(|v| parse_alternator_attribute_types(&v))
+                            .unwrap_or_default()
+                    } else {
+                        BTreeMap::new()
+                    });
                     Ok(options.remove("target").and_then(|target| {
                         let kind = db_index_kind_from_options(&mut options)?;
                         from_target_option(table, target, kind, is_alternator)
@@ -870,6 +878,7 @@ impl Statements {
                                         .expect("target column should be non-empty"),
                                     partitioning,
                                     filtering_columns,
+                                    alternator_attribute_types,
                                     kind,
                                 },
                             )
@@ -1104,6 +1113,39 @@ fn parse_target_option(table: &Table, value: &str) -> anyhow::Result<Option<Targ
         return Ok(Some(convert_legacy_target_option(table, legacy)?));
     };
     Ok(None)
+}
+
+/// Parses an Alternator index's "alternator_attribute_types" option: a JSON
+/// map from attribute name to declared DynamoDB type ("S"/"N"/"B"). While
+/// in Alternator in general attributes do not have a declared type, those
+/// used in SearchSchema (i.e. filtering and hash columns) do have a declared
+/// type, and Alternator stores it here, in alternator_attribute_types.
+fn parse_alternator_attribute_types(value: &str) -> BTreeMap<ColumnName, NativeType> {
+    serde_json::from_str::<BTreeMap<String, String>>(value)
+        .unwrap_or_else(|err| {
+            warn!(
+                "unsupported value '{value}' of the index option 'alternator_attribute_types': {err}, \
+                using the default"
+            );
+            BTreeMap::new()
+        })
+        .into_iter()
+        .filter_map(|(name, dynamodb_type)| {
+            let native_type = match dynamodb_type.as_str() {
+                "S" => NativeType::Text,
+                "N" => NativeType::Decimal,
+                "B" => NativeType::Blob,
+                _ => {
+                    warn!(
+                        "unsupported declared type '{dynamodb_type}' for attribute '{name}' \
+                        in the index option 'alternator_attribute_types', ignoring"
+                    );
+                    return None;
+                }
+            };
+            Some((ColumnName::from(name), native_type))
+        })
+        .collect()
 }
 
 fn convert_legacy_target_option(
@@ -1517,6 +1559,43 @@ pub(crate) mod tests {
     fn db_index_kind_from_options_unknown_returns_none() {
         let mut options = BTreeMap::from([("class_name".to_string(), "unknown_kind".to_string())]);
         assert_eq!(db_index_kind_from_options(&mut options), None);
+    }
+
+    #[test]
+    fn parse_alternator_attribute_types_valid() {
+        let types =
+            parse_alternator_attribute_types(r#"{"color": "S", "price": "N", "thumbnail": "B"}"#);
+        assert_eq!(
+            types,
+            BTreeMap::from([
+                (ColumnName::from("color"), NativeType::Text),
+                (ColumnName::from("price"), NativeType::Decimal),
+                (ColumnName::from("thumbnail"), NativeType::Blob),
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_alternator_attribute_types_empty_object() {
+        assert!(parse_alternator_attribute_types("{}").is_empty());
+    }
+
+    #[test]
+    fn parse_alternator_attribute_types_malformed_json_defaults_to_empty() {
+        assert!(parse_alternator_attribute_types("not json").is_empty());
+        assert!(parse_alternator_attribute_types(r#"{"color": 5}"#).is_empty());
+    }
+
+    #[test]
+    fn parse_alternator_attribute_types_unrecognized_type_is_omitted() {
+        // "BOOL" isn't one of the DynamoDB types we synthesize a NativeType
+        // for - the column is omitted rather than kept with a placeholder,
+        // so it's indistinguishable from a column with no declared type.
+        let types = parse_alternator_attribute_types(r#"{"flag": "BOOL", "color": "S"}"#);
+        assert_eq!(
+            types,
+            BTreeMap::from([(ColumnName::from("color"), NativeType::Text)])
+        );
     }
 
     #[test]

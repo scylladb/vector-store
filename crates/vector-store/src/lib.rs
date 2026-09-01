@@ -64,12 +64,14 @@ pub use crate::vector::Vector;
 use crate::vs_index::VsIndexFactory;
 use db::Db;
 use scylla::cluster::metadata::ColumnType;
+use scylla::cluster::metadata::NativeType;
 use scylla::serialize::SerializationError;
 use scylla::serialize::value::SerializeValue;
 use scylla::serialize::writers::CellWriter;
 use scylla::serialize::writers::WrittenCellProof;
 use scylla::value::CqlValue;
 use scylla_cdc::CqlIdentifier;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::net::SocketAddr;
@@ -703,7 +705,7 @@ impl IndexKind {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 /// Information about an index
 pub struct IndexMetadata {
     pub keyspace_name: KeyspaceName,
@@ -714,8 +716,37 @@ pub struct IndexMetadata {
     pub target_columns: NonemptyArc<ColumnName>,
     pub partitioning: DbIndexPartitioning,
     pub filtering_columns: Arc<[ColumnName]>,
+    /// For Alternator tables: the NativeType to decode each partition-key/
+    /// filtering column with no real column in the table's CQL schema as
+    /// (its value lives only in the ":attrs" map), derived from its
+    /// declared DynamoDB type ("S", "N" or "B"). Empty for CQL-native
+    /// tables and for columns that are real columns.
+    pub alternator_attribute_types: Arc<BTreeMap<ColumnName, NativeType>>,
     pub version: IndexVersion,
     pub kind: IndexKind,
+}
+
+// Manual impl because `NativeType` (in `alternator_attribute_types`) doesn't
+// implement `Hash`. Its variants are all fieldless, so hashing by
+// `mem::discriminant` is exactly as precise as hashing the value itself.
+impl std::hash::Hash for IndexMetadata {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.keyspace_name.hash(state);
+        self.index_name.hash(state);
+        self.table_name.hash(state);
+        self.primary_key_columns.hash(state);
+        self.partition_key_count.hash(state);
+        self.target_columns.hash(state);
+        self.partitioning.hash(state);
+        self.filtering_columns.hash(state);
+        self.alternator_attribute_types.len().hash(state);
+        for (name, native_type) in self.alternator_attribute_types.iter() {
+            name.hash(state);
+            std::mem::discriminant(native_type).hash(state);
+        }
+        self.version.hash(state);
+        self.kind.hash(state);
+    }
 }
 
 impl IndexMetadata {
@@ -781,6 +812,8 @@ pub struct DbCustomIndex {
     pub target_columns: NonemptyArc<ColumnName>,
     pub partitioning: DbIndexPartitioning,
     pub filtering_columns: Arc<[ColumnName]>,
+    /// See IndexMetadata::alternator_attribute_types.
+    pub alternator_attribute_types: Arc<BTreeMap<ColumnName, NativeType>>,
     pub kind: DbIndexKind,
 }
 
@@ -1041,6 +1074,7 @@ mod tests {
             partitioning: DbIndexPartitioning::Local(NonemptyArc::new(["pk"]).unwrap()),
             // "ck" is also a primary-key column; "f" is a genuine value column.
             filtering_columns: Arc::new(["ck".into(), "f".into()]),
+            alternator_attribute_types: Arc::new(BTreeMap::new()),
             version: Uuid::new_v4().into(),
             kind: IndexKind::Vs(IndexOptionsVs {
                 dimensions: Dimensions(NonZeroUsize::new(3).unwrap()),
