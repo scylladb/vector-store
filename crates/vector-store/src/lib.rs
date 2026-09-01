@@ -762,6 +762,12 @@ impl IndexMetadata {
         self.kind.as_fts()
     }
 
+    /// The NativeType to treat `column` as, if it's a virtual Alternator
+    /// attribute (see alternator_attribute_types) - None otherwise.
+    pub fn alternator_native_type(&self, column: &ColumnName) -> Option<NativeType> {
+        self.alternator_attribute_types.get(column).cloned()
+    }
+
     fn discard_version(&self) -> Self {
         let mut copy = self.clone();
         copy.version = IndexVersion(Uuid::nil());
@@ -1040,6 +1046,51 @@ mod tests {
     #[test]
     fn analyzer_rejects_unknown_value() {
         assert!("klingon".parse::<Analyzer>().is_err());
+    }
+
+    fn index_metadata_with_alternator_types(
+        types: impl IntoIterator<Item = (&'static str, NativeType)>,
+    ) -> IndexMetadata {
+        IndexMetadata {
+            keyspace_name: "alternator_ks".into(),
+            index_name: "idx".into(),
+            table_name: "tbl".into(),
+            primary_key_columns: NonemptyArc::new(["pk"]).unwrap(),
+            partition_key_count: NonZeroUsize::new(1).unwrap(),
+            target_columns: NonemptyArc::new(["embedding"]).unwrap(),
+            partitioning: DbIndexPartitioning::Global,
+            filtering_columns: Arc::new([]),
+            alternator_attribute_types: Arc::new(
+                types
+                    .into_iter()
+                    .map(|(name, typ)| (ColumnName::from(name), typ))
+                    .collect(),
+            ),
+            version: IndexVersion(Uuid::new_v4()),
+            kind: IndexKind::Vs(IndexOptionsVs {
+                dimensions: NonZeroUsize::new(3).unwrap().into(),
+                connectivity: Default::default(),
+                expansion_add: Default::default(),
+                expansion_search: Default::default(),
+                space_type: SpaceType::Euclidean,
+                quantization: Default::default(),
+            }),
+        }
+    }
+
+    #[test]
+    fn alternator_native_type_none_for_unknown_column() {
+        let metadata = index_metadata_with_alternator_types([("color", NativeType::Text)]);
+        assert_eq!(metadata.alternator_native_type(&"size".into()), None);
+    }
+
+    #[test]
+    fn alternator_native_type_returns_declared_type() {
+        let metadata = index_metadata_with_alternator_types([("color", NativeType::Text)]);
+        assert_eq!(
+            metadata.alternator_native_type(&"color".into()),
+            Some(NativeType::Text)
+        );
     }
 
     #[test]
