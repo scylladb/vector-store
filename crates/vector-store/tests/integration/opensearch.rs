@@ -10,9 +10,13 @@ use crate::mock_opensearch;
 use crate::vs_index::usearch_test_config;
 use crate::wait_for;
 use httpapi::IndexStatus;
+use httpapi::PostIndexAnnRequest;
+use httpapi::PostIndexAnnResponse;
 use httpclient::HttpClient;
+use reqwest::StatusCode;
 use scylla::cluster::metadata::NativeType;
 use scylla::value::CqlValue;
+use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -150,6 +154,157 @@ async fn simple_create_search_delete_index() {
     assert_eq!(similarity_scores.len(), distances.len());
     assert_eq!(primary_keys_pk.first().unwrap().as_i64().unwrap(), 2);
     assert_eq!(primary_keys_ck.first().unwrap().as_str().unwrap(), "two");
+
+    db.del_index(&index.keyspace_name, &index.index_name)
+        .unwrap();
+
+    wait_for(
+        || async { client.indexes().await.is_empty() },
+        "Waiting for index to be removed from the store",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn ann_returns_requested_column_values() {
+    crate::enable_tracing();
+    let node_state = vector_store::new_node_state().await;
+    let (db_actor, db) = db_basic::new(node_state.clone());
+
+    let index = IndexMetadata {
+        keyspace_name: "vector".into(),
+        table_name: "items".into(),
+        index_name: "ann".into(),
+        primary_key_columns: NonemptyArc::new(["pk"]).unwrap(),
+        partition_key_count: NonZeroUsize::new(1).unwrap(),
+        target_columns: NonemptyArc::new(["embedding"]).unwrap(),
+        partitioning: DbIndexPartitioning::Global,
+        filtering_columns: Arc::new(["color".into()]),
+        version: Uuid::new_v4().into(),
+        kind: IndexKind::Vs(IndexOptionsVs {
+            dimensions: NonZeroUsize::new(3).unwrap().into(),
+            connectivity: Default::default(),
+            expansion_add: Default::default(),
+            expansion_search: Default::default(),
+            space_type: Euclidean,
+            quantization: Default::default(),
+        }),
+    };
+    let server = mock_opensearch::TestOpenSearchServer::start().await;
+
+    let (receivers, _senders) = create_config_channels(Config {
+        opensearch_addr: Some(server.base_url()),
+        ..usearch_test_config()
+    })
+    .await;
+    let (server, _mtls) = vector_store::run(Some(node_state), Some(db_actor), receivers)
+        .await
+        .unwrap();
+    let addr = (*server.address().await.borrow()).unwrap();
+
+    let client = HttpClient::new(addr);
+
+    db.add_table(
+        index.keyspace_name.clone(),
+        index.table_name.clone(),
+        Table {
+            primary_keys: NonemptyArc::new(["pk"]).unwrap(),
+            partition_key_count: 1,
+            columns: Arc::new(
+                [
+                    ("pk".into(), NativeType::Int),
+                    ("color".into(), NativeType::Text),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+            dimensions: [(
+                index.target_columns.first().clone(),
+                index.vs().unwrap().dimensions,
+            )]
+            .into_iter()
+            .collect(),
+        },
+    )
+    .unwrap();
+    db.add_index(
+        index.clone(),
+        Some(db_basic::scan_fn_vectors([
+            (
+                [CqlValue::Int(1)].into(),
+                Some(vec![1., 1., 1.].into()),
+                [Some(CqlValue::Text("red".to_string()))].into(),
+                Timestamp::from_millis(10),
+            ),
+            (
+                // No "color" stored for this row: it must come back as
+                // null, not be silently omitted or default to a bogus
+                // value.
+                [CqlValue::Int(2)].into(),
+                Some(vec![2., -2., 2.].into()),
+                [None].into(),
+                Timestamp::from_millis(20),
+            ),
+            (
+                [CqlValue::Int(3)].into(),
+                Some(vec![3., 3., 3.].into()),
+                [Some(CqlValue::Text("blue".to_string()))].into(),
+                Timestamp::from_millis(30),
+            ),
+        ])),
+        None,
+    )
+    .unwrap();
+
+    let keyspace_name = index.keyspace_name.clone().into();
+    let index_name = index.index_name.clone().into();
+    wait_for(
+        || async {
+            client
+                .index_status(&keyspace_name, &index_name)
+                .await
+                .is_ok_and(|status| status.status == IndexStatus::Serving && status.count == 3)
+        },
+        "Waiting for index to be added to the store",
+    )
+    .await;
+
+    let response = client
+        .post_ann_data(
+            &keyspace_name,
+            &index_name,
+            &PostIndexAnnRequest {
+                vector: vec![2.1, -2., 2.].into(),
+                filter: None,
+                limit: NonZeroUsize::new(3).unwrap().into(),
+                routing: true,
+                return_columns: vec!["color".into()],
+            },
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response: PostIndexAnnResponse = response.json().await.unwrap();
+
+    let pks = response.primary_keys.get(&"pk".into()).unwrap();
+    let colors = response.column_values.get(&"color".into()).unwrap();
+    assert_eq!(pks.len(), 3);
+    assert_eq!(colors.len(), 3);
+
+    // primary_keys, column_values and similarity_scores are aligned
+    // row-by-row, not necessarily in insertion order, so recover the
+    // per-row correspondence from the response itself.
+    let color_by_pk: HashMap<i64, Option<String>> = pks
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .zip(
+            colors
+                .iter()
+                .map(|v| v.as_ref().map(|v| v.as_str().unwrap().to_string())),
+        )
+        .collect();
+    assert_eq!(color_by_pk[&1].as_deref(), Some("red"));
+    assert_eq!(color_by_pk[&2], None);
+    assert_eq!(color_by_pk[&3].as_deref(), Some("blue"));
 
     db.del_index(&index.keyspace_name, &index.index_name)
         .unwrap();

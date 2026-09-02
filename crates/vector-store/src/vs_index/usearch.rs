@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+use crate::ColumnName;
 use crate::Config;
 use crate::Dimensions;
 use crate::Distance;
@@ -32,7 +33,6 @@ use crate::vs_index::validator;
 use crate::worker::Worker;
 use crate::worker::WorkerExt;
 use anyhow::anyhow;
-use itertools::Itertools;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -782,12 +782,13 @@ where
             index_key,
             embedding,
             limit,
+            return_columns,
             tx,
         }) => {
             let Some((partition_id, _)) = table.read().unwrap().partition_id(&index_key, None)
             else {
                 warn!("partition id not found for index key {index_key:?} during ann");
-                _ = tx.send(Ok((vec![], vec![])));
+                _ = tx.send(Ok((vec![], vec![], vec![])));
                 return None;
             };
             let index_id = partition_id.index_id();
@@ -797,7 +798,7 @@ where
                 .map(|(state, partition)| (state, Arc::clone(partition)))
             else {
                 warn!("state or partition not found for index key {index_key:?} during ann");
-                _ = tx.send(Ok((vec![], vec![])));
+                _ = tx.send(Ok((vec![], vec![], vec![])));
                 return None;
             };
             Some((
@@ -806,6 +807,7 @@ where
                 Message::Search(VsIndexSearch::Ann {
                     embedding,
                     limit,
+                    return_columns,
                     tx,
                     index_key,
                 }),
@@ -817,6 +819,7 @@ where
             embedding,
             filter,
             limit,
+            return_columns,
             tx,
         }) => {
             let Some((partition_id, restrictions)) = table
@@ -825,7 +828,7 @@ where
                 .partition_id(&index_key, Some(filter.restrictions))
             else {
                 debug!("partition id not found for index key {index_key:?} during filtered ann");
-                _ = tx.send(Ok((vec![], vec![])));
+                _ = tx.send(Ok((vec![], vec![], vec![])));
                 return None;
             };
             let index_id = partition_id.index_id();
@@ -838,7 +841,7 @@ where
                     "state or partition not found for index key {index_key:?} \
                         during filtered ann"
                 );
-                _ = tx.send(Ok((vec![], vec![])));
+                _ = tx.send(Ok((vec![], vec![], vec![])));
                 return None;
             };
             let msg = if let Some(restrictions) = restrictions {
@@ -849,6 +852,7 @@ where
                         restrictions,
                         allow_filtering: filter.allow_filtering,
                     },
+                    return_columns,
                     tx,
                     index_key,
                 }
@@ -856,6 +860,7 @@ where
                 VsIndexSearch::Ann {
                     embedding,
                     limit,
+                    return_columns,
                     tx,
                     index_key,
                 }
@@ -969,11 +974,12 @@ fn process<I, T>(
         Message::Search(VsIndexSearch::Ann {
             embedding,
             limit,
+            return_columns,
             tx,
             ..
         }) => {
             if let Some(tx) = validate_dimensions(tx, &embedding, dimensions) {
-                ann(partition, tx, &table, embedding, limit);
+                ann(partition, tx, &table, embedding, limit, return_columns);
             }
         }
 
@@ -981,11 +987,20 @@ fn process<I, T>(
             embedding,
             limit,
             filter,
+            return_columns,
             tx,
             ..
         }) => {
             if let Some(tx) = validate_dimensions(tx, &embedding, dimensions) {
-                filtered_ann(partition, tx, &table, embedding, filter, limit);
+                filtered_ann(
+                    partition,
+                    tx,
+                    &table,
+                    embedding,
+                    filter,
+                    limit,
+                    return_columns,
+                );
             }
         }
 
@@ -1071,6 +1086,7 @@ fn ann<I>(
     table: &Arc<RwLock<impl TableSearch>>,
     embedding: Vector,
     limit: Limit,
+    return_columns: Arc<[ColumnName]>,
 ) where
     I: UsearchIndex + Send + Sync + 'static,
 {
@@ -1082,23 +1098,35 @@ fn ann<I>(
                 .map_err(|err| anyhow!("ann: search failed: {err}"))
                 .and_then(|matches| {
                     let table = table.read().unwrap();
-                    let (primary_keys, distances) = itertools::process_results(
-                        matches.filter_map_ok(|(primary_id, distance)| {
-                            table
-                                .primary_key(partition.partition_id, primary_id)
-                                .or_else(|| {
-                                    debug!(
-                                        "not defined primary key for partition_id {partition_id:?} \
-                                        and primary_id {primary_id:?}",
-                                        partition_id = partition.partition_id,
-                                    );
-                                    None
-                                })
-                                .map(|primary_key| (primary_key, distance))
-                        }),
-                        |it| it.unzip(),
-                    )?;
-                    Ok((primary_keys, distances))
+                    let mut primary_keys = Vec::new();
+                    let mut distances = Vec::new();
+                    let mut column_values_vec = Vec::new();
+                    for result in matches {
+                        let (primary_id, distance) = result?;
+                        let Some(primary_key) =
+                            table.primary_key(partition.partition_id, primary_id)
+                        else {
+                            debug!(
+                                "not defined primary key for partition_id {partition_id:?} \
+                                and primary_id {primary_id:?}",
+                                partition_id = partition.partition_id,
+                            );
+                            continue;
+                        };
+                        let col_vals = if return_columns.is_empty() {
+                            BTreeMap::new()
+                        } else {
+                            table.column_values_for(
+                                partition.partition_id,
+                                primary_id,
+                                &return_columns,
+                            )
+                        };
+                        primary_keys.push(primary_key);
+                        distances.push(distance);
+                        column_values_vec.push(col_vals);
+                    }
+                    Ok((primary_keys, distances, column_values_vec))
                 }),
         )
         .unwrap_or_else(|_| trace!("ann: unable to send response"));
@@ -1112,6 +1140,7 @@ fn filtered_ann<I>(
     embedding: Vector,
     filter: Filter,
     limit: Limit,
+    return_columns: Arc<[ColumnName]>,
 ) where
     I: UsearchIndex + Send + Sync + 'static,
 {
@@ -1131,23 +1160,35 @@ fn filtered_ann<I>(
                 .map_err(|err| anyhow!("ann: search failed: {err}"))
                 .and_then(|matches| {
                     let table = table.read().unwrap();
-                    let (primary_keys, distances) = itertools::process_results(
-                        matches.filter_map_ok(|(primary_id, distance)| {
-                            table
-                                .primary_key(partition.partition_id, primary_id)
-                                .or_else(|| {
-                                    debug!(
-                                        "not defined primary key for partition_id {partition_id:?} \
-                                        and primary_id {primary_id:?}",
-                                        partition_id = partition.partition_id,
-                                    );
-                                    None
-                                })
-                                .map(|primary_key| (primary_key, distance))
-                        }),
-                        |it| it.unzip(),
-                    )?;
-                    Ok((primary_keys, distances))
+                    let mut primary_keys = Vec::new();
+                    let mut distances = Vec::new();
+                    let mut column_values_vec = Vec::new();
+                    for result in matches {
+                        let (primary_id, distance) = result?;
+                        let Some(primary_key) =
+                            table.primary_key(partition.partition_id, primary_id)
+                        else {
+                            debug!(
+                                "not defined primary key for partition_id {partition_id:?} \
+                                and primary_id {primary_id:?}",
+                                partition_id = partition.partition_id,
+                            );
+                            continue;
+                        };
+                        let col_vals = if return_columns.is_empty() {
+                            BTreeMap::new()
+                        } else {
+                            table.column_values_for(
+                                partition.partition_id,
+                                primary_id,
+                                &return_columns,
+                            )
+                        };
+                        primary_keys.push(primary_key);
+                        distances.push(distance);
+                        column_values_vec.push(col_vals);
+                    }
+                    Ok((primary_keys, distances, column_values_vec))
                 }),
         )
         .unwrap_or_else(|_| trace!("ann: unable to send response"));
@@ -1274,6 +1315,7 @@ mod tests {
                             index_key.clone(),
                             vec![0.0f32; dimensions.get()].into(),
                             limit,
+                            Arc::new([]),
                         )
                         .await;
                 }
@@ -1373,11 +1415,12 @@ mod tests {
             .once()
             .returning(|_, _| Some([CqlValue::Int(2)].into()));
 
-        let (primary_keys, distances) = search
+        let (primary_keys, distances, _) = search
             .ann(
                 index_key.clone(),
                 vec![2.2, -2.2, 2.2].into(),
                 NonZeroUsize::new(1).unwrap().into(),
+                Arc::new([]),
             )
             .await
             .unwrap();
@@ -1415,6 +1458,7 @@ mod tests {
                     index_key.clone(),
                     vec![2.2, -2.2, 2.2].into(),
                     NonZeroUsize::new(1).unwrap().into(),
+                    Arc::new([]),
                 )
                 .await
                 .unwrap()
@@ -1444,11 +1488,12 @@ mod tests {
             .once()
             .returning(|_, _| Some([CqlValue::Int(2)].into()));
 
-        let (primary_keys, distances) = search
+        let (primary_keys, distances, _) = search
             .ann(
                 index_key,
                 vec![2.2, -2.2, 2.2].into(),
                 NonZeroUsize::new(1).unwrap().into(),
+                Arc::new([]),
             )
             .await
             .unwrap();

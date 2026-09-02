@@ -1137,6 +1137,18 @@ pub(crate) trait TableSearch {
         primary_id: PrimaryId,
         restriction: &Restriction,
     ) -> bool;
+
+    /// Return the stored values for the given filtering columns for a single
+    /// row identified by `primary_id`. Columns that have no stored value
+    /// (e.g. the attribute was absent when the row was indexed) are omitted
+    /// from the returned map. Returns an empty map when `columns` is empty
+    /// or the `primary_id` is invalid.
+    fn column_values_for(
+        &self,
+        partition_id: PartitionId,
+        primary_id: PrimaryId,
+        columns: &[ColumnName],
+    ) -> BTreeMap<ColumnName, CqlValue>;
 }
 
 impl TableSearch for Table {
@@ -1273,6 +1285,27 @@ impl TableSearch for Table {
                     .is_some_and(|ord| ord.is_ge())
             }
         }
+    }
+
+    #[hotpath::measure]
+    fn column_values_for(
+        &self,
+        partition_id: PartitionId,
+        primary_id: PrimaryId,
+        columns: &[ColumnName],
+    ) -> BTreeMap<ColumnName, CqlValue> {
+        if !self.is_valid_primary_id(partition_id, primary_id) {
+            return BTreeMap::new();
+        }
+        columns
+            .iter()
+            .filter_map(|col_name| {
+                self.columns
+                    .get(col_name)
+                    .and_then(|col| col.get(primary_id, &self.primary_keys))
+                    .map(|value| (col_name.clone(), value))
+            })
+            .collect()
     }
 }
 
@@ -1684,6 +1717,124 @@ mod tests {
                 assert_eq!(partition_id33, partition_id31);
             }
         }
+    }
+
+    #[test]
+    fn column_values_for_returns_requested_values() {
+        let index_key = IndexKey::new(&"ks".into(), &"idx".into());
+        let filtering_columns: Arc<[_]> = Arc::new(["color".into(), "size".into()]);
+        let mut table = Table::new(
+            index_key.clone(),
+            NonemptyArc::new(["pk"]).unwrap(),
+            NonZeroUsize::new(1).unwrap(),
+            None,
+            NonZeroUsize::new(1).unwrap(),
+            filtering_columns,
+            Arc::new(
+                [
+                    ("pk".into(), NativeType::Int),
+                    ("color".into(), NativeType::Text),
+                    ("size".into(), NativeType::Int),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+        )
+        .unwrap();
+
+        let values = |color: Option<CqlValue>, size: Option<CqlValue>| {
+            NonemptyBox::<Timestamped<DbIndexedValue>>::new([
+                Timestamped::new(
+                    Timestamp::from_millis(100),
+                    Some(DbIndexedValue::Vector(vec![0.1, 0.2, 0.3].into())),
+                ),
+                Timestamped::new(
+                    Timestamp::from_millis(100),
+                    color.map(DbIndexedValue::Filtering),
+                ),
+                Timestamped::new(
+                    Timestamp::from_millis(100),
+                    size.map(DbIndexedValue::Filtering),
+                ),
+            ])
+            .unwrap()
+        };
+
+        let operations = table
+            .upsert(
+                &index_key,
+                [CqlValue::Int(1)].into(),
+                values(
+                    Some(CqlValue::Text("red".to_string())),
+                    Some(CqlValue::Int(42)),
+                ),
+            )
+            .unwrap();
+        let (primary_id1, partition_id1) = match operations.first().unwrap() {
+            Operation::AddVector {
+                primary_id,
+                partition_id,
+                ..
+            } => (*primary_id, *partition_id),
+            _ => panic!("Expected AddVector operation"),
+        };
+
+        // "color" has no stored value for this row (e.g. it was absent when
+        // the row was indexed), "size" does.
+        let operations = table
+            .upsert(
+                &index_key,
+                [CqlValue::Int(2)].into(),
+                values(None, Some(CqlValue::Int(7))),
+            )
+            .unwrap();
+        let (primary_id2, partition_id2) = match operations.first().unwrap() {
+            Operation::AddVector {
+                primary_id,
+                partition_id,
+                ..
+            } => (*primary_id, *partition_id),
+            _ => panic!("Expected AddVector operation"),
+        };
+
+        // Both requested columns are present.
+        assert_eq!(
+            table.column_values_for(partition_id1, primary_id1, &["color".into(), "size".into()]),
+            [
+                ("color".into(), CqlValue::Text("red".to_string())),
+                ("size".into(), CqlValue::Int(42)),
+            ]
+            .into_iter()
+            .collect()
+        );
+
+        // A column with no stored value for this row is omitted, not
+        // reported with a placeholder value.
+        assert_eq!(
+            table.column_values_for(partition_id2, primary_id2, &["color".into(), "size".into()]),
+            [("size".into(), CqlValue::Int(7))].into_iter().collect()
+        );
+
+        // An empty column list returns an empty map.
+        assert!(
+            table
+                .column_values_for(partition_id1, primary_id1, &[])
+                .is_empty()
+        );
+
+        // A primary-key column resolves through the same method.
+        assert_eq!(
+            table.column_values_for(partition_id1, primary_id1, &["pk".into()]),
+            [("pk".into(), CqlValue::Int(1))].into_iter().collect()
+        );
+
+        // An invalid (never allocated) primary_id returns an empty map
+        // rather than stale or default values.
+        assert!(
+            table
+                .column_values_for(partition_id1, PrimaryId::from(9999), &["color".into()])
+                .is_empty()
+        );
     }
 
     #[test]

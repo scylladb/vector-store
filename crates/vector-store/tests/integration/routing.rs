@@ -83,6 +83,7 @@ async fn post_ann_without_routing(client: &HttpClient, index: &IndexMetadata) ->
                 filter: None,
                 limit: NonZeroUsize::new(ANN_LIMIT).unwrap().into(),
                 routing: false,
+                return_columns: vec![],
             },
         )
         .await
