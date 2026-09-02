@@ -46,46 +46,21 @@ jobs:
       os: ${{ contains(github.event.pull_request.labels.*.name, 'ci-use-amd64') && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
       arch: ${{ contains(github.event.pull_request.labels.*.name, 'ci-use-amd64') && 'amd64' || 'arm64' }}
 
-  validator-tests:
+  validator-run-validator-tests:
     needs: ["validator-get-scylla-nightly-digest", "validator-build-vector-store", "validator-get-validator-test-list"]
-    runs-on: ${{ contains(github.event.pull_request.labels.*.name, 'ci-use-amd64') && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
+    uses: $/.github/workflows/run-validator-tests.yml
+    with:
+      os: ${{ contains(github.event.pull_request.labels.*.name, 'ci-use-amd64') && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
+      arch: ${{ contains(github.event.pull_request.labels.*.name, 'ci-use-amd64') && 'amd64' || 'arm64' }}
+      testcase: ${{ matrix.testcase }}
+      ref: ${{ github.sha }}
     strategy:
       fail-fast: false
       matrix:
         testcase: ${{fromJSON(needs.validator-get-validator-test-list.outputs.testcases)}}
 
-    steps:
-    - name: Download scylla-nightly digest artifact
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-      with:
-        name: scylla-nightly-digest
-
-    - name: Download vector-store artifact
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-      with:
-        name: vector-store-${{ contains(github.event.pull_request.labels.*.name, 'ci-use-amd64') && 'amd64' || 'arm64' }}
-
-    - name: Download vector-search-validator artifact
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-      with:
-        name: vector-search-validator-${{ contains(github.event.pull_request.labels.*.name, 'ci-use-amd64') && 'amd64' || 'arm64' }}
-
-    - name: Download run-validator-with-scylla-docker artifact
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-      with:
-        name: run-validator-with-scylla-docker
-
-    - name: Chmod a+x downloaded artifacts
-      run: chmod a+x vector-store vector-search-validator run-validator-with-scylla-docker
-
-    - name: Run the Validator tests for testcase ${{matrix.testcase}}
-      env:
-        testcase: ${{matrix.testcase}}
-      run: |
-        ./run-validator-with-scylla-docker scylladb/scylla-nightly@$(cat scylla-nightly-digest) vector-store vector-search-validator "\"${testcase}\"::" --verbose
-
   validator-workflow-status:
-    needs: ["validator-get-scylla-nightly-digest", "validator-build-validator", "validator-build-vector-store", "validator-get-validator-test-list", "validator-tests"]
+    needs: ["validator-get-scylla-nightly-digest", "validator-build-validator", "validator-build-vector-store", "validator-get-validator-test-list", "validator-run-validator-tests"]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -113,8 +88,8 @@ jobs:
           return_code=1
         fi
 
-        if [[ "${{ needs.validator-tests.result }}" == "failure" ]]; then
-          echo "validator-tests job failed"
+        if [[ "${{ needs.validator-run-validator-tests.result }}" == "failure" ]]; then
+          echo "validator-run-validator-tests job failed"
           return_code=1
         fi
 

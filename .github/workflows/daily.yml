@@ -58,9 +58,14 @@ jobs:
       os: ubuntu-latest
       arch: amd64
 
-  daily-validator-tests:
+  daily-run-validator-tests:
     needs: ["daily-get-scylla-nightly-digest", "daily-build-vector-store", "daily-get-validator-test-list"]
-    runs-on: ${{ matrix.os }}
+    uses: $/.github/workflows/run-validator-tests.yml
+    with:
+      os: ${{ matrix.os }}
+      arch: ${{ matrix.arch }}
+      testcase: ${{ matrix.testcase }}
+      ref: ${{ github.sha }}
     strategy:
       fail-fast: false
       matrix:
@@ -71,42 +76,9 @@ jobs:
             arch: amd64
           - os: ubuntu-24.04-arm
             arch: arm64
-    steps:
-    - name: Download scylla-nightly digest artifact
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-      with:
-        name: scylla-nightly-digest
-
-    - name: Download vector-store artifact
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-      with:
-        name: vector-store-${{matrix.arch}}
-
-    - name: Download vector-search-validator artifact
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-      with:
-        name: vector-search-validator-${{matrix.arch}}
-
-    - name: Download run-validator-with-scylla-docker artifact
-      uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      with:
-        sparse-checkout: |
-          scripts/run-validator-with-scylla-docker
-        sparse-checkout-cone-mode: false
-        ref: ${{ github.sha }}
-
-    - name: Chmod a+x downloaded artifacts
-      run: chmod a+x vector-store-${{matrix.arch}} vector-search-validator-${{matrix.arch}}
-
-    - name: Run the Validator tests for testcase ${{matrix.testcase}}
-      env:
-        testcase: ${{matrix.testcase}}
-        TARGETARCH: ${{matrix.arch}}
-      run: |
-        ./scripts/run-validator-with-scylla-docker scylladb/scylla-nightly@$(cat scylla-nightly-digest) vector-store-${TARGETARCH} vector-search-validator-${TARGETARCH} "\"${testcase}\"::" --verbose
 
   daily-save-scylla-nightly-digest:
-    needs: daily-validator-tests
+    needs: daily-run-validator-tests
     runs-on: ubuntu-latest
     steps:
     - name: Download scylla-nightly digest artifact
