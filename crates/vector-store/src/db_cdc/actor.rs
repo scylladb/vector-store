@@ -325,7 +325,7 @@ impl CdcReaderState {
                 );
             }
             Err(e) => {
-                error!("Failed to create {} CDC reader: {e}", self.name);
+                error!("Failed to create {} CDC reader: {e:#}", self.name);
                 self.set_reader_metric_down();
                 self.error_notify.notify_one();
             }
