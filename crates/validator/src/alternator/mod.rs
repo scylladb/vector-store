@@ -360,7 +360,7 @@ pub(crate) async fn wait_for_alternator(db_ip: Ipv4Addr) {
 }
 
 async fn make_clients(actors: &TestActors) -> (Client, Vec<HttpClient>) {
-    let db_ip = actors.services_subnet.ip(common::DB_OCTET_1);
+    let db_ip = common::get_default_db_ip(actors);
     let dynamodb_client = make_dynamodb_client(db_ip).await;
     let vs_clients = common::get_default_vs_ips(actors)
         .into_iter()
@@ -698,7 +698,7 @@ async fn init_with_args(actors: &TestActors, extra_args: impl IntoIterator<Item 
     let vs_configs = common::get_default_vs_node_configs(actors).await;
 
     // Capture db_ip before actors is moved into init_with_config.
-    let db_ip = actors.services_subnet.ip(common::DB_OCTET_1);
+    let db_ip = common::get_default_db_ip(actors);
     common::init_with_config(actors, scylla_configs, vs_configs, true).await;
 
     wait_for_alternator(db_ip).await;

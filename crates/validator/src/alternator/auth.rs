@@ -69,14 +69,15 @@ async fn get_salted_hash(session: &Session, role_name: &str) -> String {
 ///
 /// See the module-level doc for the full scenario description.
 #[e2etest::test(group = alternator_auth)]
-async fn alternator_with_auth_enabled(actors: Arc<TestActors>) {
+async fn alternator_with_auth_enabled(fixture: Arc<Fixture>) {
+    let actors = &fixture.actors;
     info!("started");
 
-    let db_ip = actors.services_subnet.ip(common::DB_OCTET_1);
+    let db_ip = common::get_default_db_ip(actors);
 
     info!("Connecting to ScyllaDB as superuser");
     let (session, vs_clients) = common::prepare_connection_with_auth(
-        &actors,
+        actors,
         &common::SUPERUSER_NAME,
         &common::SUPERUSER_PASSWORD,
     )
@@ -257,12 +258,12 @@ e2etest::group!(
 );
 
 struct Fixture {
-    actors: Arc<TestActors>,
+    actors: TestActors,
 }
 
 impl e2etest::Fixture for Fixture {
     async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
-        let actors = setup.setup::<TestActors>().await?;
+        let actors = setup.setup::<crate::TestEnv>().await?.new_cluster().await;
 
         let scylla_configs = alternator::get_scylla_configs(
             &actors,
@@ -284,5 +285,11 @@ impl e2etest::Fixture for Fixture {
 
     async fn teardown(self) {
         common::cleanup(&self.actors).await;
+    }
+
+    // This cluster is independent of every other one, so its groups may run
+    // alongside groups owning a different cluster.
+    fn group_can_run_concurrently() -> bool {
+        true
     }
 }

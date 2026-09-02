@@ -25,17 +25,23 @@ e2etest::group!(
 );
 
 struct Fixture {
-    actors: Arc<TestActors>,
+    actors: TestActors,
 }
 
 impl e2etest::Fixture for Fixture {
     async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
-        let actors = setup.setup::<TestActors>().await?;
+        let actors = setup.setup::<crate::TestEnv>().await?.new_cluster().await;
         Some(Self { actors })
     }
 
     async fn teardown(self) {
         cleanup(&self.actors).await;
+    }
+
+    // This cluster is independent of every other one, so its groups may run
+    // alongside groups owning a different cluster.
+    fn group_can_run_concurrently() -> bool {
+        true
     }
 }
 
@@ -80,15 +86,17 @@ async fn https_status_ok(vs_ips: &[Ipv4Addr], cert_pem: &[u8]) -> bool {
 }
 
 #[e2etest::test(group = tls_reload)]
-async fn reloads_tls_identity_after_cert_file_rotation(actors: Arc<TestActors>) {
+async fn reloads_tls_identity_after_cert_file_rotation(fixture: Arc<Fixture>) {
     info!("started");
+
+    let actors = &fixture.actors;
 
     let cert_file = NamedTempFile::new().unwrap();
     let key_file = NamedTempFile::new().unwrap();
 
-    let scylla_configs = get_default_scylla_node_configs(&actors).await;
-    let mut vs_configs = get_default_vs_node_configs(&actors).await;
-    let vs_ips = get_default_vs_ips(&actors);
+    let scylla_configs = get_default_scylla_node_configs(actors).await;
+    let mut vs_configs = get_default_vs_node_configs(actors).await;
+    let vs_ips = get_default_vs_ips(actors);
 
     let cert_v1 = write_server_identity_pem(&cert_file, &key_file, &vs_ips);
 
@@ -107,7 +115,7 @@ async fn reloads_tls_identity_after_cert_file_rotation(actors: Arc<TestActors>) 
         );
     }
 
-    init_with_config(&actors, scylla_configs, vs_configs, true).await;
+    init_with_config(actors, scylla_configs, vs_configs, true).await;
 
     wait_for(
         || async { https_status_ok(&vs_ips, &cert_v1).await },

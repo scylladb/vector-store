@@ -177,45 +177,70 @@ async fn wait_for_role_login(actors: &TestActors, ip: Ipv4Addr, tls: bool) {
 #[as_ref(str)]
 pub(crate) struct TableName(String);
 
-/// Returns the default DB IPs for a given subnet. This variant can be used
-/// before `TestActors` is constructed (e.g. during TLS cert generation).
-pub fn get_default_db_ips_for_subnet(subnet: &crate::ServicesSubnet) -> Vec<Ipv4Addr> {
-    vec![
-        subnet.ip(DB_OCTET_1),
-        subnet.ip(DB_OCTET_2),
-        subnet.ip(DB_OCTET_3),
-    ]
+/// Every cluster's ScyllaDB addresses. The TLS certificate is generated once
+/// for all of them, before any cluster exists, so that clusters running side by
+/// side can share it.
+pub fn all_cluster_db_ips(subnet: &crate::ServicesSubnet) -> Vec<Ipv4Addr> {
+    (0..crate::MAX_CLUSTERS)
+        .flat_map(|cluster| {
+            let base = u8::try_from(cluster).expect("cluster index fits in an octet")
+                * crate::CLUSTER_OCTET_STRIDE;
+            [DB_OCTET_1, DB_OCTET_2, DB_OCTET_3].map(|octet| subnet.ip(base + octet))
+        })
+        .collect()
+}
+
+/// The DNS names of a cluster's Vector Store nodes. They carry the cluster
+/// index so that clusters running side by side do not overwrite each other's
+/// records in the shared zone.
+pub fn get_default_vs_names(actors: &TestActors) -> Vec<String> {
+    VS_NAMES
+        .iter()
+        .map(|name| format!("{name}-c{cluster}", cluster = actors.cluster()))
+        .collect()
 }
 
 #[framed]
 pub async fn get_default_vs_urls(actors: &TestActors) -> Vec<String> {
     let domain = actors.dns.domain().await;
-    VS_NAMES
-        .iter()
+    get_default_vs_names(actors)
+        .into_iter()
         .map(|name| format!("http://{name}.{domain}:{VS_PORT}"))
         .collect()
 }
 
 #[framed]
 pub fn get_default_vs_ips(actors: &TestActors) -> Vec<Ipv4Addr> {
+    let base = actors.octet_base();
     vec![
-        actors.services_subnet.ip(VS_OCTET_1),
-        actors.services_subnet.ip(VS_OCTET_2),
-        actors.services_subnet.ip(VS_OCTET_3),
+        actors.services_subnet.ip(base + VS_OCTET_1),
+        actors.services_subnet.ip(base + VS_OCTET_2),
+        actors.services_subnet.ip(base + VS_OCTET_3),
     ]
 }
 
 #[framed]
 pub fn get_default_db_ips(actors: &TestActors) -> Vec<Ipv4Addr> {
-    get_default_db_ips_for_subnet(&actors.services_subnet)
+    let base = actors.octet_base();
+    vec![
+        actors.services_subnet.ip(base + DB_OCTET_1),
+        actors.services_subnet.ip(base + DB_OCTET_2),
+        actors.services_subnet.ip(base + DB_OCTET_3),
+    ]
 }
 
 pub fn get_default_db_proxy_ips(actors: &TestActors) -> Vec<Ipv4Addr> {
+    let base = actors.octet_base();
     vec![
-        actors.services_subnet.ip(DB_PROXY_OCTET_1),
-        actors.services_subnet.ip(DB_PROXY_OCTET_2),
-        actors.services_subnet.ip(DB_PROXY_OCTET_3),
+        actors.services_subnet.ip(base + DB_PROXY_OCTET_1),
+        actors.services_subnet.ip(base + DB_PROXY_OCTET_2),
+        actors.services_subnet.ip(base + DB_PROXY_OCTET_3),
     ]
+}
+
+/// The address a CQL session connects to for this cluster.
+pub fn get_default_db_ip(actors: &TestActors) -> Ipv4Addr {
+    actors.services_subnet.ip(actors.octet_base() + DB_OCTET_1)
 }
 
 /// Arguments enabling the Alternator (DynamoDB-compatible) endpoint on a node.
@@ -454,8 +479,8 @@ pub async fn init_with_proxy_single_vs(actors: &TestActors) {
 #[framed]
 pub async fn init_dns(actors: &TestActors) {
     let vs_ips = get_default_vs_ips(actors);
-    for (name, ip) in VS_NAMES.iter().zip(vs_ips.iter()) {
-        actors.dns.upsert(name.to_string(), *ip).await;
+    for (name, ip) in get_default_vs_names(actors).into_iter().zip(vs_ips) {
+        actors.dns.upsert(name, ip).await;
     }
 }
 
@@ -491,14 +516,14 @@ pub async fn init_with_config(
 /// (node restarts, firewall or proxy rules, DNS records, role changes);
 /// groups that need such mutations must run on their own dedicated cluster.
 pub struct SharedCluster {
-    pub actors: Arc<TestActors>,
+    pub actors: TestActors,
 }
 
 impl e2etest::Fixture for SharedCluster {
     async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
-        let actors = setup.setup::<TestActors>().await?;
+        let actors = setup.setup::<crate::TestEnv>().await?.new_cluster().await;
         init(&actors).await;
-        crate::alternator::wait_for_alternator(actors.services_subnet.ip(DB_OCTET_1)).await;
+        crate::alternator::wait_for_alternator(get_default_db_ip(&actors)).await;
         Some(Self { actors })
     }
 
@@ -507,6 +532,12 @@ impl e2etest::Fixture for SharedCluster {
     }
 
     fn test_can_run_concurrently() -> bool {
+        true
+    }
+
+    // This cluster is independent of every other one, so its groups may run
+    // alongside groups owning a different cluster.
+    fn group_can_run_concurrently() -> bool {
         true
     }
 }
@@ -552,6 +583,12 @@ impl e2etest::Fixture for TestContext {
     fn test_can_run_concurrently() -> bool {
         true
     }
+
+    // Every group under the `standard` umbrella shares this one context, and so its keyspace,
+    // while creating its own tables and indexes; the groups may therefore overlap.
+    fn group_can_run_concurrently() -> bool {
+        true
+    }
 }
 
 impl TestContext {
@@ -586,18 +623,24 @@ impl TestContext {
 /// the default non-concurrent execution and go through [`ProxyTestContext`],
 /// which resets the rules around every test.
 pub struct ProxyCluster {
-    pub actors: Arc<TestActors>,
+    pub actors: TestActors,
 }
 
 impl e2etest::Fixture for ProxyCluster {
     async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
-        let actors = setup.setup::<TestActors>().await?;
+        let actors = setup.setup::<crate::TestEnv>().await?.new_cluster().await;
         init_with_proxy_single_vs(&actors).await;
         Some(Self { actors })
     }
 
     async fn teardown(self) {
         cleanup(&self.actors).await;
+    }
+
+    // This cluster is independent of every other one, so its groups may run
+    // alongside groups owning a different cluster.
+    fn group_can_run_concurrently() -> bool {
+        true
     }
 }
 
@@ -684,8 +727,8 @@ pub async fn cleanup(actors: &TestActors) {
     // later cluster on the same addresses; the firewall actor has no automatic
     // cleanup of its own, so reset it here (a no-op when no rules are active).
     actors.firewall.turn_off_rules().await;
-    for name in VS_NAMES.iter() {
-        actors.dns.remove(name.to_string()).await;
+    for name in get_default_vs_names(actors) {
+        actors.dns.remove(name).await;
     }
     actors.vs.stop().await;
     actors.db_proxy.stop().await;
@@ -701,7 +744,7 @@ pub async fn prepare_connection_with_custom_vs_ips(
     let tls_config = actors.tls.client_tls_config().await;
     let session = Arc::new(
         SessionBuilder::new()
-            .known_node(actors.services_subnet.ip(DB_OCTET_1).to_string())
+            .known_node(get_default_db_ip(actors).to_string())
             .user(&*SUPERUSER_NAME, &*SUPERUSER_PASSWORD)
             .tls_context(Some(TlsContext::from(tls_config)))
             .build()
@@ -724,7 +767,7 @@ pub async fn prepare_connection_with_auth(
     let tls_config = actors.tls.client_tls_config().await;
     let session = Arc::new(
         SessionBuilder::new()
-            .known_node(actors.services_subnet.ip(DB_OCTET_1).to_string())
+            .known_node(get_default_db_ip(actors).to_string())
             .user(user, password)
             .tls_context(Some(TlsContext::from(tls_config)))
             .build()
@@ -747,7 +790,7 @@ pub async fn prepare_connection_with_auth_no_tls(
 ) -> (Arc<Session>, Vec<HttpClient>) {
     let session = Arc::new(
         SessionBuilder::new()
-            .known_node(actors.services_subnet.ip(DB_OCTET_1).to_string())
+            .known_node(get_default_db_ip(actors).to_string())
             .user(user, password)
             .build()
             .await
@@ -804,7 +847,7 @@ pub async fn prepare_connection_with_custom_vs_ips_no_tls(
 
     let session = Arc::new(
         SessionBuilder::new()
-            .known_node(actors.services_subnet.ip(DB_OCTET_1).to_string())
+            .known_node(get_default_db_ip(actors).to_string())
             .user(&*SUPERUSER_NAME, &*SUPERUSER_PASSWORD)
             .build()
             .await

@@ -46,6 +46,7 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::thread;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
@@ -114,6 +115,15 @@ struct RunArgs {
     #[arg(long, default_value_t = default_concurrency(), value_name = "N")]
     concurrency: usize,
 
+    /// Maximum number of test groups to run concurrently.
+    ///
+    /// Only groups sharing a cluster with their siblings may overlap; a group
+    /// owning a cluster that mutates node, network or authorization state
+    /// always runs on its own. The work in flight is bounded by this times
+    /// `--concurrency`, so raising both loads the cluster quickly.
+    #[arg(long, default_value = "4", value_name = "N")]
+    group_concurrency: usize,
+
     /// Path to the ScyllaDB executable.
     #[arg(value_name = "PATH")]
     scylla: PathBuf,
@@ -171,12 +181,14 @@ fn init(args: RunArgs) -> Config {
         .init();
 
     let concurrency = args.concurrency;
+    let group_concurrency = args.group_concurrency;
     args.filters
         .iter()
         .fold(Config::default(), |acc, filter| acc.with_filter(filter))
         .with_permanent_fixture(args)
         .with_default_timeout(common::DEFAULT_TEST_TIMEOUT)
         .with_concurrency(concurrency)
+        .with_group_concurrency(group_concurrency)
 }
 
 /// The number of CPUs available to the process, used as the default number of
@@ -195,7 +207,7 @@ fn validate_different_subnet(dns_ip: Ipv4Addr, base_ip: Ipv4Addr) {
     );
 }
 
-e2etest::group!(name = validator, fixtures = (TestActors));
+e2etest::group!(name = validator, fixtures = (TestEnv));
 
 // Umbrella group owning the shared standard cluster. Groups whose tests only
 // need the default cluster (and do not mutate cluster-wide state) are
@@ -289,27 +301,91 @@ impl ServicesSubnet {
     }
 }
 
-#[derive(Clone)]
-struct TestActors {
-    pub(crate) services_subnet: Arc<ServicesSubnet>,
-    pub(crate) tls: mpsc::Sender<Tls>,
-    pub(crate) dns: mpsc::Sender<Dns>,
-    pub(crate) firewall: mpsc::Sender<Firewall>,
-    pub(crate) db: mpsc::Sender<ScyllaCluster>,
-    pub(crate) vs: mpsc::Sender<VectorStoreCluster>,
-    pub(crate) db_proxy: mpsc::Sender<ScyllaProxyCluster>,
+/// How many last-octet addresses each cluster reserves in the services subnet.
+/// A cluster needs nine (three ScyllaDB, three proxy and three Vector Store
+/// nodes); the rest of the block leaves room to add more.
+pub const CLUSTER_OCTET_STRIDE: u8 = 32;
+
+/// How many clusters can exist side by side, limited by the last octet the
+/// stride leaves available. Groups owning a cluster may run concurrently only
+/// up to this many at a time.
+pub const MAX_CLUSTERS: usize = 8;
+
+/// The shared, process-wide services: the loopback subnet the clusters are
+/// carved out of, the certificate they all present, the DNS zone naming their
+/// Vector Store nodes, and the host firewall.
+///
+/// Clusters are allocated from here so that several can run at the same time,
+/// each with its own nodes on its own addresses.
+struct TestEnv {
+    args: Arc<RunArgs>,
+    services_subnet: Arc<ServicesSubnet>,
+    tls: mpsc::Sender<Tls>,
+    dns: mpsc::Sender<Dns>,
+    firewall: mpsc::Sender<Firewall>,
+    /// Address blocks not currently taken by a cluster.
+    free_clusters: Arc<Mutex<Vec<usize>>>,
 }
 
-impl e2etest::Fixture for TestActors {
+impl e2etest::Fixture for TestEnv {
     async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
         let args = setup.get::<RunArgs>().await.unwrap();
 
         validate_different_subnet(args.dns_ip, args.base_ip);
 
         let services_subnet = Arc::new(ServicesSubnet::new(args.base_ip));
-        let tls = e2etest_tls::new(&common::get_default_db_ips_for_subnet(&services_subnet)).await;
+        // Every cluster presents the same certificate, so it has to name the
+        // ScyllaDB addresses of all of them.
+        let tls = e2etest_tls::new(&common::all_cluster_db_ips(&services_subnet)).await;
         let dns = e2etest_dns::new(args.dns_ip).await;
         let firewall = e2etest_firewall::new().await;
+
+        info!(
+            "{} version: {}",
+            env!("CARGO_PKG_NAME"),
+            env!("CARGO_PKG_VERSION")
+        );
+        info!("dns version: {}", dns.version().await);
+
+        Some(Self {
+            args,
+            services_subnet,
+            tls,
+            dns,
+            firewall,
+            free_clusters: Arc::new(Mutex::new((0..MAX_CLUSTERS).rev().collect())),
+        })
+    }
+
+    async fn teardown(self) {}
+
+    fn test_can_run_concurrently() -> bool {
+        true
+    }
+
+    fn group_can_run_concurrently() -> bool {
+        true
+    }
+}
+
+impl TestEnv {
+    /// Reserves a block of addresses and spawns the cluster actors that drive
+    /// the nodes in it. The returned actors are independent of every other
+    /// cluster's, so their groups can run at the same time.
+    async fn new_cluster(&self) -> TestActors {
+        let index = self
+            .free_clusters
+            .lock()
+            .expect("the cluster pool lock is never held across a panic")
+            .pop()
+            .unwrap_or_else(|| {
+                panic!(
+                    "no free address block: at most {MAX_CLUSTERS} clusters can exist at once, \
+                     so --group-concurrency must stay below that"
+                )
+            });
+        let args = &self.args;
+
         let db = e2etest_scylla_cluster::new(
             args.scylla.clone(),
             args.scylla_default_conf.clone(),
@@ -326,32 +402,68 @@ impl e2etest::Fixture for TestActors {
         .await;
         let db_proxy = e2etest_scylla_proxy_cluster::new().await;
 
-        info!(
-            "{} version: {}",
-            env!("CARGO_PKG_NAME"),
-            env!("CARGO_PKG_VERSION")
-        );
-        let version = db.version().await;
-        info!("scylla version: {}", version);
-        info!("dns version: {}", dns.version().await);
-        info!("vector-store version: {}", vs.version().await);
+        if index == 0 {
+            info!("scylla version: {}", db.version().await);
+            info!("vector-store version: {}", vs.version().await);
+        }
 
-        Some(Self {
-            services_subnet,
-            tls,
-            dns,
-            firewall,
+        TestActors {
+            slot: Arc::new(ClusterSlot {
+                index,
+                pool: Arc::clone(&self.free_clusters),
+            }),
+            services_subnet: Arc::clone(&self.services_subnet),
+            tls: self.tls.clone(),
+            dns: self.dns.clone(),
+            firewall: self.firewall.clone(),
             db,
             vs,
             db_proxy,
-        })
+        }
     }
-    async fn teardown(self) {}
+}
 
-    // The actors are actor handles (mpsc senders) safe for concurrent use;
-    // whether tests may actually run concurrently is decided by the other
-    // fixtures they use (cluster-mutating fixtures keep the default `false`).
-    fn test_can_run_concurrently() -> bool {
-        true
+/// One cluster's actors, together with the slice of the services subnet its
+/// nodes live on. Created by [`TestEnv::new_cluster`], never shared between
+/// groups that own different clusters.
+/// A reserved address block, returned to the pool once the cluster's actors are
+/// dropped, so that a later group can reuse it. Held behind an `Arc` because
+/// `TestActors` is cloned, and released only when the last clone goes away.
+struct ClusterSlot {
+    index: usize,
+    pool: Arc<Mutex<Vec<usize>>>,
+}
+
+impl Drop for ClusterSlot {
+    fn drop(&mut self) {
+        if let Ok(mut pool) = self.pool.lock() {
+            pool.push(self.index);
+        }
+    }
+}
+
+#[derive(Clone)]
+struct TestActors {
+    /// This cluster's address block, which also names its Vector Store nodes.
+    slot: Arc<ClusterSlot>,
+    pub(crate) services_subnet: Arc<ServicesSubnet>,
+    pub(crate) tls: mpsc::Sender<Tls>,
+    pub(crate) dns: mpsc::Sender<Dns>,
+    pub(crate) firewall: mpsc::Sender<Firewall>,
+    pub(crate) db: mpsc::Sender<ScyllaCluster>,
+    pub(crate) vs: mpsc::Sender<VectorStoreCluster>,
+    pub(crate) db_proxy: mpsc::Sender<ScyllaProxyCluster>,
+}
+
+impl TestActors {
+    /// Index of this cluster, which distinguishes its nodes' DNS names.
+    pub(crate) fn cluster(&self) -> usize {
+        self.slot.index
+    }
+
+    /// The first last-octet address of this cluster's block.
+    pub(crate) fn octet_base(&self) -> u8 {
+        u8::try_from(self.slot.index).expect("cluster index fits in an octet")
+            * CLUSTER_OCTET_STRIDE
     }
 }

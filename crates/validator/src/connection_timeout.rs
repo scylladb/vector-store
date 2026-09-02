@@ -21,12 +21,12 @@ e2etest::group!(
 );
 
 struct Fixture {
-    actors: Arc<TestActors>,
+    actors: TestActors,
 }
 
 impl e2etest::Fixture for Fixture {
     async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
-        let actors = setup.setup::<TestActors>().await?;
+        let actors = setup.setup::<crate::TestEnv>().await?.new_cluster().await;
         init_with_proxy_single_vs(&actors).await;
         Some(Self { actors })
     }
@@ -49,7 +49,8 @@ impl e2etest::Fixture for Fixture {
 /// - Restore connectivity by allowing traffic through the proxy.
 /// - Verify that vector-store eventually connects and becomes ready.
 #[e2etest::test(group = connection_timeout)]
-async fn connection_timeout_triggers_session_failure(actors: Arc<TestActors>) {
+async fn connection_timeout_triggers_session_failure(fixture: Arc<Fixture>) {
+    let actors = &fixture.actors;
     info!("started");
 
     info!("Stop vector-store");
@@ -58,14 +59,14 @@ async fn connection_timeout_triggers_session_failure(actors: Arc<TestActors>) {
     info!("Block all traffic through the proxy");
     actors
         .firewall
-        .drop_traffic(get_default_db_proxy_ips(&actors))
+        .drop_traffic(get_default_db_proxy_ips(actors))
         .await;
 
     info!("Restart vector-store with CQL connection timeout");
     actors
         .vs
-        .start(get_proxy_vs_node_configs(&actors).pipe(|mut nodes| {
-            let translation_map = get_proxy_translation_map(&actors);
+        .start(get_proxy_vs_node_configs(actors).pipe(|mut nodes| {
+            let translation_map = get_proxy_translation_map(actors);
             for node in nodes.iter_mut() {
                 node.envs.insert(
                     "VECTOR_STORE_CQL_URI_TRANSLATION_MAP".to_string(),
@@ -82,7 +83,7 @@ async fn connection_timeout_triggers_session_failure(actors: Arc<TestActors>) {
         .await;
 
     info!("Wait for VS HTTP to become reachable");
-    let vs_ips = get_default_vs_ips(&actors);
+    let vs_ips = get_default_vs_ips(actors);
     let vs_addr = std::net::SocketAddr::from((vs_ips[0], VS_PORT));
     let client = httpclient::HttpClient::new(vs_addr);
     wait_for(
