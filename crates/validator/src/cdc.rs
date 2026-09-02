@@ -1089,36 +1089,28 @@ async fn cdc_indexing_lag_metric_exported(ctx: Arc<TestContext>) {
     )
     .await;
 
-    // Scrape the /metrics endpoint and verify indexing_lag_seconds is present
-    // with the expected labels and at least one observation.
-    let metrics_output = wait_for_value(
-        || async {
-            let output = client.get_metrics_text().await;
-            output
-                .contains("# TYPE indexing_lag_seconds histogram")
-                .then_some(output)
-        },
-        "Waiting for indexing_lag_seconds histogram in /metrics output",
-        FINE_GRAINED_CDC_MAX_LATENCY,
-    )
-    .await;
-    assert!(
-        metrics_output.contains(&format!(r#"keyspace="{}""#, ctx.keyspace.as_ref())),
-        "expected keyspace label in indexing_lag_seconds metric:\n{metrics_output}"
-    );
-    assert!(
-        metrics_output.contains(&format!(r#"index_name="{}""#, index.index.as_ref())),
-        "expected index_name label in indexing_lag_seconds metric:\n{metrics_output}"
-    );
-    // The _count suffix confirms at least one observation was recorded.
+    // Scrape the /metrics endpoint and verify indexing_lag_seconds records an
+    // observation for this test's index. The `_count` suffix confirms at least
+    // one observation. Every index on the node exports this histogram, so wait
+    // for the sample carrying this index's labels rather than for the
+    // histogram itself, which a concurrently running test already exports.
     let expected_count_line = format!(
         r#"indexing_lag_seconds_count{{index_name="{}",keyspace="{}"}}"#,
         index.index.as_ref(),
         ctx.keyspace.as_ref()
     );
+    let metrics_output = wait_for_value(
+        || async {
+            let output = client.get_metrics_text().await;
+            output.contains(&expected_count_line).then_some(output)
+        },
+        format!("Waiting for '{expected_count_line}' in /metrics output"),
+        DEFAULT_OPERATION_TIMEOUT,
+    )
+    .await;
     assert!(
-        metrics_output.contains(&expected_count_line),
-        "expected indexing_lag_seconds_count with labels in /metrics output:\n{metrics_output}"
+        metrics_output.contains("# TYPE indexing_lag_seconds histogram"),
+        "expected indexing_lag_seconds to be exported as a histogram:\n{metrics_output}"
     );
 
     info!("finished");
