@@ -48,6 +48,7 @@ pub const VS_NAMES: [&str; 3] = ["vs1", "vs2", "vs3"];
 
 pub const VS_PORT: u16 = 6080;
 pub const DB_PORT: u16 = 9042;
+pub const ALTERNATOR_PORT: u16 = 8000;
 
 pub const DB_OCTET_1: u8 = 1;
 pub const DB_OCTET_2: u8 = 2;
@@ -216,6 +217,22 @@ pub fn get_default_db_proxy_ips(actors: &TestActors) -> Vec<Ipv4Addr> {
     ]
 }
 
+/// Arguments enabling the Alternator (DynamoDB-compatible) endpoint on a node.
+///
+/// The endpoint is enabled on every node so that all test clusters share one
+/// canonical ScyllaDB node configuration; CQL-only tests are unaffected by it.
+///
+/// NOTE: `--alternator-ttl-period-in-seconds` is already set in the default
+/// scylla args (0.5s). ScyllaDB rejects duplicate flags.
+pub fn default_alternator_args(node_ip: Ipv4Addr) -> Vec<String> {
+    vec![
+        format!("--alternator-port={ALTERNATOR_PORT}"),
+        format!("--alternator-address={node_ip}"),
+        "--alternator-write-isolation=only_rmw_uses_lwt".to_string(),
+        "--alternator-enforce-authorization=false".to_string(),
+    ]
+}
+
 #[framed]
 pub async fn get_default_scylla_node_configs(actors: &TestActors) -> Vec<ScyllaNodeConfig> {
     let default_vs_urls = get_default_vs_urls(actors).await;
@@ -226,11 +243,13 @@ pub async fn get_default_scylla_node_configs(actors: &TestActors) -> Vec<ScyllaN
         .enumerate()
         .map(|(i, &ip)| {
             let mut vs_urls = default_vs_urls.clone();
+            let mut args = e2etest_scylla_cluster::default_scylla_args();
+            args.extend(default_alternator_args(ip));
             ScyllaNodeConfig {
                 db_ip: ip,
                 primary_vs_uris: vec![vs_urls.remove(i)],
                 secondary_vs_uris: vs_urls,
-                args: e2etest_scylla_cluster::default_scylla_args(),
+                args,
                 cert_path: Some(cert_path.clone()),
                 key_path: Some(key_path.clone()),
                 extra_config: Some(scylla_auth_config()),

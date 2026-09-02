@@ -17,6 +17,7 @@ mod update_table;
 
 use crate::TestActors;
 use crate::common;
+use crate::common::ALTERNATOR_PORT;
 use async_backtrace::framed;
 use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
@@ -98,8 +99,6 @@ const MAX_ALTERNATOR_INDEX_NAME_LEN: usize = MAX_ALTERNATOR_TABLE_NAME_LEN;
 const MAX_ALTERNATOR_ATTRIBUTE_NAME_LEN: usize = 255;
 
 e2etest::group!(name = alternator, fixtures = (), parent = crate::validator);
-
-const ALTERNATOR_PORT: u16 = 8000;
 
 /// In ScyllaDB Alternator, a DynamoDB table named `T` is stored under the CQL
 /// keyspace `alternator_T`. Vector Store discovers indexes by scanning
@@ -628,8 +627,9 @@ where
     );
 }
 
-/// Applies the standard alternator base arguments plus `extra_args` overrides
-/// to default scylla node configs.
+/// Applies `extra_args` overrides to default scylla node configs. The
+/// standard alternator base arguments are already part of the default configs
+/// (see `common::default_alternator_args`).
 async fn get_scylla_configs(
     actors: &TestActors,
     extra_args: impl IntoIterator<Item = (&str, &str)>,
@@ -640,16 +640,6 @@ async fn get_scylla_configs(
     let mut scylla_configs = common::get_default_scylla_node_configs(actors).await;
 
     for config in &mut scylla_configs {
-        let node_ip = config.db_ip;
-        config.args.extend([
-            format!("--alternator-port={ALTERNATOR_PORT}"),
-            format!("--alternator-address={node_ip}"),
-            "--alternator-write-isolation=only_rmw_uses_lwt".to_string(),
-            "--alternator-enforce-authorization=false".to_string(),
-            // NOTE: --alternator-ttl-period-in-seconds is already set in
-            // DEFAULT_SCYLLA_ARGS (0.5s). ScyllaDB rejects duplicate flags.
-        ]);
-
         for (name, value) in &args {
             config.args.retain(|arg| !arg.starts_with(name));
             config.args.push(format!("{name}={value}"));
