@@ -28,6 +28,7 @@ mod tls_reload;
 
 use clap::Parser;
 use clap::Subcommand;
+use common::SharedCluster;
 use e2etest::Config;
 use e2etest_dns::Dns;
 use e2etest_dns::DnsExt;
@@ -174,6 +175,16 @@ fn validate_different_subnet(dns_ip: Ipv4Addr, base_ip: Ipv4Addr) {
 
 e2etest::group!(name = validator, fixtures = (TestActors));
 
+// Umbrella group owning the shared standard cluster. Groups whose tests only
+// need the default cluster (and do not mutate cluster-wide state) are
+// declared with `parent = crate::standard`, so a full run boots this cluster
+// once instead of once per group.
+e2etest::group!(
+    name = standard,
+    fixtures = (SharedCluster),
+    parent = validator
+);
+
 pub async fn run() -> ExitCode {
     let args = Args::parse();
     let root = validator();
@@ -307,4 +318,11 @@ impl e2etest::Fixture for TestActors {
         })
     }
     async fn teardown(self) {}
+
+    // The actors are actor handles (mpsc senders) safe for concurrent use;
+    // whether tests may actually run concurrently is decided by the other
+    // fixtures they use (cluster-mutating fixtures keep the default `false`).
+    fn test_can_run_concurrently() -> bool {
+        true
+    }
 }

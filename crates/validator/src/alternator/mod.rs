@@ -307,9 +307,9 @@ async fn make_dynamodb_client(db_ip: Ipv4Addr) -> Client {
 /// Polls the Alternator HTTP endpoint on `db_ip` until it responds successfully.
 ///
 /// The Alternator port may become available slightly after the CQL port (which
-/// is what `db.wait_for_ready()` checks), so `init` should call this once after
-/// the cluster has started before any tests run.
-async fn wait_for_alternator(db_ip: Ipv4Addr) {
+/// is what `db.wait_for_ready()` checks), so cluster init should call this once
+/// after the cluster has started before any tests run.
+pub(crate) async fn wait_for_alternator(db_ip: Ipv4Addr) {
     let client = make_dynamodb_client(db_ip).await;
     common::wait_for(
         || {

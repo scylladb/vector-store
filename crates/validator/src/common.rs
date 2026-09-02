@@ -478,6 +478,103 @@ pub async fn init_with_config(
     assert!(actors.vs.wait_for_ready().await);
 }
 
+/// The standard shared cluster: the default TLS+auth 3-node ScyllaDB cluster
+/// (with the Alternator endpoint enabled) plus 3 Vector Store nodes.
+///
+/// This fixture is held by the `standard` umbrella group (see `lib.rs`), so it
+/// is started once and shared by every test group under that umbrella. Test
+/// groups access it through fixtures such as [`TestContext`], which chain to
+/// it via `setup.setup::<SharedCluster>()`.
+///
+/// Tests running against this cluster must not mutate cluster-wide state
+/// (node restarts, firewall or proxy rules, DNS records, role changes);
+/// groups that need such mutations must run on their own dedicated cluster.
+pub struct SharedCluster {
+    pub actors: Arc<TestActors>,
+}
+
+impl e2etest::Fixture for SharedCluster {
+    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
+        let actors = setup.setup::<TestActors>().await?;
+        init(&actors).await;
+        crate::alternator::wait_for_alternator(actors.services_subnet.ip(DB_OCTET_1)).await;
+        Some(Self { actors })
+    }
+
+    async fn teardown(self) {
+        cleanup(&self.actors).await;
+    }
+
+    fn test_can_run_concurrently() -> bool {
+        true
+    }
+}
+
+/// Per-group CQL test context on the [`SharedCluster`]: a superuser session,
+/// HTTP clients for all Vector Store nodes, and a keyspace shared by every
+/// test in the group.
+///
+/// List this fixture in a group's `fixtures = (...)` tuple so that it lives
+/// for the whole group; tests then receive it via an `Arc<TestContext>`
+/// argument. Because tests may run concurrently on the same context, each
+/// test must create its own uniquely-named tables and indexes (via
+/// [`Self::create_table`] and [`Self::create_index`]) and must not drop or
+/// alter the shared keyspace or other tests' tables.
+pub struct TestContext {
+    _cluster: Arc<SharedCluster>,
+    pub session: Arc<Session>,
+    pub clients: Vec<HttpClient>,
+    pub keyspace: KeyspaceName,
+}
+
+impl e2etest::Fixture for TestContext {
+    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
+        let cluster = setup.setup::<SharedCluster>().await?;
+        let (session, clients) = prepare_connection(&cluster.actors).await;
+        let keyspace = create_keyspace(&session).await;
+        Some(Self {
+            _cluster: cluster,
+            session,
+            clients,
+            keyspace,
+        })
+    }
+
+    async fn teardown(self) {
+        self.session
+            .query_unpaged(format!("DROP KEYSPACE {}", self.keyspace), ())
+            .await
+            .expect("failed to drop the test context keyspace");
+    }
+
+    fn test_can_run_concurrently() -> bool {
+        true
+    }
+}
+
+impl TestContext {
+    /// Creates a uniquely-named table in the shared keyspace.
+    pub async fn create_table(&self, columns: &str, options: Option<&str>) -> TableName {
+        create_table(&self.session, columns, options).await
+    }
+
+    /// Starts building a `CREATE CUSTOM INDEX` query on a table in the shared
+    /// keyspace. Finish it with [`create_index`].
+    pub fn index_query<'a>(
+        &'a self,
+        table: &TableName,
+        target_column: &str,
+    ) -> CreateIndexQuery<'a> {
+        CreateIndexQuery::new(&self.session, &self.clients, table, target_column)
+    }
+
+    /// Creates a uniquely-named vector index and waits until every Vector
+    /// Store node sees it.
+    pub async fn create_index(&self, table: &TableName, target_column: &str) -> IndexInfo {
+        create_index(self.index_query(table, target_column)).await
+    }
+}
+
 #[framed]
 pub async fn cleanup(actors: &TestActors) {
     info!("started");
