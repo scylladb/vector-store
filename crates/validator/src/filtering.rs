@@ -69,10 +69,7 @@ async fn ann_filter_by_partition_key_eq(actors: Arc<TestActors>) {
 
     let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
 
-    for client in &clients {
-        let index_status = wait_for_index(client, &index).await;
-        assert_eq!(index_status.count, 20, "Expected 20 vectors to be indexed");
-    }
+    wait_for_index_count(&clients, &index, 20).await;
 
     let result = wait_for_value(
         || async {
@@ -140,10 +137,7 @@ async fn ann_filter_by_partition_key_in(actors: Arc<TestActors>) {
 
     let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
 
-    for client in &clients {
-        let index_status = wait_for_index(client, &index).await;
-        assert_eq!(index_status.count, 20, "Expected 20 vectors to be indexed");
-    }
+    wait_for_index_count(&clients, &index, 20).await;
 
     let result = wait_for_value(
         || async {
@@ -207,10 +201,7 @@ async fn ann_filter_by_clustering_key_lt(actors: Arc<TestActors>) {
 
     let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
 
-    for client in &clients {
-        let index_status = wait_for_index(client, &index).await;
-        assert_eq!(index_status.count, 10, "Expected 10 vectors to be indexed");
-    }
+    wait_for_index_count(&clients, &index, 10).await;
 
     let result = wait_for_value(
         || async {
@@ -274,10 +265,7 @@ async fn ann_filter_by_clustering_key_gt(actors: Arc<TestActors>) {
 
     let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
 
-    for client in &clients {
-        let index_status = wait_for_index(client, &index).await;
-        assert_eq!(index_status.count, 10, "Expected 10 vectors to be indexed");
-    }
+    wait_for_index_count(&clients, &index, 10).await;
 
     let result = wait_for_value(
         || async {
@@ -345,14 +333,7 @@ async fn ann_filter_by_inet_clustering_key_gt(actors: Arc<TestActors>) {
 
     let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
 
-    for client in &clients {
-        let index_status = wait_for_index(client, &index).await;
-        assert_eq!(
-            index_status.count,
-            addrs.len(),
-            "Expected every address to be indexed"
-        );
-    }
+    wait_for_index_count(&clients, &index, addrs.len()).await;
 
     // ScyllaDB owns the ordering, so take the expected rows from a plain query.
     let expected: HashSet<IpAddr> = get_query_results(
@@ -431,10 +412,7 @@ async fn ann_filter_by_clustering_key_range(actors: Arc<TestActors>) {
 
     let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
 
-    for client in &clients {
-        let index_status = wait_for_index(client, &index).await;
-        assert_eq!(index_status.count, 10, "Expected 10 vectors to be indexed");
-    }
+    wait_for_index_count(&clients, &index, 10).await;
 
     let result = wait_for_value(
         || async {
@@ -504,10 +482,7 @@ async fn ann_filter_by_pk_and_ck(actors: Arc<TestActors>) {
 
     let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
 
-    for client in &clients {
-        let index_status = wait_for_index(client, &index).await;
-        assert_eq!(index_status.count, 20, "Expected 20 vectors to be indexed");
-    }
+    wait_for_index_count(&clients, &index, 20).await;
 
     let result = wait_for_value(
         || async {
@@ -573,10 +548,7 @@ async fn ann_filter_returns_no_results_when_nothing_matches(actors: Arc<TestActo
 
     let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
 
-    for client in &clients {
-        let index_status = wait_for_index(client, &index).await;
-        assert_eq!(index_status.count, 10, "Expected 10 vectors to be indexed");
-    }
+    wait_for_index_count(&clients, &index, 10).await;
 
     // Wait until the index is operational for filtered queries
     wait_for(
@@ -642,10 +614,7 @@ async fn ann_filter_by_vector_column_fails(actors: Arc<TestActors>) {
 
     let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
 
-    for client in &clients {
-        let index_status = wait_for_index(client, &index).await;
-        assert_eq!(index_status.count, 5, "Expected 5 vectors to be indexed");
-    }
+    wait_for_index_count(&clients, &index, 5).await;
 
     session
         .query_unpaged(
@@ -703,13 +672,7 @@ async fn global_index_filter_by_filtering_columns(actors: Arc<TestActors>) {
         create_index(CreateIndexQuery::new(&session, &clients, &table, "v").filter_columns(["f"]))
             .await;
 
-    for client in &clients {
-        let index_status = wait_for_index(client, &index).await;
-        assert_eq!(
-            index_status.count, 10,
-            "Expected 10 vectors to be indexed in the index"
-        );
-    }
+    wait_for_index_count(&clients, &index, 10).await;
 
     info!("Querying index for f = 0");
     let results: HashSet<_> = get_query_results(
@@ -796,10 +759,7 @@ async fn ann_filter_by_blob_column_eq(actors: Arc<TestActors>) {
         create_index(CreateIndexQuery::new(&session, &clients, &table, "v").filter_columns(["f"]))
             .await;
 
-    for client in &clients {
-        let index_status = wait_for_index(client, &index).await;
-        assert_eq!(index_status.count, 2, "Expected 2 vectors to be indexed");
-    }
+    wait_for_index_count(&clients, &index, 2).await;
 
     info!("Querying index for f = 0x010203");
     let results = get_pks(
@@ -876,10 +836,7 @@ async fn ann_filter_by_blob_column_ordering_matches_scylla(actors: Arc<TestActor
         create_index(CreateIndexQuery::new(&session, &clients, &table, "v").filter_columns(["f"]))
             .await;
 
-    for client in &clients {
-        let index_status = wait_for_index(client, &index).await;
-        assert_eq!(index_status.count, 6, "Expected 6 vectors to be indexed");
-    }
+    wait_for_index_count(&clients, &index, 6).await;
 
     for (threshold_pk, threshold) in &values {
         let literal = blob_literal(threshold);
@@ -949,10 +906,7 @@ async fn ann_filter_by_boolean_column_eq(actors: Arc<TestActors>) {
         create_index(CreateIndexQuery::new(&session, &clients, &table, "v").filter_columns(["f"]))
             .await;
 
-    for client in &clients {
-        let index_status = wait_for_index(client, &index).await;
-        assert_eq!(index_status.count, 2, "Expected 2 vectors to be indexed");
-    }
+    wait_for_index_count(&clients, &index, 2).await;
 
     info!("Querying index for f = true");
     let results = get_pks(
@@ -1009,10 +963,7 @@ async fn ann_filter_by_boolean_column_ordering_matches_scylla(actors: Arc<TestAc
         create_index(CreateIndexQuery::new(&session, &clients, &table, "v").filter_columns(["f"]))
             .await;
 
-    for client in &clients {
-        let index_status = wait_for_index(client, &index).await;
-        assert_eq!(index_status.count, 2, "Expected 2 vectors to be indexed");
-    }
+    wait_for_index_count(&clients, &index, 2).await;
 
     for (threshold_pk, threshold) in &values {
         info!("Comparing ANN-filtered and plain (non-ANN) results for f < {threshold}");
@@ -1083,10 +1034,7 @@ async fn ann_filter_by_uuid_column_eq(actors: Arc<TestActors>) {
         create_index(CreateIndexQuery::new(&session, &clients, &table, "v").filter_columns(["f"]))
             .await;
 
-    for client in &clients {
-        let index_status = wait_for_index(client, &index).await;
-        assert_eq!(index_status.count, 2, "Expected 2 vectors to be indexed");
-    }
+    wait_for_index_count(&clients, &index, 2).await;
 
     info!("Querying index for f = {u0}");
     let results = get_pks(
@@ -1177,10 +1125,7 @@ async fn ann_filter_by_uuid_column_ordering_matches_scylla(actors: Arc<TestActor
         create_index(CreateIndexQuery::new(&session, &clients, &table, "v").filter_columns(["f"]))
             .await;
 
-    for client in &clients {
-        let index_status = wait_for_index(client, &index).await;
-        assert_eq!(index_status.count, 6, "Expected 6 vectors to be indexed");
-    }
+    wait_for_index_count(&clients, &index, 6).await;
 
     for (threshold_pk, threshold) in &values {
         info!("Comparing ANN-filtered and plain (non-ANN) results for f < {threshold}");
@@ -1251,10 +1196,7 @@ async fn ann_filter_by_timeuuid_column_eq(actors: Arc<TestActors>) {
         create_index(CreateIndexQuery::new(&session, &clients, &table, "v").filter_columns(["f"]))
             .await;
 
-    for client in &clients {
-        let index_status = wait_for_index(client, &index).await;
-        assert_eq!(index_status.count, 2, "Expected 2 vectors to be indexed");
-    }
+    wait_for_index_count(&clients, &index, 2).await;
 
     info!("Querying index for f = {t0}");
     let results = get_pks(
@@ -1323,10 +1265,7 @@ async fn ann_filter_by_timeuuid_column_ordering_matches_scylla(actors: Arc<TestA
         create_index(CreateIndexQuery::new(&session, &clients, &table, "v").filter_columns(["f"]))
             .await;
 
-    for client in &clients {
-        let index_status = wait_for_index(client, &index).await;
-        assert_eq!(index_status.count, 4, "Expected 4 vectors to be indexed");
-    }
+    wait_for_index_count(&clients, &index, 4).await;
 
     for (threshold_pk, threshold) in &values {
         info!("Comparing ANN-filtered and plain (non-ANN) results for f < {threshold}");
@@ -1401,13 +1340,7 @@ async fn local_index_filter_by_filtering_columns(actors: Arc<TestActors>) {
     )
     .await;
 
-    for client in &clients {
-        let index_status = wait_for_index(client, &index).await;
-        assert_eq!(
-            index_status.count, 100,
-            "Expected 100 vectors to be indexed in the index"
-        );
-    }
+    wait_for_index_count(&clients, &index, 100).await;
 
     info!("Querying index for pk = 3 AND f = 1");
     let results: HashSet<_> = get_query_results(
@@ -1483,10 +1416,7 @@ async fn global_index_filter_by_filtering_column_shared_with_primary_key(actors:
     )
     .await;
 
-    for client in &clients {
-        let index_status = wait_for_index(client, &index).await;
-        assert_eq!(index_status.count, 1, "Expected 1 vector to be indexed");
-    }
+    wait_for_index_count(&clients, &index, 1).await;
 
     let results = get_query_results(
         format!(
@@ -1549,10 +1479,7 @@ async fn local_index_filter_by_partition_key_eq(actors: Arc<TestActors>) {
     )
     .await;
 
-    for client in &clients {
-        let index_status = wait_for_index(client, &index).await;
-        assert_eq!(index_status.count, 20, "Expected 20 vectors to be indexed");
-    }
+    wait_for_index_count(&clients, &index, 20).await;
 
     let result = wait_for_value(
         || async {
@@ -1623,10 +1550,7 @@ async fn local_index_filter_by_clustering_key_range(actors: Arc<TestActors>) {
     )
     .await;
 
-    for client in &clients {
-        let index_status = wait_for_index(client, &index).await;
-        assert_eq!(index_status.count, 10, "Expected 10 vectors to be indexed");
-    }
+    wait_for_index_count(&clients, &index, 10).await;
 
     let result = wait_for_value(
         || async {
@@ -1691,10 +1615,7 @@ async fn local_index_filter_returns_no_results_when_nothing_matches(actors: Arc<
     )
     .await;
 
-    for client in &clients {
-        let index_status = wait_for_index(client, &index).await;
-        assert_eq!(index_status.count, 10, "Expected 10 vectors to be indexed");
-    }
+    wait_for_index_count(&clients, &index, 10).await;
 
     wait_for(
         || async {
@@ -1779,13 +1700,7 @@ async fn local_index_filter_by_partition_key_or_filtering(actors: Arc<TestActors
         )
         .await;
 
-        for client in &clients {
-            let index_status = wait_for_index(client, &index).await;
-            assert_eq!(
-                index_status.count, DATASET_SIZE,
-                "Expected {DATASET_SIZE} vectors to be indexed in the index"
-            );
-        }
+        wait_for_index_count(&clients, &index, DATASET_SIZE).await;
 
         info!("Querying index for {pc} = 1");
         let rows = get_query_results(
@@ -1877,10 +1792,7 @@ async fn global_ann_query_on_local_only_index_fails(actors: Arc<TestActors>) {
     )
     .await;
 
-    for client in &clients {
-        let index_status = wait_for_index(client, &index).await;
-        assert_eq!(index_status.count, 20, "Expected 20 vectors to be indexed");
-    }
+    wait_for_index_count(&clients, &index, 20).await;
 
     let err = session
         .query_unpaged(
@@ -2060,10 +1972,7 @@ async fn ann_filter_by_clustering_key_only_requires_allow_filtering(actors: Arc<
 
     let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
 
-    for client in &clients {
-        let index_status = wait_for_index(client, &index).await;
-        assert_eq!(index_status.count, 3, "Expected 3 vectors to be indexed");
-    }
+    wait_for_index_count(&clients, &index, 3).await;
 
     info!("Verify ANN query with only ck filtering is rejected without ALLOW FILTERING");
     session
@@ -2245,10 +2154,7 @@ async fn prepare_non_pk_column_filter_test(
     .await;
 
     let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
-    for client in &clients {
-        let index_status = wait_for_index(client, &index).await;
-        assert_eq!(index_status.count, 0, "Index should start empty");
-    }
+    wait_for_index_count(&clients, &index, 0).await;
 
     info!("Create index on non-PK column c");
     session
