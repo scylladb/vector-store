@@ -542,10 +542,11 @@ impl e2etest::Fixture for TestContext {
     }
 
     async fn teardown(self) {
-        self.session
-            .query_unpaged(format!("DROP KEYSPACE {}", self.keyspace), ())
-            .await
-            .expect("failed to drop the test context keyspace");
+        apply_schema_change(
+            &self.session,
+            format!("DROP KEYSPACE IF EXISTS {}", self.keyspace),
+        )
+        .await;
     }
 
     fn test_can_run_concurrently() -> bool {
@@ -634,10 +635,11 @@ impl e2etest::Fixture for ProxyTestContext {
         self.cluster.actors.db_proxy.turn_off_rules().await;
         self.cluster.actors.firewall.turn_off_rules().await;
         // Tests may legitimately have dropped their own keyspace already.
-        self.session
-            .query_unpaged(format!("DROP KEYSPACE IF EXISTS {}", self.keyspace), ())
-            .await
-            .expect("failed to drop the proxy test context keyspace");
+        apply_schema_change(
+            &self.session,
+            format!("DROP KEYSPACE IF EXISTS {}", self.keyspace),
+        )
+        .await;
     }
 }
 
@@ -979,15 +981,57 @@ pub fn unique_index_name() -> IndexName {
     unique_name("idx", &INDEX_COUNTER).into()
 }
 
+/// Runs a schema-changing statement, retrying while ScyllaDB rejects it
+/// because another schema change is in flight.
+///
+/// Schema changes are serialized through Raft group 0, which rejects a
+/// statement racing another one with "concurrent modification". Tests sharing
+/// a cluster issue their `CREATE TABLE` / `CREATE INDEX` / `DROP` statements
+/// concurrently, so that rejection is expected rather than a failure, and the
+/// caller must retry instead of failing the test.
+///
+/// The statement must be idempotent (use `IF EXISTS` / `IF NOT EXISTS` where a
+/// partially applied change could be observed), because a rejected attempt may
+/// still be retried.
+#[framed]
+pub async fn apply_schema_change(session: &Session, query: impl Into<String>) {
+    let query = query.into();
+    wait_for(
+        || async {
+            match session.query_unpaged(query.clone(), ()).await {
+                Ok(_) => true,
+                Err(err) if is_concurrent_schema_change(&err) => {
+                    info!("Retrying schema change rejected by a concurrent one: {query}");
+                    false
+                }
+                Err(err) => panic!("failed to apply schema change '{query}': {err}"),
+            }
+        },
+        format!("schema change to be applied: {query}"),
+        DEFAULT_OPERATION_TIMEOUT,
+    )
+    .await;
+}
+
+/// Whether the error is ScyllaDB rejecting a schema change because another one
+/// was applied concurrently, which is retryable.
+fn is_concurrent_schema_change(err: &impl std::fmt::Display) -> bool {
+    err.to_string().contains("concurrent modification")
+}
+
 #[framed]
 pub async fn create_keyspace(session: &Session) -> KeyspaceName {
     let keyspace = unique_keyspace_name();
 
     // Create keyspace with replication factor of 3 for the 3-node cluster
-    session.query_unpaged(
-        format!("CREATE KEYSPACE {keyspace} WITH replication = {{'class': 'NetworkTopologyStrategy', 'replication_factor': 3}}"),
-        (),
-    ).await.expect("failed to create a keyspace");
+    apply_schema_change(
+        session,
+        format!(
+            "CREATE KEYSPACE IF NOT EXISTS {keyspace} WITH replication = \
+             {{'class': 'NetworkTopologyStrategy', 'replication_factor': 3}}"
+        ),
+    )
+    .await;
 
     // Use keyspace
     session
@@ -1009,10 +1053,11 @@ pub async fn create_table(session: &Session, columns: &str, options: Option<&str
     };
 
     // Create table
-    session
-        .query_unpaged(format!("CREATE TABLE {table} ({columns}) {extra}"), ())
-        .await
-        .expect("failed to create a table");
+    apply_schema_change(
+        session,
+        format!("CREATE TABLE IF NOT EXISTS {table} ({columns}) {extra}"),
+    )
+    .await;
 
     table
 }
@@ -1025,7 +1070,7 @@ pub async fn create_index(query: CreateIndexQuery<'_>) -> IndexInfo {
         format!(" WITH OPTIONS = {{{}}}", query.options)
     };
     let cql_query = format!(
-        "CREATE CUSTOM INDEX {index} ON {table}({partition_columns}{target_column}{filter_columns}) USING '{index_type}'{options_clause}",
+        "CREATE CUSTOM INDEX IF NOT EXISTS {index} ON {table}({partition_columns}{target_column}{filter_columns}) USING '{index_type}'{options_clause}",
         index = query.index,
         table = query.table,
         partition_columns = query.partition_columns,
@@ -1034,11 +1079,7 @@ pub async fn create_index(query: CreateIndexQuery<'_>) -> IndexInfo {
         index_type = query.index_type,
     );
     info!("Create index: '{cql_query}'");
-    query
-        .session
-        .query_unpaged(cql_query, ())
-        .await
-        .expect("failed to create an index");
+    apply_schema_change(query.session, cql_query).await;
 
     for client in query.clients {
         wait_for(
