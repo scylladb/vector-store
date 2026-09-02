@@ -42,9 +42,11 @@ use e2etest_vector_store_cluster::VectorStoreCluster;
 use e2etest_vector_store_cluster::VectorStoreClusterExt;
 use std::env;
 use std::net::Ipv4Addr;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::thread;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use tokio::time;
@@ -103,12 +105,13 @@ struct RunArgs {
     duplicate_errors: bool,
 
     /// Maximum number of tests to run concurrently within a group.
+    /// Defaults to the number of available CPUs.
     ///
     /// Only groups whose fixtures allow it (those sharing a cluster and a
     /// keyspace, with per-test tables and indexes) run concurrently; groups
     /// that mutate cluster-wide state always run serially regardless of this
     /// value. Set to 1 to force fully sequential execution.
-    #[arg(long, default_value = "4", value_name = "N")]
+    #[arg(long, default_value_t = default_concurrency(), value_name = "N")]
     concurrency: usize,
 
     /// Path to the ScyllaDB executable.
@@ -174,6 +177,13 @@ fn init(args: RunArgs) -> Config {
         .with_permanent_fixture(args)
         .with_default_timeout(common::DEFAULT_TEST_TIMEOUT)
         .with_concurrency(concurrency)
+}
+
+/// The number of CPUs available to the process, used as the default number of
+/// tests to run concurrently. Falls back to a single test when the count
+/// cannot be determined.
+fn default_concurrency() -> usize {
+    thread::available_parallelism().map_or(1, NonZeroUsize::get)
 }
 
 fn validate_different_subnet(dns_ip: Ipv4Addr, base_ip: Ipv4Addr) {
