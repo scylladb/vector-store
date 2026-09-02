@@ -18,59 +18,76 @@ e2etest::group!(
     parent = crate::standard
 );
 
-#[e2etest::test(group = serde)]
-async fn test_serialization_deserialization_all_types(ctx: Arc<TestContext>) {
-    let cases = vec![
-        ("ascii", "'random_text'"),
-        ("bigint", "1234"),
-        ("blob", "0xdeadbeef"),
-        ("boolean", "true"),
-        ("date", "'2023-10-01'"),
-        ("decimal", "-98765432109876543210.123456789"),
-        ("double", "3.14159"),
-        ("float", "2.71828"),
-        ("inet", "'10.0.0.1'"),
-        ("int", "42"),
-        ("smallint", "123"),
-        ("tinyint", "7"),
-        ("uuid", "841685b2-8803-11f0-8de9-0242ac120002"),
-        ("timeuuid", "841685b2-8803-11f0-8de9-0242ac120002"),
-        ("time", "'08:12:54.2137'"),
-        ("timestamp", "'2023-10-01T12:34:56.789Z'"),
-        ("text", "'some_text'"),
-        ("varint", "-98765432109876543210"),
-    ];
+/// Indexes a table whose primary key has the given CQL type and checks that a
+/// row inserted with `data` as its key survives the round trip through the
+/// index: an ANN query must return it with its vector intact.
+async fn assert_key_type_round_trip(ctx: &TestContext, typ: &str, data: &str) {
+    let table = ctx
+        .create_table(&format!("id {typ} PRIMARY KEY, vec vector<float, 3>"), None)
+        .await;
+    ctx.session
+        .query_unpaged(
+            format!("INSERT INTO {table} (id, vec) VALUES ({data}, [1.0, 2.0, 3.0])"),
+            (),
+        )
+        .await
+        .expect("failed to insert data");
 
-    for (typ, data) in &cases {
-        let table = ctx
-            .create_table(&format!("id {typ} PRIMARY KEY, vec vector<float, 3>"), None)
-            .await;
-        ctx.session
-            .query_unpaged(
-                format!("INSERT INTO {table} (id, vec) VALUES ({data}, [1.0, 2.0, 3.0])"),
-                (),
-            )
-            .await
-            .expect("failed to insert data");
-
-        let index = ctx.create_index(&table, "vec").await;
-        for client in &ctx.clients {
-            wait_for_index(client, &index).await;
-        }
-
-        let rows = ctx
-            .session
-            .query_unpaged(
-                format!("SELECT * FROM {table} ORDER BY vec ANN OF [1.0, 2.0, 3.0] LIMIT 1"),
-                (),
-            )
-            .await
-            .expect("failed to select data");
-        let rows = rows.into_rows_result().unwrap();
-        assert_eq!(rows.rows_num(), 1);
-        let value: (CqlValue, Vec<f32>) = rows.first_row().unwrap();
-        assert_eq!(value.1, vec![1.0, 2.0, 3.0]);
+    let index = ctx.create_index(&table, "vec").await;
+    for client in &ctx.clients {
+        wait_for_index(client, &index).await;
     }
+
+    let rows = ctx
+        .session
+        .query_unpaged(
+            format!("SELECT * FROM {table} ORDER BY vec ANN OF [1.0, 2.0, 3.0] LIMIT 1"),
+            (),
+        )
+        .await
+        .expect("failed to select data");
+    let rows = rows.into_rows_result().unwrap();
+    assert_eq!(rows.rows_num(), 1);
+    let value: (CqlValue, Vec<f32>) = rows.first_row().unwrap();
+    assert_eq!(value.1, vec![1.0, 2.0, 3.0]);
+}
+
+/// Declares one test per CQL primary-key type.
+///
+/// A single test looping over the types would serialise the cases, each
+/// waiting out its own index build, which made this group the slowest one in
+/// the suite. As separate tests the framework runs them concurrently, within
+/// its configured concurrency limit, and names the failing type on its own.
+macro_rules! key_type_round_trip_tests {
+    ($($name:ident: $typ:literal = $data:literal,)*) => {
+        $(
+            #[e2etest::test(group = serde)]
+            async fn $name(ctx: Arc<TestContext>) {
+                assert_key_type_round_trip(&ctx, $typ, $data).await;
+            }
+        )*
+    };
+}
+
+key_type_round_trip_tests! {
+    serialization_ascii: "ascii" = "'random_text'",
+    serialization_bigint: "bigint" = "1234",
+    serialization_blob: "blob" = "0xdeadbeef",
+    serialization_boolean: "boolean" = "true",
+    serialization_date: "date" = "'2023-10-01'",
+    serialization_decimal: "decimal" = "-98765432109876543210.123456789",
+    serialization_double: "double" = "3.14159",
+    serialization_float: "float" = "2.71828",
+    serialization_inet: "inet" = "'10.0.0.1'",
+    serialization_int: "int" = "42",
+    serialization_smallint: "smallint" = "123",
+    serialization_tinyint: "tinyint" = "7",
+    serialization_uuid: "uuid" = "841685b2-8803-11f0-8de9-0242ac120002",
+    serialization_timeuuid: "timeuuid" = "841685b2-8803-11f0-8de9-0242ac120002",
+    serialization_time: "time" = "'08:12:54.2137'",
+    serialization_timestamp: "timestamp" = "'2023-10-01T12:34:56.789Z'",
+    serialization_text: "text" = "'some_text'",
+    serialization_varint: "varint" = "-98765432109876543210",
 }
 
 #[e2etest::test(group = serde)]
