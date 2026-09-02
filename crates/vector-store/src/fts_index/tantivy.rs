@@ -1038,6 +1038,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn highlight_marks_every_occurrence_of_a_term() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+        add_doc(&sender, 1, "fox").await;
+
+        let highlights = highlight(&sender, "fox", &["fox jumps, fox runs, fox sleeps"]).await;
+
+        assert_eq!(
+            highlights[0].as_deref(),
+            Some("<b>fox</b> jumps, <b>fox</b> runs, <b>fox</b> sleeps")
+        );
+    }
+
+    #[tokio::test]
+    async fn highlight_matches_case_insensitively_and_keeps_the_text_casing() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+        add_doc(&sender, 1, "The Quick Brown Fox").await;
+
+        let highlights = highlight(&sender, "FOX", &["The Quick Brown Fox jumps"]).await;
+
+        assert_eq!(
+            highlights[0].as_deref(),
+            Some("The Quick Brown <b>Fox</b> jumps")
+        );
+    }
+
+    #[tokio::test]
     async fn highlight_returns_none_when_query_term_was_never_indexed() {
         let table = make_table_with_keys();
         let sender = make_sender(table);
@@ -1145,6 +1173,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn highlight_returns_one_fragment_for_matches_too_far_apart_to_share_one() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+        add_doc(&sender, 1, "needle").await;
+
+        let filler = "haystack ".repeat(HIGHLIGHT_MAX_NUM_CHARS);
+        let text = format!("needle {filler} needle");
+        let highlights = highlight(&sender, "needle", &[text.as_str()]).await;
+
+        let highlight = highlights[0].as_deref().unwrap();
+        let marks = highlight.matches("<b>needle</b>").count();
+        assert_eq!(
+            marks, 1,
+            "expected a single fragment holding one of the two matches: {highlight}"
+        );
+    }
+
+    #[tokio::test]
     async fn highlight_empty_documents_returns_no_highlights() {
         let table = make_table_with_keys();
         let sender = make_sender(table);
@@ -1164,6 +1210,30 @@ mod tests {
         assert_eq!(
             highlights[0].as_deref(),
             Some("the quick <b>brown</b> <b>fox</b> jumps")
+        );
+    }
+
+    #[tokio::test]
+    async fn highlight_marks_the_required_term_of_a_grouped_conjunction() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+        add_doc(&sender, 1, "turtle meadow").await;
+        add_doc(&sender, 2, "fox meadow").await;
+
+        let highlights = highlight(
+            &sender,
+            "(fox OR turtle) AND meadow",
+            &["a turtle in the meadow", "a fox in the meadow"],
+        )
+        .await;
+
+        assert_eq!(
+            highlights[0].as_deref(),
+            Some("a <b>turtle</b> in the <b>meadow</b>")
+        );
+        assert_eq!(
+            highlights[1].as_deref(),
+            Some("a <b>fox</b> in the <b>meadow</b>")
         );
     }
 
