@@ -20,30 +20,10 @@ env:
   RUST_BACKTRACE: full
 
 jobs:
-  validator-scylla-nightly-digest:
-    runs-on: ubuntu-latest
-    steps:
-    - name: Get scylla-nightly digest for latest tag
-      id: get-scylla-nightly-latest-digest
-      if: contains(github.event.pull_request.labels.*.name, 'ci-use-latest-scylla-nightly')
-      run: wget -q -O - "https://hub.docker.com/v2/namespaces/scylladb/repositories/scylla-nightly/tags/latest" | jq -r .digest > scylla-nightly-digest
-
-    - name: Get scylla-nightly digest for the last working tag
-      if: steps.get-scylla-nightly-latest-digest.outcome == 'skipped'
-      uses: dawidd6/action-download-artifact@b6e2e70617bc3265edd6dab6c906732b2f1ae151 # v21
-      with:
-        workflow: daily.yml
-        name: scylla-nightly-digest
-        search_artifacts: true
-
-    - name: Show scylla-nightly digest
-      run: cat scylla-nightly-digest
-
-    - name: Upload scylla-nightly digest as artifact
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-      with:
-        name: scylla-nightly-digest
-        path: scylla-nightly-digest
+  validator-get-scylla-nightly-digest:
+    uses: $/.github/workflows/get-scylla-nightly-digest.yml
+    with:
+      use-latest-scylla-nightly: ${{ contains(github.event.pull_request.labels.*.name, 'ci-use-latest-scylla-nightly') }}
 
   validator-build:
     runs-on: ${{ contains(github.event.pull_request.labels.*.name, 'ci-use-amd64') && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
@@ -106,7 +86,7 @@ jobs:
         echo "testcases=[$(./vector-search-validator list | sed -E 's/(.*)::.*/\1/' | sort | uniq | xargs -n 1 -I '{}' echo \"{}\" | paste -sd,)]" >> "$GITHUB_OUTPUT"
 
   validator-tests:
-    needs: ["validator-scylla-nightly-digest", "validator-build"]
+    needs: ["validator-get-scylla-nightly-digest", "validator-build"]
     runs-on: ${{ contains(github.event.pull_request.labels.*.name, 'ci-use-amd64') && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
     strategy:
       fail-fast: false
@@ -144,7 +124,7 @@ jobs:
         ./run-validator-with-scylla-docker scylladb/scylla-nightly@$(cat scylla-nightly-digest) vector-store vector-search-validator "\"${testcase}\"::" --verbose
 
   validator-workflow-status:
-    needs: ["validator-scylla-nightly-digest", "validator-build", "validator-tests"]
+    needs: ["validator-get-scylla-nightly-digest", "validator-build", "validator-tests"]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -152,8 +132,8 @@ jobs:
       run: |
         return_code=0
 
-        if [[ "${{ needs.validator-scylla-nightly-digest.result }}" == "failure" ]]; then
-          echo "validator-scylla-nightly-digest job failed"
+        if [[ "${{ needs.validator-get-scylla-nightly-digest.result }}" == "failure" ]]; then
+          echo "validator-get-scylla-nightly-digest job failed"
           return_code=1
         fi
 
