@@ -3,7 +3,6 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
-use crate::TestActors;
 use crate::common::*;
 use async_backtrace::framed;
 use httpapi::FulltextIndexOptions;
@@ -17,51 +16,42 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use tracing::info;
 
-e2etest::group!(name = fts, fixtures = (Cluster), parent = crate::validator);
+e2etest::group!(
+    name = fts,
+    fixtures = (TestContext),
+    parent = crate::standard
+);
 
-struct Cluster {
-    actors: Arc<TestActors>,
-}
-
-impl e2etest::Fixture for Cluster {
-    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
-        let actors = setup.setup::<TestActors>().await?;
-        init(&actors).await;
-        Some(Self { actors })
-    }
-
-    async fn teardown(self) {
-        cleanup(&self.actors).await;
-    }
-}
-
-struct Fixture {
+/// A per-test full-text-search table in the group-shared keyspace, together
+/// with the helpers used by the FTS tests.
+///
+/// Each test constructs its own instance via [`FtsTable::create`], which
+/// creates a uniquely-named table so that tests stay independent while running
+/// concurrently on the shared [`TestContext`]. The table persists until the
+/// group teardown drops the shared keyspace.
+struct FtsTable {
     session: Arc<Session>,
+    clients: Vec<HttpClient>,
     keyspace: KeyspaceName,
     table: TableName,
-    clients: Vec<HttpClient>,
     index: RwLock<Option<Arc<IndexInfo>>>,
 }
 
-impl e2etest::Fixture for Fixture {
-    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
-        let cluster = setup.setup::<Cluster>().await?;
-        let (session, clients, keyspace, table) = Self::init_fts_table(&cluster.actors).await;
-        Some(Self {
-            session,
-            keyspace,
+impl FtsTable {
+    #[framed]
+    async fn create(ctx: &TestContext) -> Self {
+        let table = ctx
+            .create_table("pk INT PRIMARY KEY, content TEXT", None)
+            .await;
+        Self {
+            session: Arc::clone(&ctx.session),
+            clients: ctx.clients.clone(),
+            keyspace: ctx.keyspace.clone(),
             table,
-            clients,
             index: RwLock::new(None),
-        })
+        }
     }
 
-    async fn teardown(self) {
-        drop_fts_keyspace(&self.session, &self.keyspace).await;
-    }
-}
-
-impl Fixture {
     #[framed]
     async fn insert_documents<S: Into<String>>(&self, docs: impl IntoIterator<Item = (i32, S)>) {
         let stmt = self
@@ -167,18 +157,6 @@ impl Fixture {
             .map(|row| row.expect("failed to get row").0)
             .collect()
     }
-
-    #[framed]
-    async fn init_fts_table(
-        actors: &TestActors,
-    ) -> (Arc<Session>, Vec<HttpClient>, KeyspaceName, TableName) {
-        let (session, clients) = prepare_connection(actors).await;
-
-        let keyspace = create_keyspace(&session).await;
-        let table = create_table(&session, "pk INT PRIMARY KEY, content TEXT", None).await;
-
-        (session, clients, keyspace, table)
-    }
 }
 
 async fn create_fts_index(
@@ -203,61 +181,50 @@ async fn create_fts_index_with_options(
     .await
 }
 
-#[framed]
-async fn drop_fts_keyspace(session: &Session, keyspace: &KeyspaceName) {
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop a keyspace");
-}
-
 #[e2etest::test(group = fts)]
-async fn fts_index_lifecycle(actors: Arc<TestActors>) {
+async fn fts_index_lifecycle(ctx: Arc<TestContext>) {
     info!("started");
 
-    let (session, clients) = prepare_connection(&actors).await;
-
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(&session, "pk INT PRIMARY KEY, content TEXT", None).await;
+    let table = ctx
+        .create_table("pk INT PRIMARY KEY, content TEXT", None)
+        .await;
 
     info!("Creating fulltext index");
-    let index = create_fts_index(&session, &clients, &table).await;
+    let index = create_fts_index(&ctx.session, &ctx.clients, &table).await;
 
     info!("Verifying index is SERVING on all nodes");
-    for client in &clients {
+    for client in &ctx.clients {
         wait_for_index(client, &index).await;
     }
 
     info!("Dropping fulltext index");
-    session
+    ctx.session
         .query_unpaged(format!("DROP INDEX {}", index.index), ())
         .await
         .expect("failed to drop index");
 
     info!("Verifying index is removed on all nodes");
-    for client in &clients {
+    for client in &ctx.clients {
         wait_for_no_index(client, &index).await;
     }
-
-    drop_fts_keyspace(&session, &keyspace).await;
 
     info!("finished");
 }
 
 #[e2etest::test(group = fts)]
-async fn bm25_search_returns_matching_docs(fixture: Arc<Fixture>) {
+async fn bm25_search_returns_matching_docs(ctx: Arc<TestContext>) {
     info!("started");
 
-    fixture
-        .insert_documents([
-            (1, "the quick brown fox jumps over the lazy dog"),
-            (2, "a slow turtle walks through the garden"),
-            (3, "the fox runs across the meadow"),
-        ])
-        .await;
-    fixture.create_fts_index().await;
+    let t = FtsTable::create(&ctx).await;
+    t.insert_documents([
+        (1, "the quick brown fox jumps over the lazy dog"),
+        (2, "a slow turtle walks through the garden"),
+        (3, "the fox runs across the meadow"),
+    ])
+    .await;
+    t.create_fts_index().await;
 
-    let pks = fixture.bm25_search_pks("fox").await;
+    let pks = t.bm25_search_pks("fox").await;
 
     assert_eq!(pks.len(), 2, "expected exactly 2 results for 'fox'");
     assert!(pks.contains(&1), "expected pk 1 in results");
@@ -267,19 +234,19 @@ async fn bm25_search_returns_matching_docs(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn bm25_boolean_and_query(fixture: Arc<Fixture>) {
+async fn bm25_boolean_and_query(ctx: Arc<TestContext>) {
     info!("started");
 
-    fixture
-        .insert_documents([
-            (1, "the quick brown fox jumps over the lazy dog"),
-            (2, "a slow turtle walks through the garden"),
-            (3, "the fox runs across the meadow"),
-        ])
-        .await;
-    fixture.create_fts_index().await;
+    let t = FtsTable::create(&ctx).await;
+    t.insert_documents([
+        (1, "the quick brown fox jumps over the lazy dog"),
+        (2, "a slow turtle walks through the garden"),
+        (3, "the fox runs across the meadow"),
+    ])
+    .await;
+    t.create_fts_index().await;
 
-    let pks = fixture.bm25_search_pks("fox AND meadow").await;
+    let pks = t.bm25_search_pks("fox AND meadow").await;
 
     assert_eq!(pks, vec![3], "expected only pk 3 for 'fox AND meadow'");
 
@@ -287,19 +254,19 @@ async fn bm25_boolean_and_query(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn bm25_boolean_or_query(fixture: Arc<Fixture>) {
+async fn bm25_boolean_or_query(ctx: Arc<TestContext>) {
     info!("started");
 
-    fixture
-        .insert_documents([
-            (1, "the quick brown fox jumps over the lazy dog"),
-            (2, "a slow turtle walks through the garden"),
-            (3, "the fox runs across the meadow"),
-        ])
-        .await;
-    fixture.create_fts_index().await;
+    let t = FtsTable::create(&ctx).await;
+    t.insert_documents([
+        (1, "the quick brown fox jumps over the lazy dog"),
+        (2, "a slow turtle walks through the garden"),
+        (3, "the fox runs across the meadow"),
+    ])
+    .await;
+    t.create_fts_index().await;
 
-    let pks = fixture.bm25_search_pks("fox OR turtle").await;
+    let pks = t.bm25_search_pks("fox OR turtle").await;
 
     assert_eq!(
         pks.len(),
@@ -314,19 +281,19 @@ async fn bm25_boolean_or_query(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn bm25_boolean_not_query(fixture: Arc<Fixture>) {
+async fn bm25_boolean_not_query(ctx: Arc<TestContext>) {
     info!("started");
 
-    fixture
-        .insert_documents([
-            (1, "the quick brown fox jumps over the lazy dog"),
-            (2, "a slow turtle walks through the garden"),
-            (3, "the fox runs across the meadow"),
-        ])
-        .await;
-    fixture.create_fts_index().await;
+    let t = FtsTable::create(&ctx).await;
+    t.insert_documents([
+        (1, "the quick brown fox jumps over the lazy dog"),
+        (2, "a slow turtle walks through the garden"),
+        (3, "the fox runs across the meadow"),
+    ])
+    .await;
+    t.create_fts_index().await;
 
-    let pks = fixture.bm25_search_pks("fox NOT meadow").await;
+    let pks = t.bm25_search_pks("fox NOT meadow").await;
 
     assert_eq!(pks, vec![1], "expected only pk 1 for 'fox NOT meadow'");
 
@@ -334,19 +301,19 @@ async fn bm25_boolean_not_query(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn bm25_phrase_query(fixture: Arc<Fixture>) {
+async fn bm25_phrase_query(ctx: Arc<TestContext>) {
     info!("started");
 
-    fixture
-        .insert_documents([
-            (1, "the quick brown fox jumps over the lazy dog"),
-            (2, "a slow turtle walks through the garden"),
-            (3, "the fox runs across the meadow"),
-        ])
-        .await;
-    fixture.create_fts_index().await;
+    let t = FtsTable::create(&ctx).await;
+    t.insert_documents([
+        (1, "the quick brown fox jumps over the lazy dog"),
+        (2, "a slow turtle walks through the garden"),
+        (3, "the fox runs across the meadow"),
+    ])
+    .await;
+    t.create_fts_index().await;
 
-    let pks = fixture.bm25_search_pks(r#""quick brown fox""#).await;
+    let pks = t.bm25_search_pks(r#""quick brown fox""#).await;
 
     assert_eq!(
         pks,
@@ -358,16 +325,16 @@ async fn bm25_phrase_query(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn fts_crud_insert(fixture: Arc<Fixture>) {
+async fn fts_crud_insert(ctx: Arc<TestContext>) {
     info!("started");
 
-    fixture.create_fts_index().await;
-    fixture
-        .insert_documents([(1, "searchable document about databases")])
+    let t = FtsTable::create(&ctx).await;
+    t.create_fts_index().await;
+    t.insert_documents([(1, "searchable document about databases")])
         .await;
 
     wait_for(
-        || async { fixture.bm25_search_pks("databases").await == vec![1] },
+        || async { t.bm25_search_pks("databases").await == vec![1] },
         "index to reflect inserted document",
         DEFAULT_OPERATION_TIMEOUT,
     )
@@ -377,27 +344,26 @@ async fn fts_crud_insert(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn fts_crud_update(fixture: Arc<Fixture>) {
+async fn fts_crud_update(ctx: Arc<TestContext>) {
     info!("started");
 
-    fixture.create_fts_index().await;
-    fixture
-        .insert_documents([(1, "original content about alpha")])
+    let t = FtsTable::create(&ctx).await;
+    t.create_fts_index().await;
+    t.insert_documents([(1, "original content about alpha")])
         .await;
 
-    fixture
-        .insert_documents([(1, "updated content about beta")])
+    t.insert_documents([(1, "updated content about beta")])
         .await;
 
     wait_for(
-        || async { fixture.bm25_search_pks("alpha").await.is_empty() },
+        || async { t.bm25_search_pks("alpha").await.is_empty() },
         "index to stop matching old term 'alpha'",
         DEFAULT_OPERATION_TIMEOUT,
     )
     .await;
 
     wait_for(
-        || async { fixture.bm25_search_pks("beta").await == vec![1] },
+        || async { t.bm25_search_pks("beta").await == vec![1] },
         "index to reflect updated term 'beta'",
         DEFAULT_OPERATION_TIMEOUT,
     )
@@ -407,22 +373,22 @@ async fn fts_crud_update(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn fts_crud_delete(fixture: Arc<Fixture>) {
+async fn fts_crud_delete(ctx: Arc<TestContext>) {
     info!("started");
 
-    fixture
-        .insert_documents([
-            (1, "the quick brown fox jumps over the lazy dog"),
-            (2, "a slow turtle walks through the garden"),
-            (3, "the fox runs across the meadow"),
-        ])
-        .await;
-    fixture.create_fts_index().await;
+    let t = FtsTable::create(&ctx).await;
+    t.insert_documents([
+        (1, "the quick brown fox jumps over the lazy dog"),
+        (2, "a slow turtle walks through the garden"),
+        (3, "the fox runs across the meadow"),
+    ])
+    .await;
+    t.create_fts_index().await;
 
-    fixture.delete_document(1).await;
+    t.delete_document(1).await;
 
     wait_for(
-        || async { fixture.bm25_search_pks("fox").await == vec![3] },
+        || async { t.bm25_search_pks("fox").await == vec![3] },
         "index to reflect deletion of pk 1",
         DEFAULT_OPERATION_TIMEOUT,
     )
@@ -432,19 +398,19 @@ async fn fts_crud_delete(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn bm25_empty_results_for_nonexistent_term(fixture: Arc<Fixture>) {
+async fn bm25_empty_results_for_nonexistent_term(ctx: Arc<TestContext>) {
     info!("started");
 
-    fixture
-        .insert_documents([
-            (1, "the quick brown fox jumps over the lazy dog"),
-            (2, "a slow turtle walks through the garden"),
-            (3, "the fox runs across the meadow"),
-        ])
-        .await;
-    fixture.create_fts_index().await;
+    let t = FtsTable::create(&ctx).await;
+    t.insert_documents([
+        (1, "the quick brown fox jumps over the lazy dog"),
+        (2, "a slow turtle walks through the garden"),
+        (3, "the fox runs across the meadow"),
+    ])
+    .await;
+    t.create_fts_index().await;
 
-    let pks = fixture.bm25_search_pks("xyznonexistent").await;
+    let pks = t.bm25_search_pks("xyznonexistent").await;
 
     assert!(pks.is_empty(), "expected no results for non-existent term");
 
@@ -452,19 +418,19 @@ async fn bm25_empty_results_for_nonexistent_term(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn bm25_case_insensitive_search(fixture: Arc<Fixture>) {
+async fn bm25_case_insensitive_search(ctx: Arc<TestContext>) {
     info!("started");
 
-    fixture
-        .insert_documents([
-            (1, "the quick brown fox jumps over the lazy dog"),
-            (2, "a slow turtle walks through the garden"),
-            (3, "the fox runs across the meadow"),
-        ])
-        .await;
-    fixture.create_fts_index().await;
+    let t = FtsTable::create(&ctx).await;
+    t.insert_documents([
+        (1, "the quick brown fox jumps over the lazy dog"),
+        (2, "a slow turtle walks through the garden"),
+        (3, "the fox runs across the meadow"),
+    ])
+    .await;
+    t.create_fts_index().await;
 
-    let uppercase_pks = fixture.bm25_search_pks("FOX").await;
+    let uppercase_pks = t.bm25_search_pks("FOX").await;
 
     assert_eq!(
         uppercase_pks.len(),
@@ -484,19 +450,19 @@ async fn bm25_case_insensitive_search(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn bm25_stop_word_filtering(fixture: Arc<Fixture>) {
+async fn bm25_stop_word_filtering(ctx: Arc<TestContext>) {
     info!("started");
 
-    fixture
-        .insert_documents([
-            (1, "the quick brown fox jumps over the lazy dog"),
-            (2, "a slow turtle walks through the garden"),
-            (3, "the fox runs across the meadow"),
-        ])
-        .await;
-    fixture.create_fts_index().await;
+    let t = FtsTable::create(&ctx).await;
+    t.insert_documents([
+        (1, "the quick brown fox jumps over the lazy dog"),
+        (2, "a slow turtle walks through the garden"),
+        (3, "the fox runs across the meadow"),
+    ])
+    .await;
+    t.create_fts_index().await;
 
-    let with_stop_word_pks = fixture.bm25_search_pks("the fox").await;
+    let with_stop_word_pks = t.bm25_search_pks("the fox").await;
 
     assert_eq!(
         with_stop_word_pks.len(),
@@ -516,17 +482,16 @@ async fn bm25_stop_word_filtering(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn bm25_tokenizes_by_punctuation(fixture: Arc<Fixture>) {
+async fn bm25_tokenizes_by_punctuation(ctx: Arc<TestContext>) {
     info!("started");
 
-    fixture
-        .insert_documents([(1, "fox-runs fast, or: jumps!")])
-        .await;
-    fixture.create_fts_index().await;
+    let t = FtsTable::create(&ctx).await;
+    t.insert_documents([(1, "fox-runs fast, or: jumps!")]).await;
+    t.create_fts_index().await;
 
-    let fox_pks = fixture.bm25_search_pks("fox").await;
-    let runs_pks = fixture.bm25_search_pks("runs").await;
-    let jumps_pks = fixture.bm25_search_pks("jumps").await;
+    let fox_pks = t.bm25_search_pks("fox").await;
+    let runs_pks = t.bm25_search_pks("runs").await;
+    let jumps_pks = t.bm25_search_pks("jumps").await;
 
     assert_eq!(fox_pks, vec![1], "term 'fox' should be tokenized out");
     assert_eq!(runs_pks, vec![1], "term 'runs' should be tokenized out");
@@ -536,19 +501,19 @@ async fn bm25_tokenizes_by_punctuation(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn bm25_relevance_ranking_order(fixture: Arc<Fixture>) {
+async fn bm25_relevance_ranking_order(ctx: Arc<TestContext>) {
     info!("started");
 
-    fixture
-        .insert_documents([
-            (1, "fox fox fox jumps"),
-            (2, "fox runs across the meadow"),
-            (3, "a slow turtle walks through the garden"),
-        ])
-        .await;
-    fixture.create_fts_index().await;
+    let t = FtsTable::create(&ctx).await;
+    t.insert_documents([
+        (1, "fox fox fox jumps"),
+        (2, "fox runs across the meadow"),
+        (3, "a slow turtle walks through the garden"),
+    ])
+    .await;
+    t.create_fts_index().await;
 
-    let pks = fixture.bm25_search_pks("fox").await;
+    let pks = t.bm25_search_pks("fox").await;
 
     assert_eq!(
         pks,
@@ -560,15 +525,15 @@ async fn bm25_relevance_ranking_order(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn bm25_limit_restricts_result_count(fixture: Arc<Fixture>) {
+async fn bm25_limit_restricts_result_count(ctx: Arc<TestContext>) {
     info!("started");
 
-    fixture
-        .insert_documents((1..=10).map(|pk| (pk, "searchable document about databases")))
+    let t = FtsTable::create(&ctx).await;
+    t.insert_documents((1..=10).map(|pk| (pk, "searchable document about databases")))
         .await;
-    fixture.create_fts_index().await;
+    t.create_fts_index().await;
 
-    let result = fixture.bm25_search_with_limit("databases", 3).await;
+    let result = t.bm25_search_with_limit("databases", 3).await;
 
     assert_eq!(
         result.rows_num(),
@@ -580,19 +545,19 @@ async fn bm25_limit_restricts_result_count(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn bm25_grouped_boolean_query(fixture: Arc<Fixture>) {
+async fn bm25_grouped_boolean_query(ctx: Arc<TestContext>) {
     info!("started");
 
-    fixture
-        .insert_documents([
-            (1, "the quick brown fox jumps over the lazy dog"),
-            (2, "a slow turtle walks through the meadow"),
-            (3, "the fox runs across the meadow"),
-        ])
-        .await;
-    fixture.create_fts_index().await;
+    let t = FtsTable::create(&ctx).await;
+    t.insert_documents([
+        (1, "the quick brown fox jumps over the lazy dog"),
+        (2, "a slow turtle walks through the meadow"),
+        (3, "the fox runs across the meadow"),
+    ])
+    .await;
+    t.create_fts_index().await;
 
-    let pks = fixture.bm25_search_pks("(fox OR turtle) AND meadow").await;
+    let pks = t.bm25_search_pks("(fox OR turtle) AND meadow").await;
 
     assert!(
         pks.contains(&2),
@@ -608,23 +573,24 @@ async fn bm25_grouped_boolean_query(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn fts_recreate_index_serves_existing_data(fixture: Arc<Fixture>) {
+async fn fts_recreate_index_serves_existing_data(ctx: Arc<TestContext>) {
     info!("started");
 
+    let t = FtsTable::create(&ctx).await;
+
     info!("Inserting documents");
-    fixture
-        .insert_documents([
-            (1, "the quick brown fox jumps over the lazy dog"),
-            (2, "a fox walks through the garden"),
-            (3, "the fox runs across the meadow"),
-        ])
-        .await;
-    fixture.create_fts_index().await;
+    t.insert_documents([
+        (1, "the quick brown fox jumps over the lazy dog"),
+        (2, "a fox walks through the garden"),
+        (3, "the fox runs across the meadow"),
+    ])
+    .await;
+    t.create_fts_index().await;
 
-    fixture.drop_index().await;
-    fixture.create_fts_index().await;
+    t.drop_index().await;
+    t.create_fts_index().await;
 
-    let pks = fixture.bm25_search_pks("fox").await;
+    let pks = t.bm25_search_pks("fox").await;
 
     assert!(pks.contains(&1), "expected pk 1 after index recreate");
     assert!(pks.contains(&2), "expected pk 2 after index recreate");
@@ -634,24 +600,24 @@ async fn fts_recreate_index_serves_existing_data(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn fts_query_without_limit_returns_error(fixture: Arc<Fixture>) {
+async fn fts_query_without_limit_returns_error(ctx: Arc<TestContext>) {
     info!("started");
 
-    fixture
-        .insert_documents([
-            (1, "the quick brown fox jumps over the lazy dog"),
-            (2, "the fox runs across the meadow"),
-        ])
-        .await;
-    fixture.create_fts_index().await;
+    let t = FtsTable::create(&ctx).await;
+    t.insert_documents([
+        (1, "the quick brown fox jumps over the lazy dog"),
+        (2, "the fox runs across the meadow"),
+    ])
+    .await;
+    t.create_fts_index().await;
 
-    let err = fixture
+    let err = t
         .session
         .query_unpaged(
             format!(
                 "SELECT pk FROM {} WHERE BM25(content, 'fox') > 0 \
          ORDER BY BM25(content, 'fox')",
-                fixture.table
+                t.table
             ),
             (),
         )
@@ -668,15 +634,14 @@ async fn fts_query_without_limit_returns_error(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn fts_index_on_int_column_returns_error(actors: Arc<TestActors>) {
+async fn fts_index_on_int_column_returns_error(ctx: Arc<TestContext>) {
     info!("started");
 
-    let (session, _clients) = prepare_connection(&actors).await;
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(&session, "pk INT PRIMARY KEY, num INT", None).await;
+    let table = ctx.create_table("pk INT PRIMARY KEY, num INT", None).await;
     let index = unique_index_name();
 
-    let err = session
+    let err = ctx
+        .session
         .query_unpaged(
             format!("CREATE CUSTOM INDEX {index} ON {table}(num) USING 'fulltext_index'"),
             (),
@@ -690,18 +655,18 @@ async fn fts_index_on_int_column_returns_error(actors: Arc<TestActors>) {
         "unexpected error message: {err}"
     );
 
-    drop_fts_keyspace(&session, &keyspace).await;
-
     info!("finished");
 }
 
 #[e2etest::test(group = fts)]
-async fn fts_large_document_set(fixture: Arc<Fixture>) {
+async fn fts_large_document_set(ctx: Arc<TestContext>) {
     info!("started");
 
     let needle_pks = [1234, 5678, 9012];
     const LARGE_DATASET_SIZE: i32 = 10_000;
     const MAX_SEARCH_LIMIT: usize = 1000;
+
+    let t = FtsTable::create(&ctx).await;
 
     info!("Inserting {LARGE_DATASET_SIZE} documents");
     let docs = (1..=LARGE_DATASET_SIZE).map(|pk| {
@@ -712,19 +677,19 @@ async fn fts_large_document_set(fixture: Arc<Fixture>) {
         };
         (pk, content)
     });
-    fixture.insert_documents(docs).await;
+    t.insert_documents(docs).await;
 
     info!("Creating fulltext index over {LARGE_DATASET_SIZE} documents");
     measure_duration(
         format!("Index build for {LARGE_DATASET_SIZE} documents"),
-        || fixture.create_fts_index(),
+        || t.create_fts_index(),
     )
     .await;
 
     info!("Step 1: Verifying rare term matches only the expected documents");
     let rare_hits_pks = measure_duration(
         format!("BM25 needle search over {LARGE_DATASET_SIZE} documents"),
-        || fixture.bm25_search_pks("needle"),
+        || t.bm25_search_pks("needle"),
     )
     .await;
     let needle_pks_len = needle_pks.len();
@@ -753,7 +718,7 @@ async fn fts_large_document_set(fixture: Arc<Fixture>) {
     info!("Step 2: Verifying common term matches all documents, but is capped by LIMIT");
     let common_hits = measure_duration(
         format!("BM25 haystack search over {LARGE_DATASET_SIZE} documents"),
-        || fixture.bm25_search_with_limit("haystack", MAX_SEARCH_LIMIT),
+        || t.bm25_search_with_limit("haystack", MAX_SEARCH_LIMIT),
     )
     .await;
     let common_hits_rows_num = common_hits.rows_num();
@@ -767,17 +732,17 @@ async fn fts_large_document_set(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn fts_index_options_are_reported(fixture: Arc<Fixture>) {
+async fn fts_index_options_are_reported(ctx: Arc<TestContext>) {
     info!("started");
 
-    fixture
-        .create_fts_index_with_options(&[("analyzer", "german"), ("positions", "false")])
+    let t = FtsTable::create(&ctx).await;
+    t.create_fts_index_with_options(&[("analyzer", "german"), ("positions", "false")])
         .await;
 
-    let index = fixture.index();
-    for client in &fixture.clients {
+    let index = t.index();
+    for client in &t.clients {
         let info = client
-            .index_info(&fixture.keyspace, &index.index)
+            .index_info(&t.keyspace, &index.index)
             .await
             .expect("failed to get index info");
         assert_eq!(
@@ -794,44 +759,42 @@ async fn fts_index_options_are_reported(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn fts_english_analyzer_stems_terms(fixture: Arc<Fixture>) {
+async fn fts_english_analyzer_stems_terms(ctx: Arc<TestContext>) {
     info!("started");
 
-    fixture
-        .insert_documents([
-            (1, "the runners are running quickly"),
-            (2, "a turtle walks through the garden"),
-        ])
-        .await;
-    fixture
-        .create_fts_index_with_options(&[("analyzer", "english")])
+    let t = FtsTable::create(&ctx).await;
+    t.insert_documents([
+        (1, "the runners are running quickly"),
+        (2, "a turtle walks through the garden"),
+    ])
+    .await;
+    t.create_fts_index_with_options(&[("analyzer", "english")])
         .await;
 
     // Both the document and the query are stemmed, so "run" matches "running"
     // but not the semantically matching "walks" document.
-    let pks = fixture.bm25_search_pks("run").await;
+    let pks = t.bm25_search_pks("run").await;
     assert_eq!(pks, vec![1], "expected only pk 1 matching 'run'");
 
     info!("finished");
 }
 
 #[e2etest::test(group = fts)]
-async fn fts_standard_analyzer_does_not_stem_terms(fixture: Arc<Fixture>) {
+async fn fts_standard_analyzer_does_not_stem_terms(ctx: Arc<TestContext>) {
     info!("started");
 
-    fixture
-        .insert_documents([
-            (1, "the runners are running quickly"),
-            (2, "a turtle walks through the garden"),
-        ])
-        .await;
-    fixture
-        .create_fts_index_with_options(&[("analyzer", "standard")])
+    let t = FtsTable::create(&ctx).await;
+    t.insert_documents([
+        (1, "the runners are running quickly"),
+        (2, "a turtle walks through the garden"),
+    ])
+    .await;
+    t.create_fts_index_with_options(&[("analyzer", "standard")])
         .await;
 
     // The standard analyzer does not stem, so only the exact term matches.
     assert!(
-        fixture.bm25_search_pks("run").await.is_empty(),
+        t.bm25_search_pks("run").await.is_empty(),
         "the standard analyzer should not match 'run' against 'running'"
     );
 
@@ -839,22 +802,22 @@ async fn fts_standard_analyzer_does_not_stem_terms(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn fts_whitespace_analyzer_keeps_case(fixture: Arc<Fixture>) {
+async fn fts_whitespace_analyzer_keeps_case(ctx: Arc<TestContext>) {
     info!("started");
 
-    fixture.insert_documents([(1, "Quick brown Fox")]).await;
-    fixture
-        .create_fts_index_with_options(&[("analyzer", "whitespace")])
+    let t = FtsTable::create(&ctx).await;
+    t.insert_documents([(1, "Quick brown Fox")]).await;
+    t.create_fts_index_with_options(&[("analyzer", "whitespace")])
         .await;
 
     // The whitespace analyzer neither lowercases nor splits on punctuation.
     assert_eq!(
-        fixture.bm25_search_pks("Quick").await,
+        t.bm25_search_pks("Quick").await,
         vec![1],
         "the whitespace analyzer should match the exact term 'Quick'"
     );
     assert!(
-        fixture.bm25_search_pks("quick").await.is_empty(),
+        t.bm25_search_pks("quick").await.is_empty(),
         "the whitespace analyzer should keep the letter case of the indexed terms"
     );
 
@@ -862,18 +825,18 @@ async fn fts_whitespace_analyzer_keeps_case(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn fts_index_with_unsupported_options_returns_error(fixture: Arc<Fixture>) {
+async fn fts_index_with_unsupported_options_returns_error(ctx: Arc<TestContext>) {
     info!("started");
 
+    let t = FtsTable::create(&ctx).await;
     for (option, value) in [("analyzer", "klingon"), ("positions", "sometimes")] {
-        fixture
-            .session
+        t.session
             .query_unpaged(
                 format!(
                     "CREATE CUSTOM INDEX {} ON {}(content) USING 'fulltext_index' \
                      WITH OPTIONS = {{'{option}': '{value}'}}",
                     unique_index_name(),
-                    fixture.table
+                    t.table
                 ),
                 (),
             )

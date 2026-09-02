@@ -3,7 +3,6 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
-use crate::TestActors;
 use crate::common::*;
 use httpapi::IndexStatus;
 use std::sync::Arc;
@@ -11,88 +10,59 @@ use std::time::Duration;
 use tokio::time;
 use tracing::info;
 
-e2etest::group!(name = crud, fixtures = (Fixture), parent = crate::validator);
-
-struct Fixture {
-    actors: Arc<TestActors>,
-}
-
-impl e2etest::Fixture for Fixture {
-    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
-        let actors = setup.setup::<TestActors>().await?;
-        init(&actors).await;
-        Some(Self { actors })
-    }
-
-    async fn teardown(self) {
-        cleanup(&self.actors).await;
-    }
-}
+e2etest::group!(
+    name = crud,
+    fixtures = (TestContext),
+    parent = crate::standard
+);
 
 #[e2etest::test(group = crud)]
-async fn simple_create_drop_index(actors: Arc<TestActors>) {
+async fn simple_create_drop_index(ctx: Arc<TestContext>) {
     info!("started");
 
-    let (session, clients) = prepare_connection(&actors).await;
+    let table = ctx
+        .create_table(
+            "id BIGINT PRIMARY KEY, embedding VECTOR<FLOAT, 3>",
+            Some("CDC = {'enabled': true}"),
+        )
+        .await;
 
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(
-        &session,
-        "id BIGINT PRIMARY KEY, embedding VECTOR<FLOAT, 3>",
-        Some("CDC = {'enabled': true}"),
-    )
-    .await;
+    let index = ctx.create_index(&table, "embedding").await;
 
-    let index = create_index(CreateIndexQuery::new(
-        &session,
-        &clients,
-        &table,
-        "embedding",
-    ))
-    .await;
+    assert_eq!(index.keyspace, ctx.keyspace);
 
-    assert_eq!(index.keyspace, keyspace);
-
-    session
+    ctx.session
         .query_unpaged(format!("DROP INDEX {}", index.index), ())
         .await
         .expect("failed to drop an index");
 
-    for client in &clients {
+    for client in &ctx.clients {
         wait_for_no_index(client, &index).await;
     }
-
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop a keyspace");
 
     info!("finished");
 }
 
 #[e2etest::test(group = crud)]
-async fn simple_create_drop_multiple_indexes(actors: Arc<TestActors>) {
+async fn simple_create_drop_multiple_indexes(ctx: Arc<TestContext>) {
     info!("started");
 
-    let (session, clients) = prepare_connection(&actors).await;
-
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(
-        &session,
-        "pk INT PRIMARY KEY, v1 VECTOR<FLOAT, 3>, v2 VECTOR<FLOAT, 3>",
-        None,
-    )
-    .await;
+    let table = ctx
+        .create_table(
+            "pk INT PRIMARY KEY, v1 VECTOR<FLOAT, 3>, v2 VECTOR<FLOAT, 3>",
+            None,
+        )
+        .await;
 
     // Create index on column v1
-    let index1 = create_index(CreateIndexQuery::new(&session, &clients, &table, "v1")).await;
+    let index1 = ctx.create_index(&table, "v1").await;
 
     // Wait for the full scan to complete and check if ANN query succeeds on v1
-    for client in &clients {
+    for client in &ctx.clients {
         wait_for_index(client, &index1).await;
     }
     assert!(
-        session
+        ctx.session
             .query_unpaged(
                 format!("SELECT * FROM {table} ORDER BY v1 ANN OF [1.0, 2.0, 3.0] LIMIT 5"),
                 (),
@@ -102,7 +72,7 @@ async fn simple_create_drop_multiple_indexes(actors: Arc<TestActors>) {
     );
 
     // ANN query on v2 should not succeed without the index
-    session
+    ctx.session
         .query_unpaged(
             format!("SELECT * FROM {table} ORDER BY v2 ANN OF [1.0, 2.0, 3.0] LIMIT 5"),
             (),
@@ -111,10 +81,10 @@ async fn simple_create_drop_multiple_indexes(actors: Arc<TestActors>) {
         .expect_err("ANN query should fail when index does not exist");
 
     // Create index on column v2
-    let index2 = create_index(CreateIndexQuery::new(&session, &clients, &table, "v2")).await;
+    let index2 = ctx.create_index(&table, "v2").await;
 
     // Check if ANN query on v1 still succeeds
-    session
+    ctx.session
         .query_unpaged(
             format!("SELECT * FROM {table} ORDER BY v1 ANN OF [1.0, 2.0, 3.0] LIMIT 5"),
             (),
@@ -123,11 +93,11 @@ async fn simple_create_drop_multiple_indexes(actors: Arc<TestActors>) {
         .expect("failed to run ANN query");
 
     // Wait for the full scan to complete and check if ANN query succeeds on v2
-    for client in &clients {
+    for client in &ctx.clients {
         wait_for_index(client, &index2).await;
     }
     assert!(
-        session
+        ctx.session
             .query_unpaged(
                 format!("SELECT * FROM {table} ORDER BY v2 ANN OF [1.0, 2.0, 3.0] LIMIT 5"),
                 (),
@@ -137,7 +107,7 @@ async fn simple_create_drop_multiple_indexes(actors: Arc<TestActors>) {
     );
 
     // Drop index on column v1
-    session
+    ctx.session
         .query_unpaged(format!("DROP INDEX {}", index1.index), ())
         .await
         .expect("failed to drop an index");
@@ -145,12 +115,12 @@ async fn simple_create_drop_multiple_indexes(actors: Arc<TestActors>) {
     info!("waiting for the first index to be dropped");
 
     // Wait for the first index to be dropped
-    for client in &clients {
+    for client in &ctx.clients {
         wait_for_no_index(client, &index1).await;
     }
 
     // ANN query on v1 should not succeed after dropping the index
-    session
+    ctx.session
         .query_unpaged(
             format!("SELECT * FROM {table} ORDER BY v1 ANN OF [1.0, 2.0, 3.0] LIMIT 5"),
             (),
@@ -159,7 +129,7 @@ async fn simple_create_drop_multiple_indexes(actors: Arc<TestActors>) {
         .expect_err("ANN query should fail when index does not exist");
 
     // Check if ANN query on v2 still succeeds
-    session
+    ctx.session
         .query_unpaged(
             format!("SELECT * FROM {table} ORDER BY v2 ANN OF [1.0, 2.0, 3.0] LIMIT 5"),
             (),
@@ -168,40 +138,32 @@ async fn simple_create_drop_multiple_indexes(actors: Arc<TestActors>) {
         .expect("failed to run ANN query");
 
     // Drop index on column v2
-    session
+    ctx.session
         .query_unpaged(format!("DROP INDEX {}", index2.index), ())
         .await
         .expect("failed to drop an index");
 
     // Wait for the second index to be dropped
-    for client in &clients {
+    for client in &ctx.clients {
         wait_for_no_index(client, &index2).await;
     }
-
-    // Drop keyspace
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop a keyspace");
 
     info!("finished");
 }
 
 #[e2etest::test(group = crud)]
-async fn drop_table_removes_index(actors: Arc<TestActors>) {
+async fn drop_table_removes_index(ctx: Arc<TestContext>) {
     info!("started");
 
-    let (session, clients) = prepare_connection(&actors).await;
+    let table = ctx
+        .create_table(
+            "id INT PRIMARY KEY, embedding VECTOR<FLOAT, 3>",
+            Some("CDC = {'enabled': true}"),
+        )
+        .await;
 
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(
-        &session,
-        "id INT PRIMARY KEY, embedding VECTOR<FLOAT, 3>",
-        Some("CDC = {'enabled': true}"),
-    )
-    .await;
-
-    let stmt: scylla::statement::prepared::PreparedStatement = session
+    let stmt: scylla::statement::prepared::PreparedStatement = ctx
+        .session
         .prepare(format!(
             "INSERT INTO {table} (id, embedding) VALUES (?, [1.0, 2.0, 3.0])"
         ))
@@ -209,66 +171,58 @@ async fn drop_table_removes_index(actors: Arc<TestActors>) {
         .expect("failed to prepare a statement");
 
     for id in 0..1000 {
-        session
+        ctx.session
             .execute_unpaged(&stmt, (id,))
             .await
             .expect("failed to insert a row");
     }
 
-    let index = create_index(CreateIndexQuery::new(
-        &session,
-        &clients,
-        &table,
-        "embedding",
-    ))
-    .await;
+    let index = ctx.create_index(&table, "embedding").await;
 
-    let stmt = session
-        .prepare(format!("DROP TABLE {keyspace}.{table}"))
+    let stmt = ctx
+        .session
+        .prepare(format!(
+            "DROP TABLE {keyspace}.{table}",
+            keyspace = ctx.keyspace
+        ))
         .await
         .expect("failed to prepare a statement");
-    session
+    ctx.session
         .execute_unpaged(&stmt, ())
         .await
         .expect("failed to drop table");
 
-    for client in &clients {
+    for client in &ctx.clients {
         wait_for_no_index(client, &index).await;
     }
-
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop a keyspace");
 
     info!("finished");
 }
 
 #[e2etest::test(group = crud)]
-async fn null_vector_is_not_indexed(actors: Arc<TestActors>) {
+async fn null_vector_is_not_indexed(ctx: Arc<TestContext>) {
     info!("started");
 
-    let (session, clients) = prepare_connection(&actors).await;
-
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(&session, "pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None).await;
+    let table = ctx
+        .create_table("pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None)
+        .await;
 
     // Insert one row with a vector and one row with a null vector
-    session
+    ctx.session
         .query_unpaged(
             format!("INSERT INTO {table} (pk, v) VALUES (?, ?)"),
             (1i32, &vec![1.0f32, 1.0f32, 1.0f32]),
         )
         .await
         .expect("failed to insert row with vector");
-    session
+    ctx.session
         .query_unpaged(format!("INSERT INTO {table} (pk) VALUES (?)"), (2i32,))
         .await
         .expect("failed to insert row with null vector");
 
-    let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
+    let index = ctx.create_index(&table, "v").await;
 
-    for client in &clients {
+    for client in &ctx.clients {
         let index_status = wait_for_index(client, &index).await;
         assert_eq!(
             index_status.status,
@@ -280,11 +234,6 @@ async fn null_vector_is_not_indexed(actors: Arc<TestActors>) {
             "Expected only 1 vector to be indexed (null vector must be skipped)"
         );
     }
-
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop a keyspace");
 
     info!("finished");
 }
@@ -303,23 +252,22 @@ async fn null_vector_is_not_indexed(actors: Arc<TestActors>) {
 ///
 /// INSERT INTO ks.tbl (p, v) VALUES (2, [1.0, 2.0, 3.0]); <- this increases index size indefinitely and makes SELECT to return no rows
 #[e2etest::test(group = crud)]
-async fn global_add_remove_multiple_add(actors: Arc<TestActors>) {
+async fn global_add_remove_multiple_add(ctx: Arc<TestContext>) {
     info!("started");
 
-    let (session, clients) = prepare_connection(&actors).await;
-
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(&session, "p INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None).await;
+    let table = ctx
+        .create_table("p INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None)
+        .await;
 
     info!("Insert two rows");
-    session
+    ctx.session
         .query_unpaged(
             format!("INSERT INTO {table} (p, v) VALUES (?, ?)"),
             (1i32, &vec![1.0f32, 2.0f32, 3.0f32]),
         )
         .await
         .expect("failed to insert row with vector");
-    session
+    ctx.session
         .query_unpaged(
             format!("INSERT INTO {table} (p, v) VALUES (?, ?)"),
             (2i32, &vec![1.0f32, 2.0f32, 3.0f32]),
@@ -327,10 +275,10 @@ async fn global_add_remove_multiple_add(actors: Arc<TestActors>) {
         .await
         .expect("failed to insert row with vector");
 
-    let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
+    let index = ctx.create_index(&table, "v").await;
 
     info!("Wait for the full scan to complete");
-    for client in &clients {
+    for client in &ctx.clients {
         wait_for_index(client, &index).await;
         let index_status = client
             .index_status(&index.keyspace, &index.index)
@@ -340,12 +288,12 @@ async fn global_add_remove_multiple_add(actors: Arc<TestActors>) {
     }
 
     info!("Delete a row");
-    session
+    ctx.session
         .query_unpaged(format!("DELETE FROM {table} WHERE p = ?"), (2,))
         .await
         .expect("failed to delete row");
 
-    for client in &clients {
+    for client in &ctx.clients {
         wait_for(
             || async {
                 let index_status = client
@@ -362,7 +310,7 @@ async fn global_add_remove_multiple_add(actors: Arc<TestActors>) {
 
     let rows = get_query_results(
         format!("SELECT p FROM {table} ORDER BY v ANN OF [1.0, 2.0, 3.0] LIMIT 5"),
-        &session,
+        &ctx.session,
     )
     .await;
     let rows = rows.rows::<(i32,)>().expect("failed to get rows");
@@ -374,7 +322,7 @@ async fn global_add_remove_multiple_add(actors: Arc<TestActors>) {
 
     info!("Add same row several times");
     for _ in 0..10 {
-        session
+        ctx.session
             .query_unpaged(
                 format!("INSERT INTO {table} (p, v) VALUES (?, ?)"),
                 (2i32, &vec![1.0f32, 2.0f32, 3.0f32]),
@@ -390,7 +338,7 @@ async fn global_add_remove_multiple_add(actors: Arc<TestActors>) {
     info!("Run query ann and check that only 2 rows are returned");
     let rows = get_query_results(
         format!("SELECT p FROM {table} ORDER BY v ANN OF [1.0, 2.0, 3.0] LIMIT 5"),
-        &session,
+        &ctx.session,
     )
     .await;
     let rows = rows.rows::<(i32,)>().expect("failed to get rows");
@@ -401,7 +349,7 @@ async fn global_add_remove_multiple_add(actors: Arc<TestActors>) {
     );
 
     info!("Check index count of indexed rows");
-    for client in &clients {
+    for client in &ctx.clients {
         let index_status = client
             .index_status(&index.keyspace, &index.index)
             .await
@@ -412,7 +360,7 @@ async fn global_add_remove_multiple_add(actors: Arc<TestActors>) {
     info!("Run query ann and check that only 2 rows are returned");
     let rows = get_query_results(
         format!("SELECT p FROM {table} ORDER BY v ANN OF [1.0, 2.0, 3.0] LIMIT 5"),
-        &session,
+        &ctx.session,
     )
     .await;
     let rows = rows.rows::<(i32,)>().expect("failed to get rows");
@@ -421,12 +369,6 @@ async fn global_add_remove_multiple_add(actors: Arc<TestActors>) {
         2,
         "Expected 2 rows in the result after adding the same row multiple times"
     );
-
-    info!("Drop keyspace");
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop a keyspace");
 
     info!("finished");
 }
