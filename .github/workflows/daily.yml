@@ -147,18 +147,22 @@ jobs:
     - name: Set testcases output
       id: testcases
       run: |
-        # One job per cluster, not per group: the `standard` and `proxy`
-        # umbrella groups boot a single shared cluster for all their subgroups,
-        # so each runs as one job; every other top-level group boots its own
-        # cluster and gets its own job. A test name under an umbrella has three
-        # or more segments (`standard::ann::<test>`), a top-level group's has
-        # two (`auth::<test>`). Umbrella filters match partially
-        # (`standard::`); top-level ones are quoted for an exact match
-        # (`"auth"::`), so that `auth` does not also select `alternator_auth`.
-        filters=$(./vector-search-validator-amd64 list \
-          | awk -F'::' '{ print (NF > 2 ? $1 "::" : "\"" $1 "\"::") }' \
-          | sort -u)
-        echo "testcases=$(jq -Rsc 'split("\n") | map(select(length > 0))' <<< "$filters")" >> "$GITHUB_OUTPUT"
+        # One job per test group, so that the matrix is not serialised behind a
+        # single long job: groups sharing a cluster still run one after another
+        # within a job, which would make one job carrying many of them the
+        # workflow's critical path.
+        #
+        # A group's path is its test name minus the test, and the filter quotes
+        # it for an exact match so that a group is never selected by a job for
+        # another whose name it is a prefix of (`auth` and `alternator_auth`).
+        # Deriving the list from the binary keeps a newly added group from
+        # being silently dropped.
+        ./vector-search-validator-amd64 list \
+          | sed -E 's/::[^:]*$//' \
+          | sort -u \
+          | awk '{ print $0 "\t\"" $0 "\"::" }' \
+          | jq -Rc 'split("\t") | {name: .[0], filters: .[1]}' | jq -sc . \
+          | sed 's/^/testcases=/' >> "$GITHUB_OUTPUT"
 
   daily-validator-tests:
     needs: ["daily-get-scylla-nightly-digest", "daily-get-testcases"]
@@ -197,12 +201,14 @@ jobs:
     - name: Chmod a+x downloaded artifacts
       run: chmod a+x vector-store-${{matrix.arch}} vector-search-validator-${{matrix.arch}} run-validator-with-scylla-docker
 
-    - name: Run the Validator tests for testcase ${{matrix.testcase}}
+    - name: Run the Validator tests for testcase ${{matrix.testcase.name}}
       env:
-        testcase: ${{matrix.testcase}}
+        filters: ${{matrix.testcase.filters}}
         TARGETARCH: ${{matrix.arch}}
       run: |
-        ./run-validator-with-scylla-docker scylladb/scylla-nightly@$(cat scylla-nightly-digest) vector-store-${TARGETARCH} vector-search-validator-${TARGETARCH} "${testcase}" --verbose
+        # $filters is deliberately unquoted: a job may carry several filters,
+        # which have to reach the validator as separate arguments.
+        ./run-validator-with-scylla-docker scylladb/scylla-nightly@$(cat scylla-nightly-digest) vector-store-${TARGETARCH} vector-search-validator-${TARGETARCH} $filters --verbose
 
   daily-save-scylla-nightly-digest:
     needs: daily-validator-tests
