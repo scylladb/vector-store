@@ -147,7 +147,18 @@ jobs:
     - name: Set testcases output
       id: testcases
       run: |
-        echo "testcases=[$(./vector-search-validator-amd64 list | sed -E 's/(.*)::.*/\1/' | sort | uniq | xargs -n 1 -I '{}' echo \"{}\" | paste -sd,)]" >> "$GITHUB_OUTPUT"
+        # One job per cluster, not per group: the `standard` and `proxy`
+        # umbrella groups boot a single shared cluster for all their subgroups,
+        # so each runs as one job; every other top-level group boots its own
+        # cluster and gets its own job. A test name under an umbrella has three
+        # or more segments (`standard::ann::<test>`), a top-level group's has
+        # two (`auth::<test>`). Umbrella filters match partially
+        # (`standard::`); top-level ones are quoted for an exact match
+        # (`"auth"::`), so that `auth` does not also select `alternator_auth`.
+        filters=$(./vector-search-validator-amd64 list \
+          | awk -F'::' '{ print (NF > 2 ? $1 "::" : "\"" $1 "\"::") }' \
+          | sort -u)
+        echo "testcases=$(jq -Rsc 'split("\n") | map(select(length > 0))' <<< "$filters")" >> "$GITHUB_OUTPUT"
 
   daily-validator-tests:
     needs: ["daily-get-scylla-nightly-digest", "daily-get-testcases"]
@@ -191,7 +202,7 @@ jobs:
         testcase: ${{matrix.testcase}}
         TARGETARCH: ${{matrix.arch}}
       run: |
-        ./run-validator-with-scylla-docker scylladb/scylla-nightly@$(cat scylla-nightly-digest) vector-store-${TARGETARCH} vector-search-validator-${TARGETARCH} "\"${testcase}\"::" --verbose
+        ./run-validator-with-scylla-docker scylladb/scylla-nightly@$(cat scylla-nightly-digest) vector-store-${TARGETARCH} vector-search-validator-${TARGETARCH} "${testcase}" --verbose
 
   daily-save-scylla-nightly-digest:
     needs: daily-validator-tests
