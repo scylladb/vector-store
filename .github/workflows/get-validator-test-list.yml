@@ -1,0 +1,41 @@
+name: get-validator-test-list
+
+on:
+  workflow_call:
+    inputs:
+      os:
+        description: 'Operating system for the build'
+        required: true
+        type: string
+      arch:
+        description: 'Architecture for the build'
+        required: true
+        type: string
+    outputs:
+      testcases:
+        description: 'List of testcases'
+        value: ${{ jobs.get-validator-test-list.outputs.testcases }}
+
+permissions:
+  contents: read
+
+jobs:
+  get-validator-test-list:
+    runs-on: ${{ inputs.os }}
+    outputs:
+      testcases: ${{ steps.testcases.outputs.testcases }}
+
+    steps:
+    - name: Download vector-search-validator artifact
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      with:
+        name: vector-search-validator-${{inputs.arch}}
+
+    - name: Chmod a+x vector-search-validator
+      run: chmod a+x vector-search-validator
+
+    - name: Set testcases output
+      id: testcases
+      run: |
+        set -euo pipefail
+        echo "testcases=[$(./vector-search-validator list | sed -E 's/(.*)::.*/\1/' | sort | uniq | xargs -n 1 -I '{}' echo \"{}\" | paste -sd,)]" >> "$GITHUB_OUTPUT"

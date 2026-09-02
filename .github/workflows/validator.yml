@@ -25,73 +25,34 @@ jobs:
     with:
       use-latest-scylla-nightly: ${{ contains(github.event.pull_request.labels.*.name, 'ci-use-latest-scylla-nightly') }}
 
-  validator-build:
-    runs-on: ${{ contains(github.event.pull_request.labels.*.name, 'ci-use-amd64') && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
-    env:
-      TARGETARCH: ${{ contains(github.event.pull_request.labels.*.name, 'ci-use-amd64') && 'amd64' || 'arm64' }}
-    outputs:
-      testcases: ${{ steps.testcases.outputs.testcases }}
+  validator-build-validator:
+    uses: $/.github/workflows/build-validator.yml
+    with:
+      os: ${{ contains(github.event.pull_request.labels.*.name, 'ci-use-amd64') && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
+      arch: ${{ contains(github.event.pull_request.labels.*.name, 'ci-use-amd64') && 'amd64' || 'arm64' }}
+      ref: ${{ github.sha }}
 
-    steps:
-    - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      with:
-        fetch-depth: 0
-        fetch-tags: true
+  validator-build-vector-store:
+    uses: $/.github/workflows/build-vector-store.yml
+    with:
+      os: ${{ contains(github.event.pull_request.labels.*.name, 'ci-use-amd64') && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
+      arch: ${{ contains(github.event.pull_request.labels.*.name, 'ci-use-amd64') && 'amd64' || 'arm64' }}
+      ref: ${{ github.sha }}
 
-    - name: Setup local .cargo directories
-      run: mkdir -p $HOME/.cargo/git $HOME/.cargo/registry
-
-    - name: Print release toolchain rustc version
-      run: ./scripts/run-with-release-toolchain rustc --version
-
-    - name: Fetching dependencies
-      run: ./scripts/run-with-release-toolchain cargo fetch
-
-    - name: Build vector-store
-      run: ./scripts/run-with-release-toolchain cargo build --release --bin vector-store
-
-    - name: Copy vector-store
-      run: cp target/${TARGETARCH}/release/vector-store vector-store
-
-    - name: Build vector-search-validator
-      run: ./scripts/run-with-release-toolchain cargo build --release --bin vector-search-validator -p vector-search-validator
-
-    - name: Copy vector-search-validator
-      run: cp target/${TARGETARCH}/release/vector-search-validator vector-search-validator
-
-    - name: Upload vector-store as artifact
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-      with:
-        name: vector-store
-        path: vector-store
-
-    - name: Upload vector-search-validator as artifact
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-      with:
-        name: vector-search-validator
-        path: vector-search-validator
-
-    - name: Copy run-validator-with-scylla-docker script
-      run: cp scripts/run-validator-with-scylla-docker .
-
-    - name: Upload run-validator-with-scylla-docker as artifact
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-      with:
-        name: run-validator-with-scylla-docker
-        path: run-validator-with-scylla-docker
-
-    - name: Set testcases output
-      id: testcases
-      run: |
-        echo "testcases=[$(./vector-search-validator list | sed -E 's/(.*)::.*/\1/' | sort | uniq | xargs -n 1 -I '{}' echo \"{}\" | paste -sd,)]" >> "$GITHUB_OUTPUT"
+  validator-get-validator-test-list:
+    needs: ["validator-build-validator"]
+    uses: $/.github/workflows/get-validator-test-list.yml
+    with:
+      os: ${{ contains(github.event.pull_request.labels.*.name, 'ci-use-amd64') && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
+      arch: ${{ contains(github.event.pull_request.labels.*.name, 'ci-use-amd64') && 'amd64' || 'arm64' }}
 
   validator-tests:
-    needs: ["validator-get-scylla-nightly-digest", "validator-build"]
+    needs: ["validator-get-scylla-nightly-digest", "validator-build-vector-store", "validator-get-validator-test-list"]
     runs-on: ${{ contains(github.event.pull_request.labels.*.name, 'ci-use-amd64') && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
     strategy:
       fail-fast: false
       matrix:
-        testcase: ${{fromJSON(needs.validator-build.outputs.testcases)}}
+        testcase: ${{fromJSON(needs.validator-get-validator-test-list.outputs.testcases)}}
 
     steps:
     - name: Download scylla-nightly digest artifact
@@ -102,12 +63,12 @@ jobs:
     - name: Download vector-store artifact
       uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
       with:
-        name: vector-store
+        name: vector-store-${{ contains(github.event.pull_request.labels.*.name, 'ci-use-amd64') && 'amd64' || 'arm64' }}
 
     - name: Download vector-search-validator artifact
       uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
       with:
-        name: vector-search-validator
+        name: vector-search-validator-${{ contains(github.event.pull_request.labels.*.name, 'ci-use-amd64') && 'amd64' || 'arm64' }}
 
     - name: Download run-validator-with-scylla-docker artifact
       uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -124,7 +85,7 @@ jobs:
         ./run-validator-with-scylla-docker scylladb/scylla-nightly@$(cat scylla-nightly-digest) vector-store vector-search-validator "\"${testcase}\"::" --verbose
 
   validator-workflow-status:
-    needs: ["validator-get-scylla-nightly-digest", "validator-build", "validator-tests"]
+    needs: ["validator-get-scylla-nightly-digest", "validator-build-validator", "validator-build-vector-store", "validator-get-validator-test-list", "validator-tests"]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -137,8 +98,18 @@ jobs:
           return_code=1
         fi
 
-        if [[ "${{ needs.validator-build.result }}" == "failure" ]]; then
-          echo "validator-build job failed"
+        if [[ "${{ needs.validator-build-validator.result }}" == "failure" ]]; then
+          echo "validator-build-validator job failed"
+          return_code=1
+        fi
+
+        if [[ "${{ needs.validator-build-vector-store.result }}" == "failure" ]]; then
+          echo "validator-build-vector-store job failed"
+          return_code=1
+        fi
+
+        if [[ "${{ needs.validator-get-validator-test-list.result }}" == "failure" ]]; then
+          echo "validator-get-validator-test-list job failed"
           return_code=1
         fi
 
