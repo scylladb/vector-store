@@ -11,6 +11,9 @@ use tracing::info;
 /// PrimaryId is a unique identifier for a row in the table. It consists of an index and an
 /// epoch. The index is used to access the row in the column vectors, while the epoch is used
 /// to determine if the row has been updated.
+///
+/// [`bytemuck::Pod`] and the `repr(transparent)` layout let a `PrimaryId` be used
+/// as a DiskANN vector id.
 #[derive(
     Copy,
     Clone,
@@ -20,10 +23,14 @@ use tracing::info;
     PartialOrd,
     Ord,
     Hash,
+    bytemuck::Pod,
+    bytemuck::Zeroable,
     derive_more::AsRef,
+    derive_more::Display,
     derive_more::From,
     derive_more::Into,
 )]
+#[repr(transparent)]
 pub struct PrimaryId(u64);
 
 const _: () = assert!(
@@ -33,7 +40,9 @@ const _: () = assert!(
 
 impl PrimaryId {
     const EPOCH_SHIFT: usize = (mem::size_of::<u64>() - mem::size_of::<Epoch>()) * 8;
-    const MAX: u64 = !((Epoch::MAX as u64) << Self::EPOCH_SHIFT);
+
+    const RESERVED: u64 = !((Epoch::MAX as u64) << Self::EPOCH_SHIFT);
+    const MAX: u64 = Self::RESERVED - 1;
 
     pub(super) fn try_new(idx: usize, epoch: Epoch) -> anyhow::Result<Self> {
         if idx as u64 > Self::MAX {
@@ -45,7 +54,7 @@ impl PrimaryId {
     }
 
     pub(super) fn new_epoch(mut self, epoch: Epoch) -> Self {
-        self.0 &= Self::MAX;
+        self.0 &= Self::RESERVED;
         self.0 |= (epoch.0 as u64) << Self::EPOCH_SHIFT;
         self
     }
@@ -53,11 +62,21 @@ impl PrimaryId {
     pub(super) fn epoch(&self) -> Epoch {
         Epoch((self.0 >> Self::EPOCH_SHIFT) as u16)
     }
+
+    pub(crate) const fn new_reserved() -> Self {
+        Self(Self::RESERVED)
+    }
+}
+
+impl Default for PrimaryId {
+    fn default() -> Self {
+        Self(Self::RESERVED)
+    }
 }
 
 impl Idx for PrimaryId {
     fn idx(&self) -> usize {
-        (self.0 & Self::MAX) as usize
+        (self.0 & Self::RESERVED) as usize
     }
 }
 

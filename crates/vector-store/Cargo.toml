@@ -34,6 +34,7 @@ axum.workspace = true
 axum-server.workspace = true
 axum-server-dual-protocol.workspace = true
 bigdecimal.workspace = true
+bytemuck.workspace = true
 clap.workspace = true
 const-hex.workspace = true
 console-subscriber = {workspace = true, optional = true}
@@ -42,6 +43,7 @@ derive_more.workspace = true
 diskann.workspace = true
 diskann-vector.workspace = true
 diskann-inmem.workspace = true
+diskann-utils.workspace = true
 dotenvy.workspace = true
 futures.workspace = true
 hotpath.workspace = true
