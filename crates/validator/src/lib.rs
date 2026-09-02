@@ -102,6 +102,15 @@ struct RunArgs {
     #[arg(long, default_value = "false")]
     duplicate_errors: bool,
 
+    /// Maximum number of tests to run concurrently within a group.
+    ///
+    /// Only groups whose fixtures allow it (those sharing a cluster and a
+    /// keyspace, with per-test tables and indexes) run concurrently; groups
+    /// that mutate cluster-wide state always run serially regardless of this
+    /// value. Set to 1 to force fully sequential execution.
+    #[arg(long, default_value = "4", value_name = "N")]
+    concurrency: usize,
+
     /// Path to the ScyllaDB executable.
     #[arg(value_name = "PATH")]
     scylla: PathBuf,
@@ -158,11 +167,13 @@ fn init(args: RunArgs) -> Config {
         )
         .init();
 
+    let concurrency = args.concurrency;
     args.filters
         .iter()
         .fold(Config::default(), |acc, filter| acc.with_filter(filter))
         .with_permanent_fixture(args)
         .with_default_timeout(common::DEFAULT_TEST_TIMEOUT)
+        .with_concurrency(concurrency)
 }
 
 fn validate_different_subnet(dns_ip: Ipv4Addr, base_ip: Ipv4Addr) {
