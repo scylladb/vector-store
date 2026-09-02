@@ -21,27 +21,24 @@ use crate::PrimaryKey;
 use crate::Restriction;
 use crate::Timestamp;
 use crate::Vector;
+use crate::cql_types;
 use crate::primary_key::normalize;
 use crate::table::chunk_timestamps::ChunkTimestampsExclusive;
 use crate::timestamp::Timestamped;
 use anyhow::anyhow;
 use anyhow::bail;
-use bigdecimal::BigDecimal;
 use chunk_timestamps::ChunkTimestamps;
 use column::Column;
 use column_vec::ColumnVec;
 use column_vec_chunks::ColumnVecChunks;
 use itertools::Itertools;
-use num_bigint::BigInt;
 pub(crate) use partition_id::IndexId;
 pub(crate) use partition_id::IndexIdGenerator;
 pub use partition_id::PartitionId;
 use primary_id::Epoch;
 pub use primary_id::PrimaryId;
 use scylla::cluster::metadata::NativeType;
-use scylla::value::CqlDecimalBorrowed;
 use scylla::value::CqlValue;
-use scylla::value::CqlVarintBorrowed;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -1201,7 +1198,7 @@ impl TableSearch for Table {
                 .and_then(|column| column.get(primary_id, &self.primary_keys))
                 .and_then(|value| {
                     rhs.iter()
-                        .filter_map(|rhs| cql_cmp(&value, rhs))
+                        .filter_map(|rhs| cql_types::cmp(&value, rhs))
                         .any(|ord| ord.is_eq())
                         .then_some(())
                 })
@@ -1244,9 +1241,9 @@ impl TableSearch for Table {
                 lhs.and_then(|lhs| {
                     rhs.iter()
                         .any(|rhs| {
-                            lhs.iter()
-                                .zip(rhs.iter())
-                                .all(|(lhs, rhs)| cql_cmp(lhs, rhs).is_some_and(|ord| ord.is_eq()))
+                            lhs.iter().zip(rhs.iter()).all(|(lhs, rhs)| {
+                                cql_types::cmp(lhs, rhs).is_some_and(|ord| ord.is_eq())
+                            })
                         })
                         .then_some(())
                 })
@@ -1315,51 +1312,6 @@ fn partition_key_from_restrictions(
         })
 }
 
-/// Compare two CqlValues, returning an Ordering if they are comparable.
-/// Only Numeric, Text, Date, Time, and Timestamp types support comparison operators.
-fn cql_cmp(lhs: &CqlValue, rhs: &CqlValue) -> Option<Ordering> {
-    match (lhs, rhs) {
-        // Numeric types
-        (CqlValue::TinyInt(a), CqlValue::TinyInt(b)) => Some(a.cmp(b)),
-        (CqlValue::SmallInt(a), CqlValue::SmallInt(b)) => Some(a.cmp(b)),
-        (CqlValue::Int(a), CqlValue::Int(b)) => Some(a.cmp(b)),
-        (CqlValue::BigInt(a), CqlValue::BigInt(b)) => Some(a.cmp(b)),
-        (CqlValue::Float(a), CqlValue::Float(b)) => a.partial_cmp(b),
-        (CqlValue::Double(a), CqlValue::Double(b)) => a.partial_cmp(b),
-        (CqlValue::Counter(a), CqlValue::Counter(b)) => Some(a.0.cmp(&b.0)),
-        // Varint: semantic comparison via num-bigint
-        (CqlValue::Varint(a), CqlValue::Varint(b)) => {
-            let a_bi = BigInt::from(CqlVarintBorrowed::from_signed_bytes_be_slice(
-                a.as_signed_bytes_be_slice(),
-            ));
-            let b_bi = BigInt::from(CqlVarintBorrowed::from_signed_bytes_be_slice(
-                b.as_signed_bytes_be_slice(),
-            ));
-            Some(a_bi.cmp(&b_bi))
-        }
-        (CqlValue::Decimal(a), CqlValue::Decimal(b)) => {
-            let (a_bytes, a_scale) = a.as_signed_be_bytes_slice_and_exponent();
-            let (b_bytes, b_scale) = b.as_signed_be_bytes_slice_and_exponent();
-            let a_bd = BigDecimal::from(
-                CqlDecimalBorrowed::from_signed_be_bytes_slice_and_exponent(a_bytes, a_scale),
-            );
-            let b_bd = BigDecimal::from(
-                CqlDecimalBorrowed::from_signed_be_bytes_slice_and_exponent(b_bytes, b_scale),
-            );
-            Some(a_bd.cmp(&b_bd))
-        }
-        // Text types
-        (CqlValue::Text(a), CqlValue::Text(b)) => Some(a.cmp(b)),
-        (CqlValue::Ascii(a), CqlValue::Ascii(b)) => Some(a.cmp(b)),
-        // Date and Time types (access inner values directly)
-        (CqlValue::Date(a), CqlValue::Date(b)) => Some(a.0.cmp(&b.0)),
-        (CqlValue::Time(a), CqlValue::Time(b)) => Some(a.0.cmp(&b.0)),
-        (CqlValue::Timestamp(a), CqlValue::Timestamp(b)) => Some(a.0.cmp(&b.0)),
-        // Unsupported or mismatched types
-        _ => None,
-    }
-}
-
 /// Compare a column value for a given primary_id with a CqlValue.
 fn cql_cmp_single(
     columns: &BTreeMap<ColumnName, Column>,
@@ -1371,7 +1323,7 @@ fn cql_cmp_single(
     columns
         .get(lhs)
         .and_then(|column| column.get(primary_id, primary_keys))
-        .and_then(|value| cql_cmp(&value, rhs))
+        .and_then(|value| cql_types::cmp(&value, rhs))
 }
 
 /// Returns the ordering of the first non-equal pair, or None if all pairs are equal.
@@ -1420,7 +1372,6 @@ pub(crate) enum Operation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use scylla::value::CqlDecimal;
 
     #[test]
     fn flow() {
@@ -2383,206 +2334,6 @@ mod tests {
         );
         let values = NonemptyBox::new([value1, value2]).unwrap();
         assert!(split_values_filtering(values).is_err());
-    }
-
-    #[test]
-    fn cql_cmp_integers() {
-        assert_eq!(
-            cql_cmp(&CqlValue::Int(1), &CqlValue::Int(2)),
-            Some(Ordering::Less)
-        );
-        assert_eq!(
-            cql_cmp(&CqlValue::Int(2), &CqlValue::Int(2)),
-            Some(Ordering::Equal)
-        );
-        assert_eq!(
-            cql_cmp(&CqlValue::Int(3), &CqlValue::Int(2)),
-            Some(Ordering::Greater)
-        );
-    }
-
-    #[test]
-    fn cql_cmp_bigints() {
-        assert_eq!(
-            cql_cmp(&CqlValue::BigInt(100), &CqlValue::BigInt(200)),
-            Some(Ordering::Less)
-        );
-        assert_eq!(
-            cql_cmp(&CqlValue::BigInt(-50), &CqlValue::BigInt(-50)),
-            Some(Ordering::Equal)
-        );
-    }
-
-    #[test]
-    fn cql_cmp_floats() {
-        assert_eq!(
-            cql_cmp(&CqlValue::Float(1.0), &CqlValue::Float(2.0)),
-            Some(Ordering::Less)
-        );
-        assert_eq!(
-            cql_cmp(&CqlValue::Float(2.5), &CqlValue::Float(2.5)),
-            Some(Ordering::Equal)
-        );
-        // NaN comparison returns None
-        assert_eq!(
-            cql_cmp(&CqlValue::Float(f32::NAN), &CqlValue::Float(1.0)),
-            None
-        );
-    }
-
-    #[test]
-    fn cql_cmp_doubles() {
-        assert_eq!(
-            cql_cmp(&CqlValue::Double(1.0), &CqlValue::Double(2.0)),
-            Some(Ordering::Less)
-        );
-        assert_eq!(
-            cql_cmp(&CqlValue::Double(f64::NAN), &CqlValue::Double(1.0)),
-            None
-        );
-    }
-
-    #[test]
-    fn cql_cmp_text() {
-        assert_eq!(
-            cql_cmp(
-                &CqlValue::Text("apple".to_string()),
-                &CqlValue::Text("banana".to_string())
-            ),
-            Some(Ordering::Less)
-        );
-        assert_eq!(
-            cql_cmp(
-                &CqlValue::Text("same".to_string()),
-                &CqlValue::Text("same".to_string())
-            ),
-            Some(Ordering::Equal)
-        );
-    }
-
-    #[test]
-    fn cql_cmp_ascii() {
-        assert_eq!(
-            cql_cmp(
-                &CqlValue::Ascii("aaa".to_string()),
-                &CqlValue::Ascii("bbb".to_string())
-            ),
-            Some(Ordering::Less)
-        );
-    }
-
-    #[test]
-    fn cql_cmp_smallint_and_tinyint() {
-        assert_eq!(
-            cql_cmp(&CqlValue::SmallInt(10), &CqlValue::SmallInt(20)),
-            Some(Ordering::Less)
-        );
-        assert_eq!(
-            cql_cmp(&CqlValue::TinyInt(5), &CqlValue::TinyInt(3)),
-            Some(Ordering::Greater)
-        );
-    }
-
-    #[test]
-    fn cql_cmp_mismatched_types_return_none() {
-        assert_eq!(cql_cmp(&CqlValue::Int(1), &CqlValue::BigInt(1)), None);
-        assert_eq!(
-            cql_cmp(&CqlValue::Int(1), &CqlValue::Text("1".to_string())),
-            None
-        );
-        assert_eq!(cql_cmp(&CqlValue::Float(1.0), &CqlValue::Double(1.0)), None);
-    }
-
-    #[test]
-    fn cql_cmp_varint() {
-        use num_bigint::BigInt;
-        use scylla::value::CqlVarint;
-        let make = |s: &str| CqlValue::Varint(CqlVarint::from(s.parse::<BigInt>().unwrap()));
-
-        assert_eq!(
-            cql_cmp(&make("-1000000000000000000000"), &make("0")),
-            Some(Ordering::Less)
-        );
-        assert_eq!(
-            cql_cmp(&make("99999999999999999999"), &make("99999999999999999999")),
-            Some(Ordering::Equal)
-        );
-        assert_eq!(
-            cql_cmp(
-                &make("100000000000000000001"),
-                &make("99999999999999999999")
-            ),
-            Some(Ordering::Greater)
-        );
-        // negative values
-        assert_eq!(
-            cql_cmp(
-                &make("-98765432109876543210"),
-                &make("-12345678901234567890")
-            ),
-            Some(Ordering::Less)
-        );
-        assert_eq!(cql_cmp(&make("-1"), &make("1")), Some(Ordering::Less));
-        // large positive vs large negative
-        assert_eq!(
-            cql_cmp(
-                &make("98765432109876543210987654321098765432109876543210"),
-                &make("-98765432109876543210987654321098765432109876543210")
-            ),
-            Some(Ordering::Greater)
-        );
-    }
-
-    #[test]
-    fn cql_cmp_decimal() {
-        let make = |s: &str| {
-            CqlValue::Decimal(CqlDecimal::try_from(s.parse::<BigDecimal>().unwrap()).unwrap())
-        };
-
-        assert_eq!(
-            cql_cmp(&make("-98765432109876543210.123456789"), &make("0")),
-            Some(Ordering::Less)
-        );
-        assert_eq!(
-            cql_cmp(
-                &make("3.14159265358979323846"),
-                &make("3.14159265358979323846")
-            ),
-            Some(Ordering::Equal)
-        );
-        assert_eq!(
-            cql_cmp(
-                &make("1000000000000000000.000000001"),
-                &make("999999999999999999.999999999")
-            ),
-            Some(Ordering::Greater)
-        );
-        // different scales for semantically equal value: 1.50 == 1.5
-        assert_eq!(cql_cmp(&make("1.50"), &make("1.5")), Some(Ordering::Equal));
-        // negative comparisons
-        assert_eq!(
-            cql_cmp(&make("-0.000000001"), &make("0.000000001")),
-            Some(Ordering::Less)
-        );
-        assert_eq!(
-            cql_cmp(&make("-1.25"), &make("-1.125")),
-            Some(Ordering::Less)
-        );
-    }
-
-    #[test]
-    fn cql_cmp_unsupported_types_return_none() {
-        assert_eq!(
-            cql_cmp(
-                &CqlValue::Blob(vec![1, 2, 3]),
-                &CqlValue::Blob(vec![1, 2, 3])
-            ),
-            None
-        );
-        assert_eq!(
-            cql_cmp(&CqlValue::Boolean(true), &CqlValue::Boolean(false)),
-            None
-        );
     }
 
     #[test]

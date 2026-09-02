@@ -49,6 +49,7 @@ async fn test_serialization_deserialization_all_types(actors: Arc<TestActors>) {
         ("decimal", "-98765432109876543210.123456789"),
         ("double", "3.14159"),
         ("float", "2.71828"),
+        ("inet", "'10.0.0.1'"),
         ("int", "42"),
         ("smallint", "123"),
         ("tinyint", "7"),

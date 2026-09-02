@@ -28,6 +28,7 @@ use crate::Positions;
 use crate::Quantization;
 use crate::SpaceType;
 use crate::TableName;
+use crate::cql_types;
 use crate::db_index;
 use crate::db_index::DbIndex;
 use crate::db_index_backend;
@@ -866,6 +867,11 @@ impl Statements {
                     });
                     Ok(options.remove("target").and_then(|target| {
                         let kind = db_index_kind_from_options(&mut options)?;
+                        validate_primary_key_columns(table)
+                            .inspect_err(|err| {
+                                warn!("Skipping index {index_name}: {err}");
+                            })
+                            .ok()?;
                         from_target_option(table, target, kind, is_alternator)
                             .map(
                                 |(partitioning, target_column, filtering_columns)| DbCustomIndex {
@@ -1250,6 +1256,26 @@ fn validate_target_column(
         anyhow!("invalid target option: column {target_name} does not exist in a table")
     })?;
     validate_column_type_for_kind(target_name, &column.typ, kind)
+}
+
+fn validate_primary_key_columns(table: &Table) -> anyhow::Result<()> {
+    for name in table
+        .partition_key
+        .iter()
+        .chain(table.clustering_key.iter())
+    {
+        let column = table.columns.get(name).ok_or(anyhow!(
+            "primary key column {name} does not exist in a table"
+        ))?;
+        if !cql_types::is_supported(&column.typ) {
+            bail!(
+                "unsupported primary key column type: column {name} has type {:?}, \
+                which cannot be represented in an index primary key",
+                column.typ
+            );
+        }
+    }
+    Ok(())
 }
 
 fn validate_column_type_for_kind(

@@ -6,6 +6,7 @@
 mod alternator;
 mod async_in_progress;
 mod config_manager;
+mod cql_types;
 pub mod db;
 mod db_cdc;
 pub mod db_index;

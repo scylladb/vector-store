@@ -283,3 +283,84 @@ async fn local_index_based_on_f_columns(actors: Arc<TestActors>) {
 
     info!("finished");
 }
+
+/// Test that an index on a table with a primary key type the service cannot represent is skipped.
+/// Serving such an index would fail every query. Discovery must drop it and keep serving the other indexes.
+#[e2etest::test(group = index_create)]
+async fn index_with_unsupported_primary_key_type_is_skipped(actors: Arc<TestActors>) {
+    info!("started");
+
+    let (session, clients) = common::prepare_connection(&actors).await;
+    let keyspace = common::create_keyspace(&session).await;
+
+    info!("Create an index on a table with an unsupported primary key type");
+    let unsupported_table = common::create_table(
+        &session,
+        "pk FROZEN<TUPLE<INT, INT>> PRIMARY KEY, v VECTOR<FLOAT, 3>",
+        None,
+    )
+    .await;
+    let unsupported_index = common::unique_index_name();
+    session
+        .query_unpaged(
+            format!(
+                "CREATE CUSTOM INDEX {unsupported_index} ON {unsupported_table}(v) \
+                USING 'vector_index'"
+            ),
+            (),
+        )
+        .await
+        .expect("failed to create an index");
+
+    // Discovery reads `system_schema.indexes`, so the skipped index must be there to be skipped.
+    common::wait_for(
+        || async {
+            common::get_query_results(
+                format!(
+                    "SELECT index_name FROM system_schema.indexes \
+                    WHERE keyspace_name = '{keyspace}' AND table_name = '{unsupported_table}' \
+                    AND index_name = '{unsupported_index}'"
+                ),
+                &session,
+            )
+            .await
+            .rows_num()
+                == 1
+        },
+        "the unsupported index to appear in system_schema.indexes",
+        common::DEFAULT_OPERATION_TIMEOUT,
+    )
+    .await;
+
+    info!("Create a valid index in the same keyspace");
+    let table =
+        common::create_table(&session, "pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None).await;
+    let index = common::create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
+
+    // The valid index serves only after a discovery pass that already saw the skipped one.
+    wait_for_index(&clients, &index).await;
+
+    for client in &clients {
+        assert!(
+            !client
+                .indexes()
+                .await
+                .iter()
+                .any(|idx| idx.index == unsupported_index),
+            "Expected the unsupported index to be skipped at {url}",
+            url = client.url()
+        );
+        assert!(
+            client
+                .index_status(&keyspace, &unsupported_index)
+                .await
+                .is_err(),
+            "Expected no status for the skipped index at {url}",
+            url = client.url()
+        );
+    }
+
+    cleanup_keyspace(&actors, &keyspace).await;
+
+    info!("finished");
+}
