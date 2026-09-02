@@ -6,6 +6,7 @@
 use crate::TestActors;
 use async_backtrace::framed;
 use e2etest_dns::DnsExt;
+use e2etest_firewall::FirewallExt;
 use e2etest_scylla_cluster::ScyllaClusterExt;
 use e2etest_scylla_cluster::ScyllaNodeConfig;
 use e2etest_scylla_proxy_cluster::ScyllaProxyClusterExt;
@@ -575,9 +576,112 @@ impl TestContext {
     }
 }
 
+/// The shared proxy cluster: scylla-proxy in front of the 3-node ScyllaDB
+/// cluster with a single Vector Store node, held by the `proxy` umbrella group
+/// (see `lib.rs`) and shared by the groups that only manipulate proxy rules
+/// (they must not change the cluster topology or Vector Store configuration).
+///
+/// Proxy rules are cluster-global mutable state, so tests on this cluster keep
+/// the default non-concurrent execution and go through [`ProxyTestContext`],
+/// which resets the rules around every test.
+pub struct ProxyCluster {
+    pub actors: Arc<TestActors>,
+}
+
+impl e2etest::Fixture for ProxyCluster {
+    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
+        let actors = setup.setup::<TestActors>().await?;
+        init_with_proxy_single_vs(&actors).await;
+        Some(Self { actors })
+    }
+
+    async fn teardown(self) {
+        cleanup(&self.actors).await;
+    }
+}
+
+/// Per-test context on the [`ProxyCluster`]: a fresh no-TLS superuser session
+/// (opening it resets the proxy rules), the single Vector Store client, and a
+/// fresh keyspace.
+///
+/// Reference this fixture only from test arguments — never from a group's
+/// `fixtures = (...)` tuple — so it is set up before and torn down after every
+/// test: proxy tests mutate cluster-global rules and each must start from a
+/// clean slate and clean up even when the previous test panicked mid-way.
+pub struct ProxyTestContext {
+    cluster: Arc<ProxyCluster>,
+    pub session: Arc<Session>,
+    pub clients: Vec<HttpClient>,
+    pub keyspace: KeyspaceName,
+}
+
+impl e2etest::Fixture for ProxyTestContext {
+    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
+        let cluster = setup.setup::<ProxyCluster>().await?;
+        let (session, clients) = prepare_connection_single_vs_no_tls(&cluster.actors).await;
+        let keyspace = create_keyspace(&session).await;
+        Some(Self {
+            cluster,
+            session,
+            clients,
+            keyspace,
+        })
+    }
+
+    async fn teardown(self) {
+        // Reset the rule state a failed test may have leaked before touching
+        // the database again.
+        self.cluster.actors.db_proxy.turn_off_rules().await;
+        self.cluster.actors.firewall.turn_off_rules().await;
+        // Tests may legitimately have dropped their own keyspace already.
+        self.session
+            .query_unpaged(format!("DROP KEYSPACE IF EXISTS {}", self.keyspace), ())
+            .await
+            .expect("failed to drop the proxy test context keyspace");
+    }
+}
+
+impl ProxyTestContext {
+    /// The shared test actors, for driving proxy rules and reading internals.
+    pub fn actors(&self) -> &TestActors {
+        &self.cluster.actors
+    }
+
+    /// The single Vector Store client of the proxy cluster.
+    pub fn client(&self) -> &HttpClient {
+        &self.clients[0]
+    }
+
+    /// Creates a uniquely-named table in the per-test keyspace.
+    pub async fn create_table(&self, columns: &str, options: Option<&str>) -> TableName {
+        create_table(&self.session, columns, options).await
+    }
+
+    /// Starts building a `CREATE CUSTOM INDEX` query on a table in the
+    /// per-test keyspace. Finish it with [`create_index`].
+    pub fn index_query<'a>(
+        &'a self,
+        table: &TableName,
+        target_column: &str,
+    ) -> CreateIndexQuery<'a> {
+        CreateIndexQuery::new(&self.session, &self.clients, table, target_column)
+    }
+
+    /// Creates a uniquely-named vector index and waits until the Vector Store
+    /// node sees it.
+    pub async fn create_index(&self, table: &TableName, target_column: &str) -> IndexInfo {
+        create_index(self.index_query(table, target_column)).await
+    }
+}
+
 #[framed]
 pub async fn cleanup(actors: &TestActors) {
     info!("started");
+    // A test that panics between installing firewall rules and removing them
+    // would otherwise leak them into the host routing table and poison every
+    // later cluster on the same addresses; the firewall actor has no automatic
+    // cleanup of its own, so reset it here (a no-op when no rules are active).
+    actors.firewall.turn_off_rules().await;
     for name in VS_NAMES.iter() {
         actors.dns.remove(name.to_string()).await;
     }

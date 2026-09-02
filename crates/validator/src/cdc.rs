@@ -3,7 +3,6 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
-use crate::TestActors;
 use crate::common::*;
 use bytes::BytesMut;
 use e2etest_scylla_proxy_cluster::ScyllaProxyClusterExt;
@@ -34,25 +33,9 @@ e2etest::group!(
 
 e2etest::group!(
     name = cdc_proxy,
-    fixtures = (FixtureProxy),
-    parent = crate::validator
+    fixtures = (ProxyTestContext),
+    parent = crate::proxy
 );
-
-struct FixtureProxy {
-    actors: Arc<TestActors>,
-}
-
-impl e2etest::Fixture for FixtureProxy {
-    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
-        let actors = setup.setup::<TestActors>().await?;
-        init_with_proxy_single_vs(&actors).await;
-        Some(Self { actors })
-    }
-
-    async fn teardown(self) {
-        cleanup(&self.actors).await;
-    }
-}
 
 #[e2etest::test(group = cdc_direct)]
 async fn cdc_insert_visible_immediately(ctx: Arc<TestContext>) {
@@ -943,28 +926,24 @@ async fn skip_null_target(ctx: Arc<TestContext>) {
 /// 6. Remove the error injection and wait for the index to be built successfully.
 /// 7. Drop the keyspace.
 #[e2etest::test(group = cdc_proxy)]
-async fn reader_retries_after_error(actors: Arc<TestActors>) {
+async fn reader_retries_after_error(ctx: Arc<ProxyTestContext>) {
     info!("started");
 
-    let (session, clients) = prepare_connection_single_vs_no_tls(&actors).await;
-    let client = clients.first().unwrap();
-
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(&session, "pk ASCII PRIMARY KEY, v VECTOR<FLOAT, 3>", None).await;
+    let client = ctx.client();
+    let table = ctx
+        .create_table("pk ASCII PRIMARY KEY, v VECTOR<FLOAT, 3>", None)
+        .await;
 
     let index_name = unique_index_name();
-    let index_ident = format!("{keyspace}.{index_name}");
+    let index_ident = format!("{}.{index_name}", ctx.keyspace);
 
-    let index = create_index(
-        CreateIndexQuery::new(&session, &clients, table.as_ref(), "v").index_name(index_name),
-    )
-    .await;
+    let index = create_index(ctx.index_query(&table, "v").index_name(index_name)).await;
     wait_for_index(client, &index).await;
 
     const MARKER: &str = "test-cdc-retry";
 
     info!("Inject artificial errors into the CDC reader to test retry logic");
-    actors
+    ctx.actors()
         .db_proxy
         .change_response_rules(Some(vec![ResponseRule(
             Condition::And(
@@ -1012,7 +991,7 @@ async fn reader_retries_after_error(actors: Arc<TestActors>) {
 
     info!("Insert rows with marker");
     let pk = format!("{MARKER}-pk");
-    session
+    ctx.session
         .query_unpaged(
             format!("INSERT INTO {table} (pk, v) VALUES ('{pk}', [1.0, 2.0, 3.0])"),
             (),
@@ -1055,7 +1034,7 @@ async fn reader_retries_after_error(actors: Arc<TestActors>) {
     log_counters().await;
 
     info!("Remove the error injection");
-    actors.db_proxy.turn_off_rules().await;
+    ctx.actors().db_proxy.turn_off_rules().await;
 
     wait_for(
         || async {
@@ -1066,11 +1045,6 @@ async fn reader_retries_after_error(actors: Arc<TestActors>) {
         DEFAULT_OPERATION_TIMEOUT,
     )
     .await;
-
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop keyspace");
 
     info!("finished");
 }

@@ -28,6 +28,7 @@ mod tls_reload;
 
 use clap::Parser;
 use clap::Subcommand;
+use common::ProxyCluster;
 use common::SharedCluster;
 use e2etest::Config;
 use e2etest_dns::Dns;
@@ -184,6 +185,13 @@ e2etest::group!(
     fixtures = (SharedCluster),
     parent = validator
 );
+
+// Umbrella group owning the shared proxy cluster (scylla-proxy in front of the
+// database, single Vector Store node). Groups whose tests only manipulate
+// proxy rules — never topology or Vector Store configuration — are declared
+// with `parent = crate::proxy` and access the cluster through a per-test
+// ProxyTestContext that resets the rules around every test.
+e2etest::group!(name = proxy, fixtures = (ProxyCluster), parent = validator);
 
 pub async fn run() -> ExitCode {
     let args = Args::parse();
