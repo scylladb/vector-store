@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
-use crate::TestActors;
 use crate::alternator;
+use crate::alternator::AlternatorContext;
 use crate::alternator::Item;
 use crate::alternator::TableContext;
 use crate::alternator::TableShape;
@@ -29,7 +29,7 @@ fn vector_index_create_update(index_name: &str, vec_attr: &str) -> Value {
 }
 
 #[e2etest::test(group = update_table)]
-async fn create_vector_index_via_update_table(actors: Arc<TestActors>) {
+async fn create_vector_index_via_update_table(ctx: Arc<AlternatorContext>) {
     info!("started");
 
     for shape in &alternator::name_patterns() {
@@ -40,7 +40,7 @@ async fn create_vector_index_via_update_table(actors: Arc<TestActors>) {
         let vec_attr = shape.vec().unwrap_or("vec");
         info!("Testing shape: {shape:?}");
 
-        let ctx = TableContext::create(&actors, &no_vec_shape).await;
+        let ctx = TableContext::create(ctx.actors(), &no_vec_shape).await;
 
         info!("Confirming no index exists yet for '{}'", ctx.table_name);
         alternator::wait_for_no_index(&ctx.vs_clients, &ctx.index).await;
@@ -71,7 +71,7 @@ async fn create_vector_index_via_update_table(actors: Arc<TestActors>) {
 
 /// Like above but with pre-existing data in the table before adding the index.
 #[e2etest::test(group = update_table)]
-async fn create_vector_index_via_update_table_with_preexisting_data(actors: Arc<TestActors>) {
+async fn create_vector_index_via_update_table_with_preexisting_data(ctx: Arc<AlternatorContext>) {
     info!("started");
 
     for shape in &alternator::name_patterns() {
@@ -89,7 +89,7 @@ async fn create_vector_index_via_update_table_with_preexisting_data(actors: Arc<
             Item::key(shape.pk(), shape.sk(), "pk", "c").vec(vec_attr, [1.0, 4.0, 8.0]),
         ];
 
-        let ctx = TableContext::create_with_data(&actors, &no_vec_shape, &items).await;
+        let ctx = TableContext::create_with_data(ctx.actors(), &no_vec_shape, &items).await;
 
         info!("Confirming no index exists yet for '{}'", ctx.table_name);
         alternator::wait_for_no_index(&ctx.vs_clients, &ctx.index).await;
@@ -122,7 +122,7 @@ async fn create_vector_index_via_update_table_with_preexisting_data(actors: Arc<
 
 /// Verifies that the initial-scan path skips non-indexable rows.
 #[e2etest::test(group = update_table)]
-async fn create_vector_index_via_update_table_with_invalid_data(actors: Arc<TestActors>) {
+async fn create_vector_index_via_update_table_with_invalid_data(ctx: Arc<AlternatorContext>) {
     info!("started");
 
     for shape in &alternator::name_patterns() {
@@ -168,9 +168,13 @@ async fn create_vector_index_via_update_table_with_invalid_data(actors: Arc<Test
                 .attr(vec_attr, alternator::float_list([1.0_f32, 1.0, 1.0, 1.0])),
         ];
 
-        let ctx =
-            TableContext::create_with_invalid_data(&actors, shape, &valid_items, &invalid_items)
-                .await;
+        let ctx = TableContext::create_with_invalid_data(
+            ctx.actors(),
+            shape,
+            &valid_items,
+            &invalid_items,
+        )
+        .await;
 
         ctx.wait_for_ann([1.0, 1.0, 1.0], &valid_items).await;
 
@@ -183,7 +187,7 @@ async fn create_vector_index_via_update_table_with_invalid_data(actors: Arc<Test
 
 /// Deletes a vector index via UpdateTable and verifies writes succeed after.
 #[e2etest::test(group = update_table)]
-async fn delete_vector_index_via_update_table(actors: Arc<TestActors>) {
+async fn delete_vector_index_via_update_table(ctx: Arc<AlternatorContext>) {
     info!("started");
 
     for shape in &alternator::name_patterns() {
@@ -194,7 +198,7 @@ async fn delete_vector_index_via_update_table(actors: Arc<TestActors>) {
             Item::key(shape.pk(), shape.sk(), "pk", "a").vec(vec_attr, [1.0, 1.0, 1.0]),
             Item::key(shape.pk(), shape.sk(), "pk", "b").vec(vec_attr, [1.0, 2.0, 4.0]),
         ];
-        let ctx = TableContext::create_with_data(&actors, shape, &items).await;
+        let ctx = TableContext::create_with_data(ctx.actors(), shape, &items).await;
 
         info!(
             "Issuing UpdateTable for '{}' to delete vector index '{}'",
@@ -235,22 +239,6 @@ async fn delete_vector_index_via_update_table(actors: Arc<TestActors>) {
 
 e2etest::group!(
     name = update_table,
-    fixtures = (Fixture),
+    fixtures = (AlternatorContext),
     parent = alternator::alternator
 );
-
-struct Fixture {
-    actors: Arc<TestActors>,
-}
-
-impl e2etest::Fixture for Fixture {
-    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
-        let actors = setup.setup::<TestActors>().await?;
-        alternator::init(&actors).await;
-        Some(Self { actors })
-    }
-
-    async fn teardown(self) {
-        common::cleanup(&self.actors).await;
-    }
-}

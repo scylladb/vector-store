@@ -247,10 +247,13 @@ async fn alternator_with_auth_enabled(actors: Arc<TestActors>) {
     info!("finished");
 }
 
+// Dedicated cluster: enforce-authorization changes the whole-cluster auth
+// posture, so this is a top-level group with its own cluster rather than a
+// member of the shared standard Alternator namespace.
 e2etest::group!(
     name = alternator_auth,
     fixtures = (Fixture),
-    parent = alternator::alternator
+    parent = crate::validator
 );
 
 struct Fixture {

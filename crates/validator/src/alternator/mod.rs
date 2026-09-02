@@ -18,7 +18,7 @@ mod update_table;
 use crate::TestActors;
 use crate::common;
 use crate::common::ALTERNATOR_PORT;
-use async_backtrace::framed;
+use crate::common::SharedCluster;
 use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
 use aws_sdk_dynamodb::Client;
@@ -58,6 +58,7 @@ use std::collections::HashMap;
 use std::fmt::Write;
 use std::net::Ipv4Addr;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 use tracing::info;
@@ -98,7 +99,43 @@ const MAX_ALTERNATOR_INDEX_NAME_LEN: usize = MAX_ALTERNATOR_TABLE_NAME_LEN;
 /// See <https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/HowItWorks.NamingRulesDataTypes.html>.
 const MAX_ALTERNATOR_ATTRIBUTE_NAME_LEN: usize = 255;
 
-e2etest::group!(name = alternator, fixtures = (), parent = crate::validator);
+// Namespace group for Alternator test groups that run on the shared standard
+// cluster (its ScyllaDB nodes have the Alternator endpoint enabled). Groups
+// that need a differently-configured cluster (`always_use_lwt`,
+// enforce-authorization) live outside this namespace, as top-level groups with
+// their own dedicated cluster, because they cannot coexist with the shared one.
+e2etest::group!(name = alternator, fixtures = (), parent = crate::standard);
+
+/// Per-group Alternator access on the shared [`SharedCluster`]. List it in a
+/// group's `fixtures = (...)` tuple; tests build their DynamoDB and Vector
+/// Store clients from [`AlternatorContext::actors`] (via [`make_clients`] /
+/// [`TableContext`]) and create and drop their own uniquely named tables (each
+/// Alternator table is its own keyspace), so they can run concurrently on the
+/// shared cluster.
+pub(crate) struct AlternatorContext {
+    cluster: Arc<SharedCluster>,
+}
+
+impl e2etest::Fixture for AlternatorContext {
+    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
+        let cluster = setup.setup::<SharedCluster>().await?;
+        Some(Self { cluster })
+    }
+
+    async fn teardown(self) {}
+
+    fn test_can_run_concurrently() -> bool {
+        true
+    }
+}
+
+impl AlternatorContext {
+    /// The shared test actors, for building DynamoDB / Vector Store clients and
+    /// table contexts (read-only cluster access).
+    pub fn actors(&self) -> &TestActors {
+        &self.cluster.actors
+    }
+}
 
 /// In ScyllaDB Alternator, a DynamoDB table named `T` is stored under the CQL
 /// keyspace `alternator_T`. Vector Store discovers indexes by scanning
@@ -651,8 +688,9 @@ async fn get_scylla_configs(
     scylla_configs
 }
 
-/// Starts ScyllaDB with the Alternator endpoint enabled alongside the Vector
-/// Store. `extra_args` is a list of `(name, value)` pairs that override or
+/// Starts a dedicated ScyllaDB + Vector Store cluster with overridden
+/// Alternator arguments, for groups that cannot run on the shared standard
+/// cluster. `extra_args` is a list of `(name, value)` pairs that override or
 /// extend the default alternator arguments.
 async fn init_with_args(actors: &TestActors, extra_args: impl IntoIterator<Item = (&str, &str)>) {
     info!("started");
@@ -665,13 +703,6 @@ async fn init_with_args(actors: &TestActors, extra_args: impl IntoIterator<Item 
 
     wait_for_alternator(db_ip).await;
     info!("finished");
-}
-
-/// Standard test init: starts ScyllaDB with the Alternator endpoint enabled on
-/// each node's own IP, alongside the Vector Store.
-#[framed]
-pub async fn init(actors: &TestActors) {
-    init_with_args(actors, []).await;
 }
 
 /// Describes the key schema, attribute names, and name prefixes for a test

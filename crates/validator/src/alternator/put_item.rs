@@ -3,11 +3,10 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
-use crate::TestActors;
 use crate::alternator;
+use crate::alternator::AlternatorContext;
 use crate::alternator::Item;
 use crate::alternator::TableContext;
-use crate::common;
 use aws_sdk_dynamodb::types::AttributeValue;
 use std::sync::Arc;
 use tracing::info;
@@ -18,13 +17,13 @@ use tracing::info;
 /// of key schema (HASH-only / HASH+RANGE) and naming style (plain /
 /// special) is covered.
 #[e2etest::test(group = put_item)]
-async fn put_item_updates_index(actors: Arc<TestActors>) {
+async fn put_item_updates_index(ctx: Arc<AlternatorContext>) {
     info!("started");
 
     for shape in &alternator::name_patterns() {
         info!("Testing shape: {shape:?}");
 
-        let ctx = TableContext::create(&actors, shape).await;
+        let ctx = TableContext::create(ctx.actors(), shape).await;
 
         let vec_attr = ctx.shape.vec().expect("TableContext has no vec_attr");
 
@@ -77,14 +76,14 @@ async fn put_item_updates_index(actors: Arc<TestActors>) {
 /// Inserts items with various invalid vector attributes and verifies VS does
 /// not index them.  Only the valid item should appear in the index.
 #[e2etest::test(group = put_item)]
-async fn put_item_with_invalid_vector_is_not_indexed(actors: Arc<TestActors>) {
+async fn put_item_with_invalid_vector_is_not_indexed(ctx: Arc<AlternatorContext>) {
     info!("started");
 
     let shape = &alternator::name_patterns()[0]; // plain names, HASH-only
     let pk = shape.pk();
     let vec_attr = shape.vec().expect("NAME_PATTERNS[0] always has vec");
 
-    let ctx = TableContext::create(&actors, shape).await;
+    let ctx = TableContext::create(ctx.actors(), shape).await;
 
     let no_vec = Item::key(pk, None, "pk", "no-vec");
     ctx.put(&no_vec)
@@ -151,22 +150,6 @@ async fn put_item_with_invalid_vector_is_not_indexed(actors: Arc<TestActors>) {
 
 e2etest::group!(
     name = put_item,
-    fixtures = (Fixture),
+    fixtures = (AlternatorContext),
     parent = alternator::alternator
 );
-
-struct Fixture {
-    actors: Arc<TestActors>,
-}
-
-impl e2etest::Fixture for Fixture {
-    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
-        let actors = setup.setup::<TestActors>().await?;
-        alternator::init(&actors).await;
-        Some(Self { actors })
-    }
-
-    async fn teardown(self) {
-        common::cleanup(&self.actors).await;
-    }
-}
