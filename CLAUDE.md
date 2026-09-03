@@ -26,3 +26,14 @@ Before making changes, follow the project's contributor and coding guidelines:
 - Organize commits and PRs per the Commit and PR Organization section of
   [CONTRIBUTING.md](CONTRIBUTING.md) (subject format `module: changes`, small
   self-contained patches, and `Fixes:`/`Refs: VECTOR-<n>` references).
+
+## Skills
+
+Repository skills live in `.claude/skills/`:
+
+- `pr-review-loop` — re-trigger the AI reviewers that were asked for
+  (CodeRabbit, Copilot, or both) on a pull request, then iterate on their
+  comments (fix or rebut each one) until those reviewers are quiet, with a
+  default cap of 5 rounds that the invocation can override. Ends by verifying
+  CI, handing the author a numbered list of what still needs a person, and
+  naming the two most important design issues found in the change.
