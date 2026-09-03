@@ -23,6 +23,8 @@ use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
 use aws_sdk_dynamodb::Client;
 use aws_sdk_dynamodb::config::Region;
+use aws_sdk_dynamodb::config::retry::RetryConfig;
+use aws_sdk_dynamodb::config::timeout::TimeoutConfig;
 use aws_sdk_dynamodb::error::SdkError;
 use aws_sdk_dynamodb::operation::create_table::CreateTableError;
 use aws_sdk_dynamodb::operation::create_table::CreateTableOutput;
@@ -319,6 +321,19 @@ impl Intercept for Float32VectorInterceptor {
     }
 }
 
+/// How long an Alternator request may take before the client gives up.
+///
+/// `CreateTable` and `UpdateTable` are schema changes, which ScyllaDB applies
+/// one at a time through Raft: with several test groups on the shared cluster
+/// they queue, and a request can wait far longer than the SDK's 30-second
+/// default allows. The framework times the test out on its own, so this only
+/// has to outlast the queue rather than catch a hang.
+const ALTERNATOR_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How long to wait for the Alternator endpoint to accept a connection. It is
+/// on loopback, so anything but a prompt answer means the node is not up.
+const ALTERNATOR_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Builds a DynamoDB client pointing at the ScyllaDB Alternator endpoint on
 /// `db_ip` using explicit SigV4 credentials.
 async fn make_dynamodb_client_with_creds(
@@ -331,6 +346,22 @@ async fn make_dynamodb_client_with_creds(
         .credentials_provider(creds)
         .endpoint_url(format!("http://{db_ip}:{ALTERNATOR_PORT}"))
         .region(Region::new("us-east-1"))
+        // Schema changes are not idempotent, so a retry cannot be a harmless
+        // repeat: when a slow `CreateTable` outlasted the SDK's timeout, the
+        // retry reported the table its own first attempt had just created as
+        // already existing, and the same for an index created or dropped
+        // through `UpdateTable`. The tests wait for what they asked for and
+        // fail on their own, so the client must report the first answer it
+        // gets rather than ask again.
+        .retry_config(RetryConfig::disabled())
+        .timeout_config(
+            TimeoutConfig::builder()
+                .connect_timeout(ALTERNATOR_CONNECT_TIMEOUT)
+                .read_timeout(ALTERNATOR_REQUEST_TIMEOUT)
+                .operation_attempt_timeout(ALTERNATOR_REQUEST_TIMEOUT)
+                .operation_timeout(ALTERNATOR_REQUEST_TIMEOUT)
+                .build(),
+        )
         .load()
         .await;
     Client::from_conf(
