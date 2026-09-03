@@ -7,6 +7,8 @@ use crate::alternator;
 use crate::alternator::AlternatorContext;
 use crate::alternator::Item;
 use crate::alternator::TableContext;
+use crate::alternator::TableShape;
+use crate::alternator::name_pattern_tests;
 use aws_sdk_dynamodb::operation::delete_item::builders::DeleteItemFluentBuilder;
 use std::sync::Arc;
 use tracing::info;
@@ -25,57 +27,52 @@ fn ctx_delete_item(ctx: &TableContext, item: &Item) -> DeleteItemFluentBuilder {
 }
 
 /// Inserts items, deletes one via `DeleteItem`, and verifies the VS index
-/// reflects the deletion.
-///
-/// Loops [`alternator::name_patterns`] so that every combination
-/// of key schema (HASH-only / HASH+RANGE) and naming style (plain /
-/// special) is covered.
-#[e2etest::test(group = delete_item)]
-async fn delete_item_updates_index(ctx: Arc<AlternatorContext>) {
-    info!("started");
+/// reflects the deletion, for one table shape.
+async fn delete_item_updates_index(ctx: &AlternatorContext, shape: &TableShape) {
+    let vec_attr = shape.vec().expect("NAME_PATTERNS entries always have vec");
 
-    for shape in &alternator::name_patterns() {
-        info!("Testing shape: {shape:?}");
+    let a = Item::key(shape.pk(), shape.sk(), "pk", "a").vec(vec_attr, [1.0, 1.0, 1.0]);
+    let b = Item::key(shape.pk(), shape.sk(), "pk", "b").vec(vec_attr, [1.0, 2.0, 4.0]);
+    let c = Item::key(shape.pk(), shape.sk(), "pk", "c").vec(vec_attr, [1.0, 4.0, 8.0]);
 
-        let vec_attr = shape.vec().expect("NAME_PATTERNS entries always have vec");
+    let ctx =
+        TableContext::create_with_data(ctx.actors(), shape, &[a.clone(), b.clone(), c.clone()])
+            .await;
 
-        let a = Item::key(shape.pk(), shape.sk(), "pk", "a").vec(vec_attr, [1.0, 1.0, 1.0]);
-        let b = Item::key(shape.pk(), shape.sk(), "pk", "b").vec(vec_attr, [1.0, 2.0, 4.0]);
-        let c = Item::key(shape.pk(), shape.sk(), "pk", "c").vec(vec_attr, [1.0, 4.0, 8.0]);
+    info!("Step 1: deleting item from '{}'", ctx.table_name);
+    ctx_delete_item(&ctx, &a)
+        .send()
+        .await
+        .expect("DeleteItem should succeed");
 
-        let ctx =
-            TableContext::create_with_data(ctx.actors(), shape, &[a.clone(), b.clone(), c.clone()])
-                .await;
+    ctx.wait_for_count(2).await;
+    ctx.wait_for_ann([1.0, 1.0, 1.0], &[b.clone(), c]).await;
 
-        info!("Step 1: deleting item from '{}'", ctx.table_name);
-        ctx_delete_item(&ctx, &a)
-            .send()
-            .await
-            .expect("DeleteItem should succeed");
+    // Conditional DeleteItem exercises the LWT/Paxos path under
+    // `only_rmw_uses_lwt` (ConditionExpression makes it RMW).
+    info!(
+        "Step 2: conditional DeleteItem (passing condition) in '{}'",
+        ctx.table_name
+    );
+    ctx_delete_item(&ctx, &b)
+        .expression_attribute_names("#pk", ctx.shape.pk())
+        .condition_expression("attribute_exists(#pk)")
+        .send()
+        .await
+        .expect("conditional DeleteItem with passing condition should succeed");
 
-        ctx.wait_for_count(2).await;
-        ctx.wait_for_ann([1.0, 1.0, 1.0], &[b.clone(), c]).await;
+    ctx.wait_for_count(1).await;
 
-        // Conditional DeleteItem exercises the LWT/Paxos path under
-        // `only_rmw_uses_lwt` (ConditionExpression makes it RMW).
-        info!(
-            "Step 2: conditional DeleteItem (passing condition) in '{}'",
-            ctx.table_name
-        );
-        ctx_delete_item(&ctx, &b)
-            .expression_attribute_names("#pk", ctx.shape.pk())
-            .condition_expression("attribute_exists(#pk)")
-            .send()
-            .await
-            .expect("conditional DeleteItem with passing condition should succeed");
+    ctx.done().await;
+}
 
-        ctx.wait_for_count(1).await;
-
-        ctx.done().await;
-        info!("Shape {shape:?} passed");
-    }
-
-    info!("finished");
+name_pattern_tests! {
+    group = delete_item,
+    run = delete_item_updates_index,
+    delete_item_updates_index_plain_hash = 0,
+    delete_item_updates_index_plain_hash_range = 1,
+    delete_item_updates_index_special_hash = 2,
+    delete_item_updates_index_special_hash_range = 3,
 }
 
 e2etest::group!(

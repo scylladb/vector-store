@@ -781,6 +781,34 @@ const SPECIAL_ATTR_BASE_PK: &str = "1:pk'.\".\\@#$ кириллица 中文 α�
 const SPECIAL_ATTR_BASE_SK: &str = "1:sk'.\".\\@#$ кириллица 中文 αβ 🦀 ";
 const SPECIAL_ATTR_BASE_VEC: &str = "1:vec'.\".\\@#$ кириллица 中文 αβ 🦀 ";
 
+/// Declares one test per entry of [`name_patterns`], each calling `$run` with
+/// the shape it covers.
+///
+/// A single test looping over the shapes runs them one after another, and
+/// every shape creates its own table and waits out its own index build, which
+/// is what makes these tests the slowest in the suite. As separate tests the
+/// framework runs the shapes concurrently and names the failing shape on its
+/// own. The same reasoning as `serde::key_type_round_trip_tests`.
+///
+/// The invoking module needs `Arc` and `AlternatorContext` in scope: the test
+/// attribute reads the fixture out of an argument spelled exactly
+/// `Arc<Fixture>`, so the type cannot be written out in full here.
+macro_rules! name_pattern_tests {
+    (group = $group:ident, run = $run:ident, $($name:ident = $index:literal,)*) => {
+        $(
+            #[e2etest::test(group = $group)]
+            async fn $name(ctx: Arc<AlternatorContext>) {
+                tracing::info!("started");
+                let shape = &$crate::alternator::name_patterns()[$index];
+                tracing::info!("Testing shape: {shape:?}");
+                $run(&ctx, shape).await;
+                tracing::info!("finished");
+            }
+        )*
+    };
+}
+pub(crate) use name_pattern_tests;
+
 /// The 2x2 matrix of table shapes exercised by every `_with_names` test.
 ///
 /// Each basic-operation test (`put_item`, `delete_item`, `update_item`,
