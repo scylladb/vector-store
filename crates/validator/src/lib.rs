@@ -31,6 +31,7 @@ use clap::Subcommand;
 use common::ProxyCluster;
 use common::SharedCluster;
 use e2etest::Config;
+use e2etest::Progress;
 use e2etest_dns::Dns;
 use e2etest_dns::DnsExt;
 use e2etest_firewall::Firewall;
@@ -115,6 +116,11 @@ struct RunArgs {
     #[arg(long, default_value_t = default_concurrency(), value_name = "N")]
     concurrency: usize,
 
+    /// Directory to write the per-test log files to. Each test gets its own
+    /// file, so that a concurrent run's output stays readable.
+    #[arg(long, value_name = "PATH")]
+    log_dir: Option<PathBuf>,
+
     /// Maximum number of test groups to run concurrently.
     ///
     /// Only groups sharing a cluster with their siblings may overlap; a group
@@ -145,16 +151,36 @@ struct RunArgs {
 
 fn init(args: RunArgs) -> Config {
     let ansi = !args.disable_colors;
-    let rust_log = if args.verbose {
-        "info"
-    } else {
-        "info,hickory_server=warn"
-    };
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .expect("install aws-lc-rs crypto provider");
 
+    let log_dir = args
+        .log_dir
+        .clone()
+        .unwrap_or_else(|| args.tmpdir.join("vector-search-validator-logs"));
+
+    // The log always goes to a file per test. It also goes to the console, but
+    // only under --verbose: otherwise the console is left to the results, which
+    // is the whole point of reporting them.
+    //
+    // Every layer shares one filter rather than carrying its own. A per-layer
+    // filter is decided and applied in two steps, and an `info!` whose
+    // arguments await something logs in between, which loses the decision and
+    // prints a line the filter had rejected.
+    let console = args.verbose.then(|| {
+        fmt::layer()
+            .with_target(false)
+            .with_ansi(ansi)
+            .with_writer(std::io::stdout)
+    });
+
     tracing_subscriber::registry()
+        .with(
+            EnvFilter::try_from_default_env()
+                .or_else(|_| EnvFilter::try_new("info,hickory_server=warn"))
+                .expect("Failed to create EnvFilter"),
+        )
         .with(
             args.duplicate_errors.then_some(
                 fmt::layer()
@@ -167,19 +193,21 @@ fn init(args: RunArgs) -> Config {
                     })),
             ),
         )
-        .with(
-            EnvFilter::try_from_default_env()
-                .or_else(|_| EnvFilter::try_new(rust_log))
-                .expect("Failed to create EnvFilter"),
-        )
-        .with(
-            fmt::layer()
-                .with_target(false)
-                .with_ansi(ansi)
-                .with_writer(std::io::stdout),
-        )
+        .with(e2etest::logging::per_test_files(&log_dir))
+        .with(console)
         .init();
 
+    // Printed rather than logged, so that it shows without --verbose: a result
+    // on the console is only useful next to the log that explains it.
+    println!("Per-test logs: {}", log_dir.display());
+
+    // Without --verbose the console shows a mark per test on a line per group;
+    // with it, a line per test naming it with its result.
+    let progress = if args.verbose {
+        Progress::Lines
+    } else {
+        Progress::Ticks
+    };
     let concurrency = args.concurrency;
     let group_concurrency = args.group_concurrency;
     args.filters
@@ -189,6 +217,8 @@ fn init(args: RunArgs) -> Config {
         .with_default_timeout(common::DEFAULT_TEST_TIMEOUT)
         .with_concurrency(concurrency)
         .with_group_concurrency(group_concurrency)
+        .with_progress(progress)
+        .with_colors(ansi)
 }
 
 /// The number of CPUs available to the process, used as the default number of

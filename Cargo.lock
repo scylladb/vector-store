@@ -1931,7 +1931,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 [[package]]
 name = "e2etest"
 version = "0.3.1"
-source = "git+https://github.com/QuerthDP/e2etest-rs?rev=10d33a33641a4feaa7fcfefa3283368cfd1a47c5#10d33a33641a4feaa7fcfefa3283368cfd1a47c5"
+source = "git+https://github.com/QuerthDP/e2etest-rs?rev=ec6b7858aa5c531a82548c127e6656c4899a45f9#ec6b7858aa5c531a82548c127e6656c4899a45f9"
 dependencies = [
  "async-backtrace",
  "e2etest-macros",
@@ -1939,6 +1939,7 @@ dependencies = [
  "itertools 0.14.0",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1969,7 +1970,7 @@ dependencies = [
 [[package]]
 name = "e2etest-macros"
 version = "0.2.0"
-source = "git+https://github.com/QuerthDP/e2etest-rs?rev=10d33a33641a4feaa7fcfefa3283368cfd1a47c5#10d33a33641a4feaa7fcfefa3283368cfd1a47c5"
+source = "git+https://github.com/QuerthDP/e2etest-rs?rev=ec6b7858aa5c531a82548c127e6656c4899a45f9#ec6b7858aa5c531a82548c127e6656c4899a45f9"
 dependencies = [
  "convert_case 0.11.0",
  "itertools 0.14.0",

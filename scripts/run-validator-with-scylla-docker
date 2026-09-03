@@ -21,6 +21,13 @@ shift 3
 dns_ip=127.0.1.1
 base_ip=127.0.2.1
 
+# The tests log to a file each, which is of no use inside a container that is
+# thrown away when the run ends. Mount a directory for them at the same path
+# the container writes to, so the path the run reports can be opened as it is.
+# The files belong to root, the user the container runs as.
+log_dir=${VALIDATOR_LOG_DIR:-/tmp/vector-search-validator-logs}
+mkdir -p "$log_dir"
+
 docker run --rm \
     --cap-add NET_ADMIN \
     --user root \
@@ -29,7 +36,8 @@ docker run --rm \
     --dns-search=. \
     --volume="$vector_store:/vector-store" \
     --volume="$validator:/vector-search-validator" \
+    --volume="$log_dir:$log_dir" \
     --network=none \
     --entrypoint=/vector-search-validator \
     $scylla_tag \
-    run --dns-ip $dns_ip --base-ip $base_ip --scylla-default-conf /etc/scylla/scylla.yaml /usr/bin/scylla /vector-store "$@"
+    run --dns-ip $dns_ip --base-ip $base_ip --scylla-default-conf /etc/scylla/scylla.yaml --log-dir "$log_dir" /usr/bin/scylla /vector-store "$@"
