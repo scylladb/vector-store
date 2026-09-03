@@ -13,10 +13,71 @@ env:
   VECTOR_VERSION: ${{ github.event_name == 'release' && github.event.release.tag_name || github.event.inputs.VECTOR_VERSION }}
 
 jobs:
-  # Build vector-store once per architecture, natively (no QEMU emulation),
-  # and expose the results (binary tarball, docker image, SBOMs) as workflow
-  # artifacts for the downstream jobs.
-  build:
+  release-get-scylla-nightly-digest:
+    uses: $/.github/workflows/get-scylla-nightly-digest.yml
+    with:
+      use-latest-scylla-nightly: false
+
+  release-build-validator:
+    uses: $/.github/workflows/build-validator.yml
+    with:
+      os: ${{ matrix.os }}
+      arch: ${{ matrix.arch }}
+      ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.event.inputs.VECTOR_VERSION }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+        include:
+          - os: ubuntu-latest
+            arch: amd64
+          - os: ubuntu-24.04-arm
+            arch: arm64
+
+  release-build-vector-store:
+    uses: $/.github/workflows/build-vector-store.yml
+    with:
+      os: ${{ matrix.os }}
+      arch: ${{ matrix.arch }}
+      ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.event.inputs.VECTOR_VERSION }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+        include:
+          - os: ubuntu-latest
+            arch: amd64
+          - os: ubuntu-24.04-arm
+            arch: arm64
+
+  release-get-validator-test-list:
+    needs: ["release-build-validator"]
+    uses: $/.github/workflows/get-validator-test-list.yml
+    with:
+      os: ubuntu-latest
+      arch: amd64
+
+  release-run-validator-tests:
+    needs: ["release-get-scylla-nightly-digest", "release-build-vector-store", "release-get-validator-test-list"]
+    uses: $/.github/workflows/run-validator-tests.yml
+    with:
+      os: ${{ matrix.os }}
+      arch: ${{ matrix.arch }}
+      testcase: ${{ matrix.testcase }}
+      ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.event.inputs.VECTOR_VERSION }}
+    strategy:
+      fail-fast: false
+      matrix:
+        testcase: ${{fromJSON(needs.release-get-validator-test-list.outputs.testcases)}}
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+        include:
+          - os: ubuntu-latest
+            arch: amd64
+          - os: ubuntu-24.04-arm
+            arch: arm64
+
+  release-build-docker-archive-sbom:
+    needs: ["release-run-validator-tests"]
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -28,21 +89,42 @@ jobs:
             arch: amd64
           - os: ubuntu-24.04-arm
             arch: arm64
+    env:
+      TARGETARCH: ${{ matrix.arch }}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          ref: ${{ env.VECTOR_VERSION }}
           fetch-depth: 0
+          fetch-tags: true
+          ref: ${{ env.VECTOR_VERSION }}
 
       - name: Install SBOM tooling (syft + cargo-cyclonedx) used by build-release
         run: |
           set -euo pipefail
-          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
-          cargo install cargo-cyclonedx --locked
+          # syft-v1.51.1
+          export DOWNLOAD_TAG_INSTALL_SCRIPT=false
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/91a0032987d91b7411b52f6f5c185c5e7f775495/install.sh | sh -s -- -b /usr/local/bin v1.51.1
+          cargo install cargo-cyclonedx --version 0.5.9 --locked
 
-      - name: Build image, tarball and SBOMs for ${{ matrix.arch }}
-        run: ./scripts/build-release ${{ matrix.arch }}
+      - name: Download vector-store artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: vector-store-${{matrix.arch}}
+
+      - name: Copy downloaded vector-store into target directory
+        run: |
+          set -euo pipefail
+          chmod a+x vector-store
+          mkdir -p target/${{matrix.arch}}/release
+          cp vector-store target/${{matrix.arch}}/release
+
+      - name: Build docker for ${{ matrix.arch }}
+        run: ./scripts/build-dockers ${{ matrix.arch }}
+
+      - name: Build tarball and SBOMs for ${{ matrix.arch }}
+        run: ./scripts/generate-archive-sbom ${{ matrix.arch }}
 
       - name: Save the docker image
         run: docker save "scylladb/vector-store:${VECTOR_VERSION}-${{ matrix.arch }}" -o "vector-store-image-${VECTOR_VERSION}-${{ matrix.arch }}.tar"
@@ -71,7 +153,7 @@ jobs:
   # Push the per-arch images built by the build job (no rebuild) and combine
   # them into a multi-arch manifest.
   push-docker:
-    needs: [build]
+    needs: [release-build-docker-archive-sbom]
     runs-on: ubuntu-latest
     permissions:
       contents: read
