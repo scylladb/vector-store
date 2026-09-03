@@ -1,0 +1,8 @@
+monitor:
+  version: 4.12.0
+  promdir: prometheus_data
+scylla:
+  mode: docker
+  version: scylla-nightly:2025.4.0-dev-0.20250811.1322f301f63c-x86_64
+vector:
+  version: 0.5.1
