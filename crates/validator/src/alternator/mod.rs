@@ -127,6 +127,14 @@ impl e2etest::Fixture for AlternatorContext {
     fn test_can_run_concurrently() -> bool {
         true
     }
+
+    // Every test creates and drops its own uniquely named table, and an
+    // Alternator table is its own keyspace, so the groups holding this
+    // context share nothing but the read-only cluster and may run alongside
+    // each other.
+    fn group_can_run_concurrently() -> bool {
+        true
+    }
 }
 
 impl AlternatorContext {
