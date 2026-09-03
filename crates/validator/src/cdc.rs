@@ -25,6 +25,15 @@ const CDC_MAX_LATENCY: Duration = Duration::from_secs(60);
 const CDC_ACTOR_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const TTL_EXPIRATION_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long rows carrying a per-row TTL stay alive after they are written.
+///
+/// A test has to build the index and observe every row through it before they
+/// expire. Building competes with the other clusters running at the same time,
+/// so the lifetime is set well above what a build normally costs rather than
+/// just above it: too short a lifetime expires the rows mid-test and fails it
+/// for a reason that has nothing to do with what it checks.
+const TTL_LIFETIME: Duration = Duration::from_secs(20);
+
 e2etest::group!(
     name = cdc_direct,
     fixtures = (TestContext),
@@ -510,7 +519,7 @@ async fn cql_per_row_ttl_expires_from_index(ctx: Arc<TestContext>) {
 
     // Expire 5 seconds from now — enough time to build the index and
     // observe all 5 rows before the expiration service deletes them.
-    let expire_at = now_epoch_secs() + 5;
+    let expire_at = now_epoch_secs() + TTL_LIFETIME.as_secs() as i64;
 
     info!("Insert 3 rows with near-future expiration and 2 rows without expiration");
     for pk in 0..3 {
@@ -572,7 +581,9 @@ async fn cql_per_row_ttl_expires_from_index(ctx: Arc<TestContext>) {
                 matches!(status, Ok(s) if s.count == 2)
             },
             "Waiting for expired rows to be removed from index",
-            TTL_EXPIRATION_TIMEOUT,
+            // The rows expire at a fixed wall-clock time, so this has to allow
+            // for whatever is left of their lifetime as well.
+            TTL_LIFETIME + TTL_EXPIRATION_TIMEOUT,
         )
         .await;
     }
@@ -675,7 +686,7 @@ async fn cql_per_row_ttl_added_to_indexed_rows_expires(ctx: Arc<TestContext>) {
     // Add a per-row TTL to 3 of the already-indexed rows. Compute the deadline
     // only now, once the index is confirmed serving, so the rows do not expire
     // before the update lands. The other 2 rows (pk=3,4) keep no TTL.
-    let expire_at = now_epoch_secs() + 5;
+    let expire_at = now_epoch_secs() + TTL_LIFETIME.as_secs() as i64;
     info!("Add per-row TTL to 3 already-indexed rows (pk=0,1,2)");
     for pk in 0..3 {
         ctx.session
@@ -695,7 +706,9 @@ async fn cql_per_row_ttl_added_to_indexed_rows_expires(ctx: Arc<TestContext>) {
                 matches!(status, Ok(s) if s.count == 2)
             },
             "Waiting for newly-expired rows to be removed from index",
-            TTL_EXPIRATION_TIMEOUT,
+            // The rows expire at a fixed wall-clock time, so this has to allow
+            // for whatever is left of their lifetime as well.
+            TTL_LIFETIME + TTL_EXPIRATION_TIMEOUT,
         )
         .await;
     }
