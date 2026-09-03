@@ -1931,7 +1931,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 [[package]]
 name = "e2etest"
 version = "0.3.1"
-source = "git+https://github.com/QuerthDP/e2etest-rs?rev=ec6b7858aa5c531a82548c127e6656c4899a45f9#ec6b7858aa5c531a82548c127e6656c4899a45f9"
+source = "git+https://github.com/QuerthDP/e2etest-rs?rev=21009bd272a10c0ad0b581437ade08b2847c3ad0#21009bd272a10c0ad0b581437ade08b2847c3ad0"
 dependencies = [
  "async-backtrace",
  "e2etest-macros",
@@ -1957,8 +1957,7 @@ dependencies = [
 [[package]]
 name = "e2etest-firewall"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "40cadae13aae75b20c35a6400b5003abf2ece1d198fa6ff993b77191f1afde52"
+source = "git+https://github.com/QuerthDP/e2etest-rs?rev=21009bd272a10c0ad0b581437ade08b2847c3ad0#21009bd272a10c0ad0b581437ade08b2847c3ad0"
 dependencies = [
  "anyhow",
  "async-backtrace",
@@ -1970,7 +1969,7 @@ dependencies = [
 [[package]]
 name = "e2etest-macros"
 version = "0.2.0"
-source = "git+https://github.com/QuerthDP/e2etest-rs?rev=ec6b7858aa5c531a82548c127e6656c4899a45f9#ec6b7858aa5c531a82548c127e6656c4899a45f9"
+source = "git+https://github.com/QuerthDP/e2etest-rs?rev=21009bd272a10c0ad0b581437ade08b2847c3ad0#21009bd272a10c0ad0b581437ade08b2847c3ad0"
 dependencies = [
  "convert_case 0.11.0",
  "itertools 0.14.0",
