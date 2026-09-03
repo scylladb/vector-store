@@ -1931,10 +1931,11 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 [[package]]
 name = "e2etest"
 version = "0.3.1"
-source = "git+https://github.com/QuerthDP/e2etest-rs?rev=21009bd272a10c0ad0b581437ade08b2847c3ad0#21009bd272a10c0ad0b581437ade08b2847c3ad0"
+source = "git+https://github.com/QuerthDP/e2etest-rs?rev=2a81b924e847b54275f335dd66c0da9b1bf141aa#2a81b924e847b54275f335dd66c0da9b1bf141aa"
 dependencies = [
  "async-backtrace",
  "e2etest-macros",
+ "e2etest-unshare",
  "futures",
  "itertools 0.14.0",
  "tokio",
@@ -1957,7 +1958,7 @@ dependencies = [
 [[package]]
 name = "e2etest-firewall"
 version = "0.1.0"
-source = "git+https://github.com/QuerthDP/e2etest-rs?rev=21009bd272a10c0ad0b581437ade08b2847c3ad0#21009bd272a10c0ad0b581437ade08b2847c3ad0"
+source = "git+https://github.com/QuerthDP/e2etest-rs?rev=2a81b924e847b54275f335dd66c0da9b1bf141aa#2a81b924e847b54275f335dd66c0da9b1bf141aa"
 dependencies = [
  "anyhow",
  "async-backtrace",
@@ -1969,7 +1970,7 @@ dependencies = [
 [[package]]
 name = "e2etest-macros"
 version = "0.2.0"
-source = "git+https://github.com/QuerthDP/e2etest-rs?rev=21009bd272a10c0ad0b581437ade08b2847c3ad0#21009bd272a10c0ad0b581437ade08b2847c3ad0"
+source = "git+https://github.com/QuerthDP/e2etest-rs?rev=2a81b924e847b54275f335dd66c0da9b1bf141aa#2a81b924e847b54275f335dd66c0da9b1bf141aa"
 dependencies = [
  "convert_case 0.11.0",
  "itertools 0.14.0",
@@ -1982,8 +1983,7 @@ dependencies = [
 [[package]]
 name = "e2etest-scylla-cluster"
 version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "197c0c59ecd2d9a45609e32e1265df2657204a09cdf784d70062128fcec5ada7"
+source = "git+https://github.com/QuerthDP/e2etest-rs?rev=2a81b924e847b54275f335dd66c0da9b1bf141aa#2a81b924e847b54275f335dd66c0da9b1bf141aa"
 dependencies = [
  "async-backtrace",
  "sysinfo",
@@ -2016,6 +2016,16 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "e2etest-unshare"
+version = "0.1.0"
+source = "git+https://github.com/QuerthDP/e2etest-rs?rev=2a81b924e847b54275f335dd66c0da9b1bf141aa#2a81b924e847b54275f335dd66c0da9b1bf141aa"
+dependencies = [
+ "libc",
  "tokio",
  "tracing",
 ]
