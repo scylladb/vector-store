@@ -6,7 +6,6 @@
 use crate::TestActors;
 use async_backtrace::framed;
 use e2etest_dns::DnsExt;
-use e2etest_firewall::FirewallExt;
 use e2etest_scylla_cluster::ScyllaClusterExt;
 use e2etest_scylla_cluster::ScyllaNodeConfig;
 use e2etest_scylla_proxy_cluster::ScyllaProxyClusterExt;
@@ -676,7 +675,7 @@ impl e2etest::Fixture for ProxyTestContext {
         // Reset the rule state a failed test may have leaked before touching
         // the database again.
         self.cluster.actors.db_proxy.turn_off_rules().await;
-        self.cluster.actors.firewall.turn_off_rules().await;
+        self.cluster.actors.turn_off_firewall_rules().await;
         // Tests may legitimately have dropped their own keyspace already.
         apply_schema_change(
             &self.session,
@@ -726,7 +725,7 @@ pub async fn cleanup(actors: &TestActors) {
     // would otherwise leak them into the host routing table and poison every
     // later cluster on the same addresses; the firewall actor has no automatic
     // cleanup of its own, so reset it here (a no-op when no rules are active).
-    actors.firewall.turn_off_rules().await;
+    actors.turn_off_firewall_rules().await;
     for name in get_default_vs_names(actors) {
         actors.dns.remove(name).await;
     }

@@ -5,7 +5,6 @@
 
 use crate::TestActors;
 use crate::common::*;
-use e2etest_firewall::FirewallExt;
 use e2etest_vector_store_cluster::VectorStoreClusterExt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,6 +33,14 @@ impl e2etest::Fixture for Fixture {
     async fn teardown(self) {
         cleanup(&self.actors).await;
     }
+
+    // The group owns its cluster, and the firewall rules it installs are
+    // scoped to that cluster's addresses, so nothing it touches is shared with
+    // its siblings. Its tests still run one at a time: they restart nodes and
+    // cut off traffic for the whole cluster.
+    fn group_can_run_concurrently() -> bool {
+        true
+    }
 }
 
 /// Test that the CQL connection timeout causes session creation to fail
@@ -57,10 +64,7 @@ async fn connection_timeout_triggers_session_failure(fixture: Arc<Fixture>) {
     actors.vs.stop().await;
 
     info!("Block all traffic through the proxy");
-    actors
-        .firewall
-        .drop_traffic(get_default_db_proxy_ips(actors))
-        .await;
+    actors.drop_traffic(get_default_db_proxy_ips(actors)).await;
 
     info!("Restart vector-store with CQL connection timeout");
     actors
@@ -124,7 +128,7 @@ async fn connection_timeout_triggers_session_failure(fixture: Arc<Fixture>) {
         .unwrap();
 
     info!("Restore connectivity");
-    actors.firewall.turn_off_rules().await;
+    actors.turn_off_firewall_rules().await;
 
     info!("Wait for vector-store to reconnect successfully");
     wait_for(

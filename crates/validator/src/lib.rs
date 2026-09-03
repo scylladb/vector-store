@@ -35,6 +35,8 @@ use e2etest::Progress;
 use e2etest_dns::Dns;
 use e2etest_dns::DnsExt;
 use e2etest_firewall::Firewall;
+use e2etest_firewall::FirewallExt;
+use e2etest_firewall::Owner as FirewallOwner;
 use e2etest_scylla_cluster::ScyllaCluster;
 use e2etest_scylla_cluster::ScyllaClusterExt;
 use e2etest_scylla_proxy_cluster::ScyllaProxyCluster;
@@ -201,8 +203,9 @@ fn init(args: RunArgs) -> Config {
     // on the console is only useful next to the log that explains it.
     println!("Per-test logs: {}", log_dir.display());
 
-    // Without --verbose the console shows a mark per test on a line per group;
-    // with it, a line per test naming it with its result.
+    // Without --verbose the console shows a line per group, repainted as the
+    // run goes: a spinner while its cluster comes up, then a mark per test as
+    // each one ends. With it, a line per test naming it with its result.
     let progress = if args.verbose {
         Progress::Lines
     } else {
@@ -495,5 +498,23 @@ impl TestActors {
     pub(crate) fn octet_base(&self) -> u8 {
         u8::try_from(self.slot.index).expect("cluster index fits in an octet")
             * CLUSTER_OCTET_STRIDE
+    }
+
+    /// Blocks traffic to the given addresses, replacing whatever this cluster
+    /// blocked before. Other clusters' rules are left alone, so a group that
+    /// cuts its own nodes off can run alongside one doing the same to its own.
+    pub(crate) async fn drop_traffic(&self, ips: Vec<Ipv4Addr>) {
+        self.firewall.drop_traffic(self.firewall_owner(), ips).await;
+    }
+
+    /// Unblocks everything this cluster blocked.
+    pub(crate) async fn turn_off_firewall_rules(&self) {
+        self.firewall.turn_off_rules(self.firewall_owner()).await;
+    }
+
+    /// The firewall rules of this cluster, kept apart from every other
+    /// cluster's by its address block.
+    fn firewall_owner(&self) -> FirewallOwner {
+        FirewallOwner(self.slot.index as u64)
     }
 }

@@ -5,7 +5,6 @@
 
 use crate::TestActors;
 use crate::common::*;
-use e2etest_firewall::FirewallExt;
 use e2etest_scylla_cluster::ScyllaClusterExt;
 use e2etest_scylla_proxy_cluster::ScyllaProxyClusterExt;
 use e2etest_vector_store_cluster::VectorStoreClusterExt;
@@ -42,6 +41,14 @@ impl e2etest::Fixture for Fixture {
 
     async fn teardown(self) {
         cleanup(&self.actors).await;
+    }
+
+    // The group owns its cluster, and the firewall rules it installs are
+    // scoped to that cluster's addresses, so nothing it touches is shared with
+    // its siblings. Its tests still run one at a time: they restart nodes and
+    // cut off traffic for the whole cluster.
+    fn group_can_run_concurrently() -> bool {
+        true
     }
 }
 
@@ -119,10 +126,7 @@ async fn reconnect_doesnt_break_fullscan(fixture: Arc<Fixture>) {
     }
 
     info!("Disconnect scylla-proxy");
-    actors
-        .firewall
-        .drop_traffic(get_default_db_proxy_ips(actors))
-        .await;
+    actors.drop_traffic(get_default_db_proxy_ips(actors)).await;
 
     info!(
         "counters: {:?}, {:?}",
@@ -173,7 +177,7 @@ async fn reconnect_doesnt_break_fullscan(fixture: Arc<Fixture>) {
     );
 
     info!("Reconnect scylla-proxy");
-    actors.firewall.turn_off_rules().await;
+    actors.turn_off_firewall_rules().await;
 
     info!("Disable rules on scylla-proxy");
     actors.db_proxy.turn_off_rules().await;
@@ -296,7 +300,7 @@ async fn restarting_one_node_doesnt_break_fullscan(fixture: Arc<Fixture>) {
         .unwrap();
 
     info!("Disconnect scylla-proxy {proxy_addr}");
-    actors.firewall.drop_traffic(vec![proxy_addr]).await;
+    actors.drop_traffic(vec![proxy_addr]).await;
 
     wait_for(
         || async {
@@ -310,7 +314,7 @@ async fn restarting_one_node_doesnt_break_fullscan(fixture: Arc<Fixture>) {
     .await;
 
     info!("Reconnect scylla-proxy");
-    actors.firewall.turn_off_rules().await;
+    actors.turn_off_firewall_rules().await;
 
     info!("Disable rules on scylla-proxy");
     actors.db_proxy.turn_off_rules().await;
@@ -426,7 +430,7 @@ async fn restarting_all_nodes_doesnt_break_fullscan(fixture: Arc<Fixture>) {
             .unwrap();
 
         info!("Disconnect scylla-proxy {proxy_addr}");
-        actors.firewall.drop_traffic(vec![proxy_addr]).await;
+        actors.drop_traffic(vec![proxy_addr]).await;
 
         wait_for(
             || async {
@@ -447,7 +451,7 @@ async fn restarting_all_nodes_doesnt_break_fullscan(fixture: Arc<Fixture>) {
             .unwrap();
 
         info!("Reconnect scylla-proxy");
-        actors.firewall.turn_off_rules().await;
+        actors.turn_off_firewall_rules().await;
 
         wait_for(
             || async {
