@@ -63,11 +63,32 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
+use tokio::sync::Semaphore;
+use tokio::sync::SemaphorePermit;
 use tracing::info;
 use tracing::warn;
 
 static TABLE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static INDEX_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+/// How many Alternator schema changes the tests keep in flight at once.
+///
+/// ScyllaDB applies schema changes one at a time through Raft, so sending
+/// more than a handful only makes each of them wait longer: once several
+/// groups ran together a single `CreateTable` took over half a minute, long
+/// enough for the SDK to give up on it. Queuing them here instead keeps each
+/// request's latency near what the cluster can actually deliver, and costs no
+/// throughput, since the cluster was applying them one at a time regardless.
+static SCHEMA_CHANGES: Semaphore = Semaphore::const_new(4);
+
+/// Holds a place in the schema-change queue for as long as the returned
+/// permit lives.
+async fn schema_change_permit() -> SemaphorePermit<'static> {
+    SCHEMA_CHANGES
+        .acquire()
+        .await
+        .expect("the schema-change semaphore is never closed")
+}
 
 fn unique_table_name() -> String {
     common::unique_name("Alt-Tbl", &TABLE_COUNTER)
@@ -595,6 +616,7 @@ async fn create_table(
     sort_key_name: Option<&str>,
     vector_indexes: &[(&str, &str, usize)],
 ) -> Result<CreateTableOutput, SdkError<CreateTableError>> {
+    let _permit = schema_change_permit().await;
     let mut builder = client
         .create_table()
         .table_name(table_name)
@@ -665,6 +687,7 @@ async fn update_table_vector_indexes(
     table_name: &str,
     vector_index_updates: Value,
 ) {
+    let _permit = schema_change_permit().await;
     client
         .update_table()
         .table_name(table_name)
@@ -679,6 +702,7 @@ async fn update_table_vector_indexes(
 }
 
 async fn delete_table(client: &Client, table_name: &str) {
+    let _permit = schema_change_permit().await;
     client
         .delete_table()
         .table_name(table_name)
@@ -1064,6 +1088,7 @@ impl TableContext {
 
     /// Idempotent.
     async fn done(&self) {
+        let _permit = schema_change_permit().await;
         match self
             .client
             .delete_table()
