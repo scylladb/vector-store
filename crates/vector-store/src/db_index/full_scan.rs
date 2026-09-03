@@ -64,11 +64,15 @@ pub(crate) async fn scan_ranges<R, Fut>(
             })
             .await;
 
+            // The range query is exhausted, so let the next range start now. Waiting for the
+            // pipeline to acknowledge the rows must not hold the slot: the FTS index acknowledges
+            // only on commit, and a range rarely has enough rows to trigger one by itself.
+            drop(permit);
+
             // wait until all in-progress markers are dropped
             while rx_in_progress.recv().await.is_some() {}
 
             completed_scan_length.fetch_add(length, Ordering::Relaxed);
-            drop(permit);
         });
     }
 
@@ -127,6 +131,43 @@ mod tests {
         while !condition() {
             task::yield_now().await;
         }
+    }
+
+    /// Mimics an index which acknowledges rows only when it commits, and whose commit needs more
+    /// rows than the currently open ranges can deliver, e.g. tantivy committing on a timer or on a
+    /// 10k-document threshold. Scheduling the next ranges must not depend on that acknowledgement.
+    #[rstest]
+    #[timeout(Duration::from_secs(5))]
+    #[tokio::test]
+    async fn opens_next_ranges_while_rows_of_open_ranges_are_unacknowledged() {
+        const RANGES: usize = 8;
+        let (tx, mut rx) = mpsc::channel(1);
+        let completed = Arc::new(AtomicU64::new(0));
+        let consumer = {
+            let completed = Arc::clone(&completed);
+            tokio::spawn(async move {
+                let mut guards = Vec::new();
+                while guards.len() < RANGES {
+                    let (_row, guard) = rx.recv().await.unwrap();
+                    guards.push(guard);
+                }
+                assert_eq!(completed.load(Ordering::Relaxed), 0);
+                drop(guards);
+            })
+        };
+
+        scan_ranges(
+            0..RANGES,
+            concurrency(2),
+            |i| future::ready(single_row_range(i)),
+            |_| 1,
+            tx,
+            Arc::clone(&completed),
+        )
+        .await;
+
+        consumer.await.unwrap();
+        assert_eq!(completed.load(Ordering::Relaxed), RANGES as u64);
     }
 
     #[rstest]
