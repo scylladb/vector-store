@@ -103,10 +103,12 @@ jobs:
     - name: Set testcases output
       id: testcases
       run: |
-        # One job per test group, so that the matrix is not serialised behind a
-        # single long job: groups sharing a cluster still run one after another
-        # within a job, which would make one job carrying many of them the
-        # workflow's critical path.
+        # One job per test group, spread over the matrix rather than gathered
+        # onto one runner. A runner has the memory and the cores for about a
+        # cluster, so a job carrying several groups would boot their clusters
+        # one after another and become the workflow's critical path. Booting
+        # several at once is worth doing where there is room for them, which is
+        # a developer's machine rather than a runner.
         #
         # A group's path is its test name minus the test, and the filter quotes
         # it for an exact match so that a group is never selected by a job for

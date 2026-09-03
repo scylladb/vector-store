@@ -124,12 +124,14 @@ struct RunArgs {
     log_dir: Option<PathBuf>,
 
     /// Maximum number of test groups to run concurrently.
+    /// Defaults to the number of clusters this machine has the free memory and
+    /// the cores for.
     ///
     /// A group owning a cluster runs in a network namespace of its own, so any
-    /// number of them may overlap up to the address blocks there are to hand
-    /// out. The work in flight is bounded by this times `--concurrency`, so
+    /// number of them may overlap; what bounds them is what a cluster costs to
+    /// run. The work in flight is bounded by this times `--concurrency`, so
     /// raising both loads the machine quickly.
-    #[arg(long, default_value = "4", value_name = "N")]
+    #[arg(long, default_value_t = default_group_concurrency(), value_name = "N")]
     group_concurrency: usize,
 
     /// Path to the ScyllaDB executable.
@@ -203,6 +205,14 @@ fn init(args: RunArgs) -> Config {
     // on the console is only useful next to the log that explains it.
     println!("Per-test logs: {}", log_dir.display());
 
+    // Worth saying, both of these being what this machine turned out to have
+    // room for rather than what anybody asked for.
+    info!(
+        "running up to {group} clusters at once, {tests} tests at once in each",
+        group = args.group_concurrency,
+        tests = args.concurrency,
+    );
+
     // Without --verbose the console shows a line per group, repainted as the
     // run goes: a spinner while its cluster comes up, then a mark per test as
     // each one ends. With it, a line per test naming it with its result.
@@ -229,6 +239,41 @@ fn init(args: RunArgs) -> Config {
 /// cannot be determined.
 fn default_concurrency() -> usize {
     thread::available_parallelism().map_or(1, NonZeroUsize::get)
+}
+
+/// What one cluster takes of the machine's memory: a gigabyte for each of its
+/// three ScyllaDB nodes, which is what they are started with and what they
+/// reserve up front rather than grow into, and a gigabyte for the Vector Store
+/// nodes, the proxy and the test working against them.
+const CLUSTER_MEMORY: u64 = 4 * 1024 * 1024 * 1024;
+
+/// What one cluster takes of the machine's cores. Its ScyllaDB nodes run
+/// overprovisioned, so they give a core up rather than poll it for work and
+/// need not have one each; two are enough for a cluster to get on with its
+/// tests without holding up the ones beside it.
+const CLUSTER_CPUS: usize = 2;
+
+/// How many clusters this machine can hold at once, which is the default
+/// number of groups owning one to run at the same time.
+///
+/// Measured against the memory that is free rather than the memory the machine
+/// has. A run shares a developer's machine with everything else on it, and a
+/// cluster more than there is room for does not merely run slowly: its nodes
+/// reserve their memory whether they are busy or not, so the machine goes to
+/// swap and every cluster on it crawls.
+///
+/// Whichever of memory and cores runs out first decides it, and the address
+/// blocks there are to hand out cap it: a cluster past those has nowhere to
+/// put its nodes. Never zero, a run of one cluster at a time being better than
+/// no run at all on a machine that is smaller than the arithmetic likes.
+fn default_group_concurrency() -> usize {
+    let system = sysinfo::System::new_all();
+    let memory = system
+        .cgroup_limits()
+        .map_or_else(|| system.available_memory(), |limits| limits.free_memory);
+    let by_memory = usize::try_from(memory / CLUSTER_MEMORY).unwrap_or(MAX_CLUSTERS);
+    let by_cpus = default_concurrency() / CLUSTER_CPUS;
+    by_memory.min(by_cpus).clamp(1, MAX_CLUSTERS)
 }
 
 fn validate_different_subnet(dns_ip: Ipv4Addr, base_ip: Ipv4Addr) {

@@ -6143,6 +6143,7 @@ dependencies = [
  "scylla",
  "scylla-proxy",
  "serde_json",
+ "sysinfo",
  "tap",
  "tempfile",
  "tokio",
