@@ -7,6 +7,13 @@
 # settings. Any key not set here falls back to CodeRabbit's own defaults, not to
 # the org settings. Keys previously set in the org UI must therefore be restated
 # here to keep their effect.
+#
+# NOTE ON VISIBILITY: this repository is public, so anything CodeRabbit reads
+# from the private scylladb/vector-search-docs repository can end up quoted in a
+# review comment that the world can read. That repository classifies every
+# knowledge entry by path — knowledge/public/** vs knowledge/private/** — and
+# only the public tree may be referenced from here. Never point any setting in
+# this file at knowledge/private/**.
 
 reviews:
   # Previously set in the org UI; restated so this file does not silently
@@ -19,33 +26,47 @@ knowledge_base:
   # Treat the curated house rules and architecture decisions in the
   # vector-search-docs knowledge base as review criteria. Cross-repository
   # entries use `repo:path` and are read at that repository's default branch
-  # (master). These are additive: CodeRabbit's built-in patterns (CLAUDE.md,
+  # (master). These globs are an explicit allowlist: they name the public tree
+  # only, so the private tree cannot be pulled in through this setting.
+  # Entries are additive — CodeRabbit's built-in patterns (CLAUDE.md,
   # AGENTS.md, .github/instructions/*, ...) still apply.
   code_guidelines:
     enabled: true
     filePatterns:
       # House rules this codebase enforces in review rather than in a document.
-      - "vector-search-docs:knowledge/conventions/*.md"
+      - "vector-search-docs:knowledge/public/conventions/*.md"
       # Architecture decision records for vector search and FTS.
-      - "vector-search-docs:knowledge/decisions/*.md"
+      - "vector-search-docs:knowledge/public/decisions/*.md"
 
-  # Let CodeRabbit search the whole knowledge base on demand for the facts a
+  # Let CodeRabbit search the public knowledge tree on demand for the facts a
   # given change touches, rather than injecting all of it into every review.
+  #
+  # Unlike the globs above, this is agentic search over a repository the
+  # CodeRabbit installation can read in full, so the public/private boundary
+  # here rests on the instructions below being followed rather than on a path
+  # allowlist. Keep the restriction stated first and unambiguously.
   linked_repositories:
     - repository: "scylladb/vector-search-docs"
       instructions: >-
-        Curated knowledge base and source of truth for ScyllaDB vector search
-        and full-text search (FTS). Search `knowledge/` only: `concepts/`,
-        `features/`, `api/`, `decisions/` and `conventions/` hold canonical,
-        human-reviewed entries whose frontmatter records provenance
-        (`sources:`), the releases they apply to (`applies_to:`) and
-        confidence (`status:`). Prefer entries with `status: stable`; treat
-        `status: draft` or `status: review` as unverified and do not raise
-        review findings on their basis alone. Ignore `sources/` (vendored,
-        read-only ingests of external docs) and `generated/` (disposable LLM
-        drafts and slide decks) — both are large and non-authoritative.
-        Useful for checking whether a change contradicts documented API
-        behavior, configuration semantics or a recorded design decision.
+        STRICT SCOPE: read `knowledge/public/**` ONLY. Never read, quote,
+        summarize or otherwise surface `knowledge/private/**`; it holds facts
+        backed solely by internal sources, and findings from this repository
+        are published as comments on a PUBLIC repository. Also ignore
+        `sources/` (vendored, read-only ingests) and `generated/` (disposable
+        drafts and slide decks) — large and non-authoritative. If the public
+        tree does not answer a question, say so rather than consulting the
+        private tree.
+
+        Within that scope: this is the curated source of truth for ScyllaDB
+        vector search and full-text search (FTS). `knowledge/public/` holds
+        `concepts/`, `features/`, `api/`, `decisions/` and `conventions/`,
+        each entry human-reviewed with frontmatter recording provenance
+        (`sources:`), applicable releases (`applies_to:`) and confidence
+        (`status:`). Prefer `status: stable`; treat `status: draft` or
+        `status: review` as unverified and do not raise findings on their
+        basis alone. Useful for checking whether a change contradicts
+        documented API behavior, configuration semantics or a recorded
+        design decision.
 
   # Explicit: never auto-link further repositories. This repository is public
   # and most sibling ScyllaDB repositories are private; only the link declared
