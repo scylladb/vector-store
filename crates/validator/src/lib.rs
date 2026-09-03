@@ -125,10 +125,10 @@ struct RunArgs {
 
     /// Maximum number of test groups to run concurrently.
     ///
-    /// Only groups sharing a cluster with their siblings may overlap; a group
-    /// owning a cluster that mutates node, network or authorization state
-    /// always runs on its own. The work in flight is bounded by this times
-    /// `--concurrency`, so raising both loads the cluster quickly.
+    /// A group owning a cluster runs in a network namespace of its own, so any
+    /// number of them may overlap up to the address blocks there are to hand
+    /// out. The work in flight is bounded by this times `--concurrency`, so
+    /// raising both loads the machine quickly.
     #[arg(long, default_value = "4", value_name = "N")]
     group_concurrency: usize,
 
@@ -345,8 +345,12 @@ pub const CLUSTER_OCTET_STRIDE: u8 = 32;
 pub const MAX_CLUSTERS: usize = 8;
 
 /// The shared, process-wide services: the loopback subnet the clusters are
-/// carved out of, the certificate they all present, the DNS zone naming their
-/// Vector Store nodes, and the host firewall.
+/// carved out of and the certificate they all present.
+///
+/// Only what every cluster can share is here. A service bound to an address or
+/// writing to a routing table cannot be: each cluster runs in a network
+/// namespace of its own, where neither is the one this fixture was set up in.
+/// Those belong to the cluster instead, and are started in [`Self::new_cluster`].
 ///
 /// Clusters are allocated from here so that several can run at the same time,
 /// each with its own nodes on its own addresses.
@@ -354,8 +358,6 @@ struct TestEnv {
     args: Arc<RunArgs>,
     services_subnet: Arc<ServicesSubnet>,
     tls: mpsc::Sender<Tls>,
-    dns: mpsc::Sender<Dns>,
-    firewall: mpsc::Sender<Firewall>,
     /// Address blocks not currently taken by a cluster.
     free_clusters: Arc<Mutex<Vec<usize>>>,
 }
@@ -370,22 +372,17 @@ impl e2etest::Fixture for TestEnv {
         // Every cluster presents the same certificate, so it has to name the
         // ScyllaDB addresses of all of them.
         let tls = e2etest_tls::new(&common::all_cluster_db_ips(&services_subnet)).await;
-        let dns = e2etest_dns::new(args.dns_ip).await;
-        let firewall = e2etest_firewall::new().await;
 
         info!(
             "{} version: {}",
             env!("CARGO_PKG_NAME"),
             env!("CARGO_PKG_VERSION")
         );
-        info!("dns version: {}", dns.version().await);
 
         Some(Self {
             args,
             services_subnet,
             tls,
-            dns,
-            firewall,
             free_clusters: Arc::new(Mutex::new((0..MAX_CLUSTERS).rev().collect())),
         })
     }
@@ -435,9 +432,17 @@ impl TestEnv {
         .await;
         let db_proxy = e2etest_scylla_proxy_cluster::new().await;
 
+        // A DNS server and a firewall of this cluster's own. Both work on what
+        // a network namespace holds — the names its nodes answer to, the
+        // routes reaching them — and every cluster has a namespace of its own,
+        // so each needs a pair of its own rather than a share of one.
+        let dns = e2etest_dns::new(args.dns_ip).await;
+        let firewall = e2etest_firewall::new().await;
+
         if index == 0 {
             info!("scylla version: {}", db.version().await);
             info!("vector-store version: {}", vs.version().await);
+            info!("dns version: {}", dns.version().await);
         }
 
         TestActors {
@@ -447,8 +452,8 @@ impl TestEnv {
             }),
             services_subnet: Arc::clone(&self.services_subnet),
             tls: self.tls.clone(),
-            dns: self.dns.clone(),
-            firewall: self.firewall.clone(),
+            dns,
+            firewall,
             db,
             vs,
             db_proxy,
@@ -501,8 +506,9 @@ impl TestActors {
     }
 
     /// Blocks traffic to the given addresses, replacing whatever this cluster
-    /// blocked before. Other clusters' rules are left alone, so a group that
-    /// cuts its own nodes off can run alongside one doing the same to its own.
+    /// blocked before. The routes go into the routing table of the namespace
+    /// this cluster runs in, which no other cluster shares, so a group cutting
+    /// its own nodes off can run alongside one doing the same to its own.
     pub(crate) async fn drop_traffic(&self, ips: Vec<Ipv4Addr>) {
         self.firewall.drop_traffic(self.firewall_owner(), ips).await;
     }
@@ -512,8 +518,9 @@ impl TestActors {
         self.firewall.turn_off_rules(self.firewall_owner()).await;
     }
 
-    /// The firewall rules of this cluster, kept apart from every other
-    /// cluster's by its address block.
+    /// Who this cluster's rules belong to. Its firewall serves nothing else,
+    /// the namespace it runs in being this cluster's alone, so the address
+    /// block is only a stable name for the one owner there is.
     fn firewall_owner(&self) -> FirewallOwner {
         FirewallOwner(self.slot.index as u64)
     }

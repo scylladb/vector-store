@@ -539,6 +539,13 @@ impl e2etest::Fixture for SharedCluster {
     fn group_can_run_concurrently() -> bool {
         true
     }
+
+    // Its nodes claim loopback addresses, ports and routes, which every other
+    // cluster claims too, so it runs in a network namespace of its own, where
+    // it is alone in claiming them.
+    fn group_needs_own_namespace() -> bool {
+        true
+    }
 }
 
 /// Per-group CQL test context on the [`SharedCluster`]: a superuser session,
@@ -639,6 +646,13 @@ impl e2etest::Fixture for ProxyCluster {
     // This cluster is independent of every other one, so its groups may run
     // alongside groups owning a different cluster.
     fn group_can_run_concurrently() -> bool {
+        true
+    }
+
+    // Its nodes claim loopback addresses, ports and routes, which every other
+    // cluster claims too, so it runs in a network namespace of its own, where
+    // it is alone in claiming them.
+    fn group_needs_own_namespace() -> bool {
         true
     }
 }

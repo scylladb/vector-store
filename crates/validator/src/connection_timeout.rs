@@ -41,6 +41,13 @@ impl e2etest::Fixture for Fixture {
     fn group_can_run_concurrently() -> bool {
         true
     }
+
+    // Its nodes claim loopback addresses, ports and routes, which every other
+    // cluster claims too, so it runs in a network namespace of its own, where
+    // it is alone in claiming them.
+    fn group_needs_own_namespace() -> bool {
+        true
+    }
 }
 
 /// Test that the CQL connection timeout causes session creation to fail

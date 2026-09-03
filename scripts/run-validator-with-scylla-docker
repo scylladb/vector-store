@@ -38,9 +38,14 @@ if [[ -t 1 ]] ; then
     tty_opts="--tty --env COLUMNS=$(tput cols)"
 fi
 
+# Each group owning a cluster runs in a network namespace of its own, so that
+# the clusters do not have to share the loopback addresses, the ports and the
+# routing table they all claim. Creating one needs SYS_ADMIN, which is not
+# among the capabilities a container is given by default.
 docker run --rm \
     $tty_opts \
     --cap-add NET_ADMIN \
+    --cap-add SYS_ADMIN \
     --user root \
     --security-opt seccomp=unconfined \
     --dns=$dns_ip \
