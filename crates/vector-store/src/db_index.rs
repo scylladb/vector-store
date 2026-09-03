@@ -50,6 +50,7 @@ use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tap::Pipe;
 use tokio::sync::Notify;
@@ -295,7 +296,8 @@ pub(crate) async fn new<T: DbDriver>(
             info!("starting full scan on {}", metadata.key());
 
             let mut initial_scan = Box::pin(
-                statements.initial_scan(tx_embeddings.clone(), completed_scan_length.clone()),
+                Arc::clone(&statements)
+                    .initial_scan(tx_embeddings.clone(), completed_scan_length.clone()),
             );
 
             // Initial scan and message processing loop
@@ -587,59 +589,26 @@ impl<T: DbDriver> Statements<T> {
     /// using semaphore, and runs each scan in separate concurrent task using cloned mpsc channel
     /// to send read embeddings into the pipeline.
     async fn initial_scan(
-        &self,
+        self: Arc<Self>,
         tx: mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
         completed_scan_length: Arc<AtomicU64>,
     ) -> anyhow::Result<()> {
-        let semaphore_capacity = self.nr_parallel_queries().await?.get();
-        let semaphore = Arc::new(Semaphore::new(semaphore_capacity));
-
-        for (begin, end) in self.fullscan_ranges().await? {
-            let permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
-
-            let embeddings = self
-                .preform_range_scan(begin, end)
-                .await
-                .inspect_err(|err| {
-                    error!("Error during scan of the range ({begin:?}, {end:?}): {err}",);
-                })?;
-            let tx = tx.clone();
-            let scan_length = completed_scan_length.clone();
-            tokio::spawn(async move {
-                let (tx_in_progress, mut rx_in_progress) = mpsc::channel(1);
-                embeddings
-                    .for_each(move |embedding| {
-                        let tx = tx.clone();
-                        let tx_in_progress = tx_in_progress.clone();
-                        async move {
-                            _ = tx
-                                .send((embedding, AsyncInProgress::Fullscan(tx_in_progress)))
-                                .await;
-                        }
+        let ranges = self.fullscan_ranges().await?;
+        let concurrency = self.nr_parallel_queries().await?;
+        scan_ranges(
+            ranges,
+            concurrency,
+            async move |begin, end| {
+                self.preform_range_scan(begin, end)
+                    .await
+                    .inspect_err(|err| {
+                        error!("Error during scan of the range ({begin:?}, {end:?}): {err}",);
                     })
-                    .await;
-
-                // wait until all in-progress markers are dropped
-                while rx_in_progress.recv().await.is_some() {
-                    rx_in_progress.len();
-                }
-
-                //Safety: end > begin, and the range fits into u64
-                scan_length.fetch_add(
-                    end.value().abs_diff(begin.value() - 1),
-                    std::sync::atomic::Ordering::Relaxed,
-                );
-                drop(permit);
-            });
-        }
-
-        // Acquire all permits to wait until all spawned tasks have finished and released their permits.
-        let _permits = semaphore
-            .acquire_many(semaphore_capacity as u32)
-            .await
-            .unwrap();
-
-        Ok(())
+            },
+            tx,
+            completed_scan_length,
+        )
+        .await
     }
 
     async fn nr_shards_in_cluster(&self) -> anyhow::Result<NonZeroUsize> {
@@ -669,7 +638,9 @@ impl<T: DbDriver> Statements<T> {
     /// highest possible token - for support the specific token range after the highest token to
     /// the lowest token. The highest possible token value is not decremented, because it doesn't
     /// start a new range.
-    async fn fullscan_ranges(&self) -> anyhow::Result<impl Iterator<Item = (Token, Token)>> {
+    async fn fullscan_ranges(
+        &self,
+    ) -> anyhow::Result<impl Iterator<Item = (Token, Token)> + use<T>> {
         let cluster = self
             .db_session
             .wait_for_session()
@@ -757,6 +728,65 @@ impl<T: DbDriver> Statements<T> {
             })
             .boxed())
     }
+}
+
+/// Streams the rows of every range into `tx`, limiting the number of concurrently scanned ranges
+/// to `concurrency`. Each row is tagged with an `AsyncInProgress::Fullscan` guard; a range
+/// contributes its number of tokens to `completed_scan_length` once the pipeline has dropped all
+/// of its guards. The future resolves only after every range has been acknowledged this way.
+async fn scan_ranges(
+    ranges: impl IntoIterator<Item = (Token, Token)>,
+    concurrency: NonZeroUsize,
+    rows: impl AsyncFn(Token, Token) -> RangeScanResult,
+    tx: mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
+    completed_scan_length: Arc<AtomicU64>,
+) -> anyhow::Result<()> {
+    let semaphore_capacity = concurrency.get();
+    let semaphore = Arc::new(Semaphore::new(semaphore_capacity));
+
+    for (begin, end) in ranges {
+        let permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
+
+        let length = range_length(begin, end);
+        let embeddings = rows(begin, end).await?;
+        let tx = tx.clone();
+        let scan_length = completed_scan_length.clone();
+        tokio::spawn(async move {
+            let (tx_in_progress, mut rx_in_progress) = mpsc::channel(1);
+            embeddings
+                .for_each(move |embedding| {
+                    let tx = tx.clone();
+                    let tx_in_progress = tx_in_progress.clone();
+                    async move {
+                        _ = tx
+                            .send((embedding, AsyncInProgress::Fullscan(tx_in_progress)))
+                            .await;
+                    }
+                })
+                .await;
+
+            // wait until all in-progress markers are dropped
+            while rx_in_progress.recv().await.is_some() {
+                rx_in_progress.len();
+            }
+
+            scan_length.fetch_add(length, Ordering::Relaxed);
+            drop(permit);
+        });
+    }
+
+    // Acquire all permits to wait until all spawned tasks have finished and released their permits.
+    let _permits = semaphore
+        .acquire_many(semaphore_capacity as u32)
+        .await
+        .unwrap();
+
+    Ok(())
+}
+
+fn range_length(begin: Token, end: Token) -> u64 {
+    //Safety: end > begin, and the range fits into u64
+    end.value().abs_diff(begin.value() - 1)
 }
 
 /// Builds the `table_columns` lookup Table::new() uses to size and type
