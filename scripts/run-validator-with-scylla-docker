@@ -28,7 +28,18 @@ base_ip=127.0.2.1
 log_dir=${VALIDATOR_LOG_DIR:-/tmp/vector-search-validator-logs}
 mkdir -p "$log_dir"
 
+# The run reports its progress by repainting the console, which it only does
+# when it is writing to a terminal. Give the container one, and the width to
+# lay the report out in, whenever this script was started from a terminal
+# itself. In CI there is none, and the run reports a line per event instead.
+if [[ -t 1 ]] ; then
+    # Only a terminal, not an attached stdin: the run reads none, and leaving
+    # stdin alone keeps Ctrl-C reaching docker as it does today.
+    tty_opts="--tty --env COLUMNS=$(tput cols)"
+fi
+
 docker run --rm \
+    $tty_opts \
     --cap-add NET_ADMIN \
     --user root \
     --security-opt seccomp=unconfined \
