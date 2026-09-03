@@ -159,14 +159,22 @@ jobs:
         # another whose name it is a prefix of (`auth` and `alternator_auth`).
         # Deriving the list from the binary keeps a newly added group from
         # being silently dropped.
+        #
+        # A job is named after the module the group is declared in, `crud` or
+        # `alternator::create_table`, rather than after the whole path: the
+        # umbrella groups of lib.rs (`standard`, `proxy`) name the cluster a
+        # group shares and say nothing about what it tests. The filter keeps
+        # the whole path, which is what the run matches on.
         ./vector-search-validator-amd64 list \
           | sed -E 's/::[^:]*$//' \
           | sort -u \
-          | awk '{ print $0 "\t\"" $0 "\"::" }' \
+          | awk '{ label = $0; sub(/^(standard|proxy)::/, "", label);
+                   print label "\t\"" $0 "\"::" }' \
           | jq -Rc 'split("\t") | {name: .[0], filters: .[1]}' | jq -sc . \
           | sed 's/^/testcases=/' >> "$GITHUB_OUTPUT"
 
   daily-validator-tests:
+    name: ${{matrix.testcase.name}} (${{matrix.arch}})
     needs: ["daily-get-scylla-nightly-digest", "daily-get-testcases"]
     runs-on: ${{ matrix.os }}
     strategy:
