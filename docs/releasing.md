@@ -19,6 +19,18 @@ GitHub doesn't support creating annotated tags, so you must do them from local
 environment. You can add additional metadata to the tag, for example
 `X.Y.Z-dev` for development releases.
 
+In GitHub Actions there is a release workflow that builds the release artifacts
+and uploads them to GitHub and DockerHub. It is triggered when a GitHub Release
+is published, or manually via Run workflow with `VECTOR_VERSION`, and runs on
+both amd64 and arm64 runners. Before building artifacts it runs the full
+validator test suite.
+
+## Manual release
+
+In case you want to build the release manually, you can use the scripts in
+`scripts/` directory. The scripts are designed to be run from the root of the
+repository.
+
 Script `scripts/run-with-release-toolchain` can create a correct version for
 the `Cargo.toml` file based on annotated tags using `git describe --dirty`.
 
