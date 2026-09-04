@@ -1,6 +1,6 @@
 /*
  * Copyright 2025-present ScyllaDB
- * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
 use crate::Filter;
@@ -82,7 +82,7 @@ use utoipa_swagger_ui::SwaggerUi;
         description = "REST API for ScyllaDB Vector Store indexing service. Provides capabilities for executing vector search queries, \
         managing indexes, and checking service status.",
         license(
-            name = "LicenseRef-ScyllaDB-Source-Available-1.0"
+            name = "LicenseRef-ScyllaDB-Source-Available-1.1"
         ),
         // version should be updated manually when there are changes in API
         version = "3.0.0"
