@@ -1,6 +1,6 @@
 /*
  * Copyright 2026-present ScyllaDB
- * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
 #[path = "../tests/integration/db_basic.rs"]

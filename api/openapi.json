@@ -4,7 +4,7 @@
     "title": "ScyllaDB Vector Store API",
     "description": "REST API for ScyllaDB Vector Store indexing service. Provides capabilities for executing vector search queries, managing indexes, and checking service status.",
     "license": {
-      "name": "LicenseRef-ScyllaDB-Source-Available-1.0"
+      "name": "LicenseRef-ScyllaDB-Source-Available-1.1"
     },
     "version": "3.0.0"
   },
