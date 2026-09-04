@@ -195,6 +195,107 @@ jobs:
           asset_name: vector-store-cloud-images-${{ env.VECTOR_VERSION }}.json
           asset_content_type: application/json
 
+  # Hand the freshly built cloud images over to siren: extract the image IDs
+  # from the packer manifest and send the repository_dispatch that starts
+  # https://github.com/scylladb/siren/actions/workflows/add-vectorstore-ver.yml,
+  # which opens a versions.yaml PR in scylladb/siren. A separate job consuming
+  # the manifest artifact (the push-docker pattern) keeps the dispatch
+  # re-runnable without rebuilding the images.
+  trigger-siren:
+    needs: [build-cloud-images]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check the version is a GA release
+        id: ga
+        run: |
+          set -euo pipefail
+          # siren validates the version against ^X.Y.Z$ and unconditionally
+          # moves its defaults.vectorstore to it, so pre-release and dev tags
+          # (1.6.1-rc0, X.Y.Z-dev) must not be dispatched. The release trigger
+          # already filters prereleases out, but workflow_dispatch takes an
+          # arbitrary VECTOR_VERSION — skip (not fail) the job on those.
+          if [[ "${VECTOR_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ; then
+            echo "ga=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ga=false" >> "$GITHUB_OUTPUT"
+            echo "Version \`${VECTOR_VERSION}\` is not a GA X.Y.Z release — skipping the siren dispatch" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Download the packer manifest artifact
+        if: steps.ga.outputs.ga == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: vector-store-cloud-images-${{ env.VECTOR_VERSION }}
+
+      - name: Extract the image IDs from the packer manifest
+        if: steps.ga.outputs.ga == 'true'
+        id: images
+        run: |
+          set -euo pipefail
+          # All three sequential packer builds append to the one .builds[]
+          # array, and a re-run appends rather than replaces — take the last
+          # matching entry. The AWS builds are told apart by the arch recorded
+          # in custom_data by the manifest post-processor; their artifact_id
+          # is a comma-separated region:ami list and siren expects the bare
+          # us-east-1 AMI (it prefixes the value with us-east-1/ itself).
+          # The GCP image needs no such disambiguation: only one architecture
+          # (amd64) is built there, so builder_type alone identifies it.
+          aws_ami() {
+            jq -r --arg arch "$1" \
+              '[.builds[] | select(.builder_type=="amazon-ebs" and .custom_data.arch==$arch)] | last | .artifact_id // empty' \
+              packer-manifest.json \
+              | tr ',' '\n' | { grep '^us-east-1:' || true ; } | cut -d: -f2
+          }
+          aws_amd64_ami=$(aws_ami amd64)
+          aws_arm64_ami=$(aws_ami arm64)
+          gcp_amd64_image=$(jq -r \
+            '[.builds[] | select(.builder_type=="googlecompute")] | last | .artifact_id // empty' \
+            packer-manifest.json)
+          for var in aws_amd64_ami aws_arm64_ami gcp_amd64_image ; do
+            if [[ -z "${!var}" ]] ; then
+              echo "::error::failed to extract ${var} from packer-manifest.json"
+              exit 1
+            fi
+            echo "${var}=${!var}" >> "$GITHUB_OUTPUT"
+          done
+
+      - name: Trigger the siren add-vectorstore-ver workflow
+        if: steps.ga.outputs.ga == 'true'
+        uses: peter-evans/repository-dispatch@ff45666b9427631e3450c54a1bcbee4d9ff4d7c0 # v3.0.0
+        with:
+          token: ${{ secrets.SIREN_REPO_TOKEN }}
+          repository: scylladb/siren
+          event-type: vectorstore-release
+          client-payload: |
+            {
+              "version": "${{ env.VECTOR_VERSION }}",
+              "aws_amd64_ami": "${{ steps.images.outputs.aws_amd64_ami }}",
+              "gcp_amd64_image": "${{ steps.images.outputs.gcp_amd64_image }}",
+              "aws_arm64_ami": "${{ steps.images.outputs.aws_arm64_ami }}"
+            }
+
+      - name: Log the siren workflow link
+        if: steps.ga.outputs.ga == 'true'
+        env:
+          AWS_AMD64_AMI: ${{ steps.images.outputs.aws_amd64_ami }}
+          AWS_ARM64_AMI: ${{ steps.images.outputs.aws_arm64_ami }}
+          GCP_AMD64_IMAGE: ${{ steps.images.outputs.gcp_amd64_image }}
+        run: |
+          set -euo pipefail
+          # repository_dispatch returns 204 with no run id, so the run status
+          # cannot be reported here — link to the siren workflow page instead.
+          {
+            echo "Dispatched \`vectorstore-release\` for \`${VECTOR_VERSION}\` to scylladb/siren:"
+            echo ""
+            echo "- \`aws_amd64_ami\`: \`${AWS_AMD64_AMI}\`"
+            echo "- \`aws_arm64_ami\`: \`${AWS_ARM64_AMI}\`"
+            echo "- \`gcp_amd64_image\`: \`${GCP_AMD64_IMAGE}\`"
+            echo ""
+            echo "Check <https://github.com/scylladb/siren/actions/workflows/add-vectorstore-ver.yml> for the resulting run and versions.yaml PR."
+          } >> "$GITHUB_STEP_SUMMARY"
+
   announce:
     needs: [push-docker, build-cloud-images]
     runs-on: ubuntu-latest

@@ -87,6 +87,45 @@ This will upload all tar.gz archives and SBOM files to the GitHub release
 matching the current version tag. It requires the `gh` CLI to be installed and
 authenticated.
 
+## Registering the release in siren
+
+The release workflow registers a GA release with siren automatically: after
+`build-cloud-images` uploads the packer manifest, the `trigger-siren` job
+extracts the `us-east-1` amd64/arm64 AMI IDs and the GCP image name from it
+and sends a `vectorstore-release` `repository_dispatch` to scylladb/siren.
+That starts siren's
+[add-vectorstore-ver](https://github.com/scylladb/siren/actions/workflows/add-vectorstore-ver.yml)
+workflow, which opens a `feat(vectorstore): add version X.Y.Z [automation]`
+PR against siren's `info/version/versions.yaml`. No manual step is needed for
+a GA release.
+
+Two caveats:
+
+- Only GA `X.Y.Z` versions are dispatched. Pre-release and dev tags
+  (`1.6.1-rc0`, `X.Y.Z-dev`) skip the dispatch, because siren validates the
+  version against `^X.Y.Z$` and unconditionally moves its
+  `defaults.vectorstore` to the dispatched version. For the same reason,
+  releasing a patch on an *older* series still moves `defaults.vectorstore`
+  back to it — review the siren PR before merging in that case.
+- `repository_dispatch` returns no run id, so the job cannot report the siren
+  run status. It logs the dispatched image IDs and a link to the siren
+  workflow page in its job summary — verify there that the run succeeded and
+  the PR appeared.
+
+If the dispatch fails, or the siren run does, the cloud images do not need to
+be rebuilt: re-run just the `trigger-siren` job, which re-reads the packer
+manifest artifact of the same workflow run. To trigger siren fully by hand
+instead, start
+[add-vectorstore-ver](https://github.com/scylladb/siren/actions/workflows/add-vectorstore-ver.yml)
+via `workflow_dispatch`, copying the version, the bare `us-east-1` amd64 and
+arm64 AMI IDs, and the GCP image name from the packer manifest. For a release
+started by publishing a GitHub release, the manifest is attached to the
+release as the `vector-store-cloud-images-X.Y.Z.json` asset; a release
+started via `workflow_dispatch` uploads no release asset, so download the
+`vector-store-cloud-images-X.Y.Z` workflow artifact from the run page
+instead. In the manifest the AWS `artifact_id` is a comma-separated
+`region:ami` list — use the AMI from the `us-east-1` entry.
+
 ### Prerequisites
 
 - Docker; qemu support is needed only when building a non-native
