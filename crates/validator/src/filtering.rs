@@ -7,10 +7,12 @@ use crate::TestActors;
 use crate::common::*;
 use httpapi::KeyspaceName;
 use scylla::client::session::Session;
+use scylla::value::CqlTimeuuid;
 use std::collections::HashSet;
 use std::net::IpAddr;
 use std::sync::Arc;
 use tracing::info;
+use uuid::Uuid;
 
 e2etest::group!(
     name = filtering,
@@ -744,6 +746,609 @@ async fn global_index_filter_by_filtering_columns(actors: Arc<TestActors>) {
         .map(|row| row.expect("failed to get row"))
         .collect();
     assert_eq!(results, HashSet::from([(2,), (6,)]));
+
+    session
+        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
+        .await
+        .expect("failed to drop a keyspace");
+
+    info!("finished");
+}
+
+/// Test ANN search filtered by equality on a BLOB filtering column.
+///
+/// Regression test for VECTOR-889: `cql_cmp()` had no comparison arm for
+/// `CqlValue::Blob`, so a `WHERE <blob column> = <literal>` restriction
+/// during ANN search always evaluated to "not equal" - silently matching
+/// zero rows instead of the expected ones. VECTOR-889 reported the same bug
+/// for Boolean, Uuid and Timeuuid columns too, and we have corresponding
+/// tests for these types as well, below.
+#[e2etest::test(group = filtering)]
+async fn ann_filter_by_blob_column_eq(actors: Arc<TestActors>) {
+    info!("started");
+
+    let (session, clients) = prepare_connection(&actors).await;
+
+    let keyspace = create_keyspace(&session).await;
+    let table = create_table(
+        &session,
+        "pk INT, f BLOB, v VECTOR<FLOAT, 3>, PRIMARY KEY (pk)",
+        None,
+    )
+    .await;
+
+    session
+        .query_unpaged(
+            format!("INSERT INTO {table} (pk, f, v) VALUES (?, ?, ?)"),
+            (0, vec![1u8, 2, 3], &vec![0.0f32, 0.0, 0.0]),
+        )
+        .await
+        .expect("failed to insert data");
+    session
+        .query_unpaged(
+            format!("INSERT INTO {table} (pk, f, v) VALUES (?, ?, ?)"),
+            (1, vec![4u8, 5, 6], &vec![0.0f32, 0.0, 0.0]),
+        )
+        .await
+        .expect("failed to insert data");
+
+    let index =
+        create_index(CreateIndexQuery::new(&session, &clients, &table, "v").filter_columns(["f"]))
+            .await;
+
+    for client in &clients {
+        let index_status = wait_for_index(client, &index).await;
+        assert_eq!(index_status.count, 2, "Expected 2 vectors to be indexed");
+    }
+
+    info!("Querying index for f = 0x010203");
+    let results = get_pks(
+        format!(
+            "SELECT pk FROM {table} WHERE f = 0x010203 ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10 ALLOW FILTERING"
+        ),
+        &session,
+    )
+    .await;
+    assert_eq!(results, HashSet::from([0]));
+
+    session
+        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
+        .await
+        .expect("failed to drop a keyspace");
+
+    info!("finished");
+}
+
+/// Test ANN search filtered by an inequality (`>`) on a BLOB filtering
+/// column, cross-checked against Scylla's own (non-ANN) filtering, to
+/// verify we got the ordering right.
+///
+/// Blob ordering is unsigned byte-wise comparison, with a shorter blob
+/// that is a prefix of a longer one sorting first. The dataset has a
+/// three-way prefix family (b1 < b2 < b4, all starting [1,2]) alongside a
+/// value that differs in an earlier byte (b3), so a subtly wrong
+/// comparison (e.g. one that ignores length or compares lengths first)
+/// would misplace some of them. b2 vs b4 also gives a first, weaker,
+/// signed-byte check: their trailing tie-break byte is 0 vs 255. b5/b6
+/// add a stronger version of the same check at the primary differentiator
+/// instead of a tie-break: their first differing byte (0x7f vs 0x80)
+/// would flip order if compared as signed i8 instead of u8.
+///
+/// Rather than hardcoding the expected order, this loops over every value
+/// as the `>` threshold and, for each, derives the expected row set from
+/// Scylla evaluating the same restriction without `ORDER BY v ANN OF` -
+/// asserting the ANN-filtered query returns exactly that set. Looping the
+/// threshold over the whole dataset exercises every pairwise comparison
+/// among the values, not just one hand-picked split.
+#[e2etest::test(group = filtering)]
+async fn ann_filter_by_blob_column_ordering_matches_scylla(actors: Arc<TestActors>) {
+    info!("started");
+
+    let (session, clients) = prepare_connection(&actors).await;
+
+    let keyspace = create_keyspace(&session).await;
+    let table = create_table(
+        &session,
+        "pk INT, f BLOB, v VECTOR<FLOAT, 3>, PRIMARY KEY (pk)",
+        None,
+    )
+    .await;
+
+    let values: [(i32, Vec<u8>); 6] = [
+        (0, vec![1, 2]),      // b1: prefix of b2
+        (1, vec![1, 2, 0]),   // b2: b1 + trailing byte -> greater than b1
+        (2, vec![1, 10]),     // b3: differs from b1/b2 at 2nd byte
+        (3, vec![1, 2, 255]), // b4: b1 + trailing byte, greater than b2
+        (4, vec![1, 127]),    // b5: 0x7f
+        (5, vec![1, 128]),    // b6: 0x80 - must sort after b5, not before
+    ];
+    for (pk, f) in &values {
+        session
+            .query_unpaged(
+                format!("INSERT INTO {table} (pk, f, v) VALUES (?, ?, ?)"),
+                (pk, f, &vec![*pk as f32, 0.0, 0.0]),
+            )
+            .await
+            .expect("failed to insert data");
+    }
+
+    let index =
+        create_index(CreateIndexQuery::new(&session, &clients, &table, "v").filter_columns(["f"]))
+            .await;
+
+    for client in &clients {
+        let index_status = wait_for_index(client, &index).await;
+        assert_eq!(index_status.count, 6, "Expected 6 vectors to be indexed");
+    }
+
+    for (threshold_pk, threshold) in &values {
+        let literal = blob_literal(threshold);
+        info!("Comparing ANN-filtered and plain (non-ANN) results for f > {literal}");
+        let ann_results = get_pks(
+            format!(
+                "SELECT pk FROM {table} WHERE f > {literal} ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10 ALLOW FILTERING"
+            ),
+            &session,
+        )
+        .await;
+        let plain_results = get_pks(
+            format!("SELECT pk FROM {table} WHERE f > {literal} ALLOW FILTERING"),
+            &session,
+        )
+        .await;
+
+        assert_eq!(
+            ann_results, plain_results,
+            "ANN-filtered results must match Scylla's own (non-ANN) filtering \
+             for f > {literal} (threshold pk={threshold_pk})"
+        );
+    }
+
+    session
+        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
+        .await
+        .expect("failed to drop a keyspace");
+
+    info!("finished");
+}
+
+/// Test ANN search filtered by equality on a BOOLEAN filtering column.
+///
+/// See ann_filter_by_blob_column_eq above: this is the Boolean case of the
+/// same VECTOR-889 bug.
+#[e2etest::test(group = filtering)]
+async fn ann_filter_by_boolean_column_eq(actors: Arc<TestActors>) {
+    info!("started");
+
+    let (session, clients) = prepare_connection(&actors).await;
+
+    let keyspace = create_keyspace(&session).await;
+    let table = create_table(
+        &session,
+        "pk INT, f BOOLEAN, v VECTOR<FLOAT, 3>, PRIMARY KEY (pk)",
+        None,
+    )
+    .await;
+
+    session
+        .query_unpaged(
+            format!("INSERT INTO {table} (pk, f, v) VALUES (?, ?, ?)"),
+            (0, true, &vec![0.0f32, 0.0, 0.0]),
+        )
+        .await
+        .expect("failed to insert data");
+    session
+        .query_unpaged(
+            format!("INSERT INTO {table} (pk, f, v) VALUES (?, ?, ?)"),
+            (1, false, &vec![0.0f32, 0.0, 0.0]),
+        )
+        .await
+        .expect("failed to insert data");
+
+    let index =
+        create_index(CreateIndexQuery::new(&session, &clients, &table, "v").filter_columns(["f"]))
+            .await;
+
+    for client in &clients {
+        let index_status = wait_for_index(client, &index).await;
+        assert_eq!(index_status.count, 2, "Expected 2 vectors to be indexed");
+    }
+
+    info!("Querying index for f = true");
+    let results = get_pks(
+        format!(
+            "SELECT pk FROM {table} WHERE f = true ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10 ALLOW FILTERING"
+        ),
+        &session,
+    )
+    .await;
+    assert_eq!(results, HashSet::from([0]));
+
+    session
+        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
+        .await
+        .expect("failed to drop a keyspace");
+
+    info!("finished");
+}
+
+/// Test ANN search filtered by an inequality (`<`) on a BOOLEAN filtering
+/// column, cross-checked against Scylla's own (non-ANN) filtering.
+///
+/// There's only one possible relative order for two booleans, so unlike
+/// the other ordering tests this can't catch a subtly wrong comparison -
+/// but `cql_cmp()`'s `false < true` is still an assumption about Scylla's
+/// own `boolean_type` comparator, not a law of nature, and this confirms
+/// Scylla agrees rather than just asserting it in isolation.
+#[e2etest::test(group = filtering)]
+async fn ann_filter_by_boolean_column_ordering_matches_scylla(actors: Arc<TestActors>) {
+    info!("started");
+
+    let (session, clients) = prepare_connection(&actors).await;
+
+    let keyspace = create_keyspace(&session).await;
+    let table = create_table(
+        &session,
+        "pk INT, f BOOLEAN, v VECTOR<FLOAT, 3>, PRIMARY KEY (pk)",
+        None,
+    )
+    .await;
+
+    let values: [(i32, bool); 2] = [(0, false), (1, true)];
+    for (pk, f) in &values {
+        session
+            .query_unpaged(
+                format!("INSERT INTO {table} (pk, f, v) VALUES (?, ?, ?)"),
+                (pk, f, &vec![*pk as f32, 0.0, 0.0]),
+            )
+            .await
+            .expect("failed to insert data");
+    }
+
+    let index =
+        create_index(CreateIndexQuery::new(&session, &clients, &table, "v").filter_columns(["f"]))
+            .await;
+
+    for client in &clients {
+        let index_status = wait_for_index(client, &index).await;
+        assert_eq!(index_status.count, 2, "Expected 2 vectors to be indexed");
+    }
+
+    for (threshold_pk, threshold) in &values {
+        info!("Comparing ANN-filtered and plain (non-ANN) results for f < {threshold}");
+        let ann_results = get_pks(
+            format!(
+                "SELECT pk FROM {table} WHERE f < {threshold} ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10 ALLOW FILTERING"
+            ),
+            &session,
+        )
+        .await;
+        let plain_results = get_pks(
+            format!("SELECT pk FROM {table} WHERE f < {threshold} ALLOW FILTERING"),
+            &session,
+        )
+        .await;
+
+        assert_eq!(
+            ann_results, plain_results,
+            "ANN-filtered results must match Scylla's own (non-ANN) filtering \
+             for f < {threshold} (threshold pk={threshold_pk})"
+        );
+    }
+
+    session
+        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
+        .await
+        .expect("failed to drop a keyspace");
+
+    info!("finished");
+}
+
+/// Test ANN search filtered by equality on a UUID filtering column.
+///
+/// See ann_filter_by_blob_column_eq above: this is the Uuid case of the same
+/// VECTOR-889 bug.
+#[e2etest::test(group = filtering)]
+async fn ann_filter_by_uuid_column_eq(actors: Arc<TestActors>) {
+    info!("started");
+
+    let (session, clients) = prepare_connection(&actors).await;
+
+    let keyspace = create_keyspace(&session).await;
+    let table = create_table(
+        &session,
+        "pk INT, f UUID, v VECTOR<FLOAT, 3>, PRIMARY KEY (pk)",
+        None,
+    )
+    .await;
+
+    let u0 = Uuid::parse_str("00000000-0000-4000-8000-000000000000").unwrap();
+    let u1 = Uuid::parse_str("7fffffff-ffff-4fff-7fff-ffffffffffff").unwrap();
+    session
+        .query_unpaged(
+            format!("INSERT INTO {table} (pk, f, v) VALUES (?, ?, ?)"),
+            (0, u0, &vec![0.0f32, 0.0, 0.0]),
+        )
+        .await
+        .expect("failed to insert data");
+    session
+        .query_unpaged(
+            format!("INSERT INTO {table} (pk, f, v) VALUES (?, ?, ?)"),
+            (1, u1, &vec![0.0f32, 0.0, 0.0]),
+        )
+        .await
+        .expect("failed to insert data");
+
+    let index =
+        create_index(CreateIndexQuery::new(&session, &clients, &table, "v").filter_columns(["f"]))
+            .await;
+
+    for client in &clients {
+        let index_status = wait_for_index(client, &index).await;
+        assert_eq!(index_status.count, 2, "Expected 2 vectors to be indexed");
+    }
+
+    info!("Querying index for f = {u0}");
+    let results = get_pks(
+        format!(
+            "SELECT pk FROM {table} WHERE f = {u0} ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10 ALLOW FILTERING"
+        ),
+        &session,
+    )
+    .await;
+    assert_eq!(results, HashSet::from([0]));
+
+    session
+        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
+        .await
+        .expect("failed to drop a keyspace");
+
+    info!("finished");
+}
+
+/// Test ANN search filtered by an inequality (`<`) on a UUID filtering
+/// column, cross-checked against Scylla's own (non-ANN) filtering, to
+/// verify we got the ordering right.
+///
+/// Regression coverage for VECTOR-889's `uuid_cmp()`: UUIDs order by
+/// version nibble first, and version-1 (time-based) UUIDs then order by
+/// their reassembled timestamp rather than raw bytes. The dataset is
+/// crafted so that a naive 128-bit byte compare disagrees with that
+/// ordering:
+/// - `u_a` and `u_b` are both version 1, but `u_a` has a large `time_low`
+///   and small `time_hi` (giving it a small true timestamp), while `u_b`
+///   has a small `time_low` and large `time_hi` (giving it a large true
+///   timestamp) - so byte order and timestamp order disagree on them.
+/// - `u_v4` is version 4 with a `time_low` byte (0x80) that byte-sorts
+///   between `u_b` and `u_a`/`u_max`, but must sort after every version-1
+///   UUID regardless of its value.
+/// - `u_lo` shares `u_min`'s timestamp exactly (both v1, timestamp 0), so
+///   ScyllaDB's tie-break on bytes 8..16 as plain unsigned bytes decides:
+///   `u_lo`'s 0x7f < `u_min`'s 0x80. `CqlTimeuuid: Ord` (the different,
+///   sign-flipped tie-break ScyllaDB's *TIMEUUID*-column comparator uses)
+///   would order them the other way, so reusing it here would be a bug.
+///
+/// Rather than hardcoding the expected order, this loops over every value
+/// as the `<` threshold and, for each, derives the expected row set from
+/// Scylla evaluating the same restriction without `ORDER BY v ANN OF` -
+/// asserting the ANN-filtered query returns exactly that set. Looping the
+/// threshold over the whole dataset exercises every pairwise comparison
+/// among the values, not just one hand-picked split.
+#[e2etest::test(group = filtering)]
+async fn ann_filter_by_uuid_column_ordering_matches_scylla(actors: Arc<TestActors>) {
+    info!("started");
+
+    let (session, clients) = prepare_connection(&actors).await;
+
+    let keyspace = create_keyspace(&session).await;
+    let table = create_table(
+        &session,
+        "pk INT, f UUID, v VECTOR<FLOAT, 3>, PRIMARY KEY (pk)",
+        None,
+    )
+    .await;
+
+    let u_min = Uuid::parse_str("00000000-0000-1000-8000-000000000000").unwrap(); // v1, timestamp = 0
+    let u_a = Uuid::parse_str("ffffffff-0000-1000-8000-000000000001").unwrap(); // v1, timestamp ~ 4.3e9
+    let u_b = Uuid::parse_str("00000000-0000-1fff-8000-000000000002").unwrap(); // v1, timestamp ~ 1.15e18
+    let u_max = Uuid::parse_str("ffffffff-ffff-1fff-bfff-ffffffffffff").unwrap(); // v1, max timestamp
+    let u_v4 = Uuid::parse_str("80000000-0000-4000-8000-000000000000").unwrap(); // v4
+    let u_lo = Uuid::parse_str("00000000-0000-1000-7f00-000000000003").unwrap(); // v1, timestamp = 0, same as u_min
+
+    let values: [(i32, Uuid); 6] = [
+        (0, u_min),
+        (1, u_a),
+        (2, u_b),
+        (3, u_max),
+        (4, u_v4),
+        (5, u_lo),
+    ];
+    for (pk, u) in &values {
+        session
+            .query_unpaged(
+                format!("INSERT INTO {table} (pk, f, v) VALUES (?, ?, ?)"),
+                (pk, u, &vec![*pk as f32, 0.0, 0.0]),
+            )
+            .await
+            .expect("failed to insert data");
+    }
+
+    let index =
+        create_index(CreateIndexQuery::new(&session, &clients, &table, "v").filter_columns(["f"]))
+            .await;
+
+    for client in &clients {
+        let index_status = wait_for_index(client, &index).await;
+        assert_eq!(index_status.count, 6, "Expected 6 vectors to be indexed");
+    }
+
+    for (threshold_pk, threshold) in &values {
+        info!("Comparing ANN-filtered and plain (non-ANN) results for f < {threshold}");
+        let ann_results = get_pks(
+            format!(
+                "SELECT pk FROM {table} WHERE f < {threshold} ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10 ALLOW FILTERING"
+            ),
+            &session,
+        )
+        .await;
+        let plain_results = get_pks(
+            format!("SELECT pk FROM {table} WHERE f < {threshold} ALLOW FILTERING"),
+            &session,
+        )
+        .await;
+
+        assert_eq!(
+            ann_results, plain_results,
+            "ANN-filtered results must match Scylla's own (non-ANN) filtering \
+             for f < {threshold} (threshold pk={threshold_pk})"
+        );
+    }
+
+    session
+        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
+        .await
+        .expect("failed to drop a keyspace");
+
+    info!("finished");
+}
+
+/// Test ANN search filtered by equality on a TIMEUUID filtering column.
+///
+/// See ann_filter_by_blob_column_eq above: this is the Timeuuid case of the
+/// same VECTOR-889 bug.
+#[e2etest::test(group = filtering)]
+async fn ann_filter_by_timeuuid_column_eq(actors: Arc<TestActors>) {
+    info!("started");
+
+    let (session, clients) = prepare_connection(&actors).await;
+
+    let keyspace = create_keyspace(&session).await;
+    let table = create_table(
+        &session,
+        "pk INT, f TIMEUUID, v VECTOR<FLOAT, 3>, PRIMARY KEY (pk)",
+        None,
+    )
+    .await;
+
+    let t0: CqlTimeuuid = "00000000-0000-1000-8000-000000000000".parse().unwrap();
+    let t1: CqlTimeuuid = "ffffffff-ffff-1fff-bfff-ffffffffffff".parse().unwrap();
+    session
+        .query_unpaged(
+            format!("INSERT INTO {table} (pk, f, v) VALUES (?, ?, ?)"),
+            (0, t0, &vec![0.0f32, 0.0, 0.0]),
+        )
+        .await
+        .expect("failed to insert data");
+    session
+        .query_unpaged(
+            format!("INSERT INTO {table} (pk, f, v) VALUES (?, ?, ?)"),
+            (1, t1, &vec![0.0f32, 0.0, 0.0]),
+        )
+        .await
+        .expect("failed to insert data");
+
+    let index =
+        create_index(CreateIndexQuery::new(&session, &clients, &table, "v").filter_columns(["f"]))
+            .await;
+
+    for client in &clients {
+        let index_status = wait_for_index(client, &index).await;
+        assert_eq!(index_status.count, 2, "Expected 2 vectors to be indexed");
+    }
+
+    info!("Querying index for f = {t0}");
+    let results = get_pks(
+        format!(
+            "SELECT pk FROM {table} WHERE f = {t0} ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10 ALLOW FILTERING"
+        ),
+        &session,
+    )
+    .await;
+    assert_eq!(results, HashSet::from([0]));
+
+    session
+        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
+        .await
+        .expect("failed to drop a keyspace");
+
+    info!("finished");
+}
+
+/// Test ANN search filtered by an inequality (`<`) on a TIMEUUID filtering
+/// column, cross-checked against Scylla's own (non-ANN) filtering, to
+/// verify we got the ordering right.
+///
+/// This dataset is crafted the same way as ann_filter_by_uuid_column_ordering_matches_scylla
+/// above: `t_a` has a large `time_low` and small `time_hi` (small true
+/// timestamp), `t_b` has a small `time_low` and large `time_hi` (large
+/// true timestamp) - so byte order and timestamp order disagree on them.
+///
+/// Rather than hardcoding the expected order, this loops over every value
+/// as the `<` threshold and, for each, derives the expected row set from
+/// Scylla evaluating the same restriction without `ORDER BY v ANN OF` -
+/// asserting the ANN-filtered query returns exactly that set. Looping the
+/// threshold over the whole dataset exercises every pairwise comparison
+/// among the values, not just one hand-picked split.
+#[e2etest::test(group = filtering)]
+async fn ann_filter_by_timeuuid_column_ordering_matches_scylla(actors: Arc<TestActors>) {
+    info!("started");
+
+    let (session, clients) = prepare_connection(&actors).await;
+
+    let keyspace = create_keyspace(&session).await;
+    let table = create_table(
+        &session,
+        "pk INT, f TIMEUUID, v VECTOR<FLOAT, 3>, PRIMARY KEY (pk)",
+        None,
+    )
+    .await;
+
+    let t_min: CqlTimeuuid = "00000000-0000-1000-8000-000000000000".parse().unwrap(); // timestamp = 0
+    let t_a: CqlTimeuuid = "ffffffff-0000-1000-8000-000000000001".parse().unwrap(); // timestamp ~ 4.3e9
+    let t_b: CqlTimeuuid = "00000000-0000-1fff-8000-000000000002".parse().unwrap(); // timestamp ~ 1.15e18
+    let t_max: CqlTimeuuid = "ffffffff-ffff-1fff-bfff-ffffffffffff".parse().unwrap(); // max timestamp
+
+    let values: [(i32, CqlTimeuuid); 4] = [(0, t_min), (1, t_a), (2, t_b), (3, t_max)];
+    for (pk, t) in &values {
+        session
+            .query_unpaged(
+                format!("INSERT INTO {table} (pk, f, v) VALUES (?, ?, ?)"),
+                (pk, t, &vec![*pk as f32, 0.0, 0.0]),
+            )
+            .await
+            .expect("failed to insert data");
+    }
+
+    let index =
+        create_index(CreateIndexQuery::new(&session, &clients, &table, "v").filter_columns(["f"]))
+            .await;
+
+    for client in &clients {
+        let index_status = wait_for_index(client, &index).await;
+        assert_eq!(index_status.count, 4, "Expected 4 vectors to be indexed");
+    }
+
+    for (threshold_pk, threshold) in &values {
+        info!("Comparing ANN-filtered and plain (non-ANN) results for f < {threshold}");
+        let ann_results = get_pks(
+            format!(
+                "SELECT pk FROM {table} WHERE f < {threshold} ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10 ALLOW FILTERING"
+            ),
+            &session,
+        )
+        .await;
+        let plain_results = get_pks(
+            format!("SELECT pk FROM {table} WHERE f < {threshold} ALLOW FILTERING"),
+            &session,
+        )
+        .await;
+
+        assert_eq!(
+            ann_results, plain_results,
+            "ANN-filtered results must match Scylla's own (non-ANN) filtering \
+             for f < {threshold} (threshold pk={threshold_pk})"
+        );
+    }
 
     session
         .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
@@ -1528,6 +2133,24 @@ async fn ann_filter_by_non_pk_column_rejected_with_allow_filtering(actors: Arc<T
         .expect("failed to drop a keyspace");
 
     info!("finished");
+}
+
+/// Format bytes as a CQL blob literal, e.g. `0x0102ff`.
+fn blob_literal(bytes: &[u8]) -> String {
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    format!("0x{hex}")
+}
+
+/// Run a query expected to select a `pk` column and collect the results
+/// into a set, for comparing an ANN-filtered query against the same
+/// restriction evaluated by Scylla without `ORDER BY v ANN OF`.
+async fn get_pks(query: String, session: &Session) -> HashSet<i32> {
+    get_query_results(query, session)
+        .await
+        .rows::<(i32,)>()
+        .expect("failed to get rows")
+        .map(|row| row.expect("failed to get row").0)
+        .collect()
 }
 
 async fn insert_ck_only_test_rows(session: &Session, table: &TableName) {
