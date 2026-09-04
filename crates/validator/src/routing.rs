@@ -3,7 +3,6 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
-use crate::TestActors;
 use crate::common::*;
 use e2etest_scylla_proxy_cluster::ScyllaProxyClusterExt;
 use httpapi::IndexInfo;
@@ -22,25 +21,9 @@ const FRAME_DELAY: Duration = Duration::from_millis(500);
 
 e2etest::group!(
     name = routing,
-    fixtures = (Fixture),
-    parent = crate::validator
+    fixtures = (ProxyTestContext),
+    parent = crate::proxy
 );
-
-struct Fixture {
-    actors: Arc<TestActors>,
-}
-
-impl e2etest::Fixture for Fixture {
-    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
-        let actors = setup.setup::<TestActors>().await?;
-        init_with_proxy_single_vs(&actors).await;
-        Some(Self { actors })
-    }
-
-    async fn teardown(self) {
-        cleanup(&self.actors).await;
-    }
-}
 
 async fn wait_for_bootstrapping(client: &HttpClient, index: &IndexInfo) {
     wait_for_value(
@@ -61,21 +44,17 @@ async fn wait_for_bootstrapping(client: &HttpClient, index: &IndexInfo) {
 }
 
 #[e2etest::test(group = routing)]
-async fn ann_routes_to_serving_index_while_replacement_is_bootstrapping(actors: Arc<TestActors>) {
+async fn ann_routes_to_serving_index_while_replacement_is_bootstrapping(
+    ctx: Arc<ProxyTestContext>,
+) {
     info!("started");
 
-    let (session, clients) = prepare_connection_single_vs_no_tls(&actors).await;
-    let client = clients.first().expect("expected a single HTTP client");
+    let client = ctx.client();
+    let table = ctx
+        .create_table("pk INT PRIMARY KEY, embedding VECTOR<FLOAT, 3>", None)
+        .await;
 
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(
-        &session,
-        "pk INT PRIMARY KEY, embedding VECTOR<FLOAT, 3>",
-        None,
-    )
-    .await;
-
-    session
+    ctx.session
         .query_unpaged(
             format!("INSERT INTO {table} (pk, embedding) VALUES (0, [1.0, 2.0, 3.0])"),
             (),
@@ -83,17 +62,11 @@ async fn ann_routes_to_serving_index_while_replacement_is_bootstrapping(actors: 
         .await
         .expect("failed to insert test embedding");
 
-    let oldest = create_index(CreateIndexQuery::new(
-        &session,
-        &clients,
-        &table,
-        "embedding",
-    ))
-    .await;
+    let oldest = ctx.create_index(&table, "embedding").await;
     let oldest_status = wait_for_index(client, &oldest).await;
     assert_eq!(oldest_status.count, 1);
 
-    actors
+    ctx.actors()
         .db_proxy
         .change_request_rules(Some(vec![RequestRule(
             Condition::True,
@@ -101,13 +74,7 @@ async fn ann_routes_to_serving_index_while_replacement_is_bootstrapping(actors: 
         )]))
         .await;
 
-    let replacement = create_index(CreateIndexQuery::new(
-        &session,
-        &clients,
-        &table,
-        "embedding",
-    ))
-    .await;
+    let replacement = ctx.create_index(&table, "embedding").await;
 
     wait_for_bootstrapping(client, &replacement).await;
 
@@ -115,15 +82,15 @@ async fn ann_routes_to_serving_index_while_replacement_is_bootstrapping(actors: 
         format!(
             "SELECT * FROM {table} ORDER BY embedding ANN OF [1.0, 2.0, 3.0] LIMIT {ANN_LIMIT}"
         ),
-        &session,
+        &ctx.session,
     )
     .await;
 
-    actors.db_proxy.turn_off_rules().await;
+    ctx.actors().db_proxy.turn_off_rules().await;
     let replacement_status = wait_for_index(client, &replacement).await;
     assert_eq!(replacement_status.count, 1);
 
-    session
+    ctx.session
         .query_unpaged(format!("DROP INDEX {}", oldest.index), ())
         .await
         .expect("failed to drop oldest index");
@@ -134,35 +101,27 @@ async fn ann_routes_to_serving_index_while_replacement_is_bootstrapping(actors: 
         format!(
             "SELECT * FROM {table} ORDER BY embedding ANN OF [1.0, 2.0, 3.0] LIMIT {ANN_LIMIT}"
         ),
-        &session,
+        &ctx.session,
     )
     .await;
-
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop keyspace");
 
     info!("finished");
 }
 
 #[e2etest::test(group = routing)]
 async fn ann_does_not_route_between_columns_while_requested_index_is_bootstrapping(
-    actors: Arc<TestActors>,
+    ctx: Arc<ProxyTestContext>,
 ) {
     info!("started");
 
-    let (session, clients) = prepare_connection_single_vs_no_tls(&actors).await;
-    let client = clients.first().expect("expected a single HTTP client");
-
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(
-        &session,
-        "pk INT PRIMARY KEY, embedding VECTOR<FLOAT, 3>, embedding2 VECTOR<FLOAT, 3>",
-        None,
-    )
-    .await;
-    session
+    let client = ctx.client();
+    let table = ctx
+        .create_table(
+            "pk INT PRIMARY KEY, embedding VECTOR<FLOAT, 3>, embedding2 VECTOR<FLOAT, 3>",
+            None,
+        )
+        .await;
+    ctx.session
         .query_unpaged(
             format!(
                 "INSERT INTO {table} (pk, embedding, embedding2) VALUES (0, [1.0, 2.0, 3.0], [1.0, 2.0, 3.0])"
@@ -172,17 +131,11 @@ async fn ann_does_not_route_between_columns_while_requested_index_is_bootstrappi
         .await
         .expect("failed to insert test embedding");
 
-    let source = create_index(CreateIndexQuery::new(
-        &session,
-        &clients,
-        &table,
-        "embedding",
-    ))
-    .await;
+    let source = ctx.create_index(&table, "embedding").await;
     let source_status = wait_for_index(client, &source).await;
     assert_eq!(source_status.count, 1);
 
-    actors
+    ctx.actors()
         .db_proxy
         .change_request_rules(Some(vec![RequestRule(
             Condition::True,
@@ -190,17 +143,11 @@ async fn ann_does_not_route_between_columns_while_requested_index_is_bootstrappi
         )]))
         .await;
 
-    let requested = create_index(CreateIndexQuery::new(
-        &session,
-        &clients,
-        &table,
-        "embedding2",
-    ))
-    .await;
+    let requested = ctx.create_index(&table, "embedding2").await;
 
     wait_for_bootstrapping(client, &requested).await;
 
-    session
+    ctx.session
         .query_unpaged(
             format!(
                 "SELECT * FROM {table} ORDER BY embedding2 ANN OF [1.0, 2.0, 3.0] LIMIT {ANN_LIMIT}"
@@ -210,31 +157,20 @@ async fn ann_does_not_route_between_columns_while_requested_index_is_bootstrappi
         .await
         .expect_err("ANN query should fail when index is bootstrapping");
 
-    actors.db_proxy.turn_off_rules().await;
-
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop keyspace");
+    ctx.actors().db_proxy.turn_off_rules().await;
 
     info!("finished");
 }
 
 #[e2etest::test(group = routing)]
-async fn ann_returns_not_found_for_nonexistent_index(actors: Arc<TestActors>) {
+async fn ann_returns_not_found_for_nonexistent_index(ctx: Arc<ProxyTestContext>) {
     info!("started");
 
-    let (session, _clients) = prepare_connection_single_vs_no_tls(&actors).await;
+    let table = ctx
+        .create_table("pk INT PRIMARY KEY, embedding VECTOR<FLOAT, 3>", None)
+        .await;
 
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(
-        &session,
-        "pk INT PRIMARY KEY, embedding VECTOR<FLOAT, 3>",
-        None,
-    )
-    .await;
-
-    session
+    ctx.session
         .query_unpaged(
             format!(
                 "SELECT * FROM {table} ORDER BY embedding ANN OF [1.0, 2.0, 3.0] LIMIT {ANN_LIMIT}"
@@ -244,30 +180,19 @@ async fn ann_returns_not_found_for_nonexistent_index(actors: Arc<TestActors>) {
         .await
         .expect_err("ANN query should fail when no index exists");
 
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop keyspace");
-
     info!("finished");
 }
 
 #[e2etest::test(group = routing)]
-async fn ann_returns_unavailable_when_only_index_is_bootstrapping(actors: Arc<TestActors>) {
+async fn ann_returns_unavailable_when_only_index_is_bootstrapping(ctx: Arc<ProxyTestContext>) {
     info!("started");
 
-    let (session, clients) = prepare_connection_single_vs_no_tls(&actors).await;
-    let client = clients.first().expect("expected a single HTTP client");
+    let client = ctx.client();
+    let table = ctx
+        .create_table("pk INT PRIMARY KEY, embedding VECTOR<FLOAT, 3>", None)
+        .await;
 
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(
-        &session,
-        "pk INT PRIMARY KEY, embedding VECTOR<FLOAT, 3>",
-        None,
-    )
-    .await;
-
-    session
+    ctx.session
         .query_unpaged(
             format!("INSERT INTO {table} (pk, embedding) VALUES (0, [1.0, 2.0, 3.0])"),
             (),
@@ -275,7 +200,7 @@ async fn ann_returns_unavailable_when_only_index_is_bootstrapping(actors: Arc<Te
         .await
         .expect("failed to insert test embedding");
 
-    actors
+    ctx.actors()
         .db_proxy
         .change_request_rules(Some(vec![RequestRule(
             Condition::True,
@@ -283,17 +208,11 @@ async fn ann_returns_unavailable_when_only_index_is_bootstrapping(actors: Arc<Te
         )]))
         .await;
 
-    let index = create_index(CreateIndexQuery::new(
-        &session,
-        &clients,
-        &table,
-        "embedding",
-    ))
-    .await;
+    let index = ctx.create_index(&table, "embedding").await;
 
     wait_for_bootstrapping(client, &index).await;
 
-    session
+    ctx.session
         .query_unpaged(
             format!(
                 "SELECT * FROM {table} ORDER BY embedding ANN OF [1.0, 2.0, 3.0] LIMIT {ANN_LIMIT}"
@@ -303,32 +222,21 @@ async fn ann_returns_unavailable_when_only_index_is_bootstrapping(actors: Arc<Te
         .await
         .expect_err("ANN query should fail when index is bootstrapping");
 
-    actors.db_proxy.turn_off_rules().await;
-
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop keyspace");
+    ctx.actors().db_proxy.turn_off_rules().await;
 
     info!("finished");
 }
 
 #[e2etest::test(group = routing)]
-async fn ann_returns_not_found_after_index_is_dropped(actors: Arc<TestActors>) {
+async fn ann_returns_not_found_after_index_is_dropped(ctx: Arc<ProxyTestContext>) {
     info!("started");
 
-    let (session, clients) = prepare_connection_single_vs_no_tls(&actors).await;
-    let client = clients.first().expect("expected a single HTTP client");
+    let client = ctx.client();
+    let table = ctx
+        .create_table("pk INT PRIMARY KEY, embedding VECTOR<FLOAT, 3>", None)
+        .await;
 
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(
-        &session,
-        "pk INT PRIMARY KEY, embedding VECTOR<FLOAT, 3>",
-        None,
-    )
-    .await;
-
-    session
+    ctx.session
         .query_unpaged(
             format!("INSERT INTO {table} (pk, embedding) VALUES (0, [1.0, 2.0, 3.0])"),
             (),
@@ -336,13 +244,7 @@ async fn ann_returns_not_found_after_index_is_dropped(actors: Arc<TestActors>) {
         .await
         .expect("failed to insert test embedding");
 
-    let index = create_index(CreateIndexQuery::new(
-        &session,
-        &clients,
-        &table,
-        "embedding",
-    ))
-    .await;
+    let index = ctx.create_index(&table, "embedding").await;
     let index_status = wait_for_index(client, &index).await;
     assert_eq!(index_status.count, 1);
 
@@ -350,18 +252,18 @@ async fn ann_returns_not_found_after_index_is_dropped(actors: Arc<TestActors>) {
         format!(
             "SELECT * FROM {table} ORDER BY embedding ANN OF [1.0, 2.0, 3.0] LIMIT {ANN_LIMIT}"
         ),
-        &session,
+        &ctx.session,
     )
     .await;
 
-    session
+    ctx.session
         .query_unpaged(format!("DROP INDEX {}", index.index), ())
         .await
         .expect("failed to drop index");
 
     wait_for_no_index(client, &index).await;
 
-    session
+    ctx.session
         .query_unpaged(
             format!(
                 "SELECT * FROM {table} ORDER BY embedding ANN OF [1.0, 2.0, 3.0] LIMIT {ANN_LIMIT}"
@@ -370,11 +272,6 @@ async fn ann_returns_not_found_after_index_is_dropped(actors: Arc<TestActors>) {
         )
         .await
         .expect_err("ANN query should fail after index is dropped");
-
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop keyspace");
 
     info!("finished");
 }

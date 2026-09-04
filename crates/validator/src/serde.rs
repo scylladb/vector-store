@@ -3,8 +3,6 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
-use crate::TestActors;
-use crate::common;
 use crate::common::*;
 use scylla::statement::{Consistency, Statement};
 use scylla::value::CqlValue;
@@ -16,110 +14,90 @@ const CDC_WAIT: Duration = Duration::from_secs(10);
 
 e2etest::group!(
     name = serde,
-    fixtures = (Fixture),
-    parent = crate::validator
+    fixtures = (TestContext),
+    parent = crate::standard
 );
 
-struct Fixture {
-    actors: Arc<TestActors>,
-}
-
-impl e2etest::Fixture for Fixture {
-    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
-        let actors = setup.setup::<TestActors>().await?;
-        common::init(&actors).await;
-        Some(Self { actors })
-    }
-
-    async fn teardown(self) {
-        common::cleanup(&self.actors).await;
-    }
-}
-
-#[e2etest::test(group = serde)]
-async fn test_serialization_deserialization_all_types(actors: Arc<TestActors>) {
-    let (session, clients) = common::prepare_connection(&actors).await;
-
-    let cases = vec![
-        ("ascii", "'random_text'"),
-        ("bigint", "1234"),
-        ("blob", "0xdeadbeef"),
-        ("boolean", "true"),
-        ("date", "'2023-10-01'"),
-        ("decimal", "-98765432109876543210.123456789"),
-        ("double", "3.14159"),
-        ("float", "2.71828"),
-        ("inet", "'10.0.0.1'"),
-        ("int", "42"),
-        ("smallint", "123"),
-        ("tinyint", "7"),
-        ("uuid", "841685b2-8803-11f0-8de9-0242ac120002"),
-        ("timeuuid", "841685b2-8803-11f0-8de9-0242ac120002"),
-        ("time", "'08:12:54.2137'"),
-        ("timestamp", "'2023-10-01T12:34:56.789Z'"),
-        ("text", "'some_text'"),
-        ("varint", "-98765432109876543210"),
-    ];
-
-    let keyspace = create_keyspace(&session).await;
-
-    for (typ, data) in &cases {
-        session
-            .query_unpaged(
-                format!("CREATE TABLE tbl_{typ} (id {typ} PRIMARY KEY, vec vector<float, 3>)"),
-                (),
-            )
-            .await
-            .expect("failed to create a table");
-        session
-            .query_unpaged(
-                format!("INSERT INTO tbl_{typ} (id, vec) VALUES ({data}, [1.0, 2.0, 3.0])"),
-                (),
-            )
-            .await
-            .expect("failed to insert data");
-
-        let index = create_index(CreateIndexQuery::new(
-            &session,
-            &clients,
-            format!("tbl_{typ}"),
-            "vec",
-        ))
+/// Indexes a table whose primary key has the given CQL type and checks that a
+/// row inserted with `data` as its key survives the round trip through the
+/// index: an ANN query must return it with its vector intact.
+async fn assert_key_type_round_trip(ctx: &TestContext, typ: &str, data: &str) {
+    let table = ctx
+        .create_table(&format!("id {typ} PRIMARY KEY, vec vector<float, 3>"), None)
         .await;
-        for client in &clients {
-            wait_for_index(client, &index).await;
-        }
+    ctx.session
+        .query_unpaged(
+            format!("INSERT INTO {table} (id, vec) VALUES ({data}, [1.0, 2.0, 3.0])"),
+            (),
+        )
+        .await
+        .expect("failed to insert data");
 
-        let rows = session
-            .query_unpaged(
-                format!("SELECT * FROM tbl_{typ} ORDER BY vec ANN OF [1.0, 2.0, 3.0] LIMIT 1"),
-                (),
-            )
-            .await
-            .expect("failed to select data");
-        let rows = rows.into_rows_result().unwrap();
-        assert_eq!(rows.rows_num(), 1);
-        let value: (CqlValue, Vec<f32>) = rows.first_row().unwrap();
-        assert_eq!(value.1, vec![1.0, 2.0, 3.0]);
+    let index = ctx.create_index(&table, "vec").await;
+    for client in &ctx.clients {
+        wait_for_index(client, &index).await;
     }
 
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
+    let rows = ctx
+        .session
+        .query_unpaged(
+            format!("SELECT * FROM {table} ORDER BY vec ANN OF [1.0, 2.0, 3.0] LIMIT 1"),
+            (),
+        )
         .await
-        .expect("failed to drop keyspace");
+        .expect("failed to select data");
+    let rows = rows.into_rows_result().unwrap();
+    assert_eq!(rows.rows_num(), 1);
+    let value: (CqlValue, Vec<f32>) = rows.first_row().unwrap();
+    assert_eq!(value.1, vec![1.0, 2.0, 3.0]);
+}
+
+/// Declares one test per CQL primary-key type.
+///
+/// A single test looping over the types would serialise the cases, each
+/// waiting out its own index build, which made this group the slowest one in
+/// the suite. As separate tests the framework runs them concurrently, within
+/// its configured concurrency limit, and names the failing type on its own.
+macro_rules! key_type_round_trip_tests {
+    ($($name:ident: $typ:literal = $data:literal,)*) => {
+        $(
+            #[e2etest::test(group = serde)]
+            async fn $name(ctx: Arc<TestContext>) {
+                assert_key_type_round_trip(&ctx, $typ, $data).await;
+            }
+        )*
+    };
+}
+
+key_type_round_trip_tests! {
+    serialization_ascii: "ascii" = "'random_text'",
+    serialization_bigint: "bigint" = "1234",
+    serialization_blob: "blob" = "0xdeadbeef",
+    serialization_boolean: "boolean" = "true",
+    serialization_date: "date" = "'2023-10-01'",
+    serialization_decimal: "decimal" = "-98765432109876543210.123456789",
+    serialization_double: "double" = "3.14159",
+    serialization_float: "float" = "2.71828",
+    serialization_inet: "inet" = "'10.0.0.1'",
+    serialization_int: "int" = "42",
+    serialization_smallint: "smallint" = "123",
+    serialization_tinyint: "tinyint" = "7",
+    serialization_uuid: "uuid" = "841685b2-8803-11f0-8de9-0242ac120002",
+    serialization_timeuuid: "timeuuid" = "841685b2-8803-11f0-8de9-0242ac120002",
+    serialization_time: "time" = "'08:12:54.2137'",
+    serialization_timestamp: "timestamp" = "'2023-10-01T12:34:56.789Z'",
+    serialization_text: "text" = "'some_text'",
+    serialization_varint: "varint" = "-98765432109876543210",
 }
 
 #[e2etest::test(group = serde)]
-async fn test_varint_filter(actors: Arc<TestActors>) {
-    let (session, clients) = common::prepare_connection(&actors).await;
-    let keyspace = create_keyspace(&session).await;
-
-    let table = create_table(
-        &session,
-        "pk int, ck varint, vec vector<float, 3>, PRIMARY KEY (pk, ck)",
-        None,
-    )
-    .await;
+async fn test_varint_filter(ctx: Arc<TestContext>) {
+    let table = ctx
+        .create_table(
+            "pk int, ck varint, vec vector<float, 3>, PRIMARY KEY (pk, ck)",
+            None,
+        )
+        .await;
 
     let rows_to_insert = [
         "-42",
@@ -130,7 +108,7 @@ async fn test_varint_filter(actors: Arc<TestActors>) {
     ];
 
     for ck in &rows_to_insert {
-        session
+        ctx.session
             .query_unpaged(
                 format!("INSERT INTO {table} (pk, ck, vec) VALUES (1, {ck}, [1.0, 2.0, 3.0])"),
                 (),
@@ -140,18 +118,18 @@ async fn test_varint_filter(actors: Arc<TestActors>) {
     }
 
     let index = create_index(
-        CreateIndexQuery::new(&session, &clients, &table, "vec")
+        ctx.index_query(&table, "vec")
             .partition_columns(["pk"])
             .filter_columns(["ck"]),
     )
     .await;
-    for client in &clients {
+    for client in &ctx.clients {
         wait_for_index(client, &index).await;
     }
 
     // Helper: run a query with a ck restriction and return the number of rows.
     let count_rows = |restriction: &str| {
-        let session = session.clone();
+        let session = ctx.session.clone();
         let table = table.clone();
         let restriction = restriction.to_string();
         async move {
@@ -197,11 +175,6 @@ async fn test_varint_filter(actors: Arc<TestActors>) {
         1,
         "ck > 98765432109876543209 should return {{98765432109876543210}} (requires BigInt, not i64)"
     );
-
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop keyspace");
 }
 
 /// Test the fundamental PK vs CK asymmetry for decimal types:
@@ -211,21 +184,19 @@ async fn test_varint_filter(actors: Arc<TestActors>) {
 ///
 /// Verified via index_status.count and direct VS ANN queries (not CQL).
 #[e2etest::test(group = serde)]
-async fn test_decimal_key(actors: Arc<TestActors>) {
-    let (session, clients) = common::prepare_connection(&actors).await;
-    let client = clients.first().unwrap();
-    let keyspace = create_keyspace(&session).await;
+async fn test_decimal_key(ctx: Arc<TestContext>) {
+    let client = ctx.clients.first().unwrap();
 
-    let table = create_table(
-        &session,
-        "pk decimal, ck decimal, vec vector<float, 3>, PRIMARY KEY (pk, ck)",
-        None,
-    )
-    .await;
+    let table = ctx
+        .create_table(
+            "pk decimal, ck decimal, vec vector<float, 3>, PRIMARY KEY (pk, ck)",
+            None,
+        )
+        .await;
 
     let insert = |pk: &'static str, ck: &'static str, v: [f32; 3]| {
         let table = table.clone();
-        let session = session.clone();
+        let session = ctx.session.clone();
         async move {
             let mut query = Statement::new(format!(
                 "INSERT INTO {table} (pk, ck, vec) VALUES ({pk}, {ck}, [{}, {}, {}])",
@@ -247,8 +218,8 @@ async fn test_decimal_key(actors: Arc<TestActors>) {
     insert("1.0", "3.140", [4.0, 5.0, 6.0]).await;
     insert("1.00", "3.140", [7.0, 8.0, 9.0]).await;
 
-    let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "vec")).await;
-    for c in &clients {
+    let index = ctx.create_index(&table, "vec").await;
+    for c in &ctx.clients {
         wait_for_index(c, &index).await;
     }
 
@@ -307,7 +278,7 @@ async fn test_decimal_key(actors: Arc<TestActors>) {
     insert("2.0", "7.50", [4.0, 5.0, 6.0]).await;
     insert("2.00", "7.50", [7.0, 8.0, 9.0]).await;
 
-    for client in &clients {
+    for client in &ctx.clients {
         wait_for(
             || async {
                 let status = client.index_status(&index.keyspace, &index.index).await;
@@ -339,31 +310,23 @@ async fn test_decimal_key(actors: Arc<TestActors>) {
         }
     }
     assert!(expected_pks.is_empty());
-
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop keyspace");
 }
 
 /// Verify decimal filters use semantic BigDecimal comparison (not byte/unscaled comparison).
 /// Tests PK byte-identity (pk=1.0 vs pk=1.00 are separate partitions) and CK semantic
 /// comparison (cross-scale ordering, unnormalized CK match, beyond-i64 values).
 #[e2etest::test(group = serde)]
-async fn test_decimal_filter(actors: Arc<TestActors>) {
-    let (session, clients) = common::prepare_connection(&actors).await;
-    let keyspace = create_keyspace(&session).await;
-
-    let table = create_table(
-        &session,
-        "pk decimal, ck decimal, vec vector<float, 3>, PRIMARY KEY (pk, ck)",
-        None,
-    )
-    .await;
+async fn test_decimal_filter(ctx: Arc<TestContext>) {
+    let table = ctx
+        .create_table(
+            "pk decimal, ck decimal, vec vector<float, 3>, PRIMARY KEY (pk, ck)",
+            None,
+        )
+        .await;
 
     let insert = |pk: &'static str, ck: &'static str| {
         let table = table.clone();
-        let session = session.clone();
+        let session = ctx.session.clone();
         async move {
             session
                 .query_unpaged(
@@ -387,17 +350,17 @@ async fn test_decimal_filter(actors: Arc<TestActors>) {
     insert("1.00", "5.0").await;
 
     let index = create_index(
-        CreateIndexQuery::new(&session, &clients, &table, "vec")
+        ctx.index_query(&table, "vec")
             .partition_columns(["pk"])
             .filter_columns(["ck"]),
     )
     .await;
-    for client in &clients {
+    for client in &ctx.clients {
         wait_for_index(client, &index).await;
     }
 
     let count_rows = |pk: &str, restriction: &str| {
-        let session = session.clone();
+        let session = ctx.session.clone();
         let table = table.clone();
         let pk = pk.to_string();
         let restriction = restriction.to_string();
@@ -454,9 +417,4 @@ async fn test_decimal_filter(actors: Arc<TestActors>) {
         1,
         "pk=1.00 partition should have only its own row"
     );
-
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop keyspace");
 }

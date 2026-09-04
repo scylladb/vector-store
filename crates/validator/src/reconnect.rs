@@ -5,7 +5,6 @@
 
 use crate::TestActors;
 use crate::common::*;
-use e2etest_firewall::FirewallExt;
 use e2etest_scylla_cluster::ScyllaClusterExt;
 use e2etest_scylla_proxy_cluster::ScyllaProxyClusterExt;
 use e2etest_vector_store_cluster::VectorStoreClusterExt;
@@ -30,12 +29,12 @@ e2etest::group!(
 );
 
 struct Fixture {
-    actors: Arc<TestActors>,
+    actors: TestActors,
 }
 
 impl e2etest::Fixture for Fixture {
     async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
-        let actors = setup.setup::<TestActors>().await?;
+        let actors = setup.setup::<crate::TestEnv>().await?.new_cluster().await;
         init_with_proxy_single_vs(&actors).await;
         Some(Self { actors })
     }
@@ -43,13 +42,30 @@ impl e2etest::Fixture for Fixture {
     async fn teardown(self) {
         cleanup(&self.actors).await;
     }
+
+    // The group owns its cluster, and the firewall rules it installs are
+    // scoped to that cluster's addresses, so nothing it touches is shared with
+    // its siblings. Its tests still run one at a time: they restart nodes and
+    // cut off traffic for the whole cluster.
+    fn group_can_run_concurrently() -> bool {
+        true
+    }
+
+    // Its nodes claim loopback addresses, ports and routes, which every other
+    // cluster claims too, so it runs in a network namespace of its own, where
+    // it is alone in claiming them.
+    fn group_needs_own_namespace() -> bool {
+        true
+    }
 }
 
 #[e2etest::test(group = reconnect)]
-async fn reconnect_doesnt_break_fullscan(actors: Arc<TestActors>) {
+async fn reconnect_doesnt_break_fullscan(fixture: Arc<Fixture>) {
+    let actors = &fixture.actors;
+
     info!("started");
 
-    let (session, clients) = prepare_connection_single_vs_no_tls(&actors).await;
+    let (session, clients) = prepare_connection_single_vs_no_tls(actors).await;
     let client = clients.first().unwrap();
 
     let keyspace = create_keyspace(&session).await;
@@ -117,10 +133,7 @@ async fn reconnect_doesnt_break_fullscan(actors: Arc<TestActors>) {
     }
 
     info!("Disconnect scylla-proxy");
-    actors
-        .firewall
-        .drop_traffic(get_default_db_proxy_ips(&actors))
-        .await;
+    actors.drop_traffic(get_default_db_proxy_ips(actors)).await;
 
     info!(
         "counters: {:?}, {:?}",
@@ -171,7 +184,7 @@ async fn reconnect_doesnt_break_fullscan(actors: Arc<TestActors>) {
     );
 
     info!("Reconnect scylla-proxy");
-    actors.firewall.turn_off_rules().await;
+    actors.turn_off_firewall_rules().await;
 
     info!("Disable rules on scylla-proxy");
     actors.db_proxy.turn_off_rules().await;
@@ -208,10 +221,12 @@ async fn reconnect_doesnt_break_fullscan(actors: Arc<TestActors>) {
 }
 
 #[e2etest::test(group = reconnect)]
-async fn restarting_one_node_doesnt_break_fullscan(actors: Arc<TestActors>) {
+async fn restarting_one_node_doesnt_break_fullscan(fixture: Arc<Fixture>) {
+    let actors = &fixture.actors;
+
     info!("started");
 
-    let (session, clients) = prepare_connection_single_vs_no_tls(&actors).await;
+    let (session, clients) = prepare_connection_single_vs_no_tls(actors).await;
     let client = clients.first().unwrap();
 
     info!("Creating a table and inserting data");
@@ -279,7 +294,7 @@ async fn restarting_one_node_doesnt_break_fullscan(actors: Arc<TestActors>) {
     )
     .await;
 
-    let proxy_addr = get_default_scylla_proxy_node_configs(&actors)
+    let proxy_addr = get_default_scylla_proxy_node_configs(actors)
         .await
         .first()
         .unwrap()
@@ -292,7 +307,7 @@ async fn restarting_one_node_doesnt_break_fullscan(actors: Arc<TestActors>) {
         .unwrap();
 
     info!("Disconnect scylla-proxy {proxy_addr}");
-    actors.firewall.drop_traffic(vec![proxy_addr]).await;
+    actors.drop_traffic(vec![proxy_addr]).await;
 
     wait_for(
         || async {
@@ -306,7 +321,7 @@ async fn restarting_one_node_doesnt_break_fullscan(actors: Arc<TestActors>) {
     .await;
 
     info!("Reconnect scylla-proxy");
-    actors.firewall.turn_off_rules().await;
+    actors.turn_off_firewall_rules().await;
 
     info!("Disable rules on scylla-proxy");
     actors.db_proxy.turn_off_rules().await;
@@ -336,10 +351,12 @@ async fn restarting_one_node_doesnt_break_fullscan(actors: Arc<TestActors>) {
 }
 
 #[e2etest::test(group = reconnect)]
-async fn restarting_all_nodes_doesnt_break_fullscan(actors: Arc<TestActors>) {
+async fn restarting_all_nodes_doesnt_break_fullscan(fixture: Arc<Fixture>) {
+    let actors = &fixture.actors;
+
     info!("started");
 
-    let (session, clients) = prepare_connection_single_vs_no_tls(&actors).await;
+    let (session, clients) = prepare_connection_single_vs_no_tls(actors).await;
     let client = clients.first().unwrap();
 
     info!("Creating a table and inserting data");
@@ -407,7 +424,7 @@ async fn restarting_all_nodes_doesnt_break_fullscan(actors: Arc<TestActors>) {
     .await;
 
     info!("Restart each node one by one");
-    for proxy_addr in get_default_scylla_proxy_node_configs(&actors)
+    for proxy_addr in get_default_scylla_proxy_node_configs(actors)
         .await
         .into_iter()
         .map(|config| config.proxy_addr)
@@ -420,7 +437,7 @@ async fn restarting_all_nodes_doesnt_break_fullscan(actors: Arc<TestActors>) {
             .unwrap();
 
         info!("Disconnect scylla-proxy {proxy_addr}");
-        actors.firewall.drop_traffic(vec![proxy_addr]).await;
+        actors.drop_traffic(vec![proxy_addr]).await;
 
         wait_for(
             || async {
@@ -441,7 +458,7 @@ async fn restarting_all_nodes_doesnt_break_fullscan(actors: Arc<TestActors>) {
             .unwrap();
 
         info!("Reconnect scylla-proxy");
-        actors.firewall.turn_off_rules().await;
+        actors.turn_off_firewall_rules().await;
 
         wait_for(
             || async {
@@ -483,10 +500,12 @@ async fn restarting_all_nodes_doesnt_break_fullscan(actors: Arc<TestActors>) {
 }
 
 #[e2etest::test(group = reconnect)]
-async fn test_restarting_vs_cluster_does_not_break_setup(actors: Arc<TestActors>) {
+async fn test_restarting_vs_cluster_does_not_break_setup(fixture: Arc<Fixture>) {
+    let actors = &fixture.actors;
+
     info!("started");
 
-    let (session, clients) = prepare_connection_single_vs_no_tls(&actors).await;
+    let (session, clients) = prepare_connection_single_vs_no_tls(actors).await;
     let client = clients.first().unwrap();
 
     info!("Creating a table and inserting data");
@@ -538,8 +557,8 @@ async fn test_restarting_vs_cluster_does_not_break_setup(actors: Arc<TestActors>
 
     actors
         .vs
-        .start(get_proxy_vs_node_configs(&actors).pipe(|mut nodes| {
-            let translation_map = get_proxy_translation_map(&actors);
+        .start(get_proxy_vs_node_configs(actors).pipe(|mut nodes| {
+            let translation_map = get_proxy_translation_map(actors);
             for node in nodes.iter_mut() {
                 node.envs.insert(
                     "VECTOR_STORE_CQL_URI_TRANSLATION_MAP".to_string(),

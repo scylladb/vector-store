@@ -103,9 +103,34 @@ jobs:
     - name: Set testcases output
       id: testcases
       run: |
-        echo "testcases=[$(./vector-search-validator list | sed -E 's/(.*)::.*/\1/' | sort | uniq | xargs -n 1 -I '{}' echo \"{}\" | paste -sd,)]" >> "$GITHUB_OUTPUT"
+        # One job per test group, spread over the matrix rather than gathered
+        # onto one runner. A runner has the memory and the cores for about a
+        # cluster, so a job carrying several groups would boot their clusters
+        # one after another and become the workflow's critical path. Booting
+        # several at once is worth doing where there is room for them, which is
+        # a developer's machine rather than a runner.
+        #
+        # A group's path is its test name minus the test, and the filter quotes
+        # it for an exact match so that a group is never selected by a job for
+        # another whose name it is a prefix of (`auth` and `alternator_auth`).
+        # Deriving the list from the binary keeps a newly added group from
+        # being silently dropped.
+        #
+        # A job is named after the module the group is declared in, `crud` or
+        # `alternator::create_table`, rather than after the whole path: the
+        # umbrella groups of lib.rs (`standard`, `proxy`) name the cluster a
+        # group shares and say nothing about what it tests. The filter keeps
+        # the whole path, which is what the run matches on.
+        ./vector-search-validator list \
+          | sed -E 's/::[^:]*$//' \
+          | sort -u \
+          | awk '{ label = $0; sub(/^(standard|proxy)::/, "", label);
+                   print label "\t\"" $0 "\"::" }' \
+          | jq -Rc 'split("\t") | {name: .[0], filters: .[1]}' | jq -sc . \
+          | sed 's/^/testcases=/' >> "$GITHUB_OUTPUT"
 
   validator-tests:
+    name: ${{matrix.testcase.name}}
     needs: ["validator-scylla-nightly-digest", "validator-build"]
     runs-on: ${{ contains(github.event.pull_request.labels.*.name, 'ci-use-amd64') && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
     strategy:
@@ -137,11 +162,13 @@ jobs:
     - name: Chmod a+x downloaded artifacts
       run: chmod a+x vector-store vector-search-validator run-validator-with-scylla-docker
 
-    - name: Run the Validator tests for testcase ${{matrix.testcase}}
+    - name: Run the Validator tests for testcase ${{matrix.testcase.name}}
       env:
-        testcase: ${{matrix.testcase}}
+        filters: ${{matrix.testcase.filters}}
       run: |
-        ./run-validator-with-scylla-docker scylladb/scylla-nightly@$(cat scylla-nightly-digest) vector-store vector-search-validator "\"${testcase}\"::" --verbose
+        # $filters is deliberately unquoted: a job may carry several filters,
+        # which have to reach the validator as separate arguments.
+        ./run-validator-with-scylla-docker scylladb/scylla-nightly@$(cat scylla-nightly-digest) vector-store vector-search-validator $filters --verbose
 
   validator-workflow-status:
     needs: ["validator-scylla-nightly-digest", "validator-build", "validator-tests"]

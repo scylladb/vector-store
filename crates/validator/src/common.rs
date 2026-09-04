@@ -48,6 +48,7 @@ pub const VS_NAMES: [&str; 3] = ["vs1", "vs2", "vs3"];
 
 pub const VS_PORT: u16 = 6080;
 pub const DB_PORT: u16 = 9042;
+pub const ALTERNATOR_PORT: u16 = 8000;
 
 pub const DB_OCTET_1: u8 = 1;
 pub const DB_OCTET_2: u8 = 2;
@@ -175,44 +176,85 @@ async fn wait_for_role_login(actors: &TestActors, ip: Ipv4Addr, tls: bool) {
 #[as_ref(str)]
 pub(crate) struct TableName(String);
 
-/// Returns the default DB IPs for a given subnet. This variant can be used
-/// before `TestActors` is constructed (e.g. during TLS cert generation).
-pub fn get_default_db_ips_for_subnet(subnet: &crate::ServicesSubnet) -> Vec<Ipv4Addr> {
-    vec![
-        subnet.ip(DB_OCTET_1),
-        subnet.ip(DB_OCTET_2),
-        subnet.ip(DB_OCTET_3),
-    ]
+/// Every cluster's ScyllaDB addresses. The TLS certificate is generated once
+/// for all of them, before any cluster exists, so that clusters running side by
+/// side can share it.
+pub fn all_cluster_db_ips(subnet: &crate::ServicesSubnet) -> Vec<Ipv4Addr> {
+    (0..crate::MAX_CLUSTERS)
+        .flat_map(|cluster| {
+            let base = u8::try_from(cluster).expect("cluster index fits in an octet")
+                * crate::CLUSTER_OCTET_STRIDE;
+            [DB_OCTET_1, DB_OCTET_2, DB_OCTET_3].map(|octet| subnet.ip(base + octet))
+        })
+        .collect()
+}
+
+/// The DNS names of a cluster's Vector Store nodes. They carry the cluster
+/// index so that clusters running side by side do not overwrite each other's
+/// records in the shared zone.
+pub fn get_default_vs_names(actors: &TestActors) -> Vec<String> {
+    VS_NAMES
+        .iter()
+        .map(|name| format!("{name}-c{cluster}", cluster = actors.cluster()))
+        .collect()
 }
 
 #[framed]
 pub async fn get_default_vs_urls(actors: &TestActors) -> Vec<String> {
     let domain = actors.dns.domain().await;
-    VS_NAMES
-        .iter()
+    get_default_vs_names(actors)
+        .into_iter()
         .map(|name| format!("http://{name}.{domain}:{VS_PORT}"))
         .collect()
 }
 
 #[framed]
 pub fn get_default_vs_ips(actors: &TestActors) -> Vec<Ipv4Addr> {
+    let base = actors.octet_base();
     vec![
-        actors.services_subnet.ip(VS_OCTET_1),
-        actors.services_subnet.ip(VS_OCTET_2),
-        actors.services_subnet.ip(VS_OCTET_3),
+        actors.services_subnet.ip(base + VS_OCTET_1),
+        actors.services_subnet.ip(base + VS_OCTET_2),
+        actors.services_subnet.ip(base + VS_OCTET_3),
     ]
 }
 
 #[framed]
 pub fn get_default_db_ips(actors: &TestActors) -> Vec<Ipv4Addr> {
-    get_default_db_ips_for_subnet(&actors.services_subnet)
+    let base = actors.octet_base();
+    vec![
+        actors.services_subnet.ip(base + DB_OCTET_1),
+        actors.services_subnet.ip(base + DB_OCTET_2),
+        actors.services_subnet.ip(base + DB_OCTET_3),
+    ]
 }
 
 pub fn get_default_db_proxy_ips(actors: &TestActors) -> Vec<Ipv4Addr> {
+    let base = actors.octet_base();
     vec![
-        actors.services_subnet.ip(DB_PROXY_OCTET_1),
-        actors.services_subnet.ip(DB_PROXY_OCTET_2),
-        actors.services_subnet.ip(DB_PROXY_OCTET_3),
+        actors.services_subnet.ip(base + DB_PROXY_OCTET_1),
+        actors.services_subnet.ip(base + DB_PROXY_OCTET_2),
+        actors.services_subnet.ip(base + DB_PROXY_OCTET_3),
+    ]
+}
+
+/// The address a CQL session connects to for this cluster.
+pub fn get_default_db_ip(actors: &TestActors) -> Ipv4Addr {
+    actors.services_subnet.ip(actors.octet_base() + DB_OCTET_1)
+}
+
+/// Arguments enabling the Alternator (DynamoDB-compatible) endpoint on a node.
+///
+/// The endpoint is enabled on every node so that all test clusters share one
+/// canonical ScyllaDB node configuration; CQL-only tests are unaffected by it.
+///
+/// NOTE: `--alternator-ttl-period-in-seconds` is already set in the default
+/// scylla args (0.5s). ScyllaDB rejects duplicate flags.
+pub fn default_alternator_args(node_ip: Ipv4Addr) -> Vec<String> {
+    vec![
+        format!("--alternator-port={ALTERNATOR_PORT}"),
+        format!("--alternator-address={node_ip}"),
+        "--alternator-write-isolation=only_rmw_uses_lwt".to_string(),
+        "--alternator-enforce-authorization=false".to_string(),
     ]
 }
 
@@ -226,11 +268,13 @@ pub async fn get_default_scylla_node_configs(actors: &TestActors) -> Vec<ScyllaN
         .enumerate()
         .map(|(i, &ip)| {
             let mut vs_urls = default_vs_urls.clone();
+            let mut args = e2etest_scylla_cluster::default_scylla_args();
+            args.extend(default_alternator_args(ip));
             ScyllaNodeConfig {
                 db_ip: ip,
                 primary_vs_uris: vec![vs_urls.remove(i)],
                 secondary_vs_uris: vs_urls,
-                args: e2etest_scylla_cluster::default_scylla_args(),
+                args,
                 cert_path: Some(cert_path.clone()),
                 key_path: Some(key_path.clone()),
                 extra_config: Some(scylla_auth_config()),
@@ -434,8 +478,8 @@ pub async fn init_with_proxy_single_vs(actors: &TestActors) {
 #[framed]
 pub async fn init_dns(actors: &TestActors) {
     let vs_ips = get_default_vs_ips(actors);
-    for (name, ip) in VS_NAMES.iter().zip(vs_ips.iter()) {
-        actors.dns.upsert(name.to_string(), *ip).await;
+    for (name, ip) in get_default_vs_names(actors).into_iter().zip(vs_ips) {
+        actors.dns.upsert(name, ip).await;
     }
 }
 
@@ -459,11 +503,245 @@ pub async fn init_with_config(
     assert!(actors.vs.wait_for_ready().await);
 }
 
+/// The standard shared cluster: the default TLS+auth 3-node ScyllaDB cluster
+/// (with the Alternator endpoint enabled) plus 3 Vector Store nodes.
+///
+/// This fixture is held by the `standard` umbrella group (see `lib.rs`), so it
+/// is started once and shared by every test group under that umbrella. Test
+/// groups access it through fixtures such as [`TestContext`], which chain to
+/// it via `setup.setup::<SharedCluster>()`.
+///
+/// Tests running against this cluster must not mutate cluster-wide state
+/// (node restarts, firewall or proxy rules, DNS records, role changes);
+/// groups that need such mutations must run on their own dedicated cluster.
+pub struct SharedCluster {
+    pub actors: TestActors,
+}
+
+impl e2etest::Fixture for SharedCluster {
+    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
+        let actors = setup.setup::<crate::TestEnv>().await?.new_cluster().await;
+        init(&actors).await;
+        crate::alternator::wait_for_alternator(get_default_db_ip(&actors)).await;
+        Some(Self { actors })
+    }
+
+    async fn teardown(self) {
+        cleanup(&self.actors).await;
+    }
+
+    fn test_can_run_concurrently() -> bool {
+        true
+    }
+
+    // This cluster is independent of every other one, so its groups may run
+    // alongside groups owning a different cluster.
+    fn group_can_run_concurrently() -> bool {
+        true
+    }
+
+    // Its nodes claim loopback addresses, ports and routes, which every other
+    // cluster claims too, so it runs in a network namespace of its own, where
+    // it is alone in claiming them.
+    fn group_needs_own_namespace() -> bool {
+        true
+    }
+}
+
+/// Per-group CQL test context on the [`SharedCluster`]: a superuser session,
+/// HTTP clients for all Vector Store nodes, and a keyspace shared by every
+/// test in the group.
+///
+/// List this fixture in a group's `fixtures = (...)` tuple so that it lives
+/// for the whole group; tests then receive it via an `Arc<TestContext>`
+/// argument. Because tests may run concurrently on the same context, each
+/// test must create its own uniquely-named tables and indexes (via
+/// [`Self::create_table`] and [`Self::create_index`]) and must not drop or
+/// alter the shared keyspace or other tests' tables.
+pub struct TestContext {
+    _cluster: Arc<SharedCluster>,
+    pub session: Arc<Session>,
+    pub clients: Vec<HttpClient>,
+    pub keyspace: KeyspaceName,
+}
+
+impl e2etest::Fixture for TestContext {
+    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
+        let cluster = setup.setup::<SharedCluster>().await?;
+        let (session, clients) = prepare_connection(&cluster.actors).await;
+        let keyspace = create_keyspace(&session).await;
+        Some(Self {
+            _cluster: cluster,
+            session,
+            clients,
+            keyspace,
+        })
+    }
+
+    async fn teardown(self) {
+        apply_schema_change(
+            &self.session,
+            format!("DROP KEYSPACE IF EXISTS {}", self.keyspace),
+        )
+        .await;
+    }
+
+    fn test_can_run_concurrently() -> bool {
+        true
+    }
+
+    // Every group under the `standard` umbrella shares this one context, and so its keyspace,
+    // while creating its own tables and indexes; the groups may therefore overlap.
+    fn group_can_run_concurrently() -> bool {
+        true
+    }
+}
+
+impl TestContext {
+    /// Creates a uniquely-named table in the shared keyspace.
+    pub async fn create_table(&self, columns: &str, options: Option<&str>) -> TableName {
+        create_table(&self.session, columns, options).await
+    }
+
+    /// Starts building a `CREATE CUSTOM INDEX` query on a table in the shared
+    /// keyspace. Finish it with [`create_index`].
+    pub fn index_query<'a>(
+        &'a self,
+        table: &TableName,
+        target_column: &str,
+    ) -> CreateIndexQuery<'a> {
+        CreateIndexQuery::new(&self.session, &self.clients, table, target_column)
+    }
+
+    /// Creates a uniquely-named vector index and waits until every Vector
+    /// Store node sees it.
+    pub async fn create_index(&self, table: &TableName, target_column: &str) -> IndexInfo {
+        create_index(self.index_query(table, target_column)).await
+    }
+}
+
+/// The shared proxy cluster: scylla-proxy in front of the 3-node ScyllaDB
+/// cluster with a single Vector Store node, held by the `proxy` umbrella group
+/// (see `lib.rs`) and shared by the groups that only manipulate proxy rules
+/// (they must not change the cluster topology or Vector Store configuration).
+///
+/// Proxy rules are cluster-global mutable state, so tests on this cluster keep
+/// the default non-concurrent execution and go through [`ProxyTestContext`],
+/// which resets the rules around every test.
+pub struct ProxyCluster {
+    pub actors: TestActors,
+}
+
+impl e2etest::Fixture for ProxyCluster {
+    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
+        let actors = setup.setup::<crate::TestEnv>().await?.new_cluster().await;
+        init_with_proxy_single_vs(&actors).await;
+        Some(Self { actors })
+    }
+
+    async fn teardown(self) {
+        cleanup(&self.actors).await;
+    }
+
+    // This cluster is independent of every other one, so its groups may run
+    // alongside groups owning a different cluster.
+    fn group_can_run_concurrently() -> bool {
+        true
+    }
+
+    // Its nodes claim loopback addresses, ports and routes, which every other
+    // cluster claims too, so it runs in a network namespace of its own, where
+    // it is alone in claiming them.
+    fn group_needs_own_namespace() -> bool {
+        true
+    }
+}
+
+/// Per-test context on the [`ProxyCluster`]: a fresh no-TLS superuser session
+/// (opening it resets the proxy rules), the single Vector Store client, and a
+/// fresh keyspace.
+///
+/// Reference this fixture only from test arguments — never from a group's
+/// `fixtures = (...)` tuple — so it is set up before and torn down after every
+/// test: proxy tests mutate cluster-global rules and each must start from a
+/// clean slate and clean up even when the previous test panicked mid-way.
+pub struct ProxyTestContext {
+    cluster: Arc<ProxyCluster>,
+    pub session: Arc<Session>,
+    pub clients: Vec<HttpClient>,
+    pub keyspace: KeyspaceName,
+}
+
+impl e2etest::Fixture for ProxyTestContext {
+    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
+        let cluster = setup.setup::<ProxyCluster>().await?;
+        let (session, clients) = prepare_connection_single_vs_no_tls(&cluster.actors).await;
+        let keyspace = create_keyspace(&session).await;
+        Some(Self {
+            cluster,
+            session,
+            clients,
+            keyspace,
+        })
+    }
+
+    async fn teardown(self) {
+        // Reset the rule state a failed test may have leaked before touching
+        // the database again.
+        self.cluster.actors.db_proxy.turn_off_rules().await;
+        self.cluster.actors.turn_off_firewall_rules().await;
+        // Tests may legitimately have dropped their own keyspace already.
+        apply_schema_change(
+            &self.session,
+            format!("DROP KEYSPACE IF EXISTS {}", self.keyspace),
+        )
+        .await;
+    }
+}
+
+impl ProxyTestContext {
+    /// The shared test actors, for driving proxy rules and reading internals.
+    pub fn actors(&self) -> &TestActors {
+        &self.cluster.actors
+    }
+
+    /// The single Vector Store client of the proxy cluster.
+    pub fn client(&self) -> &HttpClient {
+        &self.clients[0]
+    }
+
+    /// Creates a uniquely-named table in the per-test keyspace.
+    pub async fn create_table(&self, columns: &str, options: Option<&str>) -> TableName {
+        create_table(&self.session, columns, options).await
+    }
+
+    /// Starts building a `CREATE CUSTOM INDEX` query on a table in the
+    /// per-test keyspace. Finish it with [`create_index`].
+    pub fn index_query<'a>(
+        &'a self,
+        table: &TableName,
+        target_column: &str,
+    ) -> CreateIndexQuery<'a> {
+        CreateIndexQuery::new(&self.session, &self.clients, table, target_column)
+    }
+
+    /// Creates a uniquely-named vector index and waits until the Vector Store
+    /// node sees it.
+    pub async fn create_index(&self, table: &TableName, target_column: &str) -> IndexInfo {
+        create_index(self.index_query(table, target_column)).await
+    }
+}
+
 #[framed]
 pub async fn cleanup(actors: &TestActors) {
     info!("started");
-    for name in VS_NAMES.iter() {
-        actors.dns.remove(name.to_string()).await;
+    // A test that panics between installing firewall rules and removing them
+    // would otherwise leak them into the host routing table and poison every
+    // later cluster on the same addresses; the firewall actor has no automatic
+    // cleanup of its own, so reset it here (a no-op when no rules are active).
+    actors.turn_off_firewall_rules().await;
+    for name in get_default_vs_names(actors) {
+        actors.dns.remove(name).await;
     }
     actors.vs.stop().await;
     actors.db_proxy.stop().await;
@@ -479,7 +757,7 @@ pub async fn prepare_connection_with_custom_vs_ips(
     let tls_config = actors.tls.client_tls_config().await;
     let session = Arc::new(
         SessionBuilder::new()
-            .known_node(actors.services_subnet.ip(DB_OCTET_1).to_string())
+            .known_node(get_default_db_ip(actors).to_string())
             .user(&*SUPERUSER_NAME, &*SUPERUSER_PASSWORD)
             .tls_context(Some(TlsContext::from(tls_config)))
             .build()
@@ -502,7 +780,7 @@ pub async fn prepare_connection_with_auth(
     let tls_config = actors.tls.client_tls_config().await;
     let session = Arc::new(
         SessionBuilder::new()
-            .known_node(actors.services_subnet.ip(DB_OCTET_1).to_string())
+            .known_node(get_default_db_ip(actors).to_string())
             .user(user, password)
             .tls_context(Some(TlsContext::from(tls_config)))
             .build()
@@ -525,7 +803,7 @@ pub async fn prepare_connection_with_auth_no_tls(
 ) -> (Arc<Session>, Vec<HttpClient>) {
     let session = Arc::new(
         SessionBuilder::new()
-            .known_node(actors.services_subnet.ip(DB_OCTET_1).to_string())
+            .known_node(get_default_db_ip(actors).to_string())
             .user(user, password)
             .build()
             .await
@@ -582,7 +860,7 @@ pub async fn prepare_connection_with_custom_vs_ips_no_tls(
 
     let session = Arc::new(
         SessionBuilder::new()
-            .known_node(actors.services_subnet.ip(DB_OCTET_1).to_string())
+            .known_node(get_default_db_ip(actors).to_string())
             .user(&*SUPERUSER_NAME, &*SUPERUSER_PASSWORD)
             .build()
             .await
@@ -759,15 +1037,57 @@ pub fn unique_index_name() -> IndexName {
     unique_name("idx", &INDEX_COUNTER).into()
 }
 
+/// Runs a schema-changing statement, retrying while ScyllaDB rejects it
+/// because another schema change is in flight.
+///
+/// Schema changes are serialized through Raft group 0, which rejects a
+/// statement racing another one with "concurrent modification". Tests sharing
+/// a cluster issue their `CREATE TABLE` / `CREATE INDEX` / `DROP` statements
+/// concurrently, so that rejection is expected rather than a failure, and the
+/// caller must retry instead of failing the test.
+///
+/// The statement must be idempotent (use `IF EXISTS` / `IF NOT EXISTS` where a
+/// partially applied change could be observed), because a rejected attempt may
+/// still be retried.
+#[framed]
+pub async fn apply_schema_change(session: &Session, query: impl Into<String>) {
+    let query = query.into();
+    wait_for(
+        || async {
+            match session.query_unpaged(query.clone(), ()).await {
+                Ok(_) => true,
+                Err(err) if is_concurrent_schema_change(&err) => {
+                    info!("Retrying schema change rejected by a concurrent one: {query}");
+                    false
+                }
+                Err(err) => panic!("failed to apply schema change '{query}': {err}"),
+            }
+        },
+        format!("schema change to be applied: {query}"),
+        DEFAULT_OPERATION_TIMEOUT,
+    )
+    .await;
+}
+
+/// Whether the error is ScyllaDB rejecting a schema change because another one
+/// was applied concurrently, which is retryable.
+fn is_concurrent_schema_change(err: &impl std::fmt::Display) -> bool {
+    err.to_string().contains("concurrent modification")
+}
+
 #[framed]
 pub async fn create_keyspace(session: &Session) -> KeyspaceName {
     let keyspace = unique_keyspace_name();
 
     // Create keyspace with replication factor of 3 for the 3-node cluster
-    session.query_unpaged(
-        format!("CREATE KEYSPACE {keyspace} WITH replication = {{'class': 'NetworkTopologyStrategy', 'replication_factor': 3}}"),
-        (),
-    ).await.expect("failed to create a keyspace");
+    apply_schema_change(
+        session,
+        format!(
+            "CREATE KEYSPACE IF NOT EXISTS {keyspace} WITH replication = \
+             {{'class': 'NetworkTopologyStrategy', 'replication_factor': 3}}"
+        ),
+    )
+    .await;
 
     // Use keyspace
     session
@@ -789,10 +1109,11 @@ pub async fn create_table(session: &Session, columns: &str, options: Option<&str
     };
 
     // Create table
-    session
-        .query_unpaged(format!("CREATE TABLE {table} ({columns}) {extra}"), ())
-        .await
-        .expect("failed to create a table");
+    apply_schema_change(
+        session,
+        format!("CREATE TABLE IF NOT EXISTS {table} ({columns}) {extra}"),
+    )
+    .await;
 
     table
 }
@@ -805,7 +1126,7 @@ pub async fn create_index(query: CreateIndexQuery<'_>) -> IndexInfo {
         format!(" WITH OPTIONS = {{{}}}", query.options)
     };
     let cql_query = format!(
-        "CREATE CUSTOM INDEX {index} ON {table}({partition_columns}{target_column}{filter_columns}) USING '{index_type}'{options_clause}",
+        "CREATE CUSTOM INDEX IF NOT EXISTS {index} ON {table}({partition_columns}{target_column}{filter_columns}) USING '{index_type}'{options_clause}",
         index = query.index,
         table = query.table,
         partition_columns = query.partition_columns,
@@ -814,11 +1135,7 @@ pub async fn create_index(query: CreateIndexQuery<'_>) -> IndexInfo {
         index_type = query.index_type,
     );
     info!("Create index: '{cql_query}'");
-    query
-        .session
-        .query_unpaged(cql_query, ())
-        .await
-        .expect("failed to create an index");
+    apply_schema_change(query.session, cql_query).await;
 
     for client in query.clients {
         wait_for(

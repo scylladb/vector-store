@@ -102,6 +102,14 @@ secrecy = "0.10.3"
 [patch.crates-io]
 # Currently, axum-server-dual-protocol doesn't have a published version that supports axum 0.8, so we need to use the git version from the PR.
 axum-server-dual-protocol = { git = "https://github.com/vinchona/axum-server-dual-protocol", rev = "ca6db055254255b74238673ce4135698e347d71c" }
+# Concurrent test groups, a network namespace per group holding a cluster, the
+# report a run prints as it goes, firewall rules several groups can hold at
+# once, and a quiet Alternator TTL scanner are not in a published e2etest
+# release yet, so take them from the branch they live on until one is cut.
+e2etest = { git = "https://github.com/QuerthDP/e2etest-rs", rev = "2a81b924e847b54275f335dd66c0da9b1bf141aa" }
+e2etest-firewall = { git = "https://github.com/QuerthDP/e2etest-rs", rev = "2a81b924e847b54275f335dd66c0da9b1bf141aa" }
+e2etest-macros = { git = "https://github.com/QuerthDP/e2etest-rs", rev = "2a81b924e847b54275f335dd66c0da9b1bf141aa" }
+e2etest-scylla-cluster = { git = "https://github.com/QuerthDP/e2etest-rs", rev = "2a81b924e847b54275f335dd66c0da9b1bf141aa" }
 
 [profile.dev]
 opt-level = 1

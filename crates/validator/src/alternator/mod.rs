@@ -17,11 +17,14 @@ mod update_table;
 
 use crate::TestActors;
 use crate::common;
-use async_backtrace::framed;
+use crate::common::ALTERNATOR_PORT;
+use crate::common::SharedCluster;
 use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
 use aws_sdk_dynamodb::Client;
 use aws_sdk_dynamodb::config::Region;
+use aws_sdk_dynamodb::config::retry::RetryConfig;
+use aws_sdk_dynamodb::config::timeout::TimeoutConfig;
 use aws_sdk_dynamodb::error::SdkError;
 use aws_sdk_dynamodb::operation::create_table::CreateTableError;
 use aws_sdk_dynamodb::operation::create_table::CreateTableOutput;
@@ -57,13 +60,35 @@ use std::collections::HashMap;
 use std::fmt::Write;
 use std::net::Ipv4Addr;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
+use tokio::sync::Semaphore;
+use tokio::sync::SemaphorePermit;
 use tracing::info;
 use tracing::warn;
 
 static TABLE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static INDEX_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+/// How many Alternator schema changes the tests keep in flight at once.
+///
+/// ScyllaDB applies schema changes one at a time through Raft, so sending
+/// more than a handful only makes each of them wait longer: once several
+/// groups ran together a single `CreateTable` took over half a minute, long
+/// enough for the SDK to give up on it. Queuing them here instead keeps each
+/// request's latency near what the cluster can actually deliver, and costs no
+/// throughput, since the cluster was applying them one at a time regardless.
+static SCHEMA_CHANGES: Semaphore = Semaphore::const_new(4);
+
+/// Holds a place in the schema-change queue for as long as the returned
+/// permit lives.
+async fn schema_change_permit() -> SemaphorePermit<'static> {
+    SCHEMA_CHANGES
+        .acquire()
+        .await
+        .expect("the schema-change semaphore is never closed")
+}
 
 fn unique_table_name() -> String {
     common::unique_name("Alt-Tbl", &TABLE_COUNTER)
@@ -97,9 +122,51 @@ const MAX_ALTERNATOR_INDEX_NAME_LEN: usize = MAX_ALTERNATOR_TABLE_NAME_LEN;
 /// See <https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/HowItWorks.NamingRulesDataTypes.html>.
 const MAX_ALTERNATOR_ATTRIBUTE_NAME_LEN: usize = 255;
 
-e2etest::group!(name = alternator, fixtures = (), parent = crate::validator);
+// Namespace group for Alternator test groups that run on the shared standard
+// cluster (its ScyllaDB nodes have the Alternator endpoint enabled). Groups
+// that need a differently-configured cluster (`always_use_lwt`,
+// enforce-authorization) live outside this namespace, as top-level groups with
+// their own dedicated cluster, because they cannot coexist with the shared one.
+e2etest::group!(name = alternator, fixtures = (), parent = crate::standard);
 
-const ALTERNATOR_PORT: u16 = 8000;
+/// Per-group Alternator access on the shared [`SharedCluster`]. List it in a
+/// group's `fixtures = (...)` tuple; tests build their DynamoDB and Vector
+/// Store clients from [`AlternatorContext::actors`] (via [`make_clients`] /
+/// [`TableContext`]) and create and drop their own uniquely named tables (each
+/// Alternator table is its own keyspace), so they can run concurrently on the
+/// shared cluster.
+pub(crate) struct AlternatorContext {
+    cluster: Arc<SharedCluster>,
+}
+
+impl e2etest::Fixture for AlternatorContext {
+    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
+        let cluster = setup.setup::<SharedCluster>().await?;
+        Some(Self { cluster })
+    }
+
+    async fn teardown(self) {}
+
+    fn test_can_run_concurrently() -> bool {
+        true
+    }
+
+    // Every test creates and drops its own uniquely named table, and an
+    // Alternator table is its own keyspace, so the groups holding this
+    // context share nothing but the read-only cluster and may run alongside
+    // each other.
+    fn group_can_run_concurrently() -> bool {
+        true
+    }
+}
+
+impl AlternatorContext {
+    /// The shared test actors, for building DynamoDB / Vector Store clients and
+    /// table contexts (read-only cluster access).
+    pub fn actors(&self) -> &TestActors {
+        &self.cluster.actors
+    }
+}
 
 /// In ScyllaDB Alternator, a DynamoDB table named `T` is stored under the CQL
 /// keyspace `alternator_T`. Vector Store discovers indexes by scanning
@@ -275,6 +342,19 @@ impl Intercept for Float32VectorInterceptor {
     }
 }
 
+/// How long an Alternator request may take before the client gives up.
+///
+/// `CreateTable` and `UpdateTable` are schema changes, which ScyllaDB applies
+/// one at a time through Raft: with several test groups on the shared cluster
+/// they queue, and a request can wait far longer than the SDK's 30-second
+/// default allows. The framework times the test out on its own, so this only
+/// has to outlast the queue rather than catch a hang.
+const ALTERNATOR_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How long to wait for the Alternator endpoint to accept a connection. It is
+/// on loopback, so anything but a prompt answer means the node is not up.
+const ALTERNATOR_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Builds a DynamoDB client pointing at the ScyllaDB Alternator endpoint on
 /// `db_ip` using explicit SigV4 credentials.
 async fn make_dynamodb_client_with_creds(
@@ -287,6 +367,22 @@ async fn make_dynamodb_client_with_creds(
         .credentials_provider(creds)
         .endpoint_url(format!("http://{db_ip}:{ALTERNATOR_PORT}"))
         .region(Region::new("us-east-1"))
+        // Schema changes are not idempotent, so a retry cannot be a harmless
+        // repeat: when a slow `CreateTable` outlasted the SDK's timeout, the
+        // retry reported the table its own first attempt had just created as
+        // already existing, and the same for an index created or dropped
+        // through `UpdateTable`. The tests wait for what they asked for and
+        // fail on their own, so the client must report the first answer it
+        // gets rather than ask again.
+        .retry_config(RetryConfig::disabled())
+        .timeout_config(
+            TimeoutConfig::builder()
+                .connect_timeout(ALTERNATOR_CONNECT_TIMEOUT)
+                .read_timeout(ALTERNATOR_REQUEST_TIMEOUT)
+                .operation_attempt_timeout(ALTERNATOR_REQUEST_TIMEOUT)
+                .operation_timeout(ALTERNATOR_REQUEST_TIMEOUT)
+                .build(),
+        )
         .load()
         .await;
     Client::from_conf(
@@ -308,9 +404,9 @@ async fn make_dynamodb_client(db_ip: Ipv4Addr) -> Client {
 /// Polls the Alternator HTTP endpoint on `db_ip` until it responds successfully.
 ///
 /// The Alternator port may become available slightly after the CQL port (which
-/// is what `db.wait_for_ready()` checks), so `init` should call this once after
-/// the cluster has started before any tests run.
-async fn wait_for_alternator(db_ip: Ipv4Addr) {
+/// is what `db.wait_for_ready()` checks), so cluster init should call this once
+/// after the cluster has started before any tests run.
+pub(crate) async fn wait_for_alternator(db_ip: Ipv4Addr) {
     let client = make_dynamodb_client(db_ip).await;
     common::wait_for(
         || {
@@ -324,7 +420,7 @@ async fn wait_for_alternator(db_ip: Ipv4Addr) {
 }
 
 async fn make_clients(actors: &TestActors) -> (Client, Vec<HttpClient>) {
-    let db_ip = actors.services_subnet.ip(common::DB_OCTET_1);
+    let db_ip = common::get_default_db_ip(actors);
     let dynamodb_client = make_dynamodb_client(db_ip).await;
     let vs_clients = common::get_default_vs_ips(actors)
         .into_iter()
@@ -520,6 +616,7 @@ async fn create_table(
     sort_key_name: Option<&str>,
     vector_indexes: &[(&str, &str, usize)],
 ) -> Result<CreateTableOutput, SdkError<CreateTableError>> {
+    let _permit = schema_change_permit().await;
     let mut builder = client
         .create_table()
         .table_name(table_name)
@@ -590,6 +687,7 @@ async fn update_table_vector_indexes(
     table_name: &str,
     vector_index_updates: Value,
 ) {
+    let _permit = schema_change_permit().await;
     client
         .update_table()
         .table_name(table_name)
@@ -604,6 +702,7 @@ async fn update_table_vector_indexes(
 }
 
 async fn delete_table(client: &Client, table_name: &str) {
+    let _permit = schema_change_permit().await;
     client
         .delete_table()
         .table_name(table_name)
@@ -628,8 +727,9 @@ where
     );
 }
 
-/// Applies the standard alternator base arguments plus `extra_args` overrides
-/// to default scylla node configs.
+/// Applies `extra_args` overrides to default scylla node configs. The
+/// standard alternator base arguments are already part of the default configs
+/// (see `common::default_alternator_args`).
 async fn get_scylla_configs(
     actors: &TestActors,
     extra_args: impl IntoIterator<Item = (&str, &str)>,
@@ -640,16 +740,6 @@ async fn get_scylla_configs(
     let mut scylla_configs = common::get_default_scylla_node_configs(actors).await;
 
     for config in &mut scylla_configs {
-        let node_ip = config.db_ip;
-        config.args.extend([
-            format!("--alternator-port={ALTERNATOR_PORT}"),
-            format!("--alternator-address={node_ip}"),
-            "--alternator-write-isolation=only_rmw_uses_lwt".to_string(),
-            "--alternator-enforce-authorization=false".to_string(),
-            // NOTE: --alternator-ttl-period-in-seconds is already set in
-            // DEFAULT_SCYLLA_ARGS (0.5s). ScyllaDB rejects duplicate flags.
-        ]);
-
         for (name, value) in &args {
             config.args.retain(|arg| !arg.starts_with(name));
             config.args.push(format!("{name}={value}"));
@@ -661,8 +751,9 @@ async fn get_scylla_configs(
     scylla_configs
 }
 
-/// Starts ScyllaDB with the Alternator endpoint enabled alongside the Vector
-/// Store. `extra_args` is a list of `(name, value)` pairs that override or
+/// Starts a dedicated ScyllaDB + Vector Store cluster with overridden
+/// Alternator arguments, for groups that cannot run on the shared standard
+/// cluster. `extra_args` is a list of `(name, value)` pairs that override or
 /// extend the default alternator arguments.
 async fn init_with_args(actors: &TestActors, extra_args: impl IntoIterator<Item = (&str, &str)>) {
     info!("started");
@@ -670,18 +761,11 @@ async fn init_with_args(actors: &TestActors, extra_args: impl IntoIterator<Item 
     let vs_configs = common::get_default_vs_node_configs(actors).await;
 
     // Capture db_ip before actors is moved into init_with_config.
-    let db_ip = actors.services_subnet.ip(common::DB_OCTET_1);
+    let db_ip = common::get_default_db_ip(actors);
     common::init_with_config(actors, scylla_configs, vs_configs, true).await;
 
     wait_for_alternator(db_ip).await;
     info!("finished");
-}
-
-/// Standard test init: starts ScyllaDB with the Alternator endpoint enabled on
-/// each node's own IP, alongside the Vector Store.
-#[framed]
-pub async fn init(actors: &TestActors) {
-    init_with_args(actors, []).await;
 }
 
 /// Describes the key schema, attribute names, and name prefixes for a test
@@ -751,6 +835,34 @@ const SPECIAL_INDEX_BASE: &str = "123-idx.With.Hyphens_UPPER-MixedCase-";
 const SPECIAL_ATTR_BASE_PK: &str = "1:pk'.\".\\@#$ кириллица 中文 αβ 🦀 ";
 const SPECIAL_ATTR_BASE_SK: &str = "1:sk'.\".\\@#$ кириллица 中文 αβ 🦀 ";
 const SPECIAL_ATTR_BASE_VEC: &str = "1:vec'.\".\\@#$ кириллица 中文 αβ 🦀 ";
+
+/// Declares one test per entry of [`name_patterns`], each calling `$run` with
+/// the shape it covers.
+///
+/// A single test looping over the shapes runs them one after another, and
+/// every shape creates its own table and waits out its own index build, which
+/// is what makes these tests the slowest in the suite. As separate tests the
+/// framework runs the shapes concurrently and names the failing shape on its
+/// own. The same reasoning as `serde::key_type_round_trip_tests`.
+///
+/// The invoking module needs `Arc` and `AlternatorContext` in scope: the test
+/// attribute reads the fixture out of an argument spelled exactly
+/// `Arc<Fixture>`, so the type cannot be written out in full here.
+macro_rules! name_pattern_tests {
+    (group = $group:ident, run = $run:ident, $($name:ident = $index:literal,)*) => {
+        $(
+            #[e2etest::test(group = $group)]
+            async fn $name(ctx: Arc<AlternatorContext>) {
+                tracing::info!("started");
+                let shape = &$crate::alternator::name_patterns()[$index];
+                tracing::info!("Testing shape: {shape:?}");
+                $run(&ctx, shape).await;
+                tracing::info!("finished");
+            }
+        )*
+    };
+}
+pub(crate) use name_pattern_tests;
 
 /// The 2x2 matrix of table shapes exercised by every `_with_names` test.
 ///
@@ -976,6 +1088,7 @@ impl TableContext {
 
     /// Idempotent.
     async fn done(&self) {
+        let _permit = schema_change_permit().await;
         match self
             .client
             .delete_table()

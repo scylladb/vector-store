@@ -28,10 +28,15 @@ mod tls_reload;
 
 use clap::Parser;
 use clap::Subcommand;
+use common::ProxyCluster;
+use common::SharedCluster;
 use e2etest::Config;
+use e2etest::Progress;
 use e2etest_dns::Dns;
 use e2etest_dns::DnsExt;
 use e2etest_firewall::Firewall;
+use e2etest_firewall::FirewallExt;
+use e2etest_firewall::Owner as FirewallOwner;
 use e2etest_scylla_cluster::ScyllaCluster;
 use e2etest_scylla_cluster::ScyllaClusterExt;
 use e2etest_scylla_proxy_cluster::ScyllaProxyCluster;
@@ -40,9 +45,12 @@ use e2etest_vector_store_cluster::VectorStoreCluster;
 use e2etest_vector_store_cluster::VectorStoreClusterExt;
 use std::env;
 use std::net::Ipv4Addr;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::thread;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use tokio::time;
@@ -100,6 +108,32 @@ struct RunArgs {
     #[arg(long, default_value = "false")]
     duplicate_errors: bool,
 
+    /// Maximum number of tests to run concurrently within a group.
+    /// Defaults to the number of available CPUs.
+    ///
+    /// Only groups whose fixtures allow it (those sharing a cluster and a
+    /// keyspace, with per-test tables and indexes) run concurrently; groups
+    /// that mutate cluster-wide state always run serially regardless of this
+    /// value. Set to 1 to force fully sequential execution.
+    #[arg(long, default_value_t = default_concurrency(), value_name = "N")]
+    concurrency: usize,
+
+    /// Directory to write the per-test log files to. Each test gets its own
+    /// file, so that a concurrent run's output stays readable.
+    #[arg(long, value_name = "PATH")]
+    log_dir: Option<PathBuf>,
+
+    /// Maximum number of test groups to run concurrently.
+    /// Defaults to the number of clusters this machine has the free memory and
+    /// the cores for.
+    ///
+    /// A group owning a cluster runs in a network namespace of its own, so any
+    /// number of them may overlap; what bounds them is what a cluster costs to
+    /// run. The work in flight is bounded by this times `--concurrency`, so
+    /// raising both loads the machine quickly.
+    #[arg(long, default_value_t = default_group_concurrency(), value_name = "N")]
+    group_concurrency: usize,
+
     /// Path to the ScyllaDB executable.
     #[arg(value_name = "PATH")]
     scylla: PathBuf,
@@ -121,16 +155,36 @@ struct RunArgs {
 
 fn init(args: RunArgs) -> Config {
     let ansi = !args.disable_colors;
-    let rust_log = if args.verbose {
-        "info"
-    } else {
-        "info,hickory_server=warn"
-    };
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .expect("install aws-lc-rs crypto provider");
 
+    let log_dir = args
+        .log_dir
+        .clone()
+        .unwrap_or_else(|| args.tmpdir.join("vector-search-validator-logs"));
+
+    // The log always goes to a file per test. It also goes to the console, but
+    // only under --verbose: otherwise the console is left to the results, which
+    // is the whole point of reporting them.
+    //
+    // Every layer shares one filter rather than carrying its own. A per-layer
+    // filter is decided and applied in two steps, and an `info!` whose
+    // arguments await something logs in between, which loses the decision and
+    // prints a line the filter had rejected.
+    let console = args.verbose.then(|| {
+        fmt::layer()
+            .with_target(false)
+            .with_ansi(ansi)
+            .with_writer(std::io::stdout)
+    });
+
     tracing_subscriber::registry()
+        .with(
+            EnvFilter::try_from_default_env()
+                .or_else(|_| EnvFilter::try_new("info,hickory_server=warn"))
+                .expect("Failed to create EnvFilter"),
+        )
         .with(
             args.duplicate_errors.then_some(
                 fmt::layer()
@@ -143,24 +197,83 @@ fn init(args: RunArgs) -> Config {
                     })),
             ),
         )
-        .with(
-            EnvFilter::try_from_default_env()
-                .or_else(|_| EnvFilter::try_new(rust_log))
-                .expect("Failed to create EnvFilter"),
-        )
-        .with(
-            fmt::layer()
-                .with_target(false)
-                .with_ansi(ansi)
-                .with_writer(std::io::stdout),
-        )
+        .with(e2etest::logging::per_test_files(&log_dir))
+        .with(console)
         .init();
 
+    // Printed rather than logged, so that it shows without --verbose: a result
+    // on the console is only useful next to the log that explains it.
+    println!("Per-test logs: {}", log_dir.display());
+
+    // Worth saying, both of these being what this machine turned out to have
+    // room for rather than what anybody asked for.
+    info!(
+        "running up to {group} clusters at once, {tests} tests at once in each",
+        group = args.group_concurrency,
+        tests = args.concurrency,
+    );
+
+    // Without --verbose the console shows a line per group, repainted as the
+    // run goes: a spinner while its cluster comes up, then a mark per test as
+    // each one ends. With it, a line per test naming it with its result.
+    let progress = if args.verbose {
+        Progress::Lines
+    } else {
+        Progress::Ticks
+    };
+    let concurrency = args.concurrency;
+    let group_concurrency = args.group_concurrency;
     args.filters
         .iter()
         .fold(Config::default(), |acc, filter| acc.with_filter(filter))
         .with_permanent_fixture(args)
         .with_default_timeout(common::DEFAULT_TEST_TIMEOUT)
+        .with_concurrency(concurrency)
+        .with_group_concurrency(group_concurrency)
+        .with_progress(progress)
+        .with_colors(ansi)
+}
+
+/// The number of CPUs available to the process, used as the default number of
+/// tests to run concurrently. Falls back to a single test when the count
+/// cannot be determined.
+fn default_concurrency() -> usize {
+    thread::available_parallelism().map_or(1, NonZeroUsize::get)
+}
+
+/// What one cluster takes of the machine's memory: a gigabyte for each of its
+/// three ScyllaDB nodes, which is what they are started with and what they
+/// reserve up front rather than grow into, and a gigabyte for the Vector Store
+/// nodes, the proxy and the test working against them.
+const CLUSTER_MEMORY: u64 = 4 * 1024 * 1024 * 1024;
+
+/// What one cluster takes of the machine's cores. Its ScyllaDB nodes run
+/// overprovisioned, so they give a core up rather than poll it for work and
+/// need not have one each; two are enough for a cluster to get on with its
+/// tests without holding up the ones beside it.
+const CLUSTER_CPUS: usize = 2;
+
+/// How many clusters this machine can hold at once, which is the default
+/// number of groups owning one to run at the same time.
+///
+/// Measured against the memory that is free rather than the memory the machine
+/// has. A run shares a developer's machine with everything else on it, and a
+/// cluster more than there is room for does not merely run slowly: its nodes
+/// reserve their memory whether they are busy or not, so the machine goes to
+/// swap and every cluster on it crawls.
+///
+/// Whichever of memory and cores runs out first decides it, and the address
+/// blocks there are to hand out cap it: a cluster past those has nowhere to
+/// put its nodes. Never zero, a run of one cluster at a time being better than
+/// no run at all on a machine that is smaller than the arithmetic likes.
+fn default_group_concurrency() -> usize {
+    let system = sysinfo::System::new_all();
+    let memory = system
+        .cgroup_limits()
+        .map_or_else(|| system.available_memory(), |limits| limits.free_memory);
+    let by_memory = usize::try_from(memory / CLUSTER_MEMORY).unwrap_or(MAX_CLUSTERS);
+    let by_cpus = default_concurrency() / CLUSTER_CPUS;
+    by_memory.min(by_cpus).clamp(1, MAX_CLUSTERS)
 }
 
 fn validate_different_subnet(dns_ip: Ipv4Addr, base_ip: Ipv4Addr) {
@@ -172,7 +285,24 @@ fn validate_different_subnet(dns_ip: Ipv4Addr, base_ip: Ipv4Addr) {
     );
 }
 
-e2etest::group!(name = validator, fixtures = (TestActors));
+e2etest::group!(name = validator, fixtures = (TestEnv));
+
+// Umbrella group owning the shared standard cluster. Groups whose tests only
+// need the default cluster (and do not mutate cluster-wide state) are
+// declared with `parent = crate::standard`, so a full run boots this cluster
+// once instead of once per group.
+e2etest::group!(
+    name = standard,
+    fixtures = (SharedCluster),
+    parent = validator
+);
+
+// Umbrella group owning the shared proxy cluster (scylla-proxy in front of the
+// database, single Vector Store node). Groups whose tests only manipulate
+// proxy rules — never topology or Vector Store configuration — are declared
+// with `parent = crate::proxy` and access the cluster through a per-test
+// ProxyTestContext that resets the rules around every test.
+e2etest::group!(name = proxy, fixtures = (ProxyCluster), parent = validator);
 
 pub async fn run() -> ExitCode {
     let args = Args::parse();
@@ -249,27 +379,88 @@ impl ServicesSubnet {
     }
 }
 
-#[derive(Clone)]
-struct TestActors {
-    pub(crate) services_subnet: Arc<ServicesSubnet>,
-    pub(crate) tls: mpsc::Sender<Tls>,
-    pub(crate) dns: mpsc::Sender<Dns>,
-    pub(crate) firewall: mpsc::Sender<Firewall>,
-    pub(crate) db: mpsc::Sender<ScyllaCluster>,
-    pub(crate) vs: mpsc::Sender<VectorStoreCluster>,
-    pub(crate) db_proxy: mpsc::Sender<ScyllaProxyCluster>,
+/// How many last-octet addresses each cluster reserves in the services subnet.
+/// A cluster needs nine (three ScyllaDB, three proxy and three Vector Store
+/// nodes); the rest of the block leaves room to add more.
+pub const CLUSTER_OCTET_STRIDE: u8 = 32;
+
+/// How many clusters can exist side by side, limited by the last octet the
+/// stride leaves available. Groups owning a cluster may run concurrently only
+/// up to this many at a time.
+pub const MAX_CLUSTERS: usize = 8;
+
+/// The shared, process-wide services: the loopback subnet the clusters are
+/// carved out of and the certificate they all present.
+///
+/// Only what every cluster can share is here. A service bound to an address or
+/// writing to a routing table cannot be: each cluster runs in a network
+/// namespace of its own, where neither is the one this fixture was set up in.
+/// Those belong to the cluster instead, and are started in [`Self::new_cluster`].
+///
+/// Clusters are allocated from here so that several can run at the same time,
+/// each with its own nodes on its own addresses.
+struct TestEnv {
+    args: Arc<RunArgs>,
+    services_subnet: Arc<ServicesSubnet>,
+    tls: mpsc::Sender<Tls>,
+    /// Address blocks not currently taken by a cluster.
+    free_clusters: Arc<Mutex<Vec<usize>>>,
 }
 
-impl e2etest::Fixture for TestActors {
+impl e2etest::Fixture for TestEnv {
     async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
         let args = setup.get::<RunArgs>().await.unwrap();
 
         validate_different_subnet(args.dns_ip, args.base_ip);
 
         let services_subnet = Arc::new(ServicesSubnet::new(args.base_ip));
-        let tls = e2etest_tls::new(&common::get_default_db_ips_for_subnet(&services_subnet)).await;
-        let dns = e2etest_dns::new(args.dns_ip).await;
-        let firewall = e2etest_firewall::new().await;
+        // Every cluster presents the same certificate, so it has to name the
+        // ScyllaDB addresses of all of them.
+        let tls = e2etest_tls::new(&common::all_cluster_db_ips(&services_subnet)).await;
+
+        info!(
+            "{} version: {}",
+            env!("CARGO_PKG_NAME"),
+            env!("CARGO_PKG_VERSION")
+        );
+
+        Some(Self {
+            args,
+            services_subnet,
+            tls,
+            free_clusters: Arc::new(Mutex::new((0..MAX_CLUSTERS).rev().collect())),
+        })
+    }
+
+    async fn teardown(self) {}
+
+    fn test_can_run_concurrently() -> bool {
+        true
+    }
+
+    fn group_can_run_concurrently() -> bool {
+        true
+    }
+}
+
+impl TestEnv {
+    /// Reserves a block of addresses and spawns the cluster actors that drive
+    /// the nodes in it. The returned actors are independent of every other
+    /// cluster's, so their groups can run at the same time.
+    async fn new_cluster(&self) -> TestActors {
+        let index = self
+            .free_clusters
+            .lock()
+            .expect("the cluster pool lock is never held across a panic")
+            .pop()
+            .unwrap_or_else(|| {
+                panic!(
+                    "no free address block: at most {MAX_CLUSTERS} clusters can exist at once, \
+                     so --group-concurrency must stay below that"
+                )
+            });
+        let args = &self.args;
+
         let db = e2etest_scylla_cluster::new(
             args.scylla.clone(),
             args.scylla_default_conf.clone(),
@@ -286,25 +477,96 @@ impl e2etest::Fixture for TestActors {
         .await;
         let db_proxy = e2etest_scylla_proxy_cluster::new().await;
 
-        info!(
-            "{} version: {}",
-            env!("CARGO_PKG_NAME"),
-            env!("CARGO_PKG_VERSION")
-        );
-        let version = db.version().await;
-        info!("scylla version: {}", version);
-        info!("dns version: {}", dns.version().await);
-        info!("vector-store version: {}", vs.version().await);
+        // A DNS server and a firewall of this cluster's own. Both work on what
+        // a network namespace holds — the names its nodes answer to, the
+        // routes reaching them — and every cluster has a namespace of its own,
+        // so each needs a pair of its own rather than a share of one.
+        let dns = e2etest_dns::new(args.dns_ip).await;
+        let firewall = e2etest_firewall::new().await;
 
-        Some(Self {
-            services_subnet,
-            tls,
+        if index == 0 {
+            info!("scylla version: {}", db.version().await);
+            info!("vector-store version: {}", vs.version().await);
+            info!("dns version: {}", dns.version().await);
+        }
+
+        TestActors {
+            slot: Arc::new(ClusterSlot {
+                index,
+                pool: Arc::clone(&self.free_clusters),
+            }),
+            services_subnet: Arc::clone(&self.services_subnet),
+            tls: self.tls.clone(),
             dns,
             firewall,
             db,
             vs,
             db_proxy,
-        })
+        }
     }
-    async fn teardown(self) {}
+}
+
+/// One cluster's actors, together with the slice of the services subnet its
+/// nodes live on. Created by [`TestEnv::new_cluster`], never shared between
+/// groups that own different clusters.
+/// A reserved address block, returned to the pool once the cluster's actors are
+/// dropped, so that a later group can reuse it. Held behind an `Arc` because
+/// `TestActors` is cloned, and released only when the last clone goes away.
+struct ClusterSlot {
+    index: usize,
+    pool: Arc<Mutex<Vec<usize>>>,
+}
+
+impl Drop for ClusterSlot {
+    fn drop(&mut self) {
+        if let Ok(mut pool) = self.pool.lock() {
+            pool.push(self.index);
+        }
+    }
+}
+
+#[derive(Clone)]
+struct TestActors {
+    /// This cluster's address block, which also names its Vector Store nodes.
+    slot: Arc<ClusterSlot>,
+    pub(crate) services_subnet: Arc<ServicesSubnet>,
+    pub(crate) tls: mpsc::Sender<Tls>,
+    pub(crate) dns: mpsc::Sender<Dns>,
+    pub(crate) firewall: mpsc::Sender<Firewall>,
+    pub(crate) db: mpsc::Sender<ScyllaCluster>,
+    pub(crate) vs: mpsc::Sender<VectorStoreCluster>,
+    pub(crate) db_proxy: mpsc::Sender<ScyllaProxyCluster>,
+}
+
+impl TestActors {
+    /// Index of this cluster, which distinguishes its nodes' DNS names.
+    pub(crate) fn cluster(&self) -> usize {
+        self.slot.index
+    }
+
+    /// The first last-octet address of this cluster's block.
+    pub(crate) fn octet_base(&self) -> u8 {
+        u8::try_from(self.slot.index).expect("cluster index fits in an octet")
+            * CLUSTER_OCTET_STRIDE
+    }
+
+    /// Blocks traffic to the given addresses, replacing whatever this cluster
+    /// blocked before. The routes go into the routing table of the namespace
+    /// this cluster runs in, which no other cluster shares, so a group cutting
+    /// its own nodes off can run alongside one doing the same to its own.
+    pub(crate) async fn drop_traffic(&self, ips: Vec<Ipv4Addr>) {
+        self.firewall.drop_traffic(self.firewall_owner(), ips).await;
+    }
+
+    /// Unblocks everything this cluster blocked.
+    pub(crate) async fn turn_off_firewall_rules(&self) {
+        self.firewall.turn_off_rules(self.firewall_owner()).await;
+    }
+
+    /// Who this cluster's rules belong to. Its firewall serves nothing else,
+    /// the namespace it runs in being this cluster's alone, so the address
+    /// block is only a stable name for the one owner there is.
+    fn firewall_owner(&self) -> FirewallOwner {
+        FirewallOwner(self.slot.index as u64)
+    }
 }

@@ -25,18 +25,31 @@ e2etest::group!(
 );
 
 struct Fixture {
-    actors: Arc<TestActors>,
+    actors: TestActors,
 }
 
 impl e2etest::Fixture for Fixture {
     async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
-        let actors = setup.setup::<TestActors>().await?;
+        let actors = setup.setup::<crate::TestEnv>().await?.new_cluster().await;
         init_with_proxy(&actors).await;
         Some(Self { actors })
     }
 
     async fn teardown(self) {
         cleanup(&self.actors).await;
+    }
+
+    // This cluster is independent of every other one, so its groups may run
+    // alongside groups owning a different cluster.
+    fn group_can_run_concurrently() -> bool {
+        true
+    }
+
+    // Its nodes claim loopback addresses, ports and routes, which every other
+    // cluster claims too, so it runs in a network namespace of its own, where
+    // it is alone in claiming them.
+    fn group_needs_own_namespace() -> bool {
+        true
     }
 }
 
@@ -54,9 +67,10 @@ impl e2etest::Fixture for Fixture {
 /// - Wait until vector-stores update indexes using CDC.
 /// - Drop the keyspace.
 #[e2etest::test(group = db_timeout)]
-async fn client_timeout_doesnt_stop_cdc(actors: Arc<TestActors>) {
+async fn client_timeout_doesnt_stop_cdc(fixture: Arc<Fixture>) {
+    let actors = &fixture.actors;
     info!("started");
-    let (session, clients) = prepare_connection_no_tls(&actors).await;
+    let (session, clients) = prepare_connection_no_tls(actors).await;
     let keyspace = create_keyspace(&session).await;
     let table = create_table(
         &session,
