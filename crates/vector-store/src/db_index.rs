@@ -71,6 +71,8 @@ use tracing::info;
 use tracing::trace;
 use tracing::warn;
 
+mod full_scan;
+
 type GetTableColumnsR = Arc<HashMap<ColumnName, NativeType>>;
 type RangeScanResult =
     anyhow::Result<Pin<Box<dyn Stream<Item = DbIndexedRow> + std::marker::Send>>, anyhow::Error>;
@@ -455,52 +457,16 @@ impl Statements {
         tx: mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
         completed_scan_length: Arc<AtomicU64>,
     ) {
-        let semaphore_capacity = self.nr_parallel_queries().get();
-        let semaphore = Arc::new(Semaphore::new(semaphore_capacity));
-
-        for (begin, end) in self.fullscan_ranges() {
-            let permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
-
-            let range_scan = self.preform_range_scan(begin, end).await;
-            if let Ok(embeddings) = range_scan {
-                let tx = tx.clone();
-                let scan_length = completed_scan_length.clone();
-                tokio::spawn(async move {
-                    let (tx_in_progress, mut rx_in_progress) = mpsc::channel(1);
-                    embeddings
-                        .for_each(move |embedding| {
-                            let tx = tx.clone();
-                            let tx_in_progress = tx_in_progress.clone();
-                            async move {
-                                _ = tx
-                                    .send((embedding, AsyncInProgress::Fullscan(tx_in_progress)))
-                                    .await;
-                            }
-                        })
-                        .await;
-
-                    // wait until all in-progress markers are dropped
-                    while rx_in_progress.recv().await.is_some() {
-                        rx_in_progress.len();
-                    }
-
-                    //Safety: end > begin, and the range fits into u64
-                    scan_length.fetch_add(
-                        end.value().abs_diff(begin.value() - 1),
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
-                    drop(permit);
-                });
-            } else {
-                drop(permit);
-            }
-        }
-
-        // Acquire all permits to wait until all spawned tasks have finished and released their permits.
-        let _permits = semaphore
-            .acquire_many(semaphore_capacity as u32)
-            .await
-            .unwrap();
+        full_scan::scan_ranges(
+            self.fullscan_ranges(),
+            self.nr_parallel_queries(),
+            |(begin, end)| self.preform_range_scan(begin, end),
+            //Safety: end > begin, and the range fits into u64
+            |&(begin, end)| end.value().abs_diff(begin.value() - 1),
+            tx,
+            completed_scan_length,
+        )
+        .await
     }
 
     fn nr_shards_in_cluster(&self) -> NonZeroUsize {
