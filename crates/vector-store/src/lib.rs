@@ -161,6 +161,26 @@ impl std::fmt::Display for TableIdentifier {
     }
 }
 
+/// Which data provider a DiskANN index is built on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DiskannBackendKind {
+    #[default]
+    Inmem,
+    Scylla,
+}
+
+impl FromStr for DiskannBackendKind {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "inmem" => Ok(Self::Inmem),
+            "scylla" => Ok(Self::Scylla),
+            _ => Err(anyhow::anyhow!("Unknown DiskANN backend: {s}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub struct DiskannAlpha(f32);
 
@@ -192,7 +212,7 @@ pub struct Config {
     pub usearch_simulator: Option<Vec<Duration>>,
     pub diskann_alpha: Option<DiskannAlpha>,
     pub diskann_max_points: Option<NonZeroUsize>,
-    pub use_diskann: bool,
+    pub diskann_backend: Option<DiskannBackendKind>,
     pub alter_index_simulator: bool,
     pub fulltext_indexes: bool,
     pub cql_connection_timeout: Option<Duration>,
@@ -228,7 +248,7 @@ impl Default for Config {
             usearch_simulator: None,
             diskann_alpha: None,
             diskann_max_points: None,
-            use_diskann: false,
+            diskann_backend: None,
             alter_index_simulator: false,
             fulltext_indexes: true,
             disable_colors: false,
@@ -883,7 +903,7 @@ pub async fn run(
 
     let config_rx = config_receivers.config.clone();
     let opensearch_addr = config_rx.borrow().opensearch_addr.clone();
-    let use_diskann = config_rx.borrow().use_diskann;
+    let diskann_backend = config_rx.borrow().diskann_backend;
 
     let internals = internals::new();
     let memory = memory::new(internals.clone(), config_rx.clone());
@@ -892,8 +912,8 @@ pub async fn run(
     let vs_index_factory = if let Some(addr) = opensearch_addr {
         tracing::info!("Using OpenSearch index factory at {addr}");
         vs_index::new_index_factory_opensearch(addr, config_rx.clone())?
-    } else if use_diskann {
-        tracing::info!("Using DiskANN index factory");
+    } else if let Some(backend) = diskann_backend {
+        tracing::info!("Using DiskANN index factory with the {backend:?} backend");
         vs_index::new_index_factory_diskann(config_rx.clone(), worker.clone(), memory.clone())?
     } else {
         tracing::info!("Using Usearch index factory");

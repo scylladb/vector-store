@@ -459,11 +459,11 @@ pub async fn load_config(env: impl Fn(&str) -> anyhow::Result<String>) -> anyhow
         config.diskann_max_points = Some(max_points);
     }
 
-    config.use_diskann = env("VECTOR_STORE_USE_DISKANN")
-        .unwrap_or("false".into())
-        .trim()
-        .parse()
-        .map_err(|_| anyhow!("Unable to parse VECTOR_STORE_USE_DISKANN env (bool)"))?;
+    if let Ok(diskann_backend) = env("VECTOR_STORE_DISKANN_BACKEND") {
+        config.diskann_backend = Some(diskann_backend.trim().parse().map_err(|_| {
+            anyhow!("Unable to parse VECTOR_STORE_DISKANN_BACKEND env (inmem/scylla)")
+        })?);
+    }
 
     config.alter_index_simulator = env("VECTOR_STORE_ALTER_INDEX_SIMULATOR")
         .unwrap_or("false".into())
@@ -606,6 +606,7 @@ pub async fn load_config(env: impl Fn(&str) -> anyhow::Result<String>) -> anyhow
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DiskannBackendKind;
     use secrecy::ExposeSecret;
     use std::collections::HashMap;
     use std::io::Write;
@@ -963,12 +964,12 @@ mod tests {
         let config = load_config(env).await.unwrap();
         assert!(config.diskann_alpha.is_none());
         assert!(config.diskann_max_points.is_none());
-        assert!(!config.use_diskann);
+        assert_eq!(config.diskann_backend, None);
 
         let env = mock_env(HashMap::from([
             ("VECTOR_STORE_DISKANN_ALPHA", "1.2".into()),
             ("VECTOR_STORE_DISKANN_MAX_POINTS", "500000".into()),
-            ("VECTOR_STORE_USE_DISKANN", "true".into()),
+            ("VECTOR_STORE_DISKANN_BACKEND", "scylla".into()),
         ]));
         let config = load_config(env).await.unwrap();
         assert_eq!(config.diskann_alpha, Some(DiskannAlpha::new(1.2).unwrap()));
@@ -976,7 +977,23 @@ mod tests {
             config.diskann_max_points,
             Some(NonZeroUsize::new(500_000).unwrap())
         );
-        assert!(config.use_diskann);
+        assert_eq!(config.diskann_backend, Some(DiskannBackendKind::Scylla));
+    }
+
+    #[tokio::test]
+    async fn load_config_diskann_backend_unknown_errors() {
+        let env = mock_env(HashMap::from([(
+            "VECTOR_STORE_DISKANN_BACKEND",
+            "nvme".into(),
+        )]));
+        let result = load_config(env).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Unable to parse VECTOR_STORE_DISKANN_BACKEND")
+        );
     }
 
     #[tokio::test]
