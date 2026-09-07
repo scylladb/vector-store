@@ -406,19 +406,20 @@ async fn restarting_all_nodes_doesnt_break_fullscan(actors: Arc<TestActors>) {
     )
     .await;
 
+    let total_connections = *client
+        .internals_session_counters()
+        .await
+        .unwrap()
+        .get("total-connections")
+        .unwrap();
+    info!("Base number of total connections: {total_connections}");
+
     info!("Restart each node one by one");
     for proxy_addr in get_default_scylla_proxy_node_configs(&actors)
         .await
         .into_iter()
         .map(|config| config.proxy_addr)
     {
-        let total_connections = *client
-            .internals_session_counters()
-            .await
-            .unwrap()
-            .get("total-connections")
-            .unwrap();
-
         info!("Disconnect scylla-proxy {proxy_addr}");
         actors.firewall.drop_traffic(vec![proxy_addr]).await;
 
@@ -428,17 +429,13 @@ async fn restarting_all_nodes_doesnt_break_fullscan(actors: Arc<TestActors>) {
                 info!("session counters: {:?}", counters);
                 *counters.unwrap().get("total-connections").unwrap() < total_connections
             },
-            format!("connections to {proxy_addr} must be closed"),
+            format!(
+                "connections to {proxy_addr} must be closed, \
+                number of connections should be less than {total_connections}"
+            ),
             KEEPALIVE_TIMEOUT,
         )
         .await;
-
-        let total_connections = *client
-            .internals_session_counters()
-            .await
-            .unwrap()
-            .get("total-connections")
-            .unwrap();
 
         info!("Reconnect scylla-proxy");
         actors.firewall.turn_off_rules().await;
@@ -447,9 +444,12 @@ async fn restarting_all_nodes_doesnt_break_fullscan(actors: Arc<TestActors>) {
             || async {
                 let counters = client.internals_session_counters().await;
                 info!("session counters: {:?}", counters);
-                *counters.unwrap().get("total-connections").unwrap() > total_connections
+                *counters.unwrap().get("total-connections").unwrap() == total_connections
             },
-            format!("connections to {proxy_addr} must be opened"),
+            format!(
+                "connections to {proxy_addr} must be opened, \
+                number of connections should be {total_connections}"
+            ),
             KEEPALIVE_TIMEOUT,
         )
         .await;
