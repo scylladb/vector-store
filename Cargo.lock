@@ -1212,7 +1212,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1931,15 +1931,16 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 [[package]]
 name = "e2etest"
 version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6295e4e70c848165ef0f1463b0ae68611429f363e8a2057a5c72ce7429cdde0"
+source = "git+https://github.com/QuerthDP/e2etest-rs?rev=2a81b924e847b54275f335dd66c0da9b1bf141aa#2a81b924e847b54275f335dd66c0da9b1bf141aa"
 dependencies = [
  "async-backtrace",
  "e2etest-macros",
+ "e2etest-unshare",
  "futures",
  "itertools 0.14.0",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1957,8 +1958,7 @@ dependencies = [
 [[package]]
 name = "e2etest-firewall"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "40cadae13aae75b20c35a6400b5003abf2ece1d198fa6ff993b77191f1afde52"
+source = "git+https://github.com/QuerthDP/e2etest-rs?rev=2a81b924e847b54275f335dd66c0da9b1bf141aa#2a81b924e847b54275f335dd66c0da9b1bf141aa"
 dependencies = [
  "anyhow",
  "async-backtrace",
@@ -1970,8 +1970,7 @@ dependencies = [
 [[package]]
 name = "e2etest-macros"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db22f36307489497d9241f4245dbae82d7c13ba7276fb8b297d4e916c03bda01"
+source = "git+https://github.com/QuerthDP/e2etest-rs?rev=2a81b924e847b54275f335dd66c0da9b1bf141aa#2a81b924e847b54275f335dd66c0da9b1bf141aa"
 dependencies = [
  "convert_case 0.11.0",
  "itertools 0.14.0",
@@ -1984,8 +1983,7 @@ dependencies = [
 [[package]]
 name = "e2etest-scylla-cluster"
 version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "197c0c59ecd2d9a45609e32e1265df2657204a09cdf784d70062128fcec5ada7"
+source = "git+https://github.com/QuerthDP/e2etest-rs?rev=2a81b924e847b54275f335dd66c0da9b1bf141aa#2a81b924e847b54275f335dd66c0da9b1bf141aa"
 dependencies = [
  "async-backtrace",
  "sysinfo",
@@ -2018,6 +2016,16 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "e2etest-unshare"
+version = "0.1.0"
+source = "git+https://github.com/QuerthDP/e2etest-rs?rev=2a81b924e847b54275f335dd66c0da9b1bf141aa#2a81b924e847b54275f335dd66c0da9b1bf141aa"
+dependencies = [
+ "libc",
  "tokio",
  "tracing",
 ]
@@ -2082,7 +2090,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3051,7 +3059,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3579,7 +3587,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4230,7 +4238,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4634,7 +4642,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5376,7 +5384,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6135,6 +6143,7 @@ dependencies = [
  "scylla",
  "scylla-proxy",
  "serde_json",
+ "sysinfo",
  "tap",
  "tempfile",
  "tokio",
@@ -6411,7 +6420,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

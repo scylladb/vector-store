@@ -19,26 +19,41 @@ const WAITING_FOR_DB_DISCOVERY: Duration = Duration::from_secs(5);
 e2etest::group!(name = auth, fixtures = (Fixture), parent = crate::validator);
 
 struct Fixture {
-    actors: Arc<TestActors>,
+    actors: TestActors,
 }
 
 impl e2etest::Fixture for Fixture {
     async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
-        let actors = setup.setup::<TestActors>().await?;
+        let actors = setup.setup::<crate::TestEnv>().await?.new_cluster().await;
         Some(Self { actors })
     }
 
     async fn teardown(self) {
         cleanup(&self.actors).await;
     }
+
+    // This cluster is independent of every other one, so its groups may run
+    // alongside groups owning a different cluster.
+    fn group_can_run_concurrently() -> bool {
+        true
+    }
+
+    // Its nodes claim loopback addresses, ports and routes, which every other
+    // cluster claims too, so it runs in a network namespace of its own, where
+    // it is alone in claiming them.
+    fn group_needs_own_namespace() -> bool {
+        true
+    }
 }
 
 #[e2etest::test(group = auth)]
-async fn vs_doesnt_work_without_permission(actors: Arc<TestActors>) {
+async fn vs_doesnt_work_without_permission(fixture: Arc<Fixture>) {
+    let actors = &fixture.actors;
+
     info!("started");
 
-    let mut scylla_configs = get_default_scylla_node_configs(&actors).await;
-    let mut vs_configs = get_default_vs_node_configs(&actors).await;
+    let mut scylla_configs = get_default_scylla_node_configs(actors).await;
+    let mut vs_configs = get_default_vs_node_configs(actors).await;
 
     let auth_config = scylla_auth_config();
     for config in scylla_configs.iter_mut() {
@@ -51,7 +66,7 @@ async fn vs_doesnt_work_without_permission(actors: Arc<TestActors>) {
     }
 
     info!("Initializing cluster");
-    init_dns(&actors).await;
+    init_dns(actors).await;
     actors.db.start(scylla_configs).await;
     assert!(actors.db.wait_for_ready().await);
     actors.vs.start(vs_configs).await;
@@ -61,7 +76,7 @@ async fn vs_doesnt_work_without_permission(actors: Arc<TestActors>) {
 
     info!("Connecting to scylladb as superuser over TLS");
     let (session, clients) =
-        prepare_connection_with_auth(&actors, &SUPERUSER_NAME, &SUPERUSER_PASSWORD).await;
+        prepare_connection_with_auth(actors, &SUPERUSER_NAME, &SUPERUSER_PASSWORD).await;
 
     info!("Vector-store's should be in ConnectingToDb state");
     for client in clients.iter() {
@@ -86,17 +101,19 @@ async fn vs_doesnt_work_without_permission(actors: Arc<TestActors>) {
     }
 
     info!("Cleaning up");
-    cleanup(&actors).await;
+    cleanup(actors).await;
 
     info!("finished");
 }
 
 #[e2etest::test(group = auth)]
-async fn vs_works_when_permission_granted(actors: Arc<TestActors>) {
+async fn vs_works_when_permission_granted(fixture: Arc<Fixture>) {
+    let actors = &fixture.actors;
+
     info!("started");
 
-    let mut scylla_configs = get_default_scylla_node_configs(&actors).await;
-    let mut vs_configs = get_default_vs_node_configs(&actors).await;
+    let mut scylla_configs = get_default_scylla_node_configs(actors).await;
+    let mut vs_configs = get_default_vs_node_configs(actors).await;
 
     let auth_config = scylla_auth_config();
     for config in scylla_configs.iter_mut() {
@@ -109,7 +126,7 @@ async fn vs_works_when_permission_granted(actors: Arc<TestActors>) {
     }
 
     info!("Initializing cluster");
-    init_dns(&actors).await;
+    init_dns(actors).await;
     actors.db.start(scylla_configs).await;
     assert!(actors.db.wait_for_ready().await);
     actors.vs.start(vs_configs).await;
@@ -119,7 +136,7 @@ async fn vs_works_when_permission_granted(actors: Arc<TestActors>) {
 
     info!("Connecting to scylladb as superuser over TLS");
     let (session, clients) =
-        prepare_connection_with_auth(&actors, &SUPERUSER_NAME, &SUPERUSER_PASSWORD).await;
+        prepare_connection_with_auth(actors, &SUPERUSER_NAME, &SUPERUSER_PASSWORD).await;
 
     info!("Vector-store's should be in ConnectingToDb state");
     for client in clients.iter() {
@@ -155,17 +172,19 @@ async fn vs_works_when_permission_granted(actors: Arc<TestActors>) {
     }
 
     info!("Cleaning up");
-    cleanup(&actors).await;
+    cleanup(actors).await;
 
     info!("finished");
 }
 
 #[e2etest::test(group = auth)]
-async fn cdc_works_with_auth(actors: Arc<TestActors>) {
+async fn cdc_works_with_auth(fixture: Arc<Fixture>) {
+    let actors = &fixture.actors;
+
     info!("started");
 
-    let mut scylla_configs = get_default_scylla_node_configs(&actors).await;
-    let mut vs_configs = get_default_vs_node_configs(&actors).await;
+    let mut scylla_configs = get_default_scylla_node_configs(actors).await;
+    let mut vs_configs = get_default_vs_node_configs(actors).await;
 
     let auth_config = scylla_auth_config();
     for config in scylla_configs.iter_mut() {
@@ -178,7 +197,7 @@ async fn cdc_works_with_auth(actors: Arc<TestActors>) {
     }
 
     info!("Initializing cluster");
-    init_dns(&actors).await;
+    init_dns(actors).await;
     actors.db.start(scylla_configs).await;
     assert!(actors.db.wait_for_ready().await);
     actors.vs.start(vs_configs).await;
@@ -188,7 +207,7 @@ async fn cdc_works_with_auth(actors: Arc<TestActors>) {
 
     info!("Connecting to scylladb as superuser over TLS");
     let (session, clients) =
-        prepare_connection_with_auth(&actors, &SUPERUSER_NAME, &SUPERUSER_PASSWORD).await;
+        prepare_connection_with_auth(actors, &SUPERUSER_NAME, &SUPERUSER_PASSWORD).await;
 
     info!("Creating a role alice with VECTOR_SEARCH_INDEXING and CDC permissions");
     session
@@ -256,7 +275,7 @@ async fn cdc_works_with_auth(actors: Arc<TestActors>) {
         .expect("failed to drop keyspace");
 
     info!("Cleaning up");
-    cleanup(&actors).await;
+    cleanup(actors).await;
 
     info!("finished");
 }

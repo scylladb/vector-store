@@ -3,13 +3,11 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
-use crate::TestActors;
 use crate::common;
 use crate::common::TableName;
 use crate::common::*;
 use async_backtrace::framed;
 use httpapi::IndexInfo;
-use httpclient::HttpClient;
 use scylla::client::session::Session;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -38,15 +36,12 @@ fn generate_test_vectors(num_vectors: usize) -> (Vec<f32>, HashMap<i32, Vec<f32>
 
 #[framed]
 async fn create_index(
-    session: &Session,
-    clients: &[HttpClient],
+    ctx: &TestContext,
     table: &TableName,
     options: impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>,
 ) -> IndexInfo {
-    let index =
-        common::create_index(CreateIndexQuery::new(session, clients, table, "v").options(options))
-            .await;
-    for client in clients {
+    let index = common::create_index(ctx.index_query(table, "v").options(options)).await;
+    for client in &ctx.clients {
         wait_for_index(client, &index).await;
     }
     index
@@ -54,12 +49,13 @@ async fn create_index(
 
 #[framed]
 async fn insert_vectors(session: &Session, table: &TableName, embeddings: &HashMap<i32, Vec<f32>>) {
+    let stmt = session
+        .prepare(format!("INSERT INTO {table} (pk, v) VALUES (?, ?)"))
+        .await
+        .expect("failed to prepare insert statement");
     for (pk, embedding) in embeddings {
         session
-            .query_unpaged(
-                format!("INSERT INTO {table} (pk, v) VALUES (?, ?)"),
-                (pk, embedding),
-            )
+            .execute_unpaged(&stmt, (pk, embedding))
             .await
             .expect("failed to insert data");
     }
@@ -67,25 +63,9 @@ async fn insert_vectors(session: &Session, table: &TableName, embeddings: &HashM
 
 e2etest::group!(
     name = quantization_and_rescoring,
-    fixtures = (Fixture),
-    parent = crate::validator
+    fixtures = (TestContext),
+    parent = crate::standard
 );
-
-struct Fixture {
-    actors: Arc<TestActors>,
-}
-
-impl e2etest::Fixture for Fixture {
-    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
-        let actors = setup.setup::<TestActors>().await?;
-        init(&actors).await;
-        Some(Self { actors })
-    }
-
-    async fn teardown(self) {
-        cleanup(&self.actors).await;
-    }
-}
 
 #[e2etest::test(group = quantization_and_rescoring)]
 // This test confirms that with full f32 precision, the vector search can distinguish
@@ -94,21 +74,20 @@ impl e2etest::Fixture for Fixture {
 // primary key (pk), which corresponds to their increasing distance from the query vector.
 // The success of this test depends on the underlying floating-point precision (f32) being
 // sufficient to handle the small differences in the test data.
-async fn non_quantized_index_returns_correctly_ranked_vectors(actors: Arc<TestActors>) {
+async fn non_quantized_index_returns_correctly_ranked_vectors(ctx: Arc<TestContext>) {
     info!("started");
 
-    let (session, clients) = prepare_connection(&actors).await;
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(&session, "pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None).await;
+    let table = ctx
+        .create_table("pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None)
+        .await;
     let (query_vector, embeddings) = generate_test_vectors(500);
 
-    insert_vectors(&session, &table, &embeddings).await;
+    insert_vectors(&ctx.session, &table, &embeddings).await;
     info!("inserted vectors into table");
 
     // Set oversampling to search the entire dataset for more predictable results (5.0 * LIMIT 100 = 500 embeddings)
     create_index(
-        &session,
-        &clients,
+        &ctx,
         &table,
         [
             ("quantization", "f32"),
@@ -124,7 +103,7 @@ async fn non_quantized_index_returns_correctly_ranked_vectors(actors: Arc<TestAc
             "SELECT pk, v FROM {table} ORDER BY v ANN OF [{}, {}, {}] LIMIT 100",
             query_vector[0], query_vector[1], query_vector[2]
         ),
-        &session,
+        &ctx.session,
     )
     .await;
 
@@ -144,11 +123,6 @@ async fn non_quantized_index_returns_correctly_ranked_vectors(actors: Arc<TestAc
         vectors are distinct enough to be ranked correctly"
     );
 
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop a keyspace");
-
     info!("finished");
 }
 
@@ -165,22 +139,21 @@ async fn non_quantized_index_returns_correctly_ranked_vectors(actors: Arc<TestAc
 // We assert that the results are NOT sorted by pk, which would be the correct order
 // if full precision were maintained. This demonstrates the effect of precision loss.
 async fn quantized_index_returns_incorrectly_ranked_vectors_due_to_precision_loss(
-    actors: Arc<TestActors>,
+    ctx: Arc<TestContext>,
 ) {
     info!("started");
 
-    let (session, clients) = prepare_connection(&actors).await;
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(&session, "pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None).await;
+    let table = ctx
+        .create_table("pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None)
+        .await;
     let (query_vector, embeddings) = generate_test_vectors(500);
 
-    insert_vectors(&session, &table, &embeddings).await;
+    insert_vectors(&ctx.session, &table, &embeddings).await;
     info!("inserted vectors into table");
 
     // Set oversampling to search the entire dataset for more predictable results (5.0 * LIMIT 100 = 500 embeddings)
     create_index(
-        &session,
-        &clients,
+        &ctx,
         &table,
         [
             ("quantization", "i8"),
@@ -196,7 +169,7 @@ async fn quantized_index_returns_incorrectly_ranked_vectors_due_to_precision_los
             "SELECT pk, v FROM {table} ORDER BY v ANN OF [{}, {}, {}] LIMIT 100",
             query_vector[0], query_vector[1], query_vector[2]
         ),
-        &session,
+        &ctx.session,
     )
     .await;
 
@@ -216,11 +189,6 @@ async fn quantized_index_returns_incorrectly_ranked_vectors_due_to_precision_los
         Due to quantization and precision loss, many vectors become identical after quantization, leading to incorrect ranking"
     );
 
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop a keyspace");
-
     info!("finished");
 }
 
@@ -233,21 +201,20 @@ async fn quantized_index_returns_incorrectly_ranked_vectors_due_to_precision_los
 // By enabling rescoring, the system recalculates the exact distances using the original, full-precision
 // vectors for a set of top candidates. This corrects the ranking. The test asserts that the final
 // results are sorted by primary key (pk), confirming that rescoring successfully restored the correct order.
-async fn rescoring_ranks_results_correctly_for_quantized_index(actors: Arc<TestActors>) {
+async fn rescoring_ranks_results_correctly_for_quantized_index(ctx: Arc<TestContext>) {
     info!("started");
 
-    let (session, clients) = prepare_connection(&actors).await;
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(&session, "pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None).await;
+    let table = ctx
+        .create_table("pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None)
+        .await;
     let (query_vector, embeddings) = generate_test_vectors(500);
 
-    insert_vectors(&session, &table, &embeddings).await;
+    insert_vectors(&ctx.session, &table, &embeddings).await;
     info!("inserted vectors into table");
 
     // Set oversampling to search the entire dataset for more predictable results (5.0 * LIMIT 100 = 500 embeddings)
     create_index(
-        &session,
-        &clients,
+        &ctx,
         &table,
         [
             ("quantization", "i8"),
@@ -263,7 +230,7 @@ async fn rescoring_ranks_results_correctly_for_quantized_index(actors: Arc<TestA
             "SELECT pk, v FROM {table} ORDER BY v ANN OF [{}, {}, {}] LIMIT 100",
             query_vector[0], query_vector[1], query_vector[2],
         ),
-        &session,
+        &ctx.session,
     )
     .await;
 
@@ -283,33 +250,26 @@ async fn rescoring_ranks_results_correctly_for_quantized_index(actors: Arc<TestA
         However, rescoring corrects the ranking despite the precision loss"
     );
 
-    // Drop keyspace
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop a keyspace");
-
     info!("finished");
 }
 
 #[e2etest::test(group = quantization_and_rescoring)]
 // Binary quantization has a special implementation in vector-store.
 // Hence we need to verify that search and rescoring also work correctly with it.
-async fn searching_and_rescoring_works_for_binary_quantization(actors: Arc<TestActors>) {
+async fn searching_and_rescoring_works_for_binary_quantization(ctx: Arc<TestContext>) {
     info!("started");
 
-    let (session, clients) = prepare_connection(&actors).await;
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(&session, "pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None).await;
+    let table = ctx
+        .create_table("pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None)
+        .await;
     let (query_vector, embeddings) = generate_test_vectors(500);
 
-    insert_vectors(&session, &table, &embeddings).await;
+    insert_vectors(&ctx.session, &table, &embeddings).await;
     info!("inserted vectors into table");
 
     // Set oversampling to search the entire dataset for more predictable results (5.0 * LIMIT 100 = 500 embeddings)
     create_index(
-        &session,
-        &clients,
+        &ctx,
         &table,
         [
             ("quantization", "b1"),
@@ -325,7 +285,7 @@ async fn searching_and_rescoring_works_for_binary_quantization(actors: Arc<TestA
             "SELECT pk, v FROM {table} ORDER BY v ANN OF [{}, {}, {}] LIMIT 100",
             query_vector[0], query_vector[1], query_vector[2],
         ),
-        &session,
+        &ctx.session,
     )
     .await;
 
@@ -345,12 +305,6 @@ async fn searching_and_rescoring_works_for_binary_quantization(actors: Arc<TestA
         "Results should be sorted by pk. The index is quantized, so the initial search returns incorrectly ranked results. \
         However, rescoring corrects the ranking despite the precision loss"
     );
-
-    // Drop keyspace
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop a keyspace");
 
     info!("finished");
 }

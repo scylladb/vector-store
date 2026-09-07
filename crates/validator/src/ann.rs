@@ -3,41 +3,25 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
-use crate::TestActors;
 use crate::common::*;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::time;
 use tracing::info;
 
-e2etest::group!(name = ann, fixtures = (Fixture), parent = crate::validator);
-
-struct Fixture {
-    actors: Arc<TestActors>,
-}
-
-impl e2etest::Fixture for Fixture {
-    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
-        let actors = setup.setup::<TestActors>().await?;
-        init(&actors).await;
-        Some(Self { actors })
-    }
-
-    async fn teardown(self) {
-        cleanup(&self.actors).await;
-    }
-}
+e2etest::group!(
+    name = ann,
+    fixtures = (TestContext),
+    parent = crate::standard
+);
 
 #[e2etest::test(group = ann)]
-async fn ann_query_returns_expected_results(actors: Arc<TestActors>) {
+async fn ann_query_returns_expected_results(ctx: Arc<TestContext>) {
     info!("started");
 
-    let (session, clients) = prepare_connection(&actors).await;
-
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(&session, "pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None).await;
+    let table = ctx
+        .create_table("pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None)
+        .await;
 
     // Create a map of pk -> embedding
     let mut embeddings: HashMap<i32, Vec<f32>> = HashMap::new();
@@ -51,19 +35,21 @@ async fn ann_query_returns_expected_results(actors: Arc<TestActors>) {
     }
 
     // Insert 1000 vectors from the map
+    let stmt = ctx
+        .session
+        .prepare(format!("INSERT INTO {table} (pk, v) VALUES (?, ?)"))
+        .await
+        .expect("failed to prepare insert statement");
     for (pk, embedding) in &embeddings {
-        session
-            .query_unpaged(
-                format!("INSERT INTO {table} (pk, v) VALUES (?, ?)"),
-                (pk, embedding),
-            )
+        ctx.session
+            .execute_unpaged(&stmt, (pk, embedding))
             .await
             .expect("failed to insert data");
     }
 
-    let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
+    let index = ctx.create_index(&table, "v").await;
 
-    for client in &clients {
+    for client in &ctx.clients {
         let index_status = wait_for_index(client, &index).await;
         assert_eq!(
             index_status.count, 1000,
@@ -74,7 +60,7 @@ async fn ann_query_returns_expected_results(actors: Arc<TestActors>) {
     // Check if the query returns the expected results (recall at least 85%)
     let results = get_query_results(
         format!("SELECT pk, v FROM {table} ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 100"),
-        &session,
+        &ctx.session,
     )
     .await;
     let rows = results
@@ -92,35 +78,26 @@ async fn ann_query_returns_expected_results(actors: Arc<TestActors>) {
         assert_eq!(&v, expected, "Returned vector does not match for pk={pk}");
     }
 
-    // Drop keyspace
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop a keyspace");
-
     info!("finished");
 }
 
 #[e2etest::test(group = ann)]
-async fn ann_query_returns_expected_results_multicolumn_pk(actors: Arc<TestActors>) {
+async fn ann_query_returns_expected_results_multicolumn_pk(ctx: Arc<TestContext>) {
     info!("started");
 
-    let (session, clients) = prepare_connection(&actors).await;
-
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(
-        &session,
-        "pk TEXT, ck TEXT, v VECTOR<FLOAT, 3>, PRIMARY KEY (pk, ck)",
-        None,
-    )
-    .await;
+    let table = ctx
+        .create_table(
+            "pk TEXT, ck TEXT, v VECTOR<FLOAT, 3>, PRIMARY KEY (pk, ck)",
+            None,
+        )
+        .await;
 
     let data: [(&'static str, &'static str, Vec<f32>); 2] = [
         ("pk-1", "ck-1", vec![0.0, 0.0, 0.0]),
         ("pk-2", "ck-2", vec![0.0, 0.0, 1.0]),
     ];
     for (pk, ck, v) in &data {
-        session
+        ctx.session
             .query_unpaged(
                 format!("INSERT INTO {table} (pk, ck, v) VALUES (?, ?, ?)"),
                 (pk, ck, v),
@@ -128,13 +105,13 @@ async fn ann_query_returns_expected_results_multicolumn_pk(actors: Arc<TestActor
             .await
             .expect("failed to insert data");
     }
-    create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
+    ctx.create_index(&table, "v").await;
 
     let result = wait_for_value(
         || async {
             let result = get_opt_query_results(
                 format!("SELECT pk FROM {table} ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 2"),
-                &session,
+                &ctx.session,
             )
             .await;
             result.filter(|r| r.rows_num() == 2)
@@ -157,28 +134,21 @@ async fn ann_query_returns_expected_results_multicolumn_pk(actors: Arc<TestActor
             .collect::<HashSet<String>>()
     );
 
-    // Drop keyspace
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop a keyspace");
-
     info!("finished");
 }
 
 #[e2etest::test(group = ann)]
-async fn ann_query_respects_limit(actors: Arc<TestActors>) {
+async fn ann_query_respects_limit(ctx: Arc<TestContext>) {
     info!("started");
 
-    let (session, clients) = prepare_connection(&actors).await;
-
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(&session, "pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None).await;
+    let table = ctx
+        .create_table("pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None)
+        .await;
 
     // Insert 10 vectors
     let embedding: Vec<f32> = vec![0.0, 0.0, 0.0];
     for i in 0..10 {
-        session
+        ctx.session
             .query_unpaged(
                 format!("INSERT INTO {table} (pk, v) VALUES (?, ?)"),
                 (i, &embedding),
@@ -188,9 +158,9 @@ async fn ann_query_respects_limit(actors: Arc<TestActors>) {
     }
 
     // Create index
-    let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
+    let index = ctx.create_index(&table, "v").await;
 
-    for client in &clients {
+    for client in &ctx.clients {
         let index_status = wait_for_index(client, &index).await;
         assert_eq!(index_status.count, 10, "Expected 10 vectors to be indexed");
     }
@@ -198,7 +168,7 @@ async fn ann_query_respects_limit(actors: Arc<TestActors>) {
     // Check if queries return the expected number of results
     let results = get_query_results(
         format!("SELECT * FROM {table} ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10"),
-        &session,
+        &ctx.session,
     )
     .await;
     let rows = results
@@ -208,7 +178,7 @@ async fn ann_query_respects_limit(actors: Arc<TestActors>) {
 
     let results = get_query_results(
         format!("SELECT * FROM {table} ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 1000"),
-        &session,
+        &ctx.session,
     )
     .await;
     let rows = results
@@ -217,7 +187,7 @@ async fn ann_query_respects_limit(actors: Arc<TestActors>) {
     assert!(rows.rows_remaining() <= 10); // Should return only 10, as there are only 10 vectors
 
     // Check if LIMIT over 1000 fails
-    session
+    ctx.session
         .query_unpaged(
             format!("SELECT * FROM {table} ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 1001"),
             (),
@@ -225,39 +195,34 @@ async fn ann_query_respects_limit(actors: Arc<TestActors>) {
         .await
         .expect_err("LIMIT over 1000 should fail");
 
-    // Drop keyspace
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop a keyspace");
-
     info!("finished");
 }
 
 #[e2etest::test(group = ann)]
-async fn ann_query_respects_limit_over_1000_vectors(actors: Arc<TestActors>) {
+async fn ann_query_respects_limit_over_1000_vectors(ctx: Arc<TestContext>) {
     info!("started");
 
-    let (session, clients) = prepare_connection(&actors).await;
-
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(&session, "pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None).await;
+    let table = ctx
+        .create_table("pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None)
+        .await;
 
     // Insert 1111 vectors
     let embedding: Vec<f32> = vec![0.0, 0.0, 0.0];
+    let stmt = ctx
+        .session
+        .prepare(format!("INSERT INTO {table} (pk, v) VALUES (?, ?)"))
+        .await
+        .expect("failed to prepare insert statement");
     for i in 0..1111 {
-        session
-            .query_unpaged(
-                format!("INSERT INTO {table} (pk, v) VALUES (?, ?)"),
-                (i, &embedding),
-            )
+        ctx.session
+            .execute_unpaged(&stmt, (i, &embedding))
             .await
             .expect("failed to insert data");
     }
 
-    let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
+    let index = ctx.create_index(&table, "v").await;
 
-    for client in &clients {
+    for client in &ctx.clients {
         let index_status = wait_for_index(client, &index).await;
         assert_eq!(
             index_status.count, 1111,
@@ -268,7 +233,7 @@ async fn ann_query_respects_limit_over_1000_vectors(actors: Arc<TestActors>) {
     // Check if queries return the expected number of results
     let results = get_query_results(
         format!("SELECT * FROM {table} ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10"),
-        &session,
+        &ctx.session,
     )
     .await;
     let rows = results
@@ -278,7 +243,7 @@ async fn ann_query_respects_limit_over_1000_vectors(actors: Arc<TestActors>) {
 
     let results = get_query_results(
         format!("SELECT * FROM {table} ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 1000"),
-        &session,
+        &ctx.session,
     )
     .await;
     let rows = results
@@ -287,7 +252,7 @@ async fn ann_query_respects_limit_over_1000_vectors(actors: Arc<TestActors>) {
     assert!(rows.rows_remaining() <= 1000);
 
     // Check if LIMIT over 1000 fails
-    session
+    ctx.session
         .query_unpaged(
             format!("SELECT * FROM {table} ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 1001"),
             (),
@@ -295,27 +260,19 @@ async fn ann_query_respects_limit_over_1000_vectors(actors: Arc<TestActors>) {
         .await
         .expect_err("LIMIT over 1000 should fail");
 
-    // Drop keyspace
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop a keyspace");
-
     info!("finished");
 }
 
 #[e2etest::test(group = ann)]
-async fn ann_query_returns_rows_identified_by_composite_primary_key(actors: Arc<TestActors>) {
+async fn ann_query_returns_rows_identified_by_composite_primary_key(ctx: Arc<TestContext>) {
     info!("started");
 
-    let (session, clients) = prepare_connection(&actors).await;
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(
-        &session,
-        "pk TEXT, ck TEXT, v VECTOR<FLOAT, 3>, PRIMARY KEY (pk, ck)",
-        None,
-    )
-    .await;
+    let table = ctx
+        .create_table(
+            "pk TEXT, ck TEXT, v VECTOR<FLOAT, 3>, PRIMARY KEY (pk, ck)",
+            None,
+        )
+        .await;
     let data: [(&'static str, &'static str, Vec<f32>); 4] = [
         ("pk-1", "ck-1", vec![0.0, 0.0, 0.0]),
         ("pk-1", "ck-2", vec![1.0, 1.0, 1.0]),
@@ -323,7 +280,7 @@ async fn ann_query_returns_rows_identified_by_composite_primary_key(actors: Arc<
         ("pk-2", "ck-2", vec![1.0, 1.0, 1.0]),
     ];
     for (pk, ck, v) in &data {
-        session
+        ctx.session
             .query_unpaged(
                 format!("INSERT INTO {table} (pk, ck, v) VALUES (?, ?, ?)"),
                 (pk, ck, v),
@@ -331,13 +288,13 @@ async fn ann_query_returns_rows_identified_by_composite_primary_key(actors: Arc<
             .await
             .expect("failed to insert data");
     }
-    create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
+    ctx.create_index(&table, "v").await;
 
     let result = wait_for_value(
         || async {
             let result = get_opt_query_results(
                 format!("SELECT pk, ck FROM {table} ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 2"),
-                &session,
+                &ctx.session,
             )
             .await;
             result.filter(|r| r.rows_num() == 2)
@@ -363,43 +320,33 @@ async fn ann_query_returns_rows_identified_by_composite_primary_key(actors: Arc<
         .collect::<HashSet<(String, String)>>()
     );
 
-    // Drop keyspace
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop a keyspace");
-
     info!("finished");
 }
 
 /// Test that ANN queries return correct results when data is inserted using CDC.
 ///
 /// Steps:
-/// 1. Prepare a cluster with scylladb and vector-store nodes.
-/// 2. Create a keyspace and a table with a vector column.
-/// 3. Create a vector index on the vector column (table without data).
-/// 4. Wait until vector-stores create indexes.
-/// 5. Insert data into the table that will be picked up by CDC.
-/// 6. Wait until vector-stores update indexes using CDC.
-/// 7. Perform an ANN query and verify the results.
-/// 8. Drop the keyspace.
+/// 1. Create a table with a vector column in the shared keyspace.
+/// 2. Create a vector index on the vector column (table without data).
+/// 3. Wait until vector-stores create indexes.
+/// 4. Insert data into the table that will be picked up by CDC.
+/// 5. Wait until vector-stores update indexes using CDC.
+/// 6. Perform an ANN query and verify the results.
 #[e2etest::test(group = ann)]
-async fn ann_query_returns_rows_using_cdc(actors: Arc<TestActors>) {
+async fn ann_query_returns_rows_using_cdc(ctx: Arc<TestContext>) {
     info!("started");
 
-    let (session, clients) = prepare_connection(&actors).await;
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(
-        &session,
-        "pk TEXT, ck TEXT, v VECTOR<FLOAT, 3>, PRIMARY KEY (pk, ck)",
-        None,
-    )
-    .await;
+    let table = ctx
+        .create_table(
+            "pk TEXT, ck TEXT, v VECTOR<FLOAT, 3>, PRIMARY KEY (pk, ck)",
+            None,
+        )
+        .await;
 
     info!("Initially, the index should have 0 vectors");
-    let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
+    let index = ctx.create_index(&table, "v").await;
 
-    for client in &clients {
+    for client in &ctx.clients {
         let index_status = wait_for_index(client, &index).await;
         assert_eq!(index_status.count, 0, "Expected 0 vectors to be indexed");
     }
@@ -412,7 +359,7 @@ async fn ann_query_returns_rows_using_cdc(actors: Arc<TestActors>) {
         ("pk-2", "ck-2", vec![1.0, 1.0, 1.0]),
     ];
     for (pk, ck, v) in &data {
-        session
+        ctx.session
             .query_unpaged(
                 format!("INSERT INTO {table} (pk, ck, v) VALUES (?, ?, ?)"),
                 (pk, ck, v),
@@ -422,28 +369,12 @@ async fn ann_query_returns_rows_using_cdc(actors: Arc<TestActors>) {
     }
 
     info!("Waiting till all vector-stores update indexes using CDC");
-    wait_for(
-        || async {
-            for client in &clients {
-                loop {
-                    let index_status = wait_for_index(client, &index).await;
-                    if index_status.count == 4 {
-                        break;
-                    }
-                    time::sleep(Duration::from_secs(1)).await;
-                }
-            }
-            true
-        },
-        "Waiting for all vector-stores update indexes using CDC",
-        Duration::from_secs(60),
-    )
-    .await;
+    wait_for_index_count(&ctx.clients, &index, 4).await;
 
     info!("Now perform the ANN query");
     let result = get_opt_query_results(
         format!("SELECT pk, ck FROM {table} ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 2"),
-        &session,
+        &ctx.session,
     )
     .await
     .unwrap();
@@ -466,12 +397,6 @@ async fn ann_query_returns_rows_using_cdc(actors: Arc<TestActors>) {
         .into_iter()
         .collect::<HashSet<(String, String)>>()
     );
-
-    info!("Drop keyspace");
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop a keyspace");
 
     info!("finished");
 }

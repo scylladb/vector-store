@@ -35,6 +35,7 @@ rcgen.workspace = true
 scylla.workspace = true
 scylla-proxy.workspace = true
 serde_json.workspace = true
+sysinfo.workspace = true
 tap.workspace = true
 tempfile.workspace = true
 tokio.workspace = true

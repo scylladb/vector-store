@@ -47,11 +47,12 @@ fn delete_write_request(
 
 /// Verifies that VS correctly indexes writes made through the LWT path when
 /// `--alternator-write-isolation=always_use_lwt` is active.
-#[e2etest::test(group = lwt)]
-async fn alternator_with_always_use_lwt(actors: Arc<TestActors>) {
+#[e2etest::test(group = alternator_lwt)]
+async fn alternator_with_always_use_lwt(fixture: Arc<Fixture>) {
+    let actors = &fixture.actors;
     info!("started");
 
-    let (client, vs_clients) = alternator::make_clients(&actors).await;
+    let (client, vs_clients) = alternator::make_clients(actors).await;
 
     let table_name = alternator::unique_table_name();
     let index_name = alternator::unique_index_name();
@@ -210,19 +211,21 @@ async fn alternator_with_always_use_lwt(actors: Arc<TestActors>) {
     info!("finished");
 }
 
+// Dedicated cluster: `always_use_lwt` write isolation cannot coexist with the
+// shared standard cluster, so this is a top-level group with its own cluster.
 e2etest::group!(
-    name = lwt,
+    name = alternator_lwt,
     fixtures = (Fixture),
-    parent = alternator::alternator
+    parent = crate::validator
 );
 
 struct Fixture {
-    actors: Arc<TestActors>,
+    actors: TestActors,
 }
 
 impl e2etest::Fixture for Fixture {
     async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
-        let actors = setup.setup::<TestActors>().await?;
+        let actors = setup.setup::<crate::TestEnv>().await?.new_cluster().await;
 
         alternator::init_with_args(
             &actors,
@@ -235,5 +238,18 @@ impl e2etest::Fixture for Fixture {
 
     async fn teardown(self) {
         common::cleanup(&self.actors).await;
+    }
+
+    // This cluster is independent of every other one, so its groups may run
+    // alongside groups owning a different cluster.
+    fn group_can_run_concurrently() -> bool {
+        true
+    }
+
+    // Its nodes claim loopback addresses, ports and routes, which every other
+    // cluster claims too, so it runs in a network namespace of its own, where
+    // it is alone in claiming them.
+    fn group_needs_own_namespace() -> bool {
+        true
     }
 }

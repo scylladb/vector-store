@@ -3,48 +3,28 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
-use crate::TestActors;
-use crate::common;
 use crate::common::*;
-use httpapi::IndexInfo;
 use std::sync::Arc;
 use tracing::info;
 
 e2etest::group!(
     name = similarity_function,
-    fixtures = (Fixture),
-    parent = crate::validator
+    fixtures = (TestContext),
+    parent = crate::standard
 );
 
-struct Fixture {
-    actors: Arc<TestActors>,
-}
-
-impl e2etest::Fixture for Fixture {
-    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
-        let actors = setup.setup::<TestActors>().await?;
-        common::init(&actors).await;
-        Some(Self { actors })
-    }
-
-    async fn teardown(self) {
-        common::cleanup(&self.actors).await;
-    }
-}
-
 async fn run_similarity_function_test(
-    actors: &TestActors,
+    ctx: &TestContext,
     similarity_function: Option<&str>,
     vectors: Vec<(i32, Vec<f32>)>,
     expected_best_pks: Vec<i32>,
 ) {
-    let (session, clients) = prepare_connection(actors).await;
-
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(&session, "pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None).await;
+    let table = ctx
+        .create_table("pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None)
+        .await;
 
     for (pk, v) in &vectors {
-        session
+        ctx.session
             .query_unpaged(
                 format!("INSERT INTO {table} (pk, v) VALUES (?, ?)"),
                 (pk, v),
@@ -55,29 +35,23 @@ async fn run_similarity_function_test(
 
     let index = match similarity_function {
         Some(func) => {
-            let index_name = unique_index_name();
-            session
-                .query_unpaged(
-                    format!(
-                        "CREATE INDEX {index_name} ON {table}(v) USING 'vector_index' WITH OPTIONS = {{'similarity_function': '{func}'}}"
-                    ),
-                    (),
-                )
-                .await
-                .expect("failed to create an index");
-            IndexInfo::new(keyspace.as_ref(), index_name.as_ref())
+            create_index(
+                ctx.index_query(&table, "v")
+                    .options([("similarity_function", func)]),
+            )
+            .await
         }
-        None => create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await,
+        None => ctx.create_index(&table, "v").await,
     };
 
-    for client in &clients {
+    for client in &ctx.clients {
         wait_for_index(client, &index).await;
     }
 
     let limit = expected_best_pks.len();
     let results = get_query_results(
         format!("SELECT pk FROM {table} ORDER BY v ANN OF [1.0, 0.0, 0.0] LIMIT {limit}"),
-        &session,
+        &ctx.session,
     )
     .await;
     let rows: Vec<(i32,)> = results
@@ -102,15 +76,10 @@ async fn run_similarity_function_test(
             result_pks
         );
     }
-
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop a keyspace");
 }
 
 #[e2etest::test(group = similarity_function)]
-async fn test_similarity_function_euclidean(actors: Arc<TestActors>) {
+async fn test_similarity_function_euclidean(ctx: Arc<TestContext>) {
     info!("started");
 
     let vectors = vec![
@@ -120,13 +89,13 @@ async fn test_similarity_function_euclidean(actors: Arc<TestActors>) {
         (4, vec![1.0f32, 1.0, 1.0]),
     ];
 
-    run_similarity_function_test(&actors, Some("EUCLIDEAN"), vectors, vec![1]).await;
+    run_similarity_function_test(&ctx, Some("EUCLIDEAN"), vectors, vec![1]).await;
 
     info!("finished");
 }
 
 #[e2etest::test(group = similarity_function)]
-async fn test_similarity_function_cosine(actors: Arc<TestActors>) {
+async fn test_similarity_function_cosine(ctx: Arc<TestContext>) {
     info!("started");
 
     // With cosine similarity, both pk=1 and pk=4 should have the same similarity (same direction)
@@ -137,13 +106,13 @@ async fn test_similarity_function_cosine(actors: Arc<TestActors>) {
         (4, vec![2.0f32, 0.0, 0.0]), // Same direction as pk=1 but different magnitude
     ];
 
-    run_similarity_function_test(&actors, Some("COSINE"), vectors, vec![1, 4]).await;
+    run_similarity_function_test(&ctx, Some("COSINE"), vectors, vec![1, 4]).await;
 
     info!("finished");
 }
 
 #[e2etest::test(group = similarity_function)]
-async fn test_similarity_function_dot_product(actors: Arc<TestActors>) {
+async fn test_similarity_function_dot_product(ctx: Arc<TestContext>) {
     info!("started");
 
     // With dot product, pk=4 should have highest similarity (2.0 * 1.0 = 2.0)
@@ -154,13 +123,13 @@ async fn test_similarity_function_dot_product(actors: Arc<TestActors>) {
         (4, vec![2.0f32, 0.0, 0.0]), // Higher dot product with query vector
     ];
 
-    run_similarity_function_test(&actors, Some("DOT_PRODUCT"), vectors, vec![4]).await;
+    run_similarity_function_test(&ctx, Some("DOT_PRODUCT"), vectors, vec![4]).await;
 
     info!("finished");
 }
 
 #[e2etest::test(group = similarity_function)]
-async fn test_similarity_function_default_is_cosine(actors: Arc<TestActors>) {
+async fn test_similarity_function_default_is_cosine(ctx: Arc<TestContext>) {
     info!("started");
 
     // Default is COSINE, so both pk=1 and pk=4 should have the same similarity (same direction)
@@ -171,13 +140,13 @@ async fn test_similarity_function_default_is_cosine(actors: Arc<TestActors>) {
         (4, vec![2.0f32, 0.0, 0.0]), // Same direction as pk=1
     ];
 
-    run_similarity_function_test(&actors, None, vectors, vec![1, 4]).await;
+    run_similarity_function_test(&ctx, None, vectors, vec![1, 4]).await;
 
     info!("finished");
 }
 
 #[e2etest::test(group = similarity_function)]
-async fn test_similarity_function_lowercase(actors: Arc<TestActors>) {
+async fn test_similarity_function_lowercase(ctx: Arc<TestContext>) {
     info!("started");
 
     let vectors = vec![
@@ -187,7 +156,7 @@ async fn test_similarity_function_lowercase(actors: Arc<TestActors>) {
         (4, vec![1.0f32, 1.0, 1.0]),
     ];
 
-    run_similarity_function_test(&actors, Some("euclidean"), vectors, vec![1]).await;
+    run_similarity_function_test(&ctx, Some("euclidean"), vectors, vec![1]).await;
 
     info!("finished");
 }
