@@ -335,6 +335,20 @@ async fn get_indexes(State(state): State<RoutesInnerState>) -> Response {
 #[derive(utoipa::ToSchema)]
 struct ErrorMessage(#[allow(dead_code)] String);
 
+enum IndexSender {
+    Vs(Sender<VsIndexSearch>),
+    Fts(Sender<FtsIndex>),
+}
+
+impl IndexSender {
+    async fn count(&self, index_key: IndexKey) -> anyhow::Result<usize> {
+        match self {
+            IndexSender::Vs(index) => index.count(index_key).await,
+            IndexSender::Fts(index) => index.count(index_key).await,
+        }
+    }
+}
+
 impl From<crate::node_state::IndexStatus> for httpapi::IndexStatus {
     fn from(status: crate::node_state::IndexStatus) -> Self {
         match status {
@@ -391,11 +405,6 @@ async fn get_index_status(
     let index_name: crate::IndexName = index_name.into();
     let index_key = IndexKey::new(&keyspace_name, &index_name);
 
-    enum IndexSender {
-        Vs(Sender<VsIndexSearch>),
-        Fts(Sender<FtsIndex>),
-    }
-
     let (index, status, progress) = {
         let indexes = state.indexes.read().unwrap();
         if let Some(entry) = indexes.get_vs(&index_key) {
@@ -417,11 +426,7 @@ async fn get_index_status(
         }
     };
 
-    let count_result = match index {
-        IndexSender::Vs(s) => s.count(index_key).await,
-        IndexSender::Fts(s) => s.count(index_key).await,
-    };
-    match count_result {
+    match index.count(index_key).await {
         Err(err) => {
             let msg = format!("index.count request error: {err}");
             debug!("get_index_status: {msg}");
