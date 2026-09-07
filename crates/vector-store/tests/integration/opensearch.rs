@@ -16,6 +16,7 @@ use httpclient::HttpClient;
 use reqwest::StatusCode;
 use scylla::cluster::metadata::NativeType;
 use scylla::value::CqlValue;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -306,6 +307,134 @@ async fn ann_returns_requested_column_values() {
     assert_eq!(color_by_pk[&1].as_deref(), Some("red"));
     assert_eq!(color_by_pk[&2], None);
     assert_eq!(color_by_pk[&3].as_deref(), Some("blue"));
+
+    db.del_index(&index.keyspace_name, &index.index_name)
+        .unwrap();
+
+    wait_for(
+        || async { client.indexes().await.is_empty() },
+        "Waiting for index to be removed from the store",
+    )
+    .await;
+}
+
+/// Regression test: OpenSearch can return a hit for a document the vector
+/// store itself never indexed - e.g. because the row was removed from the
+/// store after OpenSearch indexed it, or (as simulated here) the two got
+/// out of sync some other way. `table.primary_key()` reports this "stale"
+/// id with `None`. That must not crash the ANN request handling it -
+/// stale hits are skipped, and every other, valid hit is still returned.
+#[tokio::test]
+async fn ann_skips_stale_opensearch_hit() {
+    crate::enable_tracing();
+    let node_state = vector_store::new_node_state().await;
+    let (db_actor, db) = db_basic::new(node_state.clone());
+
+    let index = IndexMetadata {
+        keyspace_name: "vector".into(),
+        table_name: "items".into(),
+        index_name: "ann".into(),
+        primary_key_columns: NonemptyArc::new(["pk"]).unwrap(),
+        partition_key_count: NonZeroUsize::new(1).unwrap(),
+        target_columns: NonemptyArc::new(["embedding"]).unwrap(),
+        partitioning: DbIndexPartitioning::Global,
+        filtering_columns: Arc::new([]),
+        alternator_attribute_types: Default::default(),
+        version: Uuid::new_v4().into(),
+        kind: IndexKind::Vs(IndexOptionsVs {
+            dimensions: NonZeroUsize::new(3).unwrap().into(),
+            connectivity: Default::default(),
+            expansion_add: Default::default(),
+            expansion_search: Default::default(),
+            space_type: Euclidean,
+            quantization: Default::default(),
+        }),
+    };
+    let mock_server = mock_opensearch::TestOpenSearchServer::start().await;
+
+    let (receivers, _senders) = create_config_channels(Config {
+        opensearch_addr: Some(mock_server.base_url()),
+        ..usearch_test_config()
+    })
+    .await;
+    let (server, _mtls) = vector_store::run(Some(node_state), Some(db_actor), receivers)
+        .await
+        .unwrap();
+    let addr = (*server.address().await.borrow()).unwrap();
+
+    let client = HttpClient::new(addr);
+
+    db.add_table(
+        index.keyspace_name.clone(),
+        index.table_name.clone(),
+        Table {
+            primary_keys: NonemptyArc::new(["pk"]).unwrap(),
+            partition_key_count: 1,
+            columns: Arc::new([("pk".into(), NativeType::Int)].into_iter().collect()),
+            dimensions: [(
+                index.target_columns.first().clone(),
+                index.vs().unwrap().dimensions,
+            )]
+            .into_iter()
+            .collect(),
+        },
+    )
+    .unwrap();
+    db.add_index(
+        index.clone(),
+        Some(db_basic::scan_fn_vectors([(
+            [CqlValue::Int(1)].into(),
+            Some(vec![1., 1., 1.].into()),
+            [].into(),
+            Timestamp::from_millis(10),
+        )])),
+        None,
+    )
+    .unwrap();
+
+    let keyspace_name = index.keyspace_name.clone().into();
+    let index_name = index.index_name.clone().into();
+    wait_for(
+        || async {
+            client
+                .index_status(&keyspace_name, &index_name)
+                .await
+                .is_ok_and(|status| status.status == IndexStatus::Serving && status.count == 1)
+        },
+        "Waiting for index to be added to the store",
+    )
+    .await;
+
+    // Inject a document directly into the mock OpenSearch index under a
+    // primary_id the vector store never added - simulating the two
+    // falling out of sync - bypassing the vector store entirely.
+    reqwest::Client::new()
+        .post(format!("{}/vector.ann/_doc/9999", mock_server.base_url()))
+        .json(&serde_json::json!({ "vector": [1., 1., 1.] }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+
+    let response = client
+        .post_ann_data(
+            &keyspace_name,
+            &index_name,
+            &PostIndexAnnRequest {
+                vector: vec![1., 1., 1.].into(),
+                filter: None,
+                limit: NonZeroUsize::new(10).unwrap().into(),
+                routing: true,
+                return_columns: vec![],
+            },
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response: PostIndexAnnResponse = response.json().await.unwrap();
+
+    let pks = response.primary_keys.get(&"pk".into()).unwrap();
+    assert_eq!(pks, &[Value::from(1)]);
 
     db.del_index(&index.keyspace_name, &index.index_name)
         .unwrap();

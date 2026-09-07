@@ -439,10 +439,26 @@ async fn ann(
         let mut scores = Vec::new();
         let mut column_values = empty_column_values(&return_columns);
         for hit in hits.unwrap() {
-            let id = hit["_id"].as_str().unwrap();
-            let score = hit["_score"].as_f64().unwrap();
-            let primary_id = PrimaryId::from(id.parse::<u64>().unwrap());
-            let primary_key = table.primary_key(partition_id, primary_id).unwrap();
+            let Some(id) = hit["_id"].as_str() else {
+                warn!("ann: hit has no valid '_id' string, skipping: {hit}");
+                continue;
+            };
+            let Some(score) = hit["_score"].as_f64() else {
+                warn!("ann: hit has no valid '_score' number, skipping: {hit}");
+                continue;
+            };
+            let Ok(id) = id.parse::<u64>() else {
+                warn!("ann: hit '_id' is not a valid u64, skipping: {id}");
+                continue;
+            };
+            let primary_id = PrimaryId::from(id);
+            let Some(primary_key) = table.primary_key(partition_id, primary_id) else {
+                debug!(
+                    "not defined primary key for partition_id {partition_id:?} \
+                    and primary_id {primary_id:?}"
+                );
+                continue;
+            };
             keys.push(primary_key);
             scores.push(score);
             for (column, values) in &mut column_values {
