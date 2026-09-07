@@ -35,31 +35,30 @@ pub(crate) struct IndexLocation {
     pub index: IndexName,
 }
 
+fn column_accessors<'a>(
+    keyspace: &KeyspaceIdentifier,
+    columns: impl IntoIterator<Item = &'a ColumnName>,
+) -> impl Iterator<Item = String> {
+    let attributes = keyspace
+        .is_alternator()
+        .then(|| CqlIdentifier::new(ALTERNATOR_ATTRS_COLUMN));
+    columns.into_iter().map(move |column| match &attributes {
+        Some(attributes) => format!("{attributes}[{}]", CqlLiteral::new(column)),
+        None => CqlIdentifier::new(column.as_ref()).to_string(),
+    })
+}
+
 fn build_columns_list<'a>(
     keyspace: &KeyspaceIdentifier,
     columns: impl IntoIterator<Item = &'a ColumnName>,
 ) -> String {
-    if keyspace.is_alternator() {
-        let attributes = CqlIdentifier::new(ALTERNATOR_ATTRS_COLUMN);
-        itertools::join(
-            columns.into_iter().map(CqlLiteral::new).flat_map(|column| {
-                [
-                    format!("{attributes}[{column}]"),
-                    format!("writetime({attributes}[{column}])"),
-                ]
-            }),
-            ", ",
-        )
-    } else {
-        itertools::join(
-            columns
-                .into_iter()
-                .map(AsRef::as_ref)
-                .map(CqlIdentifier::new)
-                .flat_map(|column| [format!("{column}"), format!("writetime({column})")]),
-            ", ",
-        )
-    }
+    itertools::join(
+        column_accessors(keyspace, columns).flat_map(|column| {
+            let writetime = format!("writetime({column})");
+            [column, writetime]
+        }),
+        ", ",
+    )
 }
 
 /// Builds the CQL range scan query appropriate for the given keyspace.
@@ -97,6 +96,32 @@ pub(crate) fn request_query<'a, 'b>(
     primary_key_columns: impl IntoIterator<Item = &'b ColumnName>,
 ) -> String {
     let columns = build_columns_list(keyspace, columns);
+    let restrictions = itertools::join(
+        primary_key_columns
+            .into_iter()
+            .map(AsRef::as_ref)
+            .map(CqlIdentifier::new)
+            .map(|column| format!("{column} = ?")),
+        " AND ",
+    );
+    format!(
+        "
+            SELECT {columns}
+            FROM {keyspace}.{table}
+            WHERE {restrictions}
+            "
+    )
+}
+
+/// Builds the CQL query fetching the values of the given columns for a single
+/// row, appropriate for the given keyspace.
+pub(crate) fn fetch_vector_query<'a, 'b>(
+    keyspace: &KeyspaceIdentifier,
+    table: &TableIdentifier,
+    columns: impl IntoIterator<Item = &'a ColumnName>,
+    primary_key_columns: impl IntoIterator<Item = &'b ColumnName>,
+) -> String {
+    let columns = itertools::join(column_accessors(keyspace, columns), ", ");
     let restrictions = itertools::join(
         primary_key_columns
             .into_iter()

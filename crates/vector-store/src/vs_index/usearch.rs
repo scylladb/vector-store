@@ -13,6 +13,7 @@ use crate::Quantization;
 use crate::SpaceType;
 use crate::Vector;
 use crate::VsIndexFactory;
+use crate::db_index::DbIndex;
 use crate::memory::Allocate;
 use crate::memory::Memory;
 use crate::memory::MemoryExt;
@@ -68,6 +69,7 @@ impl VsIndexFactory for UsearchIndexFactory {
         &self,
         index: VsIndexConfiguration,
         table: Arc<RwLock<Table>>,
+        _db_index: mpsc::Sender<DbIndex>,
     ) -> anyhow::Result<(mpsc::Sender<VsIndexModify>, mpsc::Sender<VsIndexSearch>)> {
         match &self.mode {
             Mode::Usearch => {

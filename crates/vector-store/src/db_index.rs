@@ -102,11 +102,16 @@ pub enum DbIndex {
     FullScanProgress {
         tx: oneshot::Sender<Progress>,
     },
+    GetVectors {
+        keys: Vec<PrimaryKey>,
+        tx: oneshot::Sender<anyhow::Result<Vec<Option<Vector>>>>,
+    },
 }
 
 pub(crate) trait DbIndexExt {
     async fn get_table_columns(&self) -> GetTableColumnsR;
     async fn full_scan_progress(&self) -> Progress;
+    async fn get_vectors(&self, keys: Vec<PrimaryKey>) -> anyhow::Result<Vec<Option<Vector>>>;
 }
 
 impl DbIndexExt for mpsc::Sender<DbIndex> {
@@ -124,6 +129,15 @@ impl DbIndexExt for mpsc::Sender<DbIndex> {
             .await
             .expect("internal actor should receive request");
         rx.await.expect("internal actor should send response")
+    }
+
+    async fn get_vectors(&self, keys: Vec<PrimaryKey>) -> anyhow::Result<Vec<Option<Vector>>> {
+        let (tx, rx) = oneshot::channel();
+        self.send(DbIndex::GetVectors { keys, tx })
+            .await
+            .map_err(|e| anyhow!("get_vectors: db_index actor is not available: {}", e))?;
+        rx.await
+            .map_err(|e| anyhow!("get_vectors: db_index actor dropped the request: {}", e))?
     }
 }
 
@@ -157,6 +171,8 @@ pub(crate) async fn new(
     let statements = Arc::new(Statements::new(statements_session_rx, metadata.clone()).await?);
 
     let semaphore = Arc::new(Semaphore::new(concurrency_limit()));
+
+    let fetch_permits = Arc::new(Semaphore::new(concurrency_limit()));
 
     // Create wide-framed CDC actor
     let cdc_wide = db_cdc::new(
@@ -230,7 +246,7 @@ pub(crate) async fn new(
                     msg = rx_index.recv() => {
                         match msg {
                             Some(msg) => {
-                                tokio::spawn(process(Arc::clone(&statements), msg, completed_scan_length.clone()));
+                                tokio::spawn(process(Arc::clone(&statements), msg, completed_scan_length.clone(), Arc::clone(&fetch_permits)));
                             }
                             None => {
                                 // Index was dropped, stop fullscan.
@@ -249,7 +265,7 @@ pub(crate) async fn new(
 
             // Continue processing messages after scan completes
             while let Some(msg) = rx_index.recv().await {
-                tokio::spawn(process(Arc::clone(&statements), msg, completed_scan_length.clone()));
+                tokio::spawn(process(Arc::clone(&statements), msg, completed_scan_length.clone(), Arc::clone(&fetch_permits)));
             }
 
             db_index_stopped.notify_one();
@@ -261,7 +277,12 @@ pub(crate) async fn new(
     Ok((tx_index, rx_embeddings))
 }
 
-async fn process(statements: Arc<Statements>, msg: DbIndex, completed_scan_length: Arc<AtomicU64>) {
+async fn process(
+    statements: Arc<Statements>,
+    msg: DbIndex,
+    completed_scan_length: Arc<AtomicU64>,
+    fetch_permits: Arc<Semaphore>,
+) {
     match msg {
         DbIndex::GetTableColumns { tx } => tx
             .send(statements.get_table_columns())
@@ -272,6 +293,15 @@ async fn process(statements: Arc<Statements>, msg: DbIndex, completed_scan_lengt
 
             if tx.send(Progress::from(completed_scan_length)).is_err() {
                 trace!("process: Db::FullScanProgress: unable to send response");
+            }
+        }
+
+        DbIndex::GetVectors { keys, tx } => {
+            if tx
+                .send(statements.fetch_vectors(keys, fetch_permits).await)
+                .is_err()
+            {
+                trace!("process: DbIndex::GetVectors: unable to send response");
             }
         }
     }
@@ -289,6 +319,7 @@ struct Statements {
     /// real CQL column. See parse_values().
     alternator_decode_types: Box<[Option<NativeType>]>,
     st_range_scan: PreparedStatement,
+    st_fetch_vector: PreparedStatement,
     kind: IndexKind,
 }
 
@@ -401,6 +432,21 @@ impl Statements {
                 stmt
             });
 
+        let query = db_index_backend::fetch_vector_query(
+            &keyspace_identifier,
+            &table_identifier,
+            target_columns.iter(),
+            primary_key_columns.iter(),
+        );
+        let st_fetch_vector = session
+            .prepare(query)
+            .await
+            .context("fetch_vector_query")?
+            .pipe(|mut stmt| {
+                stmt.set_is_idempotent(true);
+                stmt
+            });
+
         Ok(Self {
             primary_key_columns,
             nonpk_partition_key_columns,
@@ -409,6 +455,7 @@ impl Statements {
             table_columns,
             alternator_decode_types,
             st_range_scan,
+            st_fetch_vector,
             session_rx,
             kind: metadata.kind.clone(),
         })
@@ -416,6 +463,69 @@ impl Statements {
 
     fn get_table_columns(&self) -> GetTableColumnsR {
         self.table_columns.clone()
+    }
+
+    async fn fetch_vectors(
+        &self,
+        keys: Vec<PrimaryKey>,
+        fetch_permits: Arc<Semaphore>,
+    ) -> anyhow::Result<Vec<Option<Vector>>> {
+        let session = self
+            .session_rx
+            .borrow()
+            .clone()
+            .ok_or_else(|| anyhow!("fetch_vectors: no active session"))?;
+
+        let requested = keys.len();
+        let mut failures = 0;
+        let mut last_err = None;
+
+        let vectors: Vec<Option<Vector>> = futures::stream::iter(keys)
+            .map(|key| {
+                let session = Arc::clone(&session);
+                let permits = Arc::clone(&fetch_permits);
+                async move {
+                    let _permit = permits
+                        .acquire_owned()
+                        .await
+                        .context("fetch_vectors: permit semaphore closed")?;
+                    self.fetch_vector(session, key).await
+                }
+            })
+            .buffered(concurrency_limit())
+            .map(|result| match result {
+                Ok(vector) => vector,
+                Err(err) => {
+                    failures += 1;
+                    last_err = Some(err);
+                    None
+                }
+            })
+            .collect()
+            .await;
+
+        if failures == requested {
+            return Err(last_err.unwrap())
+                .with_context(|| format!("fetch_vectors: all {requested} point reads failed"));
+        }
+
+        Ok(vectors)
+    }
+
+    async fn fetch_vector(
+        &self,
+        session: Arc<Session>,
+        key: PrimaryKey,
+    ) -> anyhow::Result<Option<Vector>> {
+        let rows_result = session
+            .execute_unpaged(&self.st_fetch_vector, &key)
+            .await?
+            .into_rows_result()?;
+        let Some(row) = rows_result.maybe_first_row::<Row>()? else {
+            // The row is gone from the base table.
+            return Ok(None);
+        };
+        parse_vector_row(row.columns)
     }
 
     async fn preform_range_scan(&self, begin: Token, end: Token) -> RangeScanResult {
@@ -810,6 +920,24 @@ fn parse_indexed_value(value: CqlValue, kind: &IndexKind) -> anyhow::Result<DbIn
     }
 }
 
+/// Parse a row of `[value]`, as selected by
+/// [`db_index_backend::fetch_vector_query`].
+fn parse_vector_row(columns: Vec<Option<CqlValue>>) -> anyhow::Result<Option<Vector>> {
+    const EXPECTED_COLUMNS: usize = 1;
+    if columns.len() != EXPECTED_COLUMNS {
+        bail!(
+            "parse_vector_row: expected {EXPECTED_COLUMNS} columns, got {}",
+            columns.len()
+        );
+    }
+    columns
+        .into_iter()
+        .next()
+        .unwrap()
+        .map(|value| Vector::try_from(value).map_err(|err| anyhow!("parse_vector_row: {err}")))
+        .transpose()
+}
+
 fn concurrency_limit() -> usize {
     const RATIO: usize = 3;
     perf::num_workers().get() * RATIO
@@ -912,6 +1040,40 @@ mod tests {
         let cql = CqlValue::Int(42);
         let result = parse_indexed_value(cql, &fts_kind());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_vector_row_returns_the_vector() {
+        let columns = vec![Some(CqlValue::Vector(vec![
+            CqlValue::Float(1.0),
+            CqlValue::Float(2.0),
+        ]))];
+        let result = parse_vector_row(columns);
+        assert_eq!(result.unwrap(), Some(Vector::from(vec![1.0, 2.0])));
+    }
+
+    #[test]
+    fn parse_vector_row_null_value_is_none() {
+        let columns = vec![None];
+        let result = parse_vector_row(columns);
+        assert_eq!(result.unwrap(), None);
+    }
+
+    #[test]
+    fn parse_vector_row_rejects_a_wrong_column_count() {
+        let columns = vec![
+            Some(CqlValue::Vector(vec![CqlValue::Float(1.0)])),
+            Some(CqlValue::BigInt(12345)),
+        ];
+        assert!(parse_vector_row(columns).is_err());
+
+        assert!(parse_vector_row(vec![]).is_err());
+    }
+
+    #[test]
+    fn parse_vector_row_rejects_a_non_vector_value() {
+        let columns = vec![Some(CqlValue::Text("not a vector".to_string()))];
+        assert!(parse_vector_row(columns).is_err());
     }
 
     #[test]

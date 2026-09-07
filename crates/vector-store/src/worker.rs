@@ -129,7 +129,7 @@ pub(crate) fn new() -> Sender<Worker> {
 
     // Dedicated thread for long tasks to avoid starving runtime.
     thread::spawn(move || {
-        let runtime = Builder::new_current_thread().build().unwrap();
+        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
 
         runtime.block_on(async move {
             while let Some((f, tx_call)) = rx_thread.recv().await {

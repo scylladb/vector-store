@@ -69,6 +69,34 @@ fn make_scan_fn(rows: impl Iterator<Item = DbIndexedRow> + Send + Sync + 'static
     })
 }
 
+/// Whether the mock keeps the indexed vectors around, so that they can be read
+/// back from the base table via `DbIndex::GetVectors`. Off by default: only a
+/// backend that re-reads the vectors it indexed (the DiskANN Scylla one) needs
+/// them, and a mock that silently answers such a read hides the tests that
+/// should not depend on it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum StoreVectors {
+    #[default]
+    Disabled,
+    Enabled,
+}
+
+impl StoreVectors {
+    fn is_enabled(self) -> bool {
+        self == Self::Enabled
+    }
+}
+
+impl From<bool> for StoreVectors {
+    fn from(enabled: bool) -> Self {
+        if enabled {
+            Self::Enabled
+        } else {
+            Self::Disabled
+        }
+    }
+}
+
 pub(crate) fn pending_scan_fn() -> ScanFn {
     Box::new(|_tx| std::future::pending::<()>().boxed())
 }
@@ -130,8 +158,16 @@ where
 pub(crate) struct DbBasic(#[debug(skip)] Arc<RwLock<DbMock>>);
 
 pub(crate) fn new(node_state: Sender<NodeState>) -> (mpsc::Sender<Db>, DbBasic) {
+    new_with(node_state, StoreVectors::default())
+}
+
+/// [`new`], for a test that needs a non-default [`StoreVectors`].
+pub(crate) fn new_with(
+    node_state: Sender<NodeState>,
+    store_vectors: StoreVectors,
+) -> (mpsc::Sender<Db>, DbBasic) {
     let (tx, mut rx) = mpsc::channel(10);
-    let db = DbBasic::new();
+    let db = DbBasic::new(store_vectors);
     tokio::spawn({
         let db = db.clone();
         async move {
@@ -177,6 +213,8 @@ struct DbMock {
     next_get_db_index_failed: bool,
     next_full_scan_progress: Option<Progress>,
     simulate_endless_get_indexes_processing: bool,
+    store_vectors: StoreVectors,
+    vectors: HashMap<PrimaryKey, Vector>,
 }
 
 impl DbMock {
@@ -186,14 +224,41 @@ impl DbMock {
 }
 
 impl DbBasic {
-    pub(crate) fn new() -> Self {
+    fn new(store_vectors: StoreVectors) -> Self {
         Self(Arc::new(RwLock::new(DbMock {
             schema_version: CqlTimeuuid::from(Uuid::new_v4()),
             keyspaces: HashMap::new(),
             next_get_db_index_failed: false,
             next_full_scan_progress: None,
             simulate_endless_get_indexes_processing: false,
+            store_vectors,
+            vectors: HashMap::new(),
         })))
+    }
+
+    fn record_row(&self, row: &DbIndexedRow) {
+        let mut db = self.0.write().unwrap();
+        match &row.operation {
+            DbIndexedOperation::Upsert(values) => match values.first().value() {
+                Some(DbIndexedValue::Vector(vector)) => {
+                    db.vectors.insert(row.primary_key.clone(), vector.clone());
+                }
+                None => {
+                    db.vectors.remove(&row.primary_key);
+                }
+                Some(_) => {}
+            },
+            DbIndexedOperation::Delete(_) => {
+                db.vectors.remove(&row.primary_key);
+            }
+        }
+    }
+
+    fn get_vectors(&self, keys: &[PrimaryKey]) -> Vec<Option<Vector>> {
+        let db = self.0.read().unwrap();
+        keys.iter()
+            .map(|key| db.vectors.get(key).cloned())
+            .collect()
     }
 
     pub(crate) fn add_table(
@@ -471,6 +536,12 @@ pub(crate) fn new_db_index(
 
     let (tx_index, mut rx_index) = mpsc::channel(10);
     let (tx_embeddings, rx_embeddings) = mpsc::channel(10);
+    let store_vectors = db.0.read().unwrap().store_vectors.is_enabled();
+    let tx_embeddings = if store_vectors && metadata.vs().is_some() {
+        record_streamed_vectors(db.clone(), tx_embeddings)
+    } else {
+        tx_embeddings
+    };
     let fullscan_finished = Arc::new(AtomicBool::new(false));
     tokio::spawn({
         let fullscan_finished = fullscan_finished.clone();
@@ -558,6 +629,19 @@ pub(crate) fn new_db_index(
     Ok((tx_index, rx_embeddings))
 }
 
+fn record_streamed_vectors(db: DbBasic, tx: TxIndexedRow) -> TxIndexedRow {
+    let (tx_recorded, mut rx_recorded) = mpsc::channel(10);
+    tokio::spawn(async move {
+        while let Some((row, in_progress)) = rx_recorded.recv().await {
+            db.record_row(&row);
+            if tx.send((row, in_progress)).await.is_err() {
+                break;
+            }
+        }
+    });
+    tx_recorded
+}
+
 fn fullscan(db: &mut DbBasic, metadata: &IndexMetadata) -> Option<ScanFn> {
     db.0.write()
         .unwrap()
@@ -609,6 +693,11 @@ async fn spawn_process_db_index(
                     })
                 })
                 .map_err(|_| anyhow!("DbIndex::GetTargetColumn: unable to send response"))
+                .unwrap(),
+
+            DbIndex::GetVectors { keys, tx } => tx
+                .send(Ok(db.get_vectors(&keys)))
+                .map_err(|_| anyhow!("DbIndex::GetVectors: unable to send response"))
                 .unwrap(),
         }
     });

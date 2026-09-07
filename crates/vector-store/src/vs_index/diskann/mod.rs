@@ -6,6 +6,7 @@
 use crate::Config;
 use crate::Dimensions;
 use crate::DiskannAlpha;
+use crate::DiskannBackendKind;
 use crate::Distance;
 use crate::IndexKey;
 use crate::Limit;
@@ -14,6 +15,7 @@ use crate::PrimaryId;
 use crate::SpaceType;
 use crate::Vector;
 use crate::VsIndexFactory;
+use crate::db_index::DbIndex;
 use crate::memory::Allocate;
 use crate::memory::Memory;
 use crate::memory::MemoryExt;
@@ -89,6 +91,7 @@ where
     fn create_index(
         &self,
         params: &DiskannParams,
+        partition_id: PartitionId,
         start_point: &[f32],
     ) -> anyhow::Result<DiskANNIndex<Self::Provider>>;
 
@@ -102,6 +105,7 @@ pub struct DiskannIndexFactory {
     memory: mpsc::Sender<Memory>,
     alpha: DiskannAlpha,
     max_points: NonZeroUsize,
+    backend: DiskannBackendKind,
 }
 
 impl VsIndexFactory for DiskannIndexFactory {
@@ -109,18 +113,32 @@ impl VsIndexFactory for DiskannIndexFactory {
         &self,
         index: VsIndexConfiguration,
         table: Arc<RwLock<Table>>,
+        db_index: mpsc::Sender<DbIndex>,
     ) -> anyhow::Result<(mpsc::Sender<VsIndexModify>, mpsc::Sender<VsIndexSearch>)> {
         let params = DiskannParams::new(&index, self.alpha, self.max_points)
             .context("failed to create DiskANN parameters")?;
 
-        new(
-            inmem::InmemBackend::new(),
-            index.key,
-            self.worker.clone(),
-            self.memory.clone(),
-            table,
-            params,
-        )
+        match self.backend {
+            DiskannBackendKind::Inmem => new(
+                inmem::InmemBackend::new(),
+                index.key,
+                self.worker.clone(),
+                self.memory.clone(),
+                table,
+                params,
+            ),
+            DiskannBackendKind::Scylla => {
+                let source = Arc::new(scylla::BaseTableSource::new(Arc::clone(&table), db_index));
+                new(
+                    scylla::ScyllaBackend::new(source),
+                    index.key,
+                    self.worker.clone(),
+                    self.memory.clone(),
+                    table,
+                    params,
+                )
+            }
+        }
     }
 
     fn index_engine_version(&self) -> String {
@@ -144,6 +162,7 @@ pub fn new_diskann(
         max_points: config
             .diskann_max_points
             .unwrap_or(DISKANN_DEFAULT_MAX_POINTS),
+        backend: config.diskann_backend.unwrap_or_default(),
     })
 }
 
@@ -227,7 +246,7 @@ where
                     // The first vector of a partition becomes the start point of the graph, so the
                     // index is created here to make it depend on the order of the messages only.
                     let index = backend
-                        .create_index(params, embedding.as_slice())
+                        .create_index(params, partition_id, embedding.as_slice())
                         .context(format!(
                             "failed to create index for partition {partition_id:?}"
                         ))
@@ -712,7 +731,7 @@ mod tests {
         let backend = inmem::InmemBackend::new();
 
         let index = backend
-            .create_index(&params, embeddings[0].as_slice())
+            .create_index(&params, PartitionId::from(0u64), embeddings[0].as_slice())
             .unwrap();
         let partition = Partition {
             partition_id: PartitionId::from(0u64),

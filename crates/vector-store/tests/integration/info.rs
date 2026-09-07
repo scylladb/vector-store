@@ -8,6 +8,7 @@ use crate::vs_index::usearch_test_config;
 use crate::{db_basic, mock_opensearch};
 use httpclient::HttpClient;
 use vector_store::Config;
+use vector_store::DiskannBackendKind;
 use vector_store::HttpServerExt;
 
 async fn run_vs(config: Config) -> (HttpClient, impl Sized, impl Sized) {
@@ -52,7 +53,7 @@ async fn get_application_info_opensearch() {
 #[tokio::test]
 async fn get_application_info_diskann() {
     let (client, _server, _config_senders) = run_vs(Config {
-        use_diskann: true,
+        diskann_backend: Some(DiskannBackendKind::Inmem),
         ..usearch_test_config()
     })
     .await;

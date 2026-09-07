@@ -5,6 +5,11 @@
 
 use crate::invariant_key::InvariantKey;
 use bigdecimal::BigDecimal;
+use scylla::serialize::SerializationError;
+use scylla::serialize::row::RowSerializationContext;
+use scylla::serialize::row::SerializeRow;
+use scylla::serialize::value::SerializeValue;
+use scylla::serialize::writers::RowWriter;
 use scylla::value::CqlDecimal;
 use scylla::value::CqlValue;
 
@@ -25,6 +30,38 @@ impl PrimaryKey {
     pub fn get(&self, idx: usize) -> Option<CqlValue> {
         self.0.get(idx)
     }
+}
+
+impl SerializeRow for PrimaryKey {
+    fn serialize(
+        &self,
+        ctx: &RowSerializationContext<'_>,
+        writer: &mut RowWriter,
+    ) -> Result<(), SerializationError> {
+        if ctx.columns().len() != self.len() {
+            return Err(SerializationError::new(WrongColumnCount {
+                key_columns: self.len(),
+                cql_columns: ctx.columns().len(),
+            }));
+        }
+
+        for (column, value) in ctx.columns().iter().zip(self.0.iter()) {
+            value.serialize(column.typ(), writer.make_cell_writer())?;
+        }
+
+        Ok(())
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("primary key has {key_columns} columns, but the statement takes {cql_columns}")]
+struct WrongColumnCount {
+    key_columns: usize,
+    cql_columns: usize,
 }
 
 impl FromIterator<CqlValue> for PrimaryKey {
