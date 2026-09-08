@@ -1,0 +1,91 @@
+//! Binary (fbin/ibin) dataset loaders for vector-search workloads.
+//!
+//! A benchmark dataset is three files in the big-ann-benchmarks binary
+//! formats:
+//!
+//!   base vectors  - fbin: header `count: u32 LE, dimension: u32 LE`, then
+//!                   count x dimension f32 LE; ids are the record indices.
+//!   query vectors - fbin, same layout.
+//!   ground truth  - ibin: same header (`count, k`), then count x k u32 LE
+//!                   neighbour ids (nearest first), aligned with the query
+//!                   file. Official big-ann files append count x k f32
+//!                   distances; both layouts are accepted (distances unread).
+
+/// Read an fbin header, returning `#{ count, dimension }` validated against the
+/// file length.
+fn read_fbin_header(file, path) {
+    let count = file.read_u32(fs::LE)?;
+    let dimension = file.read_u32(fs::LE)?;
+    let expected = 8 + count * dimension * 4;
+    if file.len() != expected {
+        let hint = "";
+        if file.len() < expected && dimension > 0 {
+            let holds = (file.len() - 8) / (dimension * 4);
+            hint = `; truncated or unpatched prefix crop (holds ${holds} whole \
+                records; for a crop, patch header count to ${holds})`;
+        }
+        return Err(`${path}: file is ${file.len()} bytes, header ${count} x \
+            ${dimension} implies ${expected}${hint}`);
+    }
+    Ok(#{ "count": count, "dimension": dimension })
+}
+
+/// Load an fbin base-vector file into a Vec of `#{ id, bucket, vector }` (the
+/// text-loader row shape). fbin has no buckets, so `bucketed` must be false.
+pub async fn load_base_vectors(path, bucketed) {
+    if bucketed {
+        return Err("fbin datasets have no bucket column; use the text format for the bucketed workload");
+    }
+    let file = fs::open_binary(path)?;
+    let header = read_fbin_header(file, path)?;
+    let rows = [];
+    for id in 0..header.count {
+        rows.push(#{ "id": id, "bucket": 0, "vector": file.read_f32_vec(fs::LE, header.dimension)? });
+    }
+    Ok(rows)
+}
+
+/// Like `load_base_vectors`, but keeps each vector as packed little-endian f32
+/// bytes (4 bytes per component instead of a rune value); latte binds them to
+/// `vector<float, N>` directly. Bind-only: script code cannot index the
+/// components.
+pub async fn load_base_vectors_packed(path) {
+    let file = fs::open_binary(path)?;
+    let header = read_fbin_header(file, path)?;
+    let rows = [];
+    for id in 0..header.count {
+        rows.push(#{ "id": id, "bucket": 0, "vector": file.read_bytes(header.dimension * 4)? });
+    }
+    Ok(rows)
+}
+
+/// Load an fbin query-vector file into a Vec of Vec<f64>.
+pub async fn load_query_vectors(path) {
+    let file = fs::open_binary(path)?;
+    let header = read_fbin_header(file, path)?;
+    let rows = [];
+    for _ in 0..header.count {
+        rows.push(file.read_f32_vec(fs::LE, header.dimension)?);
+    }
+    Ok(rows)
+}
+
+/// Load a ground-truth file into a Vec of Vec<i64> (k neighbour ids per query,
+/// nearest first). Accepts the bare ibin layout and the official layout with
+/// appended f32 distances (not read).
+pub async fn load_ground_truth(path) {
+    let file = fs::open_binary(path)?;
+    let count = file.read_u32(fs::LE)?;
+    let k = file.read_u32(fs::LE)?;
+    let ids_only = 8 + count * k * 4;
+    let with_distances = 8 + count * k * 8;
+    if file.len() != ids_only && file.len() != with_distances {
+        return Err(`${path}: file is ${file.len()} bytes, expected ${ids_only} \
+            (ids) or ${with_distances} (ids + distances) for ${count} x ${k}`);
+    }
+    let rows = [];
+    for _ in 0..count {
+        rows.push(file.read_u32_vec(fs::LE, k)?);
+    }
+    Ok(rows)
+}

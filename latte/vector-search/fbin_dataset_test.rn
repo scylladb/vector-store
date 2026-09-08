@@ -1,0 +1,78 @@
+//! Smoke test for the fbin_dataset loaders. Needs any CQL endpoint (plain
+//! ScyllaDB is enough, no vector-store) and the fixture files in testdata/
+//! (regenerate with testdata/gen_fbin_testdata.py):
+//!
+//!   latte run -f smoke fbin_dataset_test.rn <node> -d 1
+//!
+//! Checks valid files in every representation, both ground-truth layouts, an
+//! id above i32::MAX, and the error paths: truncated file, unpatched prefix crop,
+//! wrong ground-truth size.
+
+use latte::*;
+
+mod fbin_dataset;
+
+const DATA_DIR = latte::param!("data_dir", "testdata/");
+
+fn expect_err(result, expected, label) {
+    match result {
+        Ok(_) => Err(`${label}: expected an error, got Ok`),
+        Err(e) => {
+            let msg = `${e}`;
+            for part in expected {
+                if !msg.contains(part) {
+                    return Err(`${label}: error "${msg}" does not contain "${part}"`);
+                }
+            }
+            Ok(msg)
+        }
+    }
+}
+
+pub async fn prepare(db) {
+    let rows = fbin_dataset::load_base_vectors(`${DATA_DIR}data.fbin`, false).await?;
+    if rows.len() != 10 || rows[9].vector.len() != 4 {
+        return Err("load_base_vectors: wrong shape");
+    }
+    if rows[1].vector[0] != 2.0 {
+        return Err(`load_base_vectors: wrong value ${rows[1].vector[0]}`);
+    }
+    let packed = fbin_dataset::load_base_vectors_packed(`${DATA_DIR}data.fbin`).await?;
+    if packed.len() != 10 || packed[0].vector.len() != 16 {
+        return Err("load_base_vectors_packed: wrong shape");
+    }
+    if fbin_dataset::load_query_vectors(`${DATA_DIR}data.fbin`).await?.len() != 10 {
+        return Err("load_query_vectors: wrong count");
+    }
+
+    let gt = fbin_dataset::load_ground_truth(`${DATA_DIR}gt_ids.ibin`).await?;
+    if gt.len() != 10 || gt[9] != [45, 46, 47, 48, 4294967295] {
+        return Err("load_ground_truth ids-only: wrong content");
+    }
+    if fbin_dataset::load_ground_truth(`${DATA_DIR}gt_dist.bin`).await? != gt {
+        return Err("load_ground_truth ids+distances: ids differ from ids-only file");
+    }
+
+    expect_err(
+        fbin_dataset::load_base_vectors(`${DATA_DIR}data_cropped.fbin`, false).await,
+        ["implies 1608", "holds 10 whole records", "patch header count to 10"],
+        "unpatched crop")?;
+    let msg = expect_err(
+        fbin_dataset::load_base_vectors(`${DATA_DIR}data_trailing.fbin`, false).await,
+        ["175 bytes, header 10 x 4 implies 168"],
+        "trailing bytes")?;
+    if msg.contains("patch header") {
+        return Err("trailing bytes: crop hint must not appear for a too-large file");
+    }
+    expect_err(
+        fbin_dataset::load_ground_truth(`${DATA_DIR}gt_bad.bin`).await,
+        ["expected 208", "408", "10 x 5"],
+        "wrong ground-truth size")?;
+
+    println!("all fbin loader checks passed");
+    Ok(())
+}
+
+pub async fn smoke(db, i) {
+    Ok(())
+}
