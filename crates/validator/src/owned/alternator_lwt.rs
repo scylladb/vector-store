@@ -48,10 +48,12 @@ fn delete_write_request(
 /// Verifies that VS correctly indexes writes made through the LWT path when
 /// `--alternator-write-isolation=always_use_lwt` is active.
 #[e2etest::test(group = alternator_lwt)]
-async fn alternator_with_always_use_lwt(actors: Arc<TestActors>) {
+async fn alternator_with_always_use_lwt(cluster: Arc<LwtAlternatorCluster>) {
     info!("started");
 
-    let (client, vs_clients) = alternator::make_clients(&actors).await;
+    let actors = cluster.actors();
+
+    let (client, vs_clients) = alternator::make_clients(actors).await;
 
     let table_name = alternator::unique_table_name();
     let index_name = alternator::unique_index_name();
@@ -210,26 +212,20 @@ async fn alternator_with_always_use_lwt(actors: Arc<TestActors>) {
     info!("finished");
 }
 
-e2etest::group!(
-    name = alternator_lwt,
-    fixtures = (Fixture),
-    parent = super::owned
-);
-
-struct Fixture {
+/// Alternator routing every write through LWT. The setting is cluster-wide, so
+/// it cannot share the standard cluster.
+struct LwtAlternatorCluster {
     actors: Arc<TestActors>,
 }
 
-impl e2etest::Fixture for Fixture {
+impl e2etest::Fixture for LwtAlternatorCluster {
     async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
         let actors = setup.setup::<TestActors>().await?;
-
         alternator::init_with_args(
             &actors,
             [("--alternator-write-isolation", "always_use_lwt")],
         )
         .await;
-
         Some(Self { actors })
     }
 
@@ -237,3 +233,15 @@ impl e2etest::Fixture for Fixture {
         common::cleanup(&self.actors).await;
     }
 }
+
+impl LwtAlternatorCluster {
+    fn actors(&self) -> &TestActors {
+        &self.actors
+    }
+}
+
+e2etest::group!(
+    name = alternator_lwt,
+    fixtures = (LwtAlternatorCluster),
+    parent = super::owned
+);
