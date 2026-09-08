@@ -3,7 +3,6 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
-use crate::TestActors;
 use crate::common::*;
 use e2etest_firewall::FirewallExt;
 use e2etest_scylla_cluster::ScyllaClusterExt;
@@ -25,42 +24,26 @@ const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(12); // slightly more th
 
 e2etest::group!(
     name = reconnect,
-    fixtures = (Fixture),
+    fixtures = (OwnedProxyCluster),
     parent = crate::owned
 );
 
-struct Fixture {
-    actors: Arc<TestActors>,
-}
-
-impl e2etest::Fixture for Fixture {
-    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
-        let actors = setup.setup::<TestActors>().await?;
-        init_with_proxy_single_vs(&actors).await;
-        Some(Self { actors })
-    }
-
-    async fn teardown(self) {
-        cleanup(&self.actors).await;
-    }
-}
-
 #[e2etest::test(group = reconnect)]
-async fn reconnect_doesnt_break_fullscan(actors: Arc<TestActors>) {
+async fn reconnect_doesnt_break_fullscan(ctx: Arc<OwnedProxyContext>) {
     info!("started");
 
-    let (session, clients) = prepare_connection_single_vs_no_tls(&actors).await;
-    let client = clients.first().unwrap();
+    let actors = ctx.actors();
 
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(
-        &session,
-        "id INT PRIMARY KEY, embedding VECTOR<FLOAT, 3>",
-        Some("CDC = {'enabled': true}"),
-    )
-    .await;
+    let client = ctx.client();
+    let table = ctx
+        .create_table(
+            "id INT PRIMARY KEY, embedding VECTOR<FLOAT, 3>",
+            Some("CDC = {'enabled': true}"),
+        )
+        .await;
 
-    let stmt = session
+    let stmt = ctx
+        .session
         .prepare(format!(
             "INSERT INTO {table} (id, embedding) VALUES (?, [1.0, 2.0, 3.0])"
         ))
@@ -69,7 +52,7 @@ async fn reconnect_doesnt_break_fullscan(actors: Arc<TestActors>) {
 
     info!("Inserting data into the table");
     for id in 0..DATASET_SIZE {
-        session
+        ctx.session
             .execute_unpaged(&stmt, (id,))
             .await
             .expect("failed to insert a row");
@@ -96,16 +79,11 @@ async fn reconnect_doesnt_break_fullscan(actors: Arc<TestActors>) {
         .await;
 
     info!("Creating index");
-    let index = create_index(CreateIndexQuery::new(
-        &session,
-        &clients,
-        &table,
-        "embedding",
-    ))
-    .await;
+    let index = ctx.create_index(&table, "embedding").await;
 
     info!("Checking that full scan isn't completed");
-    let result = session
+    let result = ctx
+        .session
         .query_unpaged(
             format!("SELECT * FROM {table} ORDER BY embedding ANN OF [1.0, 2.0, 3.0] LIMIT 1"),
             (),
@@ -119,7 +97,7 @@ async fn reconnect_doesnt_break_fullscan(actors: Arc<TestActors>) {
     info!("Disconnect scylla-proxy");
     actors
         .firewall
-        .drop_traffic(get_default_db_proxy_ips(&actors))
+        .drop_traffic(get_default_db_proxy_ips(actors))
         .await;
 
     info!(
@@ -183,7 +161,7 @@ async fn reconnect_doesnt_break_fullscan(actors: Arc<TestActors>) {
                 "status: {:?}",
                 client.index_status(&index.keyspace, &index.index).await
             );
-            session
+            ctx.session
                 .query_unpaged(
                     format!(
                         "SELECT * FROM {table} ORDER BY embedding ANN OF [1.0, 2.0, 3.0] LIMIT 1"
@@ -198,32 +176,24 @@ async fn reconnect_doesnt_break_fullscan(actors: Arc<TestActors>) {
     )
     .await;
 
-    info!("Dropping keyspace");
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop a keyspace");
-
     info!("finished");
 }
 
 #[e2etest::test(group = reconnect)]
-async fn restarting_one_node_doesnt_break_fullscan(actors: Arc<TestActors>) {
+async fn restarting_one_node_doesnt_break_fullscan(ctx: Arc<OwnedProxyContext>) {
     info!("started");
 
-    let (session, clients) = prepare_connection_single_vs_no_tls(&actors).await;
-    let client = clients.first().unwrap();
+    let actors = ctx.actors();
+
+    let client = ctx.client();
 
     info!("Creating a table and inserting data");
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(
-        &session,
-        "id INT PRIMARY KEY, embedding VECTOR<FLOAT, 3>",
-        None,
-    )
-    .await;
+    let table = ctx
+        .create_table("id INT PRIMARY KEY, embedding VECTOR<FLOAT, 3>", None)
+        .await;
 
-    let stmt = session
+    let stmt = ctx
+        .session
         .prepare(format!(
             "INSERT INTO {table} (id, embedding) VALUES (?, [1.0, 2.0, 3.0])"
         ))
@@ -231,13 +201,13 @@ async fn restarting_one_node_doesnt_break_fullscan(actors: Arc<TestActors>) {
         .expect("failed to prepare a statement");
 
     for id in 0..DATASET_SIZE {
-        session
+        ctx.session
             .execute_unpaged(&stmt, (id,))
             .await
             .expect("failed to insert a row");
     }
 
-    let results = get_query_results(format!("SELECT * FROM {table}"), &session).await;
+    let results = get_query_results(format!("SELECT * FROM {table}"), &ctx.session).await;
     let rows = results
         .rows::<(i32, Vec<f32>)>()
         .expect("failed to get rows");
@@ -256,13 +226,7 @@ async fn restarting_one_node_doesnt_break_fullscan(actors: Arc<TestActors>) {
         .await;
 
     info!("Creating index");
-    let index = create_index(CreateIndexQuery::new(
-        &session,
-        &clients,
-        &table,
-        "embedding",
-    ))
-    .await;
+    let index = ctx.create_index(&table, "embedding").await;
 
     info!("Checking that full scan isn't completed");
     wait_for(
@@ -279,7 +243,7 @@ async fn restarting_one_node_doesnt_break_fullscan(actors: Arc<TestActors>) {
     )
     .await;
 
-    let proxy_addr = get_default_scylla_proxy_node_configs(&actors)
+    let proxy_addr = get_default_scylla_proxy_node_configs(actors)
         .await
         .first()
         .unwrap()
@@ -318,7 +282,7 @@ async fn restarting_one_node_doesnt_break_fullscan(actors: Arc<TestActors>) {
         "Expected {DATASET_SIZE} vectors to be indexed"
     );
 
-    session
+    ctx.session
         .query_unpaged(
             format!("SELECT * FROM {table} ORDER BY embedding ANN OF [1.0, 2.0, 3.0] LIMIT 5"),
             (),
@@ -326,32 +290,24 @@ async fn restarting_one_node_doesnt_break_fullscan(actors: Arc<TestActors>) {
         .await
         .expect("failed to query ANN search");
 
-    info!("Dropping keyspace");
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop a keyspace");
-
     info!("finished");
 }
 
 #[e2etest::test(group = reconnect)]
-async fn restarting_all_nodes_doesnt_break_fullscan(actors: Arc<TestActors>) {
+async fn restarting_all_nodes_doesnt_break_fullscan(ctx: Arc<OwnedProxyContext>) {
     info!("started");
 
-    let (session, clients) = prepare_connection_single_vs_no_tls(&actors).await;
-    let client = clients.first().unwrap();
+    let actors = ctx.actors();
+
+    let client = ctx.client();
 
     info!("Creating a table and inserting data");
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(
-        &session,
-        "id INT PRIMARY KEY, embedding VECTOR<FLOAT, 3>",
-        None,
-    )
-    .await;
+    let table = ctx
+        .create_table("id INT PRIMARY KEY, embedding VECTOR<FLOAT, 3>", None)
+        .await;
 
-    let stmt = session
+    let stmt = ctx
+        .session
         .prepare(format!(
             "INSERT INTO {table} (id, embedding) VALUES (?, [1.0, 2.0, 3.0])"
         ))
@@ -359,13 +315,13 @@ async fn restarting_all_nodes_doesnt_break_fullscan(actors: Arc<TestActors>) {
         .expect("failed to prepare a statement");
 
     for id in 0..DATASET_SIZE {
-        session
+        ctx.session
             .execute_unpaged(&stmt, (id,))
             .await
             .expect("failed to insert a row");
     }
 
-    let results = get_query_results(format!("SELECT * FROM {table}"), &session).await;
+    let results = get_query_results(format!("SELECT * FROM {table}"), &ctx.session).await;
     let rows = results
         .rows::<(i32, Vec<f32>)>()
         .expect("failed to get rows");
@@ -384,13 +340,7 @@ async fn restarting_all_nodes_doesnt_break_fullscan(actors: Arc<TestActors>) {
         .await;
 
     info!("Creating index");
-    let index = create_index(CreateIndexQuery::new(
-        &session,
-        &clients,
-        &table,
-        "embedding",
-    ))
-    .await;
+    let index = ctx.create_index(&table, "embedding").await;
 
     wait_for(
         || async {
@@ -415,7 +365,7 @@ async fn restarting_all_nodes_doesnt_break_fullscan(actors: Arc<TestActors>) {
     info!("Base number of total connections: {total_connections}");
 
     info!("Restart each node one by one");
-    for proxy_addr in get_default_scylla_proxy_node_configs(&actors)
+    for proxy_addr in get_default_scylla_proxy_node_configs(actors)
         .await
         .into_iter()
         .map(|config| config.proxy_addr)
@@ -465,7 +415,7 @@ async fn restarting_all_nodes_doesnt_break_fullscan(actors: Arc<TestActors>) {
         "Expected {DATASET_SIZE} vectors to be indexed"
     );
 
-    session
+    ctx.session
         .query_unpaged(
             format!("SELECT * FROM {table} ORDER BY embedding ANN OF [1.0, 2.0, 3.0] LIMIT 5"),
             (),
@@ -473,32 +423,24 @@ async fn restarting_all_nodes_doesnt_break_fullscan(actors: Arc<TestActors>) {
         .await
         .expect("failed to query ANN search");
 
-    info!("Dropping keyspace");
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop a keyspace");
-
     info!("finished");
 }
 
 #[e2etest::test(group = reconnect)]
-async fn test_restarting_vs_cluster_does_not_break_setup(actors: Arc<TestActors>) {
+async fn test_restarting_vs_cluster_does_not_break_setup(ctx: Arc<OwnedProxyContext>) {
     info!("started");
 
-    let (session, clients) = prepare_connection_single_vs_no_tls(&actors).await;
-    let client = clients.first().unwrap();
+    let actors = ctx.actors();
+
+    let client = ctx.client();
 
     info!("Creating a table and inserting data");
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(
-        &session,
-        "id INT PRIMARY KEY, embedding VECTOR<FLOAT, 3>",
-        None,
-    )
-    .await;
+    let table = ctx
+        .create_table("id INT PRIMARY KEY, embedding VECTOR<FLOAT, 3>", None)
+        .await;
 
-    let stmt = session
+    let stmt = ctx
+        .session
         .prepare(format!(
             "INSERT INTO {table} (id, embedding) VALUES (?, [1.0, 2.0, 3.0])"
         ))
@@ -506,7 +448,7 @@ async fn test_restarting_vs_cluster_does_not_break_setup(actors: Arc<TestActors>
         .expect("failed to prepare a statement");
 
     for id in 0..DATASET_SIZE {
-        session
+        ctx.session
             .execute_unpaged(&stmt, (id,))
             .await
             .expect("failed to insert a row");
@@ -522,13 +464,7 @@ async fn test_restarting_vs_cluster_does_not_break_setup(actors: Arc<TestActors>
         .await;
 
     info!("Creating index");
-    let index = create_index(CreateIndexQuery::new(
-        &session,
-        &clients,
-        &table,
-        "embedding",
-    ))
-    .await;
+    let index = ctx.create_index(&table, "embedding").await;
 
     info!("Stopping VS cluster");
     actors.vs.stop().await;
@@ -538,8 +474,8 @@ async fn test_restarting_vs_cluster_does_not_break_setup(actors: Arc<TestActors>
 
     actors
         .vs
-        .start(get_proxy_vs_node_configs(&actors).pipe(|mut nodes| {
-            let translation_map = get_proxy_translation_map(&actors);
+        .start(get_proxy_vs_node_configs(actors).pipe(|mut nodes| {
+            let translation_map = get_proxy_translation_map(actors);
             for node in nodes.iter_mut() {
                 node.envs.insert(
                     "VECTOR_STORE_CQL_URI_TRANSLATION_MAP".to_string(),
@@ -558,19 +494,13 @@ async fn test_restarting_vs_cluster_does_not_break_setup(actors: Arc<TestActors>
         "Expected {DATASET_SIZE} vectors to be indexed"
     );
 
-    session
+    ctx.session
         .query_unpaged(
             format!("SELECT * FROM {table} ORDER BY embedding ANN OF [1.0, 2.0, 3.0] LIMIT 5"),
             (),
         )
         .await
         .expect("failed to query ANN search");
-
-    info!("Dropping keyspace");
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop a keyspace");
 
     info!("finished");
 }
