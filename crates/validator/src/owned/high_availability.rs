@@ -5,42 +5,28 @@
 
 use std::collections::HashMap;
 
-use crate::TestActors;
+use super::CustomCluster;
 use crate::common::*;
 use e2etest_scylla_cluster::ScyllaClusterExt;
 use e2etest_scylla_cluster::ScyllaNodeConfig;
 use e2etest_tls::TlsExt;
 use e2etest_vector_store_cluster::VectorStoreNodeConfig;
-use scylla::statement::Statement;
 use std::sync::Arc;
 use tracing::info;
 
 e2etest::group!(
     name = high_availability,
-    fixtures = (Fixture),
+    fixtures = (),
     parent = super::owned
 );
 
-struct Fixture {
-    actors: Arc<TestActors>,
-}
-
-impl e2etest::Fixture for Fixture {
-    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
-        let actors = setup.setup::<TestActors>().await?;
-        Some(Self { actors })
-    }
-
-    async fn teardown(self) {
-        cleanup(&self.actors).await;
-    }
-}
-
 #[e2etest::test(group = high_availability)]
-async fn test_secondary_uri_works_correctly(actors: Arc<TestActors>) {
+async fn test_secondary_uri_works_correctly(cluster: Arc<CustomCluster>) {
     info!("started");
 
-    let vs_urls = get_default_vs_urls(&actors).await;
+    let actors = cluster.actors();
+
+    let vs_urls = get_default_vs_urls(actors).await;
     let vs_url = &vs_urls[0];
 
     let cert_path = actors.tls.cert_path().await;
@@ -91,10 +77,10 @@ async fn test_secondary_uri_works_correctly(actors: Arc<TestActors>) {
         user: Some(DEFAULT_DB_USER.to_string()),
         password: Some(DEFAULT_DB_PASSWORD.to_string()),
     }];
-    init_with_config(&actors, scylla_configs, vs_configs, true).await;
+    init_with_config(actors, scylla_configs, vs_configs, true).await;
 
     let vs_ips = vec![actors.services_subnet.ip(VS_OCTET_1)];
-    let (session, clients) = prepare_connection_with_custom_vs_ips(&actors, vs_ips).await;
+    let (session, clients) = prepare_connection_with_custom_vs_ips(actors, vs_ips).await;
 
     let keyspace = create_keyspace(&session).await;
     let table = create_table(&session, "pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None).await;
@@ -141,18 +127,7 @@ async fn test_secondary_uri_works_correctly(actors: Arc<TestActors>) {
         "Expected at most 10 results from ANN query after node down"
     );
 
-    // Drop keyspace
-    session
-        .query_unpaged(
-            {
-                let mut stmt = Statement::new(format!("DROP KEYSPACE IF EXISTS {keyspace}"));
-                stmt.set_is_idempotent(true);
-                stmt
-            },
-            (),
-        )
-        .await
-        .expect("failed to drop a keyspace");
+    drop_keyspace(&session, &keyspace).await;
 
     info!("finished");
 }
