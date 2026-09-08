@@ -5,7 +5,6 @@
 
 use super::ALTERNATOR_PORT;
 use crate::TestActors;
-use async_backtrace::framed;
 use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
 use aws_sdk_dynamodb::Client;
@@ -51,7 +50,6 @@ use std::net::Ipv4Addr;
 use std::num::NonZeroUsize;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
-use tracing::info;
 use tracing::warn;
 
 static TABLE_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -680,32 +678,6 @@ pub(crate) async fn get_scylla_configs(
         }
     }
     scylla_configs
-}
-
-/// Starts ScyllaDB with the Alternator endpoint enabled alongside the Vector
-/// Store. `extra_args` is a list of `(name, value)` pairs that override or
-/// extend the default alternator arguments.
-pub(crate) async fn init_with_args(
-    actors: &TestActors,
-    extra_args: impl IntoIterator<Item = (&str, &str)>,
-) {
-    info!("started");
-    let scylla_configs = get_scylla_configs(actors, extra_args, None).await;
-    let vs_configs = super::get_default_vs_node_configs(actors).await;
-
-    // Capture db_ip before actors is moved into init_with_config.
-    let db_ip = actors.services_subnet.ip(super::DB_OCTET_1);
-    super::init_with_config(actors, scylla_configs, vs_configs, true).await;
-
-    wait_for_alternator(db_ip).await;
-    info!("finished");
-}
-
-/// Standard test init: starts ScyllaDB with the Alternator endpoint enabled on
-/// each node's own IP, alongside the Vector Store.
-#[framed]
-pub async fn init(actors: &TestActors) {
-    init_with_args(actors, []).await;
 }
 
 /// Describes the key schema, attribute names, and name prefixes for a test

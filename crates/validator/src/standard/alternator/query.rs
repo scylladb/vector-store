@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
-use crate::TestActors;
+use super::AlternatorContext;
 use crate::common;
 use crate::common::alternator;
 use crate::common::alternator::Item;
@@ -20,7 +20,7 @@ use tracing::info;
 
 /// Verifies basic VectorSearch query: results returned, limit respected, nearest item first.
 #[e2etest::test(group = query)]
-async fn query_with_vector_search(actors: Arc<TestActors>) {
+async fn query_with_vector_search(ctx: Arc<AlternatorContext>) {
     info!("started");
 
     let shapes = [
@@ -57,7 +57,7 @@ async fn query_with_vector_search(actors: Arc<TestActors>) {
                 .vec(shape.vec().unwrap(), [4.0, 1.0, 2.0]),
         ];
 
-        let ctx = TableContext::create_with_data(&actors, shape, &dataset).await;
+        let ctx = TableContext::create_with_data(ctx.actors(), shape, &dataset).await;
 
         info!(
             "Issuing Query with VectorSearch Limit=2 on '{}'",
@@ -106,10 +106,10 @@ async fn query_with_vector_search(actors: Arc<TestActors>) {
 }
 
 #[e2etest::test(group = query)]
-async fn query_uses_selected_vector_index(actors: Arc<TestActors>) {
+async fn query_uses_selected_vector_index(ctx: Arc<AlternatorContext>) {
     info!("started");
 
-    let (client, vs_clients) = alternator::make_clients(&actors).await;
+    let (client, vs_clients) = alternator::make_clients(ctx.actors()).await;
 
     let table_name = alternator::unique_table_name();
     let partition_key_name = "Pk-Query-Case";
@@ -232,7 +232,7 @@ async fn query_uses_selected_vector_index(actors: Arc<TestActors>) {
 
 /// Verifies ANN results are ordered by ascending cosine distance.
 #[e2etest::test(group = query)]
-async fn query_with_vector_search_multiple_results_ordering(actors: Arc<TestActors>) {
+async fn query_with_vector_search_multiple_results_ordering(ctx: Arc<AlternatorContext>) {
     info!("started");
 
     let dataset = [
@@ -245,7 +245,7 @@ async fn query_with_vector_search_multiple_results_ordering(actors: Arc<TestActo
     ];
 
     let ctx = TableContext::create_with_data(
-        &actors,
+        ctx.actors(),
         &TableShape {
             table_prefix: None,
             index_prefix: None,
@@ -297,7 +297,7 @@ async fn query_with_vector_search_multiple_results_ordering(actors: Arc<TestActo
 
 /// Verifies ProjectionExpression returns only requested key attributes across name_patterns.
 #[e2etest::test(group = query)]
-async fn query_with_projection_special_names(actors: Arc<TestActors>) {
+async fn query_with_projection_special_names(ctx: Arc<AlternatorContext>) {
     info!("started");
 
     for shape in &alternator::name_patterns() {
@@ -317,7 +317,7 @@ async fn query_with_projection_special_names(actors: Arc<TestActors>) {
                 AttributeValue::S("extra-val".to_string()),
             )];
 
-        let ctx = TableContext::create_with_data(&actors, shape, &dataset).await;
+        let ctx = TableContext::create_with_data(ctx.actors(), shape, &dataset).await;
         let pk_name = ctx.shape.pk();
 
         let proj_expr: &str = if shape.sk_name.is_some() {
@@ -366,7 +366,7 @@ async fn query_with_projection_special_names(actors: Arc<TestActors>) {
 
 /// Verifies Select::AllAttributes returns all item attributes.
 #[e2etest::test(group = query)]
-async fn query_with_select_all_attributes(actors: Arc<TestActors>) {
+async fn query_with_select_all_attributes(ctx: Arc<AlternatorContext>) {
     info!("started");
 
     let shape = TableShape {
@@ -386,7 +386,7 @@ async fn query_with_select_all_attributes(actors: Arc<TestActors>) {
             AttributeValue::S("some-data".to_string()),
         )];
 
-    let ctx = TableContext::create_with_data(&actors, &shape, &dataset).await;
+    let ctx = TableContext::create_with_data(ctx.actors(), &shape, &dataset).await;
 
     info!("Querying with Select::AllAttributes");
     let items = ctx
@@ -425,7 +425,7 @@ async fn query_with_select_all_attributes(actors: Arc<TestActors>) {
 
 /// Verifies Select::Count returns count > 0 with empty items list.
 #[e2etest::test(group = query)]
-async fn query_with_select_count(actors: Arc<TestActors>) {
+async fn query_with_select_count(ctx: Arc<AlternatorContext>) {
     info!("started");
 
     let dataset = [
@@ -434,7 +434,7 @@ async fn query_with_select_count(actors: Arc<TestActors>) {
     ];
 
     let ctx = TableContext::create_with_data(
-        &actors,
+        ctx.actors(),
         &TableShape {
             table_prefix: None,
             index_prefix: None,
@@ -478,7 +478,7 @@ async fn query_with_select_count(actors: Arc<TestActors>) {
 
 /// Verifies Limit larger than dataset returns all items without error.
 #[e2etest::test(group = query)]
-async fn query_with_limit_larger_than_dataset(actors: Arc<TestActors>) {
+async fn query_with_limit_larger_than_dataset(ctx: Arc<AlternatorContext>) {
     info!("started");
 
     let dataset = [
@@ -488,7 +488,7 @@ async fn query_with_limit_larger_than_dataset(actors: Arc<TestActors>) {
     ];
 
     let ctx = TableContext::create_with_data(
-        &actors,
+        ctx.actors(),
         &TableShape {
             table_prefix: None,
             index_prefix: None,
@@ -539,10 +539,10 @@ async fn query_with_limit_larger_than_dataset(actors: Arc<TestActors>) {
 
 /// Verifies VectorSearch works with 1536-dimensional vectors.
 #[e2etest::test(group = query)]
-async fn query_with_large_dimensions(actors: Arc<TestActors>) {
+async fn query_with_large_dimensions(ctx: Arc<AlternatorContext>) {
     info!("started");
 
-    let (client, vs_clients) = alternator::make_clients(&actors).await;
+    let (client, vs_clients) = alternator::make_clients(ctx.actors()).await;
 
     let table_name = alternator::unique_table_name();
     let index_name = alternator::unique_index_name();
@@ -618,7 +618,7 @@ async fn query_with_large_dimensions(actors: Arc<TestActors>) {
 
 /// Verifies FilterExpression excludes non-matching items while preserving ANN ordering.
 #[e2etest::test(group = query)]
-async fn query_with_filter_expression(actors: Arc<TestActors>) {
+async fn query_with_filter_expression(ctx: Arc<AlternatorContext>) {
     info!("started");
 
     let pk_name = "Pk-Flt";
@@ -640,7 +640,7 @@ async fn query_with_filter_expression(actors: Arc<TestActors>) {
     ];
 
     let ctx = TableContext::create_with_data(
-        &actors,
+        ctx.actors(),
         &TableShape {
             table_prefix: None,
             index_prefix: None,
@@ -703,22 +703,6 @@ async fn query_with_filter_expression(actors: Arc<TestActors>) {
 
 e2etest::group!(
     name = query,
-    fixtures = (Fixture),
+    fixtures = (AlternatorContext),
     parent = super::alternator
 );
-
-struct Fixture {
-    actors: Arc<TestActors>,
-}
-
-impl e2etest::Fixture for Fixture {
-    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
-        let actors = setup.setup::<TestActors>().await?;
-        alternator::init(&actors).await;
-        Some(Self { actors })
-    }
-
-    async fn teardown(self) {
-        common::cleanup(&self.actors).await;
-    }
-}

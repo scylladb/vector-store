@@ -10,7 +10,7 @@
 //! this path by exercising `PutItem`, `DeleteItem`, `UpdateItem`, and
 //! `BatchWriteItem` (put-only, mixed put+delete, delete-only).
 
-use crate::TestActors;
+use super::AlternatorContext;
 use crate::common;
 use crate::common::alternator;
 use crate::common::alternator::Item;
@@ -49,10 +49,10 @@ fn delete_write_request(
 /// Verifies that VS correctly indexes writes made through the LWT path when
 /// the table is tagged with the `always_use_lwt` write isolation.
 #[e2etest::test(group = lwt)]
-async fn alternator_with_always_use_lwt(actors: Arc<TestActors>) {
+async fn alternator_with_always_use_lwt(ctx: Arc<AlternatorContext>) {
     info!("started");
 
-    let (client, vs_clients) = alternator::make_clients(&actors).await;
+    let (client, vs_clients) = alternator::make_clients(ctx.actors()).await;
 
     let table_name = alternator::unique_table_name();
     let index_name = alternator::unique_index_name();
@@ -231,20 +231,8 @@ async fn alternator_with_always_use_lwt(actors: Arc<TestActors>) {
     info!("finished");
 }
 
-e2etest::group!(name = lwt, fixtures = (Fixture), parent = super::alternator);
-
-struct Fixture {
-    actors: Arc<TestActors>,
-}
-
-impl e2etest::Fixture for Fixture {
-    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
-        let actors = setup.setup::<TestActors>().await?;
-        alternator::init(&actors).await;
-        Some(Self { actors })
-    }
-
-    async fn teardown(self) {
-        common::cleanup(&self.actors).await;
-    }
-}
+e2etest::group!(
+    name = lwt,
+    fixtures = (AlternatorContext),
+    parent = super::alternator
+);
