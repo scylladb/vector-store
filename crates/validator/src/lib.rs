@@ -28,6 +28,7 @@ mod tls_reload;
 
 use clap::Parser;
 use clap::Subcommand;
+use common::ProxyCluster;
 use common::StandardCluster;
 use e2etest::Config;
 use e2etest_dns::Dns;
@@ -175,13 +176,14 @@ fn validate_different_subnet(dns_ip: Ipv4Addr, base_ip: Ipv4Addr) {
 
 e2etest::group!(name = validator, fixtures = (TestActors));
 
-// Umbrella group owning the cluster its subgroups share, so a run starts it
-// once instead of once per group.
+// Umbrella groups owning the clusters their subgroups share, so a run starts
+// each of them once instead of once per group.
 e2etest::group!(
     name = standard,
     fixtures = (StandardCluster),
     parent = validator
 );
+e2etest::group!(name = proxy, fixtures = (ProxyCluster), parent = validator);
 
 pub async fn run() -> ExitCode {
     let args = Args::parse();
