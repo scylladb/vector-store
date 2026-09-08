@@ -490,6 +490,70 @@ pub async fn cleanup(actors: &TestActors) {
     info!("finished");
 }
 
+pub trait Cluster: e2etest::Fixture {
+    fn actors(&self) -> &TestActors;
+
+    fn connect(actors: &TestActors)
+    -> impl Future<Output = (Arc<Session>, Vec<HttpClient>)> + Send;
+
+    /// Undoes the cluster-wide changes a test made, like proxy rules.
+    /// Runs before the keyspace is dropped, so the drop can reach the database.
+    fn reset(actors: &TestActors) -> impl Future<Output = ()> + Send {
+        async move {
+            let _ = actors;
+        }
+    }
+}
+
+/// A session on cluster `C`, its Vector Store clients and a keyspace.
+///
+/// Named in a group's `fixtures = (...)`, it lives for the whole group.
+/// Named in test arguments only, it lives for a single test.
+pub struct TestEnv<C: Cluster> {
+    cluster: Arc<C>,
+    pub session: Arc<Session>,
+    pub clients: Vec<HttpClient>,
+    pub keyspace: KeyspaceName,
+}
+
+impl<C: Cluster> e2etest::Fixture for TestEnv<C> {
+    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
+        let cluster = setup.setup::<C>().await?;
+        let (session, clients) = C::connect(cluster.actors()).await;
+        let keyspace = create_keyspace(&session).await;
+        Some(Self {
+            cluster,
+            session,
+            clients,
+            keyspace,
+        })
+    }
+
+    async fn teardown(self) {
+        C::reset(self.cluster.actors()).await;
+        drop_keyspace(&self.session, &self.keyspace).await;
+    }
+}
+
+impl<C: Cluster> TestEnv<C> {
+    pub async fn create_table(&self, columns: &str, options: Option<&str>) -> TableName {
+        create_table(&self.session, columns, options).await
+    }
+
+    /// Prepares an index to be customized with options or filter columns.
+    pub fn index_query<'a>(
+        &'a self,
+        table: &TableName,
+        target_column: &str,
+    ) -> CreateIndexQuery<'a> {
+        CreateIndexQuery::new(&self.session, &self.clients, table, target_column)
+    }
+
+    pub async fn create_index(&self, table: &TableName, target_column: &str) -> IndexInfo {
+        create_index(self.index_query(table, target_column)).await
+    }
+}
+
 #[framed]
 pub async fn prepare_connection_with_custom_vs_ips(
     actors: &TestActors,
@@ -827,6 +891,11 @@ pub async fn create_keyspace(session: &Session) -> KeyspaceName {
         .expect("failed to use a keyspace");
 
     keyspace
+}
+
+#[framed]
+pub async fn drop_keyspace(session: &Session, keyspace: &KeyspaceName) {
+    apply_schema_change(session, format!("DROP KEYSPACE IF EXISTS {keyspace}")).await;
 }
 
 #[framed]

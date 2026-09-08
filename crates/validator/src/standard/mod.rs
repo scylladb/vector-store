@@ -20,6 +20,8 @@ mod similarity_functions;
 use crate::TestActors;
 use crate::common::alternator::wait_for_alternator;
 use crate::common::*;
+use httpclient::HttpClient;
+use scylla::client::session::Session;
 use std::sync::Arc;
 
 e2etest::group!(
@@ -49,3 +51,15 @@ impl e2etest::Fixture for StandardCluster {
         cleanup(&self.actors).await;
     }
 }
+
+impl Cluster for StandardCluster {
+    fn actors(&self) -> &TestActors {
+        &self.actors
+    }
+
+    async fn connect(actors: &TestActors) -> (Arc<Session>, Vec<HttpClient>) {
+        prepare_connection(actors).await
+    }
+}
+
+type TestContext = TestEnv<StandardCluster>;
