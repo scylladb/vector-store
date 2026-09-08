@@ -6,6 +6,7 @@
 use crate::TestActors;
 use async_backtrace::framed;
 use e2etest_dns::DnsExt;
+use e2etest_firewall::FirewallExt;
 use e2etest_scylla_cluster::ScyllaClusterExt;
 use e2etest_scylla_cluster::ScyllaNodeConfig;
 use e2etest_scylla_proxy_cluster::ScyllaProxyClusterExt;
@@ -480,6 +481,10 @@ pub async fn init_with_config(
 #[framed]
 pub async fn cleanup(actors: &TestActors) {
     info!("started");
+    // A panicking test can leak firewall rules into the host routing table and
+    // poison every later cluster on the same addresses; the firewall actor has
+    // no cleanup of its own.
+    actors.firewall.turn_off_rules().await;
     for name in VS_NAMES.iter() {
         actors.dns.remove(name.to_string()).await;
     }
