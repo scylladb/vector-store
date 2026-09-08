@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
-use crate::TestActors;
+use super::TestContext;
 use crate::common::*;
 use itertools::Itertools;
 use std::array;
@@ -21,41 +21,25 @@ const TTL_EXPIRATION_TIMEOUT: Duration = Duration::from_secs(10);
 
 e2etest::group!(
     name = cdc_direct,
-    fixtures = (FixtureDirect),
-    parent = crate::validator
+    fixtures = (TestContext),
+    parent = super::standard
 );
 
-struct FixtureDirect {
-    actors: Arc<TestActors>,
-}
-
-impl e2etest::Fixture for FixtureDirect {
-    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
-        let actors = setup.setup::<TestActors>().await?;
-        init(&actors).await;
-        Some(Self { actors })
-    }
-
-    async fn teardown(self) {
-        cleanup(&self.actors).await;
-    }
-}
-
 #[e2etest::test(group = cdc_direct)]
-async fn cdc_insert_visible_immediately(actors: Arc<TestActors>) {
+async fn cdc_insert_visible_immediately(ctx: Arc<TestContext>) {
     info!("started");
 
-    let (session, clients) = prepare_connection_single_vs(&actors).await;
-    let client = clients.first().unwrap();
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(&session, "pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None).await;
-    let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
+    let client = &ctx.clients[0];
+    let table = ctx
+        .create_table("pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None)
+        .await;
+    let index = ctx.create_index(&table, "v").await;
 
     let status = wait_for_index(client, &index).await;
     assert_eq!(status.count, 0, "Index should start empty");
 
     // Insert after index creation - this should be picked up by the fine-grained CDC reader
-    session
+    ctx.session
         .query_unpaged(
             format!("INSERT INTO {table} (pk, v) VALUES (1, [1.0, 2.0, 3.0])"),
             (),
@@ -69,7 +53,7 @@ async fn cdc_insert_visible_immediately(actors: Arc<TestActors>) {
         || async {
             let result = get_opt_query_results(
                 format!("SELECT pk FROM {table} ORDER BY v ANN OF [1.0, 2.0, 3.0] LIMIT 1"),
-                &session,
+                &ctx.session,
             )
             .await?;
             let mut rows = result.rows::<(i32,)>().ok()?;
@@ -82,31 +66,26 @@ async fn cdc_insert_visible_immediately(actors: Arc<TestActors>) {
     .await;
     assert_eq!(pk, 1, "Expected pk=1 returned by ANN query");
 
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop keyspace");
-
     info!("finished");
 }
 
 #[e2etest::test(group = cdc_direct)]
-async fn cdc_update_visible_immediately(actors: Arc<TestActors>) {
+async fn cdc_update_visible_immediately(ctx: Arc<TestContext>) {
     info!("started");
 
-    let (session, clients) = prepare_connection_single_vs(&actors).await;
-    let client = clients.first().unwrap();
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(&session, "pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None).await;
+    let client = &ctx.clients[0];
+    let table = ctx
+        .create_table("pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None)
+        .await;
 
-    session
+    ctx.session
         .query_unpaged(
             format!("INSERT INTO {table} (pk, v) VALUES (1, [0.0, 0.0, 0.0])"),
             (),
         )
         .await
         .expect("failed to insert data");
-    session
+    ctx.session
         .query_unpaged(
             format!("INSERT INTO {table} (pk, v) VALUES (2, [5.0, 5.0, 5.0])"),
             (),
@@ -115,7 +94,7 @@ async fn cdc_update_visible_immediately(actors: Arc<TestActors>) {
         .expect("failed to insert data");
 
     let index = create_index(
-        CreateIndexQuery::new(&session, &clients, &table, "v")
+        ctx.index_query(&table, "v")
             .options([("similarity_function", "euclidean")]),
     )
     .await;
@@ -131,7 +110,7 @@ async fn cdc_update_visible_immediately(actors: Arc<TestActors>) {
         || async {
             let result = get_opt_query_results(
                 format!("SELECT pk FROM {table} ORDER BY v ANN OF [10.0, 10.0, 10.0] LIMIT 1"),
-                &session,
+                &ctx.session,
             )
             .await?;
             let mut rows = result.rows::<(i32,)>().ok()?;
@@ -145,7 +124,7 @@ async fn cdc_update_visible_immediately(actors: Arc<TestActors>) {
     assert_eq!(pk, 2, "Before update: pk=2 should be closest to [10,10,10]");
 
     // Update pk=1 vector to [10,10,10] (closer than pk=2) - fine-grained CDC reader should pick this up
-    session
+    ctx.session
         .query_unpaged(
             format!("UPDATE {table} SET v = [10.0, 10.0, 10.0] WHERE pk = 1"),
             (),
@@ -158,7 +137,7 @@ async fn cdc_update_visible_immediately(actors: Arc<TestActors>) {
         || async {
             let result = get_opt_query_results(
                 format!("SELECT pk FROM {table} ORDER BY v ANN OF [10.0, 10.0, 10.0] LIMIT 1"),
-                &session,
+                &ctx.session,
             )
             .await?;
             let mut rows = result.rows::<(i32,)>().ok()?;
@@ -171,11 +150,6 @@ async fn cdc_update_visible_immediately(actors: Arc<TestActors>) {
     .await;
     assert_eq!(pk, 1, "After update: pk=1 should be closest to [10,10,10]");
 
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop keyspace");
-
     info!("finished");
 }
 fn now_epoch_secs() -> i64 {
@@ -186,16 +160,16 @@ fn now_epoch_secs() -> i64 {
 }
 
 #[e2etest::test(group = cdc_direct)]
-async fn cdc_delete_visible_immediately(actors: Arc<TestActors>) {
+async fn cdc_delete_visible_immediately(ctx: Arc<TestContext>) {
     info!("started");
 
-    let (session, clients) = prepare_connection_single_vs(&actors).await;
-    let client = clients.first().unwrap();
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(&session, "pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None).await;
+    let client = &ctx.clients[0];
+    let table = ctx
+        .create_table("pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None)
+        .await;
 
     for pk in 1..=3 {
-        session
+        ctx.session
             .query_unpaged(
                 format!("INSERT INTO {table} (pk, v) VALUES ({pk}, [1.0, 1.0, 1.0])"),
                 (),
@@ -204,13 +178,13 @@ async fn cdc_delete_visible_immediately(actors: Arc<TestActors>) {
             .expect("failed to insert data");
     }
 
-    let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
+    let index = ctx.create_index(&table, "v").await;
 
     let status = wait_for_index(client, &index).await;
     assert_eq!(status.count, 3, "Index should have 3 vectors");
 
     // Delete one row - fine-grained CDC reader should pick this up
-    session
+    ctx.session
         .query_unpaged(format!("DELETE FROM {table} WHERE pk = 2"), ())
         .await
         .expect("failed to delete data");
@@ -226,29 +200,24 @@ async fn cdc_delete_visible_immediately(actors: Arc<TestActors>) {
     )
     .await;
 
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop keyspace");
-
     info!("finished");
 }
 
 #[e2etest::test(group = cdc_direct)]
-async fn cdc_lwt_insert_visible(actors: Arc<TestActors>) {
+async fn cdc_lwt_insert_visible(ctx: Arc<TestContext>) {
     info!("started");
 
-    let (session, clients) = prepare_connection_single_vs(&actors).await;
-    let client = clients.first().unwrap();
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(&session, "pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None).await;
-    let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
+    let client = &ctx.clients[0];
+    let table = ctx
+        .create_table("pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None)
+        .await;
+    let index = ctx.create_index(&table, "v").await;
 
     let status = wait_for_index(client, &index).await;
     assert_eq!(status.count, 0, "Index should start empty");
 
     // LWT insert
-    session
+    ctx.session
         .query_unpaged(
             format!("INSERT INTO {table} (pk, v) VALUES (1, [1.0, 2.0, 3.0]) IF NOT EXISTS"),
             (),
@@ -261,7 +230,7 @@ async fn cdc_lwt_insert_visible(actors: Arc<TestActors>) {
         || async {
             let result = get_opt_query_results(
                 format!("SELECT pk FROM {table} ORDER BY v ANN OF [1.0, 2.0, 3.0] LIMIT 1"),
-                &session,
+                &ctx.session,
             )
             .await?;
             let mut rows = result.rows::<(i32,)>().ok()?;
@@ -274,31 +243,26 @@ async fn cdc_lwt_insert_visible(actors: Arc<TestActors>) {
     .await;
     assert_eq!(pk, 1, "Unexpected primary key returned by ANN query");
 
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop keyspace");
-
     info!("finished");
 }
 
 #[e2etest::test(group = cdc_direct)]
-async fn cdc_lwt_update_visible(actors: Arc<TestActors>) {
+async fn cdc_lwt_update_visible(ctx: Arc<TestContext>) {
     info!("started");
 
-    let (session, clients) = prepare_connection_single_vs(&actors).await;
-    let client = clients.first().unwrap();
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(&session, "pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None).await;
+    let client = &ctx.clients[0];
+    let table = ctx
+        .create_table("pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None)
+        .await;
 
-    session
+    ctx.session
         .query_unpaged(
             format!("INSERT INTO {table} (pk, v) VALUES (1, [0.0, 0.0, 0.0])"),
             (),
         )
         .await
         .expect("failed to insert data");
-    session
+    ctx.session
         .query_unpaged(
             format!("INSERT INTO {table} (pk, v) VALUES (2, [5.0, 5.0, 5.0])"),
             (),
@@ -307,7 +271,7 @@ async fn cdc_lwt_update_visible(actors: Arc<TestActors>) {
         .expect("failed to insert data");
 
     let index = create_index(
-        CreateIndexQuery::new(&session, &clients, &table, "v")
+        ctx.index_query(&table, "v")
             .options([("similarity_function", "euclidean")]),
     )
     .await;
@@ -323,7 +287,7 @@ async fn cdc_lwt_update_visible(actors: Arc<TestActors>) {
         || async {
             let result = get_opt_query_results(
                 format!("SELECT pk FROM {table} ORDER BY v ANN OF [10.0, 10.0, 10.0] LIMIT 1"),
-                &session,
+                &ctx.session,
             )
             .await?;
             let mut rows = result.rows::<(i32,)>().ok()?;
@@ -337,7 +301,7 @@ async fn cdc_lwt_update_visible(actors: Arc<TestActors>) {
     assert_eq!(pk, 2, "Before update: pk=2 should be closest to [10,10,10]");
 
     // LWT update pk=1 vector to [10,10,10] (closer than pk=2)
-    session
+    ctx.session
         .query_unpaged(
             format!("UPDATE {table} SET v = [10.0, 10.0, 10.0] WHERE pk = 1 IF EXISTS"),
             (),
@@ -350,7 +314,7 @@ async fn cdc_lwt_update_visible(actors: Arc<TestActors>) {
         || async {
             let result = get_opt_query_results(
                 format!("SELECT pk FROM {table} ORDER BY v ANN OF [10.0, 10.0, 10.0] LIMIT 1"),
-                &session,
+                &ctx.session,
             )
             .await?;
             let mut rows = result.rows::<(i32,)>().ok()?;
@@ -366,25 +330,20 @@ async fn cdc_lwt_update_visible(actors: Arc<TestActors>) {
         "After LWT update: pk=1 should be closest to [10,10,10]"
     );
 
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop keyspace");
-
     info!("finished");
 }
 
 #[e2etest::test(group = cdc_direct)]
-async fn cdc_lwt_delete_visible(actors: Arc<TestActors>) {
+async fn cdc_lwt_delete_visible(ctx: Arc<TestContext>) {
     info!("started");
 
-    let (session, clients) = prepare_connection_single_vs(&actors).await;
-    let client = clients.first().unwrap();
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(&session, "pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None).await;
+    let client = &ctx.clients[0];
+    let table = ctx
+        .create_table("pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None)
+        .await;
 
     for pk in 1..=3 {
-        session
+        ctx.session
             .query_unpaged(
                 format!("INSERT INTO {table} (pk, v) VALUES ({pk}, [1.0, 1.0, 1.0])"),
                 (),
@@ -393,13 +352,13 @@ async fn cdc_lwt_delete_visible(actors: Arc<TestActors>) {
             .expect("failed to insert data");
     }
 
-    let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
+    let index = ctx.create_index(&table, "v").await;
 
     let status = wait_for_index(client, &index).await;
     assert_eq!(status.count, 3, "Index should have 3 vectors");
 
     // LWT delete one row
-    session
+    ctx.session
         .query_unpaged(format!("DELETE FROM {table} WHERE pk = 2 IF EXISTS"), ())
         .await
         .expect("failed to delete data");
@@ -415,11 +374,6 @@ async fn cdc_lwt_delete_visible(actors: Arc<TestActors>) {
     )
     .await;
 
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop keyspace");
-
     info!("finished");
 }
 
@@ -430,33 +384,35 @@ async fn cdc_lwt_delete_visible(actors: Arc<TestActors>) {
 /// they are orphaned, the same index ends up with multiple CDC readers
 /// running concurrently, which is the symptom observed in the field.
 #[e2etest::test(group = cdc_direct)]
-async fn recreating_index_terminates_old_cdc_actors(actors: Arc<TestActors>) {
+async fn recreating_index_terminates_old_cdc_actors(ctx: Arc<TestContext>) {
     info!("started");
 
-    let (session, clients) = prepare_connection_single_vs(&actors).await;
-    let client = &clients[0];
+    let client = &ctx.clients[0];
 
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(&session, "pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None).await;
+    let table = ctx
+        .create_table("pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None)
+        .await;
 
+    // The DROP + CREATE scenario needs a fixed index name. The group keyspace
+    // is shared by every test in this file, so this name must stay unique
+    // within the whole module.
     let index_name = "idx_vector_653_regression";
-    let index_ident = format!("{keyspace}.{index_name}");
+    let index_ident = format!("{keyspace}.{index_name}", keyspace = ctx.keyspace);
 
     let wide_started = format!("{index_ident}-wide-cdc-actor-started");
     let wide_stopped = format!("{index_ident}-wide-cdc-actor-stopped");
     let fine_started = format!("{index_ident}-fine-cdc-actor-started");
     let fine_stopped = format!("{index_ident}-fine-cdc-actor-stopped");
 
+    // Internals counters are node-global VS state: this must remain the only
+    // test using them among the tests running on the shared standard cluster.
     client.internals_clear_counters().await.unwrap();
     for name in [&wide_started, &wide_stopped, &fine_started, &fine_stopped] {
         client.internals_start_counter(name.clone()).await.unwrap();
     }
 
     info!("creating generation 1 of index {index_ident}");
-    let index = create_index(
-        CreateIndexQuery::new(&session, &clients, table.as_ref(), "v").index_name(index_name),
-    )
-    .await;
+    let index = create_index(ctx.index_query(&table, "v").index_name(index_name)).await;
     wait_for_index(client, &index).await;
 
     wait_for(
@@ -474,16 +430,10 @@ async fn recreating_index_terminates_old_cdc_actors(actors: Arc<TestActors>) {
     .await;
 
     info!("dropping index {index_ident}");
-    session
-        .query_unpaged(format!("DROP INDEX {index_name}"), ())
-        .await
-        .expect("failed to drop an index");
+    apply_schema_change(&ctx.session, format!("DROP INDEX IF EXISTS {index_name}")).await;
 
     info!("re-creating index {index_ident} as generation 2");
-    let index = create_index(
-        CreateIndexQuery::new(&session, &clients, table.as_ref(), "v").index_name(index_name),
-    )
-    .await;
+    let index = create_index(ctx.index_query(&table, "v").index_name(index_name)).await;
     wait_for_index(client, &index).await;
 
     wait_for(
@@ -533,18 +483,15 @@ async fn recreating_index_terminates_old_cdc_actors(actors: Arc<TestActors>) {
 /// 3. Wait for the expiration service to delete expired rows (via CDC).
 /// 4. Verify the index count drops and ANN queries return only non-TTL rows.
 #[e2etest::test(group = cdc_direct)]
-async fn cql_per_row_ttl_expires_from_index(actors: Arc<TestActors>) {
+async fn cql_per_row_ttl_expires_from_index(ctx: Arc<TestContext>) {
     info!("started");
 
-    let (session, clients) = prepare_connection(&actors).await;
-
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(
-        &session,
-        "pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>, expiration BIGINT TTL",
-        None,
-    )
-    .await;
+    let table = ctx
+        .create_table(
+            "pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>, expiration BIGINT TTL",
+            None,
+        )
+        .await;
 
     // Expire 5 seconds from now — enough time to build the index and
     // observe all 5 rows before the expiration service deletes them.
@@ -552,7 +499,7 @@ async fn cql_per_row_ttl_expires_from_index(actors: Arc<TestActors>) {
 
     info!("Insert 3 rows with near-future expiration and 2 rows without expiration");
     for pk in 0..3 {
-        session
+        ctx.session
             .query_unpaged(
                 format!(
                     "INSERT INTO {table} (pk, v, expiration) VALUES ({pk}, [{v}, 0.0, 0.0], {expire_at})",
@@ -564,7 +511,7 @@ async fn cql_per_row_ttl_expires_from_index(actors: Arc<TestActors>) {
             .expect("failed to insert data with TTL");
     }
     for pk in 10..12 {
-        session
+        ctx.session
             .query_unpaged(
                 format!(
                     "INSERT INTO {table} (pk, v) VALUES ({pk}, [{v}, 1.0, 1.0])",
@@ -576,9 +523,9 @@ async fn cql_per_row_ttl_expires_from_index(actors: Arc<TestActors>) {
             .expect("failed to insert data without TTL");
     }
 
-    let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
+    let index = ctx.create_index(&table, "v").await;
 
-    for client in &clients {
+    for client in &ctx.clients {
         let index_status = wait_for_index(client, &index).await;
         assert_eq!(
             index_status.count, 5,
@@ -591,7 +538,7 @@ async fn cql_per_row_ttl_expires_from_index(actors: Arc<TestActors>) {
         || async {
             let result = get_opt_query_results(
                 format!("SELECT pk FROM {table} ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10"),
-                &session,
+                &ctx.session,
             )
             .await;
             result.filter(|r| r.rows_num() == 5)
@@ -603,7 +550,7 @@ async fn cql_per_row_ttl_expires_from_index(actors: Arc<TestActors>) {
     assert_eq!(result.rows_num(), 5, "Expected 5 rows before expiration");
 
     info!("Wait for index count to drop after expiration service runs");
-    for client in &clients {
+    for client in &ctx.clients {
         wait_for(
             || async {
                 let status = client.index_status(&index.keyspace, &index.index).await;
@@ -620,7 +567,7 @@ async fn cql_per_row_ttl_expires_from_index(actors: Arc<TestActors>) {
         || async {
             let result = get_opt_query_results(
                 format!("SELECT pk FROM {table} ORDER BY v ANN OF [10.0, 1.0, 1.0] LIMIT 10"),
-                &session,
+                &ctx.session,
             )
             .await;
             result.filter(|r| r.rows_num() == 2)
@@ -642,11 +589,6 @@ async fn cql_per_row_ttl_expires_from_index(actors: Arc<TestActors>) {
         );
     }
 
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop a keyspace");
-
     info!("finished");
 }
 
@@ -665,22 +607,19 @@ async fn cql_per_row_ttl_expires_from_index(actors: Arc<TestActors>) {
 /// 5. Verify the index count drops to 2 and ANN returns only the rows that
 ///    were never given a TTL.
 #[e2etest::test(group = cdc_direct)]
-async fn cql_per_row_ttl_added_to_indexed_rows_expires(actors: Arc<TestActors>) {
+async fn cql_per_row_ttl_added_to_indexed_rows_expires(ctx: Arc<TestContext>) {
     info!("started");
 
-    let (session, clients) = prepare_connection(&actors).await;
-
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(
-        &session,
-        "pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>, expiration BIGINT TTL",
-        None,
-    )
-    .await;
+    let table = ctx
+        .create_table(
+            "pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>, expiration BIGINT TTL",
+            None,
+        )
+        .await;
 
     info!("Insert 5 rows without expiration - all permanent for now");
     for pk in 0..5 {
-        session
+        ctx.session
             .query_unpaged(
                 format!(
                     "INSERT INTO {table} (pk, v) VALUES ({pk}, [{v}, 0.0, 0.0])",
@@ -692,9 +631,9 @@ async fn cql_per_row_ttl_added_to_indexed_rows_expires(actors: Arc<TestActors>) 
             .expect("failed to insert data without TTL");
     }
 
-    let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
+    let index = ctx.create_index(&table, "v").await;
 
-    for client in &clients {
+    for client in &ctx.clients {
         let index_status = wait_for_index(client, &index).await;
         assert_eq!(
             index_status.count, 5,
@@ -707,7 +646,7 @@ async fn cql_per_row_ttl_added_to_indexed_rows_expires(actors: Arc<TestActors>) 
         || async {
             let result = get_opt_query_results(
                 format!("SELECT pk FROM {table} ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10"),
-                &session,
+                &ctx.session,
             )
             .await;
             result.filter(|r| r.rows_num() == 5)
@@ -724,7 +663,7 @@ async fn cql_per_row_ttl_added_to_indexed_rows_expires(actors: Arc<TestActors>) 
     let expire_at = now_epoch_secs() + 5;
     info!("Add per-row TTL to 3 already-indexed rows (pk=0,1,2)");
     for pk in 0..3 {
-        session
+        ctx.session
             .query_unpaged(
                 format!("UPDATE {table} SET expiration = {expire_at} WHERE pk = {pk}"),
                 (),
@@ -734,7 +673,7 @@ async fn cql_per_row_ttl_added_to_indexed_rows_expires(actors: Arc<TestActors>) 
     }
 
     info!("Wait for index count to drop after the added TTL expires");
-    for client in &clients {
+    for client in &ctx.clients {
         wait_for(
             || async {
                 let status = client.index_status(&index.keyspace, &index.index).await;
@@ -751,7 +690,7 @@ async fn cql_per_row_ttl_added_to_indexed_rows_expires(actors: Arc<TestActors>) 
         || async {
             let result = get_opt_query_results(
                 format!("SELECT pk FROM {table} ORDER BY v ANN OF [4.0, 0.0, 0.0] LIMIT 10"),
-                &session,
+                &ctx.session,
             )
             .await;
             result.filter(|r| r.rows_num() == 2)
@@ -773,11 +712,6 @@ async fn cql_per_row_ttl_added_to_indexed_rows_expires(actors: Arc<TestActors>) 
         );
     }
 
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop a keyspace");
-
     info!("finished");
 }
 
@@ -790,21 +724,18 @@ async fn cql_per_row_ttl_added_to_indexed_rows_expires(actors: Arc<TestActors>) 
 /// 2. Create an index on the vector column.
 /// 3. Insert rows with a clustering key and a static column value.
 /// 4. Verify that the index count is correct and the ANN query returns the inserted rows.
-/// 5. Drop the keyspace and verify that the index is dropped.
 #[e2etest::test(group = cdc_direct)]
-async fn skip_null_ck(actors: Arc<TestActors>) {
+async fn skip_null_ck(ctx: Arc<TestContext>) {
     info!("started");
 
-    let (session, clients) = prepare_connection_single_vs(&actors).await;
-    let client = clients.first().unwrap();
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(
-        &session,
-        "pk INT, ck INT, v VECTOR<FLOAT, 3>, s INT STATIC, PRIMARY KEY (pk, ck)",
-        None,
-    )
-    .await;
-    let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
+    let client = &ctx.clients[0];
+    let table = ctx
+        .create_table(
+            "pk INT, ck INT, v VECTOR<FLOAT, 3>, s INT STATIC, PRIMARY KEY (pk, ck)",
+            None,
+        )
+        .await;
+    let index = ctx.create_index(&table, "v").await;
 
     let status = wait_for_index(client, &index).await;
     assert_eq!(status.count, 0, "Index should start empty");
@@ -814,7 +745,7 @@ async fn skip_null_ck(actors: Arc<TestActors>) {
         .into_iter()
         .collect();
     for pk in &pks {
-        session
+        ctx.session
             .query_unpaged(
                 format!("INSERT INTO {table} (pk, ck, v, s) VALUES ({pk}, 2, [1.0, 2.0, 3.0], 3)"),
                 (),
@@ -838,7 +769,7 @@ async fn skip_null_ck(actors: Arc<TestActors>) {
         || async {
             let result = get_opt_query_results(
                 format!("SELECT pk FROM {table} ORDER BY v ANN OF [1.0, 2.0, 3.0] LIMIT 100"),
-                &session,
+                &ctx.session,
             )
             .await?;
             let rows = result
@@ -855,11 +786,6 @@ async fn skip_null_ck(actors: Arc<TestActors>) {
     .await;
     assert_eq!(rows, pks);
 
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop keyspace");
-
     info!("finished");
 }
 
@@ -873,21 +799,15 @@ async fn skip_null_ck(actors: Arc<TestActors>) {
 /// 5. Insert new rows to wait for the CDC reader to process the update with null vector value.
 /// 6. Verify that the index count after index and the ANN query returns the updated and inserted
 ///    rows.
-/// 7. Drop the keyspace and verify that the index is dropped.
 #[e2etest::test(group = cdc_direct)]
-async fn skip_null_target(actors: Arc<TestActors>) {
+async fn skip_null_target(ctx: Arc<TestContext>) {
     info!("started");
 
-    let (session, clients) = prepare_connection_single_vs(&actors).await;
-    let client = clients.first().unwrap();
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(
-        &session,
-        "pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>, i INT",
-        None,
-    )
-    .await;
-    let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
+    let client = &ctx.clients[0];
+    let table = ctx
+        .create_table("pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>, i INT", None)
+        .await;
+    let index = ctx.create_index(&table, "v").await;
 
     let status = wait_for_index(client, &index).await;
     assert_eq!(status.count, 0, "Index should start empty");
@@ -897,7 +817,7 @@ async fn skip_null_target(actors: Arc<TestActors>) {
         .into_iter()
         .collect();
     for pk in &pks {
-        session
+        ctx.session
             .query_unpaged(
                 format!("INSERT INTO {table} (pk, v, i) VALUES ({pk}, [1.0, 2.0, 3.0], {pk})"),
                 (),
@@ -917,7 +837,7 @@ async fn skip_null_target(actors: Arc<TestActors>) {
     .await;
 
     for pk in &pks {
-        session
+        ctx.session
             .query_unpaged(
                 format!("UPDATE {table} SET i = {i} WHERE pk = {pk}", i = pk + 10),
                 (),
@@ -927,7 +847,7 @@ async fn skip_null_target(actors: Arc<TestActors>) {
     }
 
     for pk in &pks {
-        session
+        ctx.session
             .query_unpaged(
                 format!(
                     "INSERT INTO {table} (pk, v, i) VALUES ({pk}, [1.0, 2.0, 3.0], {i})",
@@ -959,7 +879,7 @@ async fn skip_null_target(actors: Arc<TestActors>) {
         || async {
             let result = get_opt_query_results(
                 format!("SELECT pk, i FROM {table} ORDER BY v ANN OF [1.0, 2.0, 3.0] LIMIT 100"),
-                &session,
+                &ctx.session,
             )
             .await?;
             let rows = result
@@ -976,30 +896,25 @@ async fn skip_null_target(actors: Arc<TestActors>) {
     .await;
     assert_eq!(rows, expected);
 
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop keyspace");
-
     info!("finished");
 }
 
 #[e2etest::test(group = cdc_direct)]
-async fn cdc_indexing_lag_metric_exported(actors: Arc<TestActors>) {
+async fn cdc_indexing_lag_metric_exported(ctx: Arc<TestContext>) {
     info!("started");
 
-    let (session, clients) = prepare_connection_single_vs(&actors).await;
-    let client = clients.first().unwrap();
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(&session, "pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None).await;
-    let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
+    let client = &ctx.clients[0];
+    let table = ctx
+        .create_table("pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None)
+        .await;
+    let index = ctx.create_index(&table, "v").await;
 
     let status = wait_for_index(client, &index).await;
     assert_eq!(status.count, 0, "Index should start empty");
 
     // Insert after index creation - picked up by the CDC reader, which should
     // record an indexing_lag_seconds observation.
-    session
+    ctx.session
         .query_unpaged(
             format!("INSERT INTO {table} (pk, v) VALUES (1, [1.0, 2.0, 3.0])"),
             (),
@@ -1012,7 +927,7 @@ async fn cdc_indexing_lag_metric_exported(actors: Arc<TestActors>) {
         || async {
             let result = get_opt_query_results(
                 format!("SELECT pk FROM {table} ORDER BY v ANN OF [1.0, 2.0, 3.0] LIMIT 1"),
-                &session,
+                &ctx.session,
             )
             .await?;
             let mut rows = result.rows::<(i32,)>().ok()?;
@@ -1038,7 +953,7 @@ async fn cdc_indexing_lag_metric_exported(actors: Arc<TestActors>) {
     )
     .await;
     assert!(
-        metrics_output.contains(&format!(r#"keyspace="{}""#, keyspace.as_ref())),
+        metrics_output.contains(&format!(r#"keyspace="{}""#, ctx.keyspace.as_ref())),
         "expected keyspace label in indexing_lag_seconds metric:\n{metrics_output}"
     );
     assert!(
@@ -1049,40 +964,33 @@ async fn cdc_indexing_lag_metric_exported(actors: Arc<TestActors>) {
     let expected_count_line = format!(
         r#"indexing_lag_seconds_count{{index_name="{}",keyspace="{}"}}"#,
         index.index.as_ref(),
-        keyspace.as_ref()
+        ctx.keyspace.as_ref()
     );
     assert!(
         metrics_output.contains(&expected_count_line),
         "expected indexing_lag_seconds_count with labels in /metrics output:\n{metrics_output}"
     );
 
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop keyspace");
-
     info!("finished");
 }
 
 #[e2etest::test(group = cdc_direct)]
-async fn insert_and_remove(actors: Arc<TestActors>) {
+async fn insert_and_remove(ctx: Arc<TestContext>) {
     info!("started");
 
-    let (session, clients) = prepare_connection_single_vs(&actors).await;
-    let client = clients.first().unwrap();
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(
-        &session,
-        "pk INT, ck INT, rc INT, v VECTOR<FLOAT, 1>, PRIMARY KEY (pk, ck)",
-        None,
-    )
-    .await;
+    let client = &ctx.clients[0];
+    let table = ctx
+        .create_table(
+            "pk INT, ck INT, rc INT, v VECTOR<FLOAT, 1>, PRIMARY KEY (pk, ck)",
+            None,
+        )
+        .await;
 
     for column in ["pk", "ck", "rc"] {
         info!("Testing index with partition column {column}");
 
         let index = create_index(
-            CreateIndexQuery::new(&session, &clients, &table, "v")
+            ctx.index_query(&table, "v")
                 .options([("similarity_function", "euclidean")])
                 .partition_columns([column]),
         )
@@ -1099,7 +1007,7 @@ async fn insert_and_remove(actors: Arc<TestActors>) {
         info!("Inserting {DATASET_SIZE}x{DATASET_SIZE} rows to the table for CDC");
         for pk in 1..=DATASET_SIZE {
             for ck in 1..=DATASET_SIZE {
-                session
+                ctx.session
                     .query_unpaged(
                         format!(
                             "INSERT INTO {table} (pk, ck, rc, v) VALUES ({pk}, {ck}, {ck}, [{ck}])"
@@ -1123,7 +1031,7 @@ async fn insert_and_remove(actors: Arc<TestActors>) {
 
         info!("Removing {DATASET_SIZE} rows by removing vector columns");
         for pk in 1..=DATASET_SIZE {
-            session
+            ctx.session
                 .query_unpaged(
                     format!("DELETE v FROM {table} WHERE pk = {pk} AND ck = 1"),
                     (),
@@ -1145,7 +1053,7 @@ async fn insert_and_remove(actors: Arc<TestActors>) {
         info!("Removing all rows by removing rows");
         for pk in 1..=DATASET_SIZE {
             for ck in 2..=DATASET_SIZE {
-                session
+                ctx.session
                     .query_unpaged(
                         format!("DELETE FROM {table} WHERE pk = {pk} AND ck = {ck}"),
                         (),
@@ -1166,19 +1074,8 @@ async fn insert_and_remove(actors: Arc<TestActors>) {
         .await;
 
         info!("Dropping index {index}", index = index.index.as_ref());
-        session
-            .query_unpaged(
-                format!("DROP INDEX {index}", index = index.index.as_ref()),
-                (),
-            )
-            .await
-            .expect("failed to drop keyspace");
+        drop_index(&ctx.session, &index).await;
     }
-
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop keyspace");
 
     info!("finished");
 }
