@@ -11,9 +11,9 @@
 //! `BatchWriteItem` (put-only, mixed put+delete, delete-only).
 
 use crate::TestActors;
-use crate::alternator;
-use crate::alternator::Item;
 use crate::common;
+use crate::common::alternator;
+use crate::common::alternator::Item;
 use aws_sdk_dynamodb::types::AttributeValue;
 use httpapi::IndexInfo;
 use std::sync::Arc;
@@ -210,11 +210,7 @@ async fn alternator_with_always_use_lwt(actors: Arc<TestActors>) {
     info!("finished");
 }
 
-e2etest::group!(
-    name = lwt,
-    fixtures = (Fixture),
-    parent = alternator::alternator
-);
+e2etest::group!(name = lwt, fixtures = (Fixture), parent = super::alternator);
 
 struct Fixture {
     actors: Arc<TestActors>,

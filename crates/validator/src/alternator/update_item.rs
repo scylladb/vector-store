@@ -4,10 +4,10 @@
  */
 
 use crate::TestActors;
-use crate::alternator;
-use crate::alternator::Item;
-use crate::alternator::TableContext;
 use crate::common;
+use crate::common::alternator;
+use crate::common::alternator::Item;
+use crate::common::alternator::TableContext;
 use aws_sdk_dynamodb::operation::update_item::builders::UpdateItemFluentBuilder;
 use aws_sdk_dynamodb::types::AttributeValue;
 use std::sync::Arc;
@@ -470,7 +470,7 @@ async fn update_item_vector_element_operations(actors: Arc<TestActors>) {
 e2etest::group!(
     name = update_item,
     fixtures = (Fixture),
-    parent = alternator::alternator
+    parent = super::alternator
 );
 
 struct Fixture {

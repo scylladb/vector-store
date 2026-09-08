@@ -4,11 +4,11 @@
  */
 
 use crate::TestActors;
-use crate::alternator;
-use crate::alternator::Item;
-use crate::alternator::TableContext;
-use crate::alternator::TableShape;
 use crate::common;
+use crate::common::alternator;
+use crate::common::alternator::Item;
+use crate::common::alternator::TableContext;
+use crate::common::alternator::TableShape;
 use aws_sdk_dynamodb::types::AttributeValue;
 use serde_json::Value;
 use std::sync::Arc;
@@ -236,7 +236,7 @@ async fn delete_vector_index_via_update_table(actors: Arc<TestActors>) {
 e2etest::group!(
     name = update_table,
     fixtures = (Fixture),
-    parent = alternator::alternator
+    parent = super::alternator
 );
 
 struct Fixture {

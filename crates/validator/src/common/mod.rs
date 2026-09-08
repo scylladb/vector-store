@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
+pub(crate) mod alternator;
+
 use crate::TestActors;
 use async_backtrace::framed;
 use e2etest_dns::DnsExt;

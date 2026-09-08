@@ -21,9 +21,9 @@ use std::sync::Arc;
 use tracing::info;
 use uuid::Uuid;
 
-use crate::alternator;
-use crate::alternator::ALTERNATOR_PORT;
-use crate::alternator::JsonBodyInjectInterceptor;
+use crate::common::ALTERNATOR_PORT;
+use crate::common::alternator;
+use crate::common::alternator::JsonBodyInjectInterceptor;
 use aws_sdk_dynamodb::error::ProvideErrorMetadata as _;
 
 /// Polls the Alternator endpoint with the given credentials until it responds
@@ -250,7 +250,7 @@ async fn alternator_with_auth_enabled(actors: Arc<TestActors>) {
 e2etest::group!(
     name = alternator_auth,
     fixtures = (Fixture),
-    parent = alternator::alternator
+    parent = super::alternator
 );
 
 struct Fixture {
