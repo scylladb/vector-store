@@ -647,6 +647,42 @@ impl Cluster for ProxyCluster {
 /// none behind, even after failing half way through.
 pub type ProxyTestContext = TestEnv<ProxyCluster>;
 
+/// A proxy cluster of one group's own, for tests that go further than rules —
+/// stopping nodes, cutting their traffic off, restarting Vector Store with a
+/// different configuration. No sibling group could survive that.
+pub struct OwnedProxyCluster {
+    actors: Arc<TestActors>,
+}
+
+impl e2etest::Fixture for OwnedProxyCluster {
+    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
+        let actors = setup.setup::<TestActors>().await?;
+        init_with_proxy_single_vs(&actors).await;
+        Some(Self { actors })
+    }
+
+    async fn teardown(self) {
+        cleanup(&self.actors).await;
+    }
+}
+
+impl Cluster for OwnedProxyCluster {
+    fn actors(&self) -> &TestActors {
+        &self.actors
+    }
+
+    async fn connect(actors: &TestActors) -> (Arc<Session>, Vec<HttpClient>) {
+        prepare_connection_single_vs_no_tls(actors).await
+    }
+
+    async fn reset(actors: &TestActors) {
+        actors.db_proxy.turn_off_rules().await;
+        actors.firewall.turn_off_rules().await;
+    }
+}
+
+pub type OwnedProxyContext = TestEnv<OwnedProxyCluster>;
+
 #[framed]
 pub async fn prepare_connection_with_custom_vs_ips(
     actors: &TestActors,
