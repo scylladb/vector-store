@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
-use crate::TestActors;
+use super::ProxyTestContext;
 use crate::common::*;
 use e2etest_scylla_proxy_cluster::ScyllaProxyClusterExt;
 use httpapi::IndexInfo;
@@ -21,48 +21,27 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::info;
 
-e2etest::group!(
-    name = full_scan,
-    fixtures = (Fixture),
-    parent = crate::validator
-);
-
-struct Fixture {
-    actors: Arc<TestActors>,
-}
-
-impl e2etest::Fixture for Fixture {
-    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
-        let actors = setup.setup::<TestActors>().await?;
-        init_with_proxy_single_vs(&actors).await;
-        Some(Self { actors })
-    }
-
-    async fn teardown(self) {
-        cleanup(&self.actors).await;
-    }
-}
+e2etest::group!(name = full_scan, fixtures = (), parent = super::proxy);
 
 #[e2etest::test(group = full_scan)]
-async fn full_scan_is_completed_when_responding_to_messages_concurrently(actors: Arc<TestActors>) {
+async fn full_scan_is_completed_when_responding_to_messages_concurrently(
+    ctx: Arc<ProxyTestContext>,
+) {
     info!("started");
 
-    let (session, clients) = prepare_connection_single_vs_no_tls(&actors).await;
-    let client = clients.first().unwrap();
-
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(
-        &session,
-        "id INT PRIMARY KEY, embedding VECTOR<FLOAT, 3>",
-        Some("CDC = {'enabled': true}"),
-    )
-    .await;
+    let client = ctx.client();
+    let table = ctx
+        .create_table(
+            "id INT PRIMARY KEY, embedding VECTOR<FLOAT, 3>",
+            Some("CDC = {'enabled': true}"),
+        )
+        .await;
 
     info!("Inserting data to the table");
     const DATASET_SIZE: i32 = 100;
     let embedding: Vec<f32> = vec![0.0, 0.0, 0.0];
     for i in 0..DATASET_SIZE {
-        session
+        ctx.session
             .query_unpaged(
                 format!("INSERT INTO {table} (id, embedding) VALUES (?, ?)"),
                 (i, embedding.clone()),
@@ -73,7 +52,7 @@ async fn full_scan_is_completed_when_responding_to_messages_concurrently(actors:
 
     info!("Slow communication between vector-store and scylla using proxy");
     const FRAME_DELAY: Duration = Duration::from_millis(100);
-    actors
+    ctx.actors()
         .db_proxy
         .change_request_rules(Some(vec![RequestRule(
             Condition::True,
@@ -82,16 +61,11 @@ async fn full_scan_is_completed_when_responding_to_messages_concurrently(actors:
         .await;
 
     info!("Creating index");
-    let index = create_index(CreateIndexQuery::new(
-        &session,
-        &clients,
-        &table,
-        "embedding",
-    ))
-    .await;
+    let index = ctx.create_index(&table, "embedding").await;
 
     info!("Checking that full scan isn't completed");
-    let result = session
+    let result = ctx
+        .session
         .query_unpaged(
             format!("SELECT * FROM {table} ORDER BY embedding ANN OF [1.0, 2.0, 3.0] LIMIT 5"),
             (),
@@ -103,7 +77,7 @@ async fn full_scan_is_completed_when_responding_to_messages_concurrently(actors:
     }
 
     info!("Recovering normal communication");
-    actors.db_proxy.turn_off_rules().await;
+    ctx.actors().db_proxy.turn_off_rules().await;
 
     info!("Waiting for index to be built");
     let index_status = wait_for_index(client, &index).await;
@@ -113,7 +87,7 @@ async fn full_scan_is_completed_when_responding_to_messages_concurrently(actors:
     );
 
     info!("Checking that ANN search works after index is built");
-    session
+    ctx.session
         .query_unpaged(
             format!("SELECT * FROM {table} ORDER BY embedding ANN OF [1.0, 2.0, 3.0] LIMIT 5"),
             (),
@@ -122,42 +96,27 @@ async fn full_scan_is_completed_when_responding_to_messages_concurrently(actors:
         .expect("failed to query ANN search");
 
     info!("Dropping index");
-    session
-        .query_unpaged(format!("DROP INDEX {}", index.index), ())
-        .await
-        .expect("failed to drop an index");
+    drop_index(&ctx.session, &index).await;
 
     wait_for_no_index(client, &index).await;
-
-    info!("Dropping keyspace");
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop a keyspace");
 
     info!("finished");
 }
 
 #[e2etest::test(group = full_scan)]
-async fn full_scan_stops_when_index_is_dropped(actors: Arc<TestActors>) {
+async fn full_scan_stops_when_index_is_dropped(ctx: Arc<ProxyTestContext>) {
     info!("started");
 
-    let (session, clients) = prepare_connection_single_vs_no_tls(&actors).await;
-    let client = clients.first().unwrap();
-
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(
-        &session,
-        "id INT PRIMARY KEY, embedding VECTOR<FLOAT, 3>",
-        None,
-    )
-    .await;
+    let client = ctx.client();
+    let table = ctx
+        .create_table("id INT PRIMARY KEY, embedding VECTOR<FLOAT, 3>", None)
+        .await;
 
     info!("Inserting data to the table");
     const DATASET_SIZE: i32 = 1000;
     let embedding: Vec<f32> = vec![0.0, 0.0, 0.0];
     for i in 0..DATASET_SIZE {
-        session
+        ctx.session
             .query_unpaged(
                 format!("INSERT INTO {table} (id, embedding) VALUES (?, ?)"),
                 (i, embedding.clone()),
@@ -169,7 +128,7 @@ async fn full_scan_stops_when_index_is_dropped(actors: Arc<TestActors>) {
     info!("Slowing down communication to keep fullscan in progress");
     const FRAME_DELAY: Duration = Duration::from_millis(50);
     let (tx_feedback_before_drop, mut rx_feedback_before_drop) = mpsc::unbounded_channel();
-    actors
+    ctx.actors()
         .db_proxy
         .change_request_rules(Some(vec![RequestRule(
             Condition::True,
@@ -179,13 +138,7 @@ async fn full_scan_stops_when_index_is_dropped(actors: Arc<TestActors>) {
         .await;
 
     info!("Creating index");
-    let index = create_index(CreateIndexQuery::new(
-        &session,
-        &clients,
-        &table,
-        "embedding",
-    ))
-    .await;
+    let index = ctx.create_index(&table, "embedding").await;
 
     info!("Waiting for fullscan to reach BOOTSTRAPPING state");
     wait_for_bootstrapping(client, &index).await;
@@ -213,17 +166,14 @@ async fn full_scan_stops_when_index_is_dropped(actors: Arc<TestActors>) {
     .expect("expected to observe at least one fullscan EXECUTE before drop");
 
     info!("Dropping index while fullscan is still running");
-    session
-        .query_unpaged(format!("DROP INDEX {}", index.index), ())
-        .await
-        .expect("failed to drop an index");
+    drop_index(&ctx.session, &index).await;
 
     info!("Waiting for index to be removed from vector-store");
     wait_for_no_index(client, &index).await;
 
     info!("Verifying no DB execute traffic continues after index drop");
     let (tx_feedback, mut rx_feedback) = mpsc::unbounded_channel();
-    actors
+    ctx.actors()
         .db_proxy
         .change_request_rules(Some(vec![RequestRule(
             Condition::RequestOpcode(RequestOpcode::Execute),
@@ -254,13 +204,7 @@ async fn full_scan_stops_when_index_is_dropped(actors: Arc<TestActors>) {
     );
 
     info!("Recovering normal communication");
-    actors.db_proxy.turn_off_rules().await;
-
-    info!("Dropping keyspace");
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop a keyspace");
+    ctx.actors().db_proxy.turn_off_rules().await;
 
     info!("finished");
 }
