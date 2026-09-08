@@ -13,8 +13,8 @@
 //!    `CreateTable`) is explicitly revoked; Alternator returns `AccessDeniedException`.
 //! 4. Vector Store successfully indexes data written by the limited-permission role.
 
-use crate::TestActors;
 use crate::common;
+use crate::common::AuthAlternatorCluster;
 use scylla::client::session::Session;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
@@ -22,7 +22,6 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::alternator;
-use crate::alternator::ALTERNATOR_PORT;
 use crate::alternator::JsonBodyInjectInterceptor;
 use aws_sdk_dynamodb::error::ProvideErrorMetadata as _;
 
@@ -42,7 +41,10 @@ async fn wait_for_alternator_with_creds(
             let c = client.clone();
             async move { c.list_tables().limit(1).send().await.is_ok() }
         },
-        format!("Alternator endpoint at http://{db_ip}:{ALTERNATOR_PORT} to be ready"),
+        format!(
+            "Alternator endpoint at http://{db_ip}:{port} to be ready",
+            port = common::ALTERNATOR_PORT
+        ),
         common::DEFAULT_TEST_TIMEOUT,
     )
     .await;
@@ -69,14 +71,16 @@ async fn get_salted_hash(session: &Session, role_name: &str) -> String {
 ///
 /// See the module-level doc for the full scenario description.
 #[e2etest::test(group = alternator_auth)]
-async fn alternator_with_auth_enabled(actors: Arc<TestActors>) {
+async fn alternator_with_auth_enabled(cluster: Arc<AuthAlternatorCluster>) {
     info!("started");
+
+    let actors = cluster.actors();
 
     let db_ip = actors.services_subnet.ip(common::DB_OCTET_1);
 
     info!("Connecting to ScyllaDB as superuser");
     let (session, vs_clients) = common::prepare_connection_with_auth(
-        &actors,
+        actors,
         &common::SUPERUSER_NAME,
         &common::SUPERUSER_PASSWORD,
     )
@@ -249,37 +253,6 @@ async fn alternator_with_auth_enabled(actors: Arc<TestActors>) {
 
 e2etest::group!(
     name = alternator_auth,
-    fixtures = (Fixture),
+    fixtures = (AuthAlternatorCluster),
     parent = crate::owned
 );
-
-struct Fixture {
-    actors: Arc<TestActors>,
-}
-
-impl e2etest::Fixture for Fixture {
-    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
-        let actors = setup.setup::<TestActors>().await?;
-
-        let scylla_configs = alternator::get_scylla_configs(
-            &actors,
-            [("--alternator-enforce-authorization", "true")],
-            Some(common::scylla_auth_config()),
-        )
-        .await;
-
-        let mut vs_configs = common::get_default_vs_node_configs(&actors).await;
-        for config in &mut vs_configs {
-            config.user = Some(common::SUPERUSER_NAME.clone());
-            config.password = Some(common::SUPERUSER_PASSWORD.clone());
-        }
-
-        common::init_with_config(&actors, scylla_configs, vs_configs, false).await;
-
-        Some(Self { actors })
-    }
-
-    async fn teardown(self) {
-        common::cleanup(&self.actors).await;
-    }
-}

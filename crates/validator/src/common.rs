@@ -770,6 +770,47 @@ impl LwtAlternatorCluster {
     }
 }
 
+/// Alternator checking every request against a ScyllaDB role. Vector Store
+/// connects as the superuser, because the reduced-privilege default role
+/// cannot read the tables the limited roles under test create.
+pub struct AuthAlternatorCluster {
+    actors: Arc<TestActors>,
+}
+
+impl e2etest::Fixture for AuthAlternatorCluster {
+    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
+        let actors = setup.setup::<TestActors>().await?;
+
+        let scylla_configs = crate::alternator::get_scylla_configs(
+            &actors,
+            [("--alternator-enforce-authorization", "true")],
+            Some(scylla_auth_config()),
+        )
+        .await;
+
+        let mut vs_configs = get_default_vs_node_configs(&actors).await;
+        for config in &mut vs_configs {
+            config.user = Some(SUPERUSER_NAME.clone());
+            config.password = Some(SUPERUSER_PASSWORD.clone());
+        }
+
+        // The tests grant their own roles the permissions they are about.
+        init_with_config(&actors, scylla_configs, vs_configs, false).await;
+
+        Some(Self { actors })
+    }
+
+    async fn teardown(self) {
+        cleanup(&self.actors).await;
+    }
+}
+
+impl AuthAlternatorCluster {
+    pub fn actors(&self) -> &TestActors {
+        &self.actors
+    }
+}
+
 #[framed]
 pub async fn prepare_connection_with_custom_vs_ips(
     actors: &TestActors,
