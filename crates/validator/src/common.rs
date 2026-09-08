@@ -742,6 +742,34 @@ impl CustomCluster {
     }
 }
 
+/// Alternator routing every write through LWT. The setting is cluster-wide, so
+/// it cannot share the standard cluster.
+pub struct LwtAlternatorCluster {
+    actors: Arc<TestActors>,
+}
+
+impl e2etest::Fixture for LwtAlternatorCluster {
+    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
+        let actors = setup.setup::<TestActors>().await?;
+        crate::alternator::init_with_args(
+            &actors,
+            [("--alternator-write-isolation", "always_use_lwt")],
+        )
+        .await;
+        Some(Self { actors })
+    }
+
+    async fn teardown(self) {
+        cleanup(&self.actors).await;
+    }
+}
+
+impl LwtAlternatorCluster {
+    pub fn actors(&self) -> &TestActors {
+        &self.actors
+    }
+}
+
 #[framed]
 pub async fn prepare_connection_with_custom_vs_ips(
     actors: &TestActors,
