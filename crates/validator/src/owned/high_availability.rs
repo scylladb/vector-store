@@ -18,7 +18,7 @@ use tracing::info;
 e2etest::group!(
     name = high_availability,
     fixtures = (Fixture),
-    parent = crate::validator
+    parent = super::owned
 );
 
 struct Fixture {
