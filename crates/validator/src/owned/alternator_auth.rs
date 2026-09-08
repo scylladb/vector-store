@@ -21,7 +21,6 @@ use std::sync::Arc;
 use tracing::info;
 use uuid::Uuid;
 
-use crate::common::ALTERNATOR_PORT;
 use crate::common::alternator;
 use crate::common::alternator::JsonBodyInjectInterceptor;
 use aws_sdk_dynamodb::error::ProvideErrorMetadata as _;
@@ -42,7 +41,10 @@ async fn wait_for_alternator_with_creds(
             let c = client.clone();
             async move { c.list_tables().limit(1).send().await.is_ok() }
         },
-        format!("Alternator endpoint at http://{db_ip}:{ALTERNATOR_PORT} to be ready"),
+        format!(
+            "Alternator endpoint at http://{db_ip}:{port} to be ready",
+            port = common::ALTERNATOR_PORT
+        ),
         common::DEFAULT_TEST_TIMEOUT,
     )
     .await;
@@ -69,14 +71,16 @@ async fn get_salted_hash(session: &Session, role_name: &str) -> String {
 ///
 /// See the module-level doc for the full scenario description.
 #[e2etest::test(group = alternator_auth)]
-async fn alternator_with_auth_enabled(actors: Arc<TestActors>) {
+async fn alternator_with_auth_enabled(cluster: Arc<AuthAlternatorCluster>) {
     info!("started");
+
+    let actors = cluster.actors();
 
     let db_ip = actors.services_subnet.ip(common::DB_OCTET_1);
 
     info!("Connecting to ScyllaDB as superuser");
     let (session, vs_clients) = common::prepare_connection_with_auth(
-        &actors,
+        actors,
         &common::SUPERUSER_NAME,
         &common::SUPERUSER_PASSWORD,
     )
@@ -247,17 +251,14 @@ async fn alternator_with_auth_enabled(actors: Arc<TestActors>) {
     info!("finished");
 }
 
-e2etest::group!(
-    name = alternator_auth,
-    fixtures = (Fixture),
-    parent = super::owned
-);
-
-struct Fixture {
+/// Alternator checking every request against a ScyllaDB role. Vector Store
+/// connects as the superuser, because the reduced-privilege default role
+/// cannot read the tables the limited roles under test create.
+struct AuthAlternatorCluster {
     actors: Arc<TestActors>,
 }
 
-impl e2etest::Fixture for Fixture {
+impl e2etest::Fixture for AuthAlternatorCluster {
     async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
         let actors = setup.setup::<TestActors>().await?;
 
@@ -274,6 +275,7 @@ impl e2etest::Fixture for Fixture {
             config.password = Some(common::SUPERUSER_PASSWORD.clone());
         }
 
+        // The tests grant their own roles the permissions they are about.
         common::init_with_config(&actors, scylla_configs, vs_configs, false).await;
 
         Some(Self { actors })
@@ -283,3 +285,15 @@ impl e2etest::Fixture for Fixture {
         common::cleanup(&self.actors).await;
     }
 }
+
+impl AuthAlternatorCluster {
+    fn actors(&self) -> &TestActors {
+        &self.actors
+    }
+}
+
+e2etest::group!(
+    name = alternator_auth,
+    fixtures = (AuthAlternatorCluster),
+    parent = super::owned
+);
