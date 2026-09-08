@@ -3,10 +3,9 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
+use super::AlternatorContext;
 use super::query::QueryBuilderExt;
 use crate::TestActors;
-use crate::common;
-use crate::common::alternator;
 use crate::common::alternator::Item;
 use crate::common::alternator::TableContext;
 use crate::common::alternator::TableShape;
@@ -85,7 +84,7 @@ async fn query_with_key_type(
 }
 
 #[e2etest::test(group = types)]
-async fn query_with_string_key(actors: Arc<TestActors>) {
+async fn query_with_string_key(ctx: Arc<AlternatorContext>) {
     info!("started");
     let shape = TableShape {
         table_prefix: None,
@@ -101,12 +100,12 @@ async fn query_with_string_key(actors: Arc<TestActors>) {
         Item::new(shape.pk(), AttributeValue::S("str-b".into())).vec(v, [1.0, 2.0, 4.0]),
     ];
     let extra = [Item::new(shape.pk(), AttributeValue::S("str-c".into())).vec(v, [1.0, 4.0, 8.0])];
-    query_with_key_type(&actors, &shape, &initial, &extra).await;
+    query_with_key_type(ctx.actors(), &shape, &initial, &extra).await;
     info!("finished");
 }
 
 #[e2etest::test(group = types)]
-async fn query_with_number_key(actors: Arc<TestActors>) {
+async fn query_with_number_key(ctx: Arc<AlternatorContext>) {
     info!("started");
     let shape = TableShape {
         table_prefix: None,
@@ -122,12 +121,12 @@ async fn query_with_number_key(actors: Arc<TestActors>) {
         Item::new(shape.pk(), AttributeValue::N("2".into())).vec(v, [1.0, 2.0, 4.0]),
     ];
     let extra = [Item::new(shape.pk(), AttributeValue::N("3".into())).vec(v, [1.0, 4.0, 8.0])];
-    query_with_key_type(&actors, &shape, &initial, &extra).await;
+    query_with_key_type(ctx.actors(), &shape, &initial, &extra).await;
     info!("finished");
 }
 
 #[e2etest::test(group = types)]
-async fn query_with_binary_key(actors: Arc<TestActors>) {
+async fn query_with_binary_key(ctx: Arc<AlternatorContext>) {
     info!("started");
     let shape = TableShape {
         table_prefix: None,
@@ -145,13 +144,13 @@ async fn query_with_binary_key(actors: Arc<TestActors>) {
     let extra = [
         Item::new(shape.pk(), AttributeValue::B(Blob::new(vec![0x03u8]))).vec(v, [1.0, 4.0, 8.0]),
     ];
-    query_with_key_type(&actors, &shape, &initial, &extra).await;
+    query_with_key_type(ctx.actors(), &shape, &initial, &extra).await;
     info!("finished");
 }
 
 /// Verifies queries work with both FLOAT32VECTOR-encoded items and query vectors.
 #[e2etest::test(group = types)]
-async fn query_with_optimized_vector_type(actors: Arc<TestActors>) {
+async fn query_with_optimized_vector_type(ctx: Arc<AlternatorContext>) {
     info!("started");
 
     let shape = TableShape {
@@ -174,29 +173,13 @@ async fn query_with_optimized_vector_type(actors: Arc<TestActors>) {
         Item::new(shape.pk(), AttributeValue::S("pk-v-live".into()))
             .vec_optimized(v, [1.0, 1.0, 1.0]),
     ];
-    query_with_key_type(&actors, &shape, &initial, &extra).await;
+    query_with_key_type(ctx.actors(), &shape, &initial, &extra).await;
 
     info!("finished");
 }
 
 e2etest::group!(
     name = types,
-    fixtures = (Fixture),
+    fixtures = (AlternatorContext),
     parent = super::alternator
 );
-
-struct Fixture {
-    actors: Arc<TestActors>,
-}
-
-impl e2etest::Fixture for Fixture {
-    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
-        let actors = setup.setup::<TestActors>().await?;
-        alternator::init(&actors).await;
-        Some(Self { actors })
-    }
-
-    async fn teardown(self) {
-        common::cleanup(&self.actors).await;
-    }
-}

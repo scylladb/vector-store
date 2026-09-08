@@ -5,7 +5,6 @@
 
 use super::ALTERNATOR_PORT;
 use crate::TestActors;
-use async_backtrace::framed;
 use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
 use aws_sdk_dynamodb::Client;
@@ -652,13 +651,6 @@ pub(crate) async fn init_with_args(
 
     wait_for_alternator(db_ip).await;
     info!("finished");
-}
-
-/// Standard test init: starts ScyllaDB with the Alternator endpoint enabled on
-/// each node's own IP, alongside the Vector Store.
-#[framed]
-pub async fn init(actors: &TestActors) {
-    init_with_args(actors, []).await;
 }
 
 /// Describes the key schema, attribute names, and name prefixes for a test
