@@ -301,7 +301,8 @@ async fn simple_create_search_delete_index(#[case] config: Config) {
 
     let indexes = client.indexes().await;
     assert_eq!(indexes.len(), 1);
-    assert_eq!(indexes[0], httpapi::IndexInfo::new("vector", "ann"));
+    assert_eq!(indexes[0].keyspace.as_ref(), "vector");
+    assert_eq!(indexes[0].index.as_ref(), "ann");
 
     let (primary_keys, distances, similarity_scores) = client
         .ann(
@@ -423,8 +424,9 @@ async fn failed_db_index_create(#[case] config: Config) {
 
     let indexes = client.indexes().await;
     assert_eq!(indexes.len(), 2);
-    assert!(indexes.contains(&httpapi::IndexInfo::new("vector", "ann")));
-    assert!(indexes.contains(&httpapi::IndexInfo::new("vector", "ann2")));
+    let names: Vec<_> = indexes.iter().map(|info| info.index.as_ref()).collect();
+    assert!(names.contains(&"ann"));
+    assert!(names.contains(&"ann2"));
 
     db.add_index(
         IndexMetadata {
@@ -444,9 +446,10 @@ async fn failed_db_index_create(#[case] config: Config) {
 
     let indexes = client.indexes().await;
     assert_eq!(indexes.len(), 3);
-    assert!(indexes.contains(&httpapi::IndexInfo::new("vector", "ann")));
-    assert!(indexes.contains(&httpapi::IndexInfo::new("vector", "ann2")));
-    assert!(indexes.contains(&httpapi::IndexInfo::new("vector", "ann3")));
+    let names: Vec<_> = indexes.iter().map(|info| info.index.as_ref()).collect();
+    assert!(names.contains(&"ann"));
+    assert!(names.contains(&"ann2"));
+    assert!(names.contains(&"ann3"));
 
     db.del_index(&index.keyspace_name, &"ann2".into()).unwrap();
 
@@ -458,8 +461,9 @@ async fn failed_db_index_create(#[case] config: Config) {
 
     let indexes = client.indexes().await;
     assert_eq!(indexes.len(), 2);
-    assert!(indexes.contains(&httpapi::IndexInfo::new("vector", "ann")));
-    assert!(indexes.contains(&httpapi::IndexInfo::new("vector", "ann3")));
+    let names: Vec<_> = indexes.iter().map(|info| info.index.as_ref()).collect();
+    assert!(names.contains(&"ann"));
+    assert!(names.contains(&"ann3"));
 }
 
 #[rstest]

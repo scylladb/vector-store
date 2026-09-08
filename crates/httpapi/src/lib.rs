@@ -82,11 +82,21 @@ impl Serialize for Distance {
 }
 
 #[derive(Debug, PartialEq, serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
-/// Information about an index, such as keyspace, name, and creation options.
+/// Information about an index: its keyspace, name, creation options, and the status it currently reports.
 pub struct IndexInfo {
     pub keyspace: KeyspaceName,
     pub index: IndexName,
     pub options: IndexOptions,
+    pub status: IndexStatus,
+    pub count: usize,
+    /// Progress of the initial full table scan that backfills the index,
+    /// expressed as a percentage in the range `0.0..=100.0`. This reflects
+    /// only how far the full scan has advanced; it is not a source of truth
+    /// for the index state. The `status` field is authoritative: an index
+    /// reporting `SERVING` is serving regardless of `build_progress`, which
+    /// may not reach `100.0` (e.g. if some scan ranges failed).
+    #[schema(minimum = 0, maximum = 100)]
+    pub build_progress: f64,
 }
 
 impl IndexInfo {
@@ -102,6 +112,9 @@ impl IndexInfo {
                 similarity_function: SimilarityFunction::Euclidean,
                 quantization: DataType::F32,
             }),
+            status: IndexStatus::Initializing,
+            count: 0,
+            build_progress: 0.0,
         }
     }
 }

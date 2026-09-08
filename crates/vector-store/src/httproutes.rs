@@ -50,6 +50,7 @@ use axum::response::Response;
 use axum::routing::get;
 use axum::routing::put;
 use axum_server_dual_protocol::Protocol;
+use futures::future;
 use httpapi::DataType;
 use httpapi::FulltextIndexOptions;
 use httpapi::IndexInfo;
@@ -85,7 +86,7 @@ use utoipa_swagger_ui::SwaggerUi;
             name = "LicenseRef-ScyllaDB-Source-Available-1.1"
         ),
         // version should be updated manually when there are changes in API
-        version = "3.0.0"
+        version = "3.1.0"
     ),
     tags(
         (
@@ -274,9 +275,11 @@ impl From<crate::SimilarityScore> for httpapi::SimilarityScore {
     get,
     path = "/api/v1/indexes",
     tag = "scylla-vector-store-index",
-    description = "Returns the list of indexes managed by the Vector Store indexing service. \
+    description = "Returns the list of indexes managed by the Vector Store indexing service, each with its current operational status, \
+    the total number of items indexed and the progress of the initial table scan that backfills it. \
     The list includes both vector and fulltext indexes in any state (initializing, available/built, destroying). \
-    Due to synchronization delays, it may temporarily differ from the list of indexes inside ScyllaDB.",
+    Due to synchronization delays, it may temporarily differ from the list of indexes inside ScyllaDB. \
+    An index whose item count cannot be obtained, e.g. because it is being removed while the request is served, is omitted from the list.",
     responses(
         (
             status = 200,
@@ -295,7 +298,10 @@ impl From<crate::SimilarityScore> for httpapi::SimilarityScore {
                         "search_beam_width": 64,
                         "similarity_function": "COSINE",
                         "quantization": "F32"
-                    }
+                    },
+                    "status": "SERVING",
+                    "count": 12345,
+                    "build_progress": 100.0
                 },
                 {
                     "keyspace": "my_keyspace",
@@ -304,7 +310,10 @@ impl From<crate::SimilarityScore> for httpapi::SimilarityScore {
                         "type": "fulltext",
                         "analyzer": "standard",
                         "positions": true
-                    }
+                    },
+                    "status": "BOOTSTRAPPING",
+                    "count": 42,
+                    "build_progress": 37.5
                 }
             ])
         )
@@ -312,21 +321,53 @@ impl From<crate::SimilarityScore> for httpapi::SimilarityScore {
 )]
 
 async fn get_indexes(State(state): State<RoutesInnerState>) -> Response {
-    let indexes_guard = state.indexes.read().unwrap();
+    let entries: Vec<_> = {
+        let indexes = state.indexes.read().unwrap();
+        indexes
+            .iter_vs()
+            .map(|(key, entry)| {
+                (
+                    key.clone(),
+                    IndexOptions::Vector(entry.options().into()),
+                    IndexSender::Vs(entry.index().clone()),
+                    entry.status(),
+                    entry.progress(),
+                )
+            })
+            .chain(indexes.iter_fts().map(|(key, entry)| {
+                (
+                    key.clone(),
+                    IndexOptions::Fulltext(entry.options().into()),
+                    IndexSender::Fts(entry.index().clone()),
+                    entry.status(),
+                    entry.progress(),
+                )
+            }))
+            .collect()
+    };
 
-    let indexes: Vec<_> = indexes_guard
-        .iter_vs()
-        .map(|(key, entry)| IndexInfo {
-            keyspace: key.keyspace().into(),
-            index: key.index().into(),
-            options: IndexOptions::Vector(entry.options().into()),
-        })
-        .chain(indexes_guard.iter_fts().map(|(key, entry)| IndexInfo {
-            keyspace: key.keyspace().into(),
-            index: key.index().into(),
-            options: IndexOptions::Fulltext(entry.options().into()),
-        }))
-        .collect();
+    let indexes: Vec<_> = future::join_all(entries.into_iter().map(
+        |(key, options, index, status, progress)| async move {
+            match index.count(key.clone()).await {
+                Ok(count) => Some(IndexInfo {
+                    keyspace: key.keyspace().into(),
+                    index: key.index().into(),
+                    options,
+                    status: status.into(),
+                    count,
+                    build_progress: progress_to_percentage(progress),
+                }),
+                Err(err) => {
+                    debug!("get_indexes: index.count request error for {key}: {err}");
+                    None
+                }
+            }
+        },
+    ))
+    .await
+    .into_iter()
+    .flatten()
+    .collect();
 
     (StatusCode::OK, response::Json(indexes)).into_response()
 }
@@ -448,9 +489,9 @@ async fn get_index_status(
     get,
     path = "/api/v1/indexes/{keyspace}/{index}",
     tag = "scylla-vector-store-index",
-    description = "Retrieves information about a specific index, including its search type and the options \
-    it was created with. This is the same information reported per-entry by the `/api/v1/indexes` listing, \
-    scoped to a single index.",
+    description = "Retrieves information about a specific index: its search type, the options it was created with, \
+    its current operational status, the total number of items indexed and the progress of the initial table scan \
+    that backfills it. Each entry of the `/api/v1/indexes` listing carries the same information.",
     params(
         ("keyspace" = httpapi::KeyspaceName, Path, description = "The name of the ScyllaDB keyspace containing the index."),
         ("index" = httpapi::IndexName, Path, description = "The name of the ScyllaDB index within the specified keyspace.")
@@ -458,7 +499,7 @@ async fn get_index_status(
     responses(
         (
             status = 200,
-            description = "Successful operation. Returns the index's type and creation options.",
+            description = "Successful operation. Returns the index's type, creation options, and the status it currently reports.",
             body = IndexInfo,
             content_type = "application/json",
             example = json!({
@@ -472,12 +513,21 @@ async fn get_index_status(
                     "search_beam_width": 64,
                     "similarity_function": "COSINE",
                     "quantization": "F32"
-                }
+                },
+                "status": "SERVING",
+                "count": 12345,
+                "build_progress": 100.0
             })
         ),
         (
             status = 404,
             description = "Index not found. Possible causes: index does not exist, or is not discovered yet.",
+            content_type = "application/json",
+            body = ErrorMessage
+        ),
+        (
+            status = 500,
+            description = "Error while checking index state or counting indexed items. Possible causes: internal error, or issues accessing the database.",
             content_type = "application/json",
             body = ErrorMessage
         )
@@ -491,26 +541,48 @@ async fn get_index_info(
     let index_name: crate::IndexName = index_name.into();
     let index_key = IndexKey::new(&keyspace_name, &index_name);
 
-    let indexes = state.indexes.read().unwrap();
-    let info = if let Some(entry) = indexes.get_vs(&index_key) {
-        IndexInfo {
-            keyspace: keyspace_name.into(),
-            index: index_name.into(),
-            options: IndexOptions::Vector(entry.options().into()),
+    let (options, index, status, progress) = {
+        let indexes = state.indexes.read().unwrap();
+        if let Some(entry) = indexes.get_vs(&index_key) {
+            (
+                IndexOptions::Vector(entry.options().into()),
+                IndexSender::Vs(entry.index().clone()),
+                entry.status(),
+                entry.progress(),
+            )
+        } else if let Some(entry) = indexes.get_fts(&index_key) {
+            (
+                IndexOptions::Fulltext(entry.options().into()),
+                IndexSender::Fts(entry.index().clone()),
+                entry.status(),
+                entry.progress(),
+            )
+        } else {
+            let msg = format!("missing index: {keyspace_name}.{index_name}");
+            debug!("get_index_info: {msg}");
+            return (StatusCode::NOT_FOUND, msg).into_response();
         }
-    } else if let Some(entry) = indexes.get_fts(&index_key) {
-        IndexInfo {
-            keyspace: keyspace_name.into(),
-            index: index_name.into(),
-            options: IndexOptions::Fulltext(entry.options().into()),
-        }
-    } else {
-        let msg = format!("missing index: {keyspace_name}.{index_name}");
-        debug!("get_index_info: {msg}");
-        return (StatusCode::NOT_FOUND, msg).into_response();
     };
 
-    (StatusCode::OK, response::Json(info)).into_response()
+    match index.count(index_key).await {
+        Err(err) => {
+            let msg = format!("index.count request error: {err}");
+            debug!("get_index_info: {msg}");
+            (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
+        }
+        Ok(count) => (
+            StatusCode::OK,
+            response::Json(IndexInfo {
+                keyspace: keyspace_name.into(),
+                index: index_name.into(),
+                options,
+                status: status.into(),
+                count,
+                build_progress: progress_to_percentage(progress),
+            }),
+        )
+            .into_response(),
+    }
 }
 
 async fn refresh_index_metrics(
