@@ -964,6 +964,15 @@ pub async fn create_index(query: CreateIndexQuery<'_>) -> IndexInfo {
         .expect("index not found")
 }
 
+#[framed]
+pub async fn drop_index(session: &Session, index: &IndexInfo) {
+    apply_schema_change(
+        session,
+        format!("DROP INDEX IF EXISTS {index}", index = index.index),
+    )
+    .await;
+}
+
 pub struct CreateIndexQuery<'a> {
     session: &'a Session,
     clients: &'a [HttpClient],
