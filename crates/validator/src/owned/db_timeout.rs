@@ -5,7 +5,10 @@
 
 use crate::TestActors;
 use crate::common::*;
+use e2etest_firewall::FirewallExt;
 use e2etest_scylla_proxy_cluster::ScyllaProxyClusterExt;
+use httpclient::HttpClient;
+use scylla::client::session::Session;
 use scylla_proxy::Condition;
 use scylla_proxy::Reaction;
 use scylla_proxy::RequestReaction;
@@ -20,15 +23,17 @@ use tracing::info;
 
 e2etest::group!(
     name = db_timeout,
-    fixtures = (Fixture),
+    fixtures = (AllVsProxyCluster),
     parent = super::owned
 );
 
-struct Fixture {
+/// A proxy cluster running every Vector Store node, for the tests whose claim
+/// is about all of them at once.
+struct AllVsProxyCluster {
     actors: Arc<TestActors>,
 }
 
-impl e2etest::Fixture for Fixture {
+impl e2etest::Fixture for AllVsProxyCluster {
     async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
         let actors = setup.setup::<TestActors>().await?;
         init_with_proxy(&actors).await;
@@ -39,6 +44,23 @@ impl e2etest::Fixture for Fixture {
         cleanup(&self.actors).await;
     }
 }
+
+impl Cluster for AllVsProxyCluster {
+    fn actors(&self) -> &TestActors {
+        &self.actors
+    }
+
+    async fn connect(actors: &TestActors) -> (Arc<Session>, Vec<HttpClient>) {
+        prepare_connection_no_tls(actors).await
+    }
+
+    async fn reset(actors: &TestActors) {
+        actors.db_proxy.turn_off_rules().await;
+        actors.firewall.turn_off_rules().await;
+    }
+}
+
+type AllVsProxyContext = TestEnv<AllVsProxyCluster>;
 
 /// Test that CDC is working after rust driver session's client timeout.
 ///
@@ -52,23 +74,18 @@ impl e2etest::Fixture for Fixture {
 /// - Wait until vector-stores finish CDC readers.
 /// - Bring back simulator to normal operation.
 /// - Wait until vector-stores update indexes using CDC.
-/// - Drop the keyspace.
 #[e2etest::test(group = db_timeout)]
-async fn client_timeout_doesnt_stop_cdc(actors: Arc<TestActors>) {
+async fn client_timeout_doesnt_stop_cdc(ctx: Arc<AllVsProxyContext>) {
     info!("started");
-    let (session, clients) = prepare_connection_no_tls(&actors).await;
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(
-        &session,
-        "pk INT, v VECTOR<FLOAT, 1>, PRIMARY KEY (pk)",
-        None,
-    )
-    .await;
+    let clients = &ctx.clients;
+    let table = ctx
+        .create_table("pk INT, v VECTOR<FLOAT, 1>, PRIMARY KEY (pk)", None)
+        .await;
 
     info!("Initially, the index should have 0 vectors");
-    let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
+    let index = ctx.create_index(&table, "v").await;
 
-    for client in &clients {
+    for client in clients {
         let index_status = wait_for_index(client, &index).await;
         assert_eq!(index_status.count, 0, "Expected 0 vectors to be indexed");
     }
@@ -77,7 +94,7 @@ async fn client_timeout_doesnt_stop_cdc(actors: Arc<TestActors>) {
     const DATA_SIZE: usize = 10;
     let insert_vectors = async |start| {
         for i in start..start + DATA_SIZE {
-            session
+            ctx.session
                 .query_unpaged(
                     format!("INSERT INTO {table} (pk, v) VALUES (?, ?)"),
                     (i as i32, vec![i as f32]),
@@ -92,7 +109,7 @@ async fn client_timeout_doesnt_stop_cdc(actors: Arc<TestActors>) {
     const INSERT_FROM_CDC_TIMEOUT: Duration = Duration::from_secs(30);
     wait_for(
         || async {
-            for client in &clients {
+            for client in clients {
                 loop {
                     let index_status = wait_for_index(client, &index).await;
                     if index_status.count == DATA_SIZE {
@@ -110,7 +127,7 @@ async fn client_timeout_doesnt_stop_cdc(actors: Arc<TestActors>) {
 
     info!("Restart internals counter for cdc handler errors");
     let counter = format!("{}.{}-cdc-handler-errors", index.keyspace, index.index);
-    for client in &clients {
+    for client in clients {
         client.internals_clear_counters().await.unwrap();
         client
             .internals_start_counter(counter.clone())
@@ -127,7 +144,7 @@ async fn client_timeout_doesnt_stop_cdc(actors: Arc<TestActors>) {
             _ = timestamp_tx.send(Instant::now());
         }
     });
-    actors
+    ctx.actors()
         .db_proxy
         .change_request_rules(Some(vec![RequestRule(
             Condition::True,
@@ -135,7 +152,7 @@ async fn client_timeout_doesnt_stop_cdc(actors: Arc<TestActors>) {
         )]))
         .await;
 
-    for client in &clients {
+    for client in clients {
         let index_status = wait_for_index(client, &index).await;
         info!("Current index status: {index_status:?}");
     }
@@ -143,7 +160,7 @@ async fn client_timeout_doesnt_stop_cdc(actors: Arc<TestActors>) {
     info!("Insert new data that will be picked up by CDC");
     insert_vectors(DATA_SIZE).await;
 
-    for client in &clients {
+    for client in clients {
         let index_status = client
             .index_status(&index.keyspace, &index.index)
             .await
@@ -155,7 +172,7 @@ async fn client_timeout_doesnt_stop_cdc(actors: Arc<TestActors>) {
     const DROP_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
     wait_for(
         || async {
-            'clients: for client in &clients {
+            'clients: for client in clients {
                 loop {
                     let index_status = client
                         .index_status(&index.keyspace, &index.index)
@@ -187,12 +204,12 @@ async fn client_timeout_doesnt_stop_cdc(actors: Arc<TestActors>) {
     .await;
 
     info!("Stop timeout simulation");
-    actors.db_proxy.turn_off_rules().await;
+    ctx.actors().db_proxy.turn_off_rules().await;
 
     info!("Waiting till all vector-stores update indexes with new data using CDC");
     wait_for(
         || async {
-            for client in &clients {
+            for client in clients {
                 loop {
                     let index_status = client
                         .index_status(&index.keyspace, &index.index)
@@ -212,10 +229,5 @@ async fn client_timeout_doesnt_stop_cdc(actors: Arc<TestActors>) {
     )
     .await;
 
-    info!("Drop keyspace");
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop a keyspace");
     info!("finished");
 }
