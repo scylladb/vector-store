@@ -1817,8 +1817,9 @@ dependencies = [
 
 [[package]]
 name = "diskann"
-version = "0.55.0"
-source = "git+https://github.com/microsoft/DiskANN.git?rev=90f49467a7558bd53e01f61617c294611a96158d#90f49467a7558bd53e01f61617c294611a96158d"
+version = "0.57.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7cbaae814e21834c53f28bf9fad0d29c3cd61f2c3bd38f2af496acb39625d25"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -1837,8 +1838,9 @@ dependencies = [
 
 [[package]]
 name = "diskann-inmem"
-version = "0.55.0"
-source = "git+https://github.com/microsoft/DiskANN.git?rev=90f49467a7558bd53e01f61617c294611a96158d#90f49467a7558bd53e01f61617c294611a96158d"
+version = "0.57.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f6c17ef4e6628a4a09032f14ed3236039d494be7cf164f5d5e731b414501796"
 dependencies = [
  "bytemuck",
  "crossbeam-queue",
@@ -1854,8 +1856,9 @@ dependencies = [
 
 [[package]]
 name = "diskann-utils"
-version = "0.55.0"
-source = "git+https://github.com/microsoft/DiskANN.git?rev=90f49467a7558bd53e01f61617c294611a96158d#90f49467a7558bd53e01f61617c294611a96158d"
+version = "0.57.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aab785969c6dfb76f61ec107c1b0ba754556cec4a4f775d02c5d4bd4dd4e5385"
 dependencies = [
  "bytemuck",
  "cfg-if",
@@ -1870,8 +1873,9 @@ dependencies = [
 
 [[package]]
 name = "diskann-vector"
-version = "0.55.0"
-source = "git+https://github.com/microsoft/DiskANN.git?rev=90f49467a7558bd53e01f61617c294611a96158d#90f49467a7558bd53e01f61617c294611a96158d"
+version = "0.57.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5f4dd226bb7f1e0cd4e0cab323ea159b3d3973b72fa361aed999fdadb628bf4b"
 dependencies = [
  "cfg-if",
  "diskann-wide",
@@ -1880,8 +1884,9 @@ dependencies = [
 
 [[package]]
 name = "diskann-wide"
-version = "0.55.0"
-source = "git+https://github.com/microsoft/DiskANN.git?rev=90f49467a7558bd53e01f61617c294611a96158d#90f49467a7558bd53e01f61617c294611a96158d"
+version = "0.57.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8c0c7c27dd6d994860e09bb2873ab8d66a23279f8dbbd7f1f8d7f3c1d24e1548"
 dependencies = [
  "cfg-if",
  "half",

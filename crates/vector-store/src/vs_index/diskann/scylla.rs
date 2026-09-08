@@ -1027,7 +1027,10 @@ impl<'a> glue::SearchPostProcess<ScyllaSearchAccessor<'a>, &'a [f32], PrimaryId>
                 continue;
             };
 
-            if output.push(external, candidate.distance()).is_full() {
+            if output
+                .push(Neighbor::new(external, *candidate.distance()))
+                .is_full()
+            {
                 break;
             }
         }
