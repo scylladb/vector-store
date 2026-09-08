@@ -16,7 +16,7 @@ use tracing::info;
 
 const WAITING_FOR_DB_DISCOVERY: Duration = Duration::from_secs(5);
 
-e2etest::group!(name = auth, fixtures = (Fixture), parent = crate::validator);
+e2etest::group!(name = auth, fixtures = (Fixture), parent = super::owned);
 
 struct Fixture {
     actors: Arc<TestActors>,
