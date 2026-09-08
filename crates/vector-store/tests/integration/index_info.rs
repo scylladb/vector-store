@@ -3,17 +3,21 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 use crate::common::add_table;
+use crate::common::blocking_scan_fn;
 use crate::common::make_fts_index;
 use crate::common::make_fts_index_with_options;
 use crate::common::make_index_with_kind;
+use crate::common::make_vs_index;
 use crate::common::ordered_timeuuid;
 use crate::common::setup;
 use crate::common::single_row_scan;
 use crate::db_basic;
 use crate::wait_for;
+use crate::wait_for_value;
 use httpapi::DataType;
 use httpapi::FulltextIndexOptions;
 use httpapi::IndexOptions;
+use httpapi::IndexStatus;
 use httpapi::SimilarityFunction;
 use httpapi::VectorIndexOptions;
 use rstest::rstest;
@@ -27,6 +31,8 @@ use vector_store::DbIndexPartitioning;
 use vector_store::IndexKind;
 use vector_store::IndexOptionsFts;
 use vector_store::IndexOptionsVs;
+use vector_store::Percentage;
+use vector_store::Progress;
 use vector_store::Timestamp;
 
 #[rstest]
@@ -266,4 +272,142 @@ async fn indexes_lists_all_indexes_with_options() {
             expected_options.get(entry.index.as_ref()).unwrap()
         );
     }
+}
+
+#[rstest]
+#[timeout(Duration::from_secs(10))]
+#[tokio::test]
+async fn indexes_listing_reports_status_and_progress_when_serving() {
+    crate::enable_tracing();
+    let (client, db, _keep) = setup().await;
+
+    add_table(
+        &db,
+        ["pk".into()],
+        1,
+        [("pk".into(), NativeType::Int)],
+        ["embedding".into()],
+    );
+
+    let index = make_vs_index(
+        "ready",
+        &["pk"],
+        1,
+        "embedding",
+        DbIndexPartitioning::Global,
+        &[],
+        ordered_timeuuid(1),
+    );
+    db.add_index(
+        index.clone(),
+        Some(single_row_scan([CqlValue::Int(1)])),
+        None,
+    )
+    .unwrap();
+
+    let entries = wait_for_value(
+        async || {
+            let entries = client.indexes().await;
+            entries
+                .first()
+                .is_some_and(|entry| entry.status == IndexStatus::Serving && entry.count == 1)
+                .then_some(entries)
+        },
+        "the listed index to be serving with a single item indexed",
+    )
+    .await;
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].index.as_ref(), index.index_name.as_ref());
+    assert_eq!(entries[0].build_progress, 100.0);
+}
+
+#[rstest]
+#[timeout(Duration::from_secs(10))]
+#[tokio::test]
+async fn indexes_listing_reports_progress_of_bootstrapping_index() {
+    crate::enable_tracing();
+    let (client, db, _keep) = setup().await;
+
+    add_table(
+        &db,
+        ["pk".into()],
+        1,
+        [("pk".into(), NativeType::Int)],
+        ["embedding".into()],
+    );
+
+    // Pin the reported full-scan progress to a partial value, then add an index
+    // whose scan never completes, keeping it bootstrapping at that progress.
+    db.set_next_full_scan_progress(Progress::InProgress(Percentage::try_from(37.0).unwrap()));
+
+    let index = make_vs_index(
+        "building",
+        &["pk"],
+        1,
+        "embedding",
+        DbIndexPartitioning::Global,
+        &[],
+        ordered_timeuuid(1),
+    );
+    db.add_index(index.clone(), Some(blocking_scan_fn()), None)
+        .unwrap();
+
+    wait_for(
+        || async {
+            client.indexes().await.first().is_some_and(|entry| {
+                entry.status == IndexStatus::Bootstrapping && entry.build_progress == 37.0
+            })
+        },
+        "the listed index to be bootstrapping with build_progress == 37%",
+    )
+    .await;
+}
+
+#[rstest]
+#[timeout(Duration::from_secs(10))]
+#[tokio::test]
+async fn indexes_listing_reports_status_of_a_fulltext_index() {
+    crate::enable_tracing();
+    let (client, db, _keep) = setup().await;
+
+    add_table(
+        &db,
+        ["pk".into()],
+        1,
+        [
+            ("pk".into(), NativeType::Int),
+            ("content".into(), NativeType::Text),
+        ],
+        [],
+    );
+
+    let index = make_fts_index("fulltext", &["pk"], 1, "content", ordered_timeuuid(1));
+    db.add_index(
+        index.clone(),
+        Some(db_basic::scan_fn_documents([(
+            [CqlValue::Int(1)].into(),
+            Some("hello world".to_string()),
+            Timestamp::from_millis(10),
+        )])),
+        None,
+    )
+    .unwrap();
+
+    let entries = wait_for_value(
+        async || {
+            let entries = client.indexes().await;
+            entries
+                .first()
+                .is_some_and(|entry| entry.status == IndexStatus::Serving && entry.count == 1)
+                .then_some(entries)
+        },
+        "the listed full-text index to be serving with a single document indexed",
+    )
+    .await;
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].index.as_ref(), index.index_name.as_ref());
+    assert!(matches!(entries[0].options, IndexOptions::Fulltext(_)));
+    assert_eq!(entries[0].build_progress, 100.0);
 }

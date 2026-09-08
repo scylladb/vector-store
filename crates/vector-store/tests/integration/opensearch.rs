@@ -130,7 +130,8 @@ async fn simple_create_search_delete_index() {
 
     let indexes = client.indexes().await;
     assert_eq!(indexes.len(), 1);
-    assert_eq!(indexes[0], httpapi::IndexInfo::new("vector", "ann"));
+    assert_eq!(indexes[0].keyspace.as_ref(), "vector");
+    assert_eq!(indexes[0].index.as_ref(), "ann");
 
     let (primary_keys, distances, similarity_scores) = client
         .ann(

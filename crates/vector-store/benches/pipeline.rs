@@ -17,8 +17,8 @@ use db_basic::Table;
 use futures::FutureExt;
 use futures::StreamExt;
 use futures::stream;
+use httpapi::IndexInfo;
 use httpapi::IndexStatus;
-use httpapi::IndexStatusResponse;
 use itertools::Itertools;
 use scylla::cluster::metadata::NativeType;
 use scylla::value::CqlValue;
@@ -246,7 +246,7 @@ async fn wait_until_index_is_ready(
     loop {
         let response = client.index_status(keyspace_name, index_name).await;
         if response.status_code() == StatusCode::OK
-            && response.json::<IndexStatusResponse>().status == IndexStatus::Serving
+            && response.json::<IndexInfo>().status == IndexStatus::Serving
         {
             break;
         }

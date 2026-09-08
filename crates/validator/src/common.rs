@@ -16,7 +16,6 @@ use e2etest_vector_store_cluster::VectorStoreNodeConfig;
 use httpapi::IndexInfo;
 use httpapi::IndexName;
 use httpapi::IndexStatus;
-use httpapi::IndexStatusResponse;
 use httpapi::KeyspaceName;
 use httpclient::HttpClient;
 use itertools::Itertools;
@@ -643,7 +642,7 @@ where
 }
 
 #[framed]
-pub async fn wait_for_index(client: &HttpClient, index: &IndexInfo) -> IndexStatusResponse {
+pub async fn wait_for_index(client: &HttpClient, index: &IndexInfo) -> IndexInfo {
     wait_for_value(
         || async {
             match client.index_status(&index.keyspace, &index.index).await {

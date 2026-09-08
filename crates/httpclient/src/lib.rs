@@ -7,7 +7,6 @@ use httpapi::ColumnName;
 use httpapi::Distance;
 use httpapi::IndexInfo;
 use httpapi::IndexName;
-use httpapi::IndexStatusResponse;
 use httpapi::InfoResponse;
 use httpapi::KeyspaceName;
 use httpapi::Limit;
@@ -188,7 +187,7 @@ impl HttpClient {
         &self,
         keyspace_name: &KeyspaceName,
         index_name: &IndexName,
-    ) -> anyhow::Result<IndexStatusResponse> {
+    ) -> anyhow::Result<IndexInfo> {
         let response = self
             .client
             .get(format!(
@@ -199,7 +198,7 @@ impl HttpClient {
             .await?;
 
         if response.status().is_success() {
-            Ok(response.json::<IndexStatusResponse>().await?)
+            Ok(response.json::<IndexInfo>().await?)
         } else {
             let status = response.status();
             let error_text = response.text().await?;
