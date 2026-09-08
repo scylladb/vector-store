@@ -11,13 +11,12 @@ mod common;
 mod crud;
 mod filtering;
 mod fts;
-mod full_scan;
 mod index_create;
 mod index_modify;
 mod index_status;
 mod owned;
+mod proxy;
 mod quantization_and_rescoring;
-mod routing;
 mod serde;
 mod similarity_functions;
 
