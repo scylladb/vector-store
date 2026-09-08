@@ -185,6 +185,10 @@ e2etest::group!(
 );
 e2etest::group!(name = proxy, fixtures = (ProxyCluster), parent = validator);
 
+// Namespace for the groups that cannot share a cluster and start one of their
+// own.
+e2etest::group!(name = owned, fixtures = (), parent = validator);
+
 pub async fn run() -> ExitCode {
     let args = Args::parse();
     let root = validator();

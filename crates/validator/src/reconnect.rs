@@ -26,7 +26,7 @@ const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(12); // slightly more th
 e2etest::group!(
     name = reconnect,
     fixtures = (Fixture),
-    parent = crate::validator
+    parent = crate::owned
 );
 
 struct Fixture {

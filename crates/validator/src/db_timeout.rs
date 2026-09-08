@@ -21,7 +21,7 @@ use tracing::info;
 e2etest::group!(
     name = db_timeout,
     fixtures = (Fixture),
-    parent = crate::validator
+    parent = crate::owned
 );
 
 struct Fixture {

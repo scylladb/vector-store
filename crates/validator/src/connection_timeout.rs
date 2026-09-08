@@ -17,7 +17,7 @@ const CONNECTION_TIMEOUT: &str = "5s";
 e2etest::group!(
     name = connection_timeout,
     fixtures = (Fixture),
-    parent = crate::validator
+    parent = crate::owned
 );
 
 struct Fixture {

@@ -21,7 +21,7 @@ const TLS_RELOAD_TIMEOUT: Duration = Duration::from_secs(30);
 e2etest::group!(
     name = tls_reload,
     fixtures = (Fixture),
-    parent = crate::validator
+    parent = crate::owned
 );
 
 struct Fixture {
