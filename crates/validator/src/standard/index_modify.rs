@@ -3,14 +3,13 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
-use crate::TestActors;
+use super::TestContext;
 use crate::common;
 use crate::common::CreateIndexQuery;
 use crate::common::DEFAULT_OPERATION_TIMEOUT;
 use crate::common::TableName;
 use async_backtrace::framed;
 use httpapi::IndexInfo;
-use httpapi::KeyspaceName;
 use httpclient::HttpClient;
 use itertools::Itertools;
 use scylla::client::session::Session;
@@ -20,65 +19,36 @@ use tracing::info;
 
 e2etest::group!(
     name = index_modify,
-    fixtures = (GroupFixture),
-    parent = crate::validator
+    fixtures = (TestContext),
+    parent = super::standard
 );
-
-struct GroupFixture {
-    actors: Arc<TestActors>,
-}
-
-impl e2etest::Fixture for GroupFixture {
-    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
-        let actors = setup.setup::<TestActors>().await?;
-        common::init(&actors).await;
-        Some(Self { actors })
-    }
-
-    async fn teardown(self) {
-        common::cleanup(&self.actors).await;
-    }
-}
 
 struct Fixture {
     session: Arc<Session>,
     clients: Vec<HttpClient>,
-    keyspace: KeyspaceName,
     table: TableName,
 }
 
 impl e2etest::Fixture for Fixture {
     async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
-        let actors = setup.setup::<TestActors>().await?;
+        let ctx = setup.setup::<TestContext>().await?;
 
-        let (session, clients) = common::prepare_connection(&actors).await;
-
-        info!("Creating keyspace and table");
-        let keyspace = common::create_keyspace(&session).await;
-        let table = common::create_table(
-            &session,
-            "pk INT, ck INT, v VECTOR<FLOAT, 1>, rc INT, fc INT, PRIMARY KEY(pk, ck)",
-            None,
-        )
-        .await;
+        info!("Creating table");
+        let table = ctx
+            .create_table(
+                "pk INT, ck INT, v VECTOR<FLOAT, 1>, rc INT, fc INT, PRIMARY KEY(pk, ck)",
+                None,
+            )
+            .await;
         Some(Self {
-            session,
-            clients,
-            keyspace,
+            session: Arc::clone(&ctx.session),
+            clients: ctx.clients.clone(),
             table,
         })
     }
 
-    async fn teardown(self) {
-        info!("Dropping keyspace");
-        self.session
-            .query_unpaged(
-                format!("DROP KEYSPACE {keyspace}", keyspace = self.keyspace),
-                (),
-            )
-            .await
-            .expect("failed to drop a keyspace");
-    }
+    // The table lives in the group keyspace, dropped by the TestContext.
+    async fn teardown(self) {}
 }
 
 impl Fixture {
@@ -135,14 +105,6 @@ impl Fixture {
     async fn create_index(&self, query: CreateIndexQuery<'_>) -> IndexInfo {
         info!("Create an index");
         common::create_index(query).await
-    }
-
-    #[framed]
-    async fn wait_for_index(&self, index: &IndexInfo) {
-        info!("Wait for the index to be created");
-        for client in &self.clients {
-            common::wait_for_index(client, index).await;
-        }
     }
 
     #[framed]
