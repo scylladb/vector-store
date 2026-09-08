@@ -427,7 +427,7 @@
         "tags": [
           "scylla-vector-store-index"
         ],
-        "description": "Returns the same information about a single index as `/api/v1/indexes/{keyspace}/{index}` returns.",
+        "description": "Returns the same information about a single index as `/api/v1/indexes/{keyspace}/{index}`. Deprecated. Use that endpoint instead.",
         "operationId": "get_index_status",
         "parameters": [
           {
@@ -496,7 +496,8 @@
               }
             }
           }
-        }
+        },
+        "deprecated": true
       }
     },
     "/api/v1/info": {

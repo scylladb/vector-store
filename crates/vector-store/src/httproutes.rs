@@ -156,6 +156,7 @@ pub fn api() -> utoipa::openapi::OpenApi {
     new_open_api_router().1
 }
 
+#[allow(deprecated)]
 fn new_open_api_router() -> (Router<RoutesInnerState>, utoipa::openapi::OpenApi) {
     OpenApiRouter::with_openapi(ApiDoc::openapi())
         .merge(
@@ -404,7 +405,8 @@ impl From<crate::node_state::IndexStatus> for httpapi::IndexStatus {
     get,
     path = "/api/v1/indexes/{keyspace}/{index}/status",
     tag = "scylla-vector-store-index",
-    description = "Returns the same information about a single index as `/api/v1/indexes/{keyspace}/{index}` returns.",
+    description = "Returns the same information about a single index as `/api/v1/indexes/{keyspace}/{index}`. \
+    Deprecated. Use that endpoint instead.",
     params(
         ("keyspace" = httpapi::KeyspaceName, Path, description = "The name of the ScyllaDB keyspace containing the index."),
         ("index" = httpapi::IndexName, Path, description = "The name of the ScyllaDB index within the specified keyspace to check status of.")
@@ -446,6 +448,7 @@ impl From<crate::node_state::IndexStatus> for httpapi::IndexStatus {
         )
     )
 )]
+#[deprecated(note = "use get_index_info at /api/v1/indexes/{keyspace}/{index}")]
 async fn get_index_status(
     state: State<RoutesInnerState>,
     path: Path<(httpapi::KeyspaceName, httpapi::IndexName)>,
