@@ -1,0 +1,43 @@
+name: get-scylla-nightly-digest
+
+on:
+  workflow_call:
+    inputs:
+      use-latest-scylla-nightly:
+        description: 'Whether to use the latest scylla-nightly tag or the last working tag'
+        required: true
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  get-scylla-nightly-digest:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Get scylla-nightly digest for latest tag
+      id: get-scylla-nightly-latest-digest
+      run: wget -q -O - "https://hub.docker.com/v2/namespaces/scylladb/repositories/scylla-nightly/tags/latest" | jq -r .digest > scylla-nightly-latest-digest
+
+    - name: Get scylla-nightly digest for the last working tag
+      if: ${{ !inputs.use-latest-scylla-nightly }}
+      uses: dawidd6/action-download-artifact@b6e2e70617bc3265edd6dab6c906732b2f1ae151 # v21
+      with:
+        workflow: daily.yml
+        name: valid-scylla-nightly-digest
+        search_artifacts: true
+        if_no_artifact_found: warn
+
+    - name: Set scylla-nightly digest
+      id: set-scylla-nightly-digest
+      run: |
+        if [ ! -f scylla-nightly-digest ]; then
+          mv scylla-nightly-latest-digest scylla-nightly-digest
+        fi
+        cat scylla-nightly-digest
+
+    - name: Upload scylla-nightly digest as artifact
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: scylla-nightly-digest
+        path: scylla-nightly-digest

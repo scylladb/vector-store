@@ -1,0 +1,43 @@
+#!/bin/bash
+
+set -e
+
+repo=$(dirname "${BASH_SOURCE[0]}")
+repo=$(realpath $repo/..)
+
+cd $repo
+
+vector_store_version=$(./scripts/run-with-release-toolchain cargo info vector-store | grep ^version: | cut -d ' ' -f 2)
+
+archs="${*:-amd64 arm64}"
+
+for arch in $archs ; do
+    echo build the tar archive for $arch
+    vector_store_dir=vector-store-$vector_store_version-$arch
+    vector_store_tarball=$vector_store_dir.tar.gz
+    (cd target/$arch/release && tar -czf $vector_store_tarball --transform "s,^,$vector_store_dir/," vector-store)
+    ls -lh target/$arch/release/$vector_store_tarball
+done
+
+echo generate Cargo SBOM for version $vector_store_version
+cp Cargo.toml Cargo.toml.bak
+cp Cargo.lock Cargo.lock.bak
+trap 'mv Cargo.toml.bak Cargo.toml; mv Cargo.lock.bak Cargo.lock' EXIT
+sed -i "s/version = \"0.0.0-dev\"/version = \"$vector_store_version\"/" Cargo.toml
+cargo cyclonedx --manifest-path crates/vector-store/Cargo.toml --format json
+mv Cargo.toml.bak Cargo.toml
+mv Cargo.lock.bak Cargo.lock
+trap - EXIT
+cargo_sbom=crates/vector-store/vector-store.cdx.json
+[[ -f $cargo_sbom ]] || { echo "error: SBOM was not generated at $cargo_sbom"; exit 1; }
+mv $cargo_sbom vector-store-$vector_store_version.cdx.json
+echo "Cargo SBOM: vector-store-$vector_store_version.cdx.json"
+
+for arch in $archs ; do
+    echo generate Docker image SBOM for $arch using syft
+    docker_sbom=vector-store-docker-$vector_store_version-$arch.cdx.json
+    docker_tag=scylladb/vector-store:$vector_store_version-$arch
+    syft $docker_tag -o cyclonedx-json > $docker_sbom
+    [[ -s $docker_sbom ]] || { echo "error: Docker SBOM is empty at $docker_sbom"; exit 1; }
+    echo "Docker SBOM: $docker_sbom"
+done
