@@ -6,61 +6,33 @@
 //! Tests for a table with a secondary index, a vector index, and a fulltext index
 //! coexisting on different columns.
 
-use crate::TestActors;
+use super::TestContext;
 use crate::common::*;
-use httpapi::KeyspaceName;
 use scylla::client::session::Session;
 use std::sync::Arc;
 use tracing::info;
 
 e2etest::group!(
     name = coexisting_indexes,
-    fixtures = (Cluster, Fixture),
-    parent = crate::validator
+    fixtures = (TestContext, Fixture),
+    parent = super::standard
 );
 
-struct Cluster {
-    actors: Arc<TestActors>,
-}
-
-impl e2etest::Fixture for Cluster {
-    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
-        let actors = setup.setup::<TestActors>().await?;
-        init(&actors).await;
-        Some(Self { actors })
-    }
-
-    async fn teardown(self) {
-        cleanup(&self.actors).await;
-    }
-}
-
 struct Fixture {
-    _cluster: Arc<Cluster>,
     session: Arc<Session>,
-    keyspace: KeyspaceName,
     table: TableName,
 }
 
 impl e2etest::Fixture for Fixture {
     async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
-        let cluster = setup.setup::<Cluster>().await?;
-        let actors = setup.setup::<TestActors>().await?;
-        let (session, keyspace, table) = setup_table(&actors).await;
-        Some(Self {
-            _cluster: cluster,
-            session,
-            keyspace,
-            table,
-        })
+        let ctx = setup.setup::<TestContext>().await?;
+        let table = setup_table(&ctx).await;
+        let session = Arc::clone(&ctx.session);
+        Some(Self { session, table })
     }
 
-    async fn teardown(self) {
-        self.session
-            .query_unpaged(format!("DROP KEYSPACE {}", self.keyspace), ())
-            .await
-            .expect("failed to drop keyspace");
-    }
+    // The table lives in the group keyspace, dropped by the TestContext.
+    async fn teardown(self) {}
 }
 
 /// Creates a table with 20 rows:
@@ -70,20 +42,19 @@ impl e2etest::Fixture for Fixture {
 /// - `s`   = `pk % 3`
 ///
 /// A vector index is created on `v`, a fulltext index on `doc`, and a secondary index on `s`.
-async fn setup_table(actors: &TestActors) -> (Arc<Session>, KeyspaceName, TableName) {
-    let (session, clients) = prepare_connection(actors).await;
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(
-        &session,
-        "pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>, doc TEXT, s INT",
-        None,
+async fn setup_table(ctx: &TestContext) -> TableName {
+    let table = ctx
+        .create_table(
+            "pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>, doc TEXT, s INT",
+            None,
+        )
+        .await;
+
+    apply_schema_change(
+        &ctx.session,
+        format!("CREATE INDEX IF NOT EXISTS ON {table}(s)"),
     )
     .await;
-
-    session
-        .query_unpaged(format!("CREATE INDEX ON {table}(s)"), ())
-        .await
-        .expect("failed to create secondary index on s");
 
     let documents = [
         "the quick brown fox jumps over the lazy dog",
@@ -99,7 +70,7 @@ async fn setup_table(actors: &TestActors) -> (Arc<Session>, KeyspaceName, TableN
     ];
 
     for i in 0..20 {
-        session
+        ctx.session
             .query_unpaged(
                 format!("INSERT INTO {table} (pk, v, doc, s) VALUES (?, ?, ?, ?)"),
                 (
@@ -114,21 +85,19 @@ async fn setup_table(actors: &TestActors) -> (Arc<Session>, KeyspaceName, TableN
     }
 
     let vector_index = create_index(
-        CreateIndexQuery::new(&session, &clients, &table, "v")
+        ctx.index_query(&table, "v")
             .options([("similarity_function", "euclidean")]),
     )
     .await;
-    let fulltext_index = create_index(
-        CreateIndexQuery::new(&session, &clients, &table, "doc").index_type("fulltext_index"),
-    )
-    .await;
+    let fulltext_index =
+        create_index(ctx.index_query(&table, "doc").index_type("fulltext_index")).await;
 
-    for client in &clients {
+    for client in &ctx.clients {
         wait_for_index(client, &vector_index).await;
         wait_for_index(client, &fulltext_index).await;
     }
 
-    (session, keyspace, table)
+    table
 }
 
 #[e2etest::test(group = coexisting_indexes)]
