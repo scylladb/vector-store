@@ -127,8 +127,11 @@ TARGETARCH=arm64 ./scripts/run-with-release-toolchain cargo build --release --bi
 - Filters select test cases using `<group>::<test>` syntax. Partial matches work,
   and wrapping either side in double quotes forces an exact match. Omit filters to
   run everything. For example, `cdc_direct::` runs every group whose name contains
-  `cdc_direct`; to match that group exactly, keep the double quotes intact through
-  the shell with single quotes: `'"cdc_direct"::'`.
+  `cdc_direct`. Groups sharing a cluster sit under an umbrella group, so a group's
+  name is a path — `standard::cdc_direct` — and an exact match has to spell the
+  whole path out, keeping the double quotes intact through the shell with single
+  quotes: `'"standard::cdc_direct"::'`. Take the paths from `list`. Beware that an
+  exact match matching nothing runs the whole suite rather than nothing.
 
 **List available test cases:**
 ```sh
