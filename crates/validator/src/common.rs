@@ -720,15 +720,6 @@ pub async fn prepare_connection(actors: &TestActors) -> (Arc<Session>, Vec<HttpC
     prepare_connection_with_custom_vs_ips(actors, get_default_vs_ips(actors)).await
 }
 
-#[framed]
-pub async fn prepare_connection_single_vs(actors: &TestActors) -> (Arc<Session>, Vec<HttpClient>) {
-    prepare_connection_with_custom_vs_ips(
-        actors,
-        get_default_vs_ips(actors).into_iter().take(1).collect(),
-    )
-    .await
-}
-
 /// Creates a CQL session and VS HTTP clients without TLS.
 /// Use this variant for tests that go through the scylla-proxy, which
 /// operates at the CQL frame level and cannot handle TLS traffic.
