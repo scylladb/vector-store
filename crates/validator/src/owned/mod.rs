@@ -59,3 +59,27 @@ impl Cluster for OwnedProxyCluster {
 }
 
 type OwnedProxyContext = TestEnv<OwnedProxyCluster>;
+
+/// Starts nothing: the tests whose subject is the cluster configuration build
+/// the node configs themselves. Name it in test arguments only, so whatever a
+/// test started is stopped before the next one runs.
+struct CustomCluster {
+    actors: Arc<TestActors>,
+}
+
+impl e2etest::Fixture for CustomCluster {
+    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
+        let actors = setup.setup::<TestActors>().await?;
+        Some(Self { actors })
+    }
+
+    async fn teardown(self) {
+        cleanup(&self.actors).await;
+    }
+}
+
+impl CustomCluster {
+    fn actors(&self) -> &TestActors {
+        &self.actors
+    }
+}
