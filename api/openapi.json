@@ -427,7 +427,7 @@
         "tags": [
           "scylla-vector-store-index"
         ],
-        "description": "Retrieves the current operational status and item count for a specific index. The response includes the index's state and the total number of items currently indexed (excluding tombstoned or deleted entries). This endpoint enables clients to monitor index readiness and data availability for search operations.",
+        "description": "Returns the same information about a single index as `/api/v1/indexes/{keyspace}/{index}` returns.",
         "operationId": "get_index_status",
         "parameters": [
           {
@@ -451,15 +451,26 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful operation. Returns the current operational status of the specified index, including its state and the total number of items currently indexed.",
+            "description": "Successful operation. Returns the index's type, creation options, and the status it currently reports.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/IndexStatusResponse"
+                  "$ref": "#/components/schemas/IndexInfo"
                 },
                 "example": {
                   "build_progress": 100.0,
                   "count": 12345,
+                  "index": "my_vector_index",
+                  "keyspace": "my_keyspace",
+                  "options": {
+                    "construction_beam_width": 128,
+                    "dimensions": 384,
+                    "maximum_node_connections": 16,
+                    "quantization": "F32",
+                    "search_beam_width": 64,
+                    "similarity_function": "COSINE",
+                    "type": "vector"
+                  },
                   "status": "SERVING"
                 }
               }
@@ -716,29 +727,6 @@
           "The index is performing the initial full scan of the underlying table to populate the index.",
           "The index has completed the initial table scan. It is now monitoring the database for changes."
         ]
-      },
-      "IndexStatusResponse": {
-        "type": "object",
-        "required": [
-          "status",
-          "count"
-        ],
-        "properties": {
-          "build_progress": {
-            "type": "number",
-            "format": "double",
-            "description": "Progress of the initial full table scan that backfills the index,\nexpressed as a percentage in the range `0.0..=100.0`. This reflects\nonly how far the full scan has advanced; it is not a source of truth\nfor the index state. The `status` field is authoritative: an index\nreporting `SERVING` is serving regardless of `build_progress`, which\nmay not reach `100.0` (e.g. if some scan ranges failed). Defaults to\n`100.0` when omitted, so a new client talking to an older server that\ndoes not report the field falls back to relying solely on `status`.",
-            "maximum": 100,
-            "minimum": 0
-          },
-          "count": {
-            "type": "integer",
-            "minimum": 0
-          },
-          "status": {
-            "$ref": "#/components/schemas/IndexStatus"
-          }
-        }
       },
       "InfoResponse": {
         "type": "object",

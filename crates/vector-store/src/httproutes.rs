@@ -404,9 +404,7 @@ impl From<crate::node_state::IndexStatus> for httpapi::IndexStatus {
     get,
     path = "/api/v1/indexes/{keyspace}/{index}/status",
     tag = "scylla-vector-store-index",
-    description = "Retrieves the current operational status and item count for a specific index. \
-    The response includes the index's state and the total number of items currently indexed (excluding tombstoned or deleted entries). \
-    This endpoint enables clients to monitor index readiness and data availability for search operations.",
+    description = "Returns the same information about a single index as `/api/v1/indexes/{keyspace}/{index}` returns.",
     params(
         ("keyspace" = httpapi::KeyspaceName, Path, description = "The name of the ScyllaDB keyspace containing the index."),
         ("index" = httpapi::IndexName, Path, description = "The name of the ScyllaDB index within the specified keyspace to check status of.")
@@ -414,11 +412,21 @@ impl From<crate::node_state::IndexStatus> for httpapi::IndexStatus {
     responses(
         (
             status = 200,
-            description = "Successful operation. Returns the current operational status of the specified index, including its state \
-            and the total number of items currently indexed.",
-            body = httpapi::IndexStatusResponse,
+            description = "Successful operation. Returns the index's type, creation options, and the status it currently reports.",
+            body = IndexInfo,
             content_type = "application/json",
             example = json!({
+                "keyspace": "my_keyspace",
+                "index": "my_vector_index",
+                "options": {
+                    "type": "vector",
+                    "dimensions": 384,
+                    "maximum_node_connections": 16,
+                    "construction_beam_width": 128,
+                    "search_beam_width": 64,
+                    "similarity_function": "COSINE",
+                    "quantization": "F32"
+                },
                 "status": "SERVING",
                 "count": 12345,
                 "build_progress": 100.0
@@ -439,50 +447,10 @@ impl From<crate::node_state::IndexStatus> for httpapi::IndexStatus {
     )
 )]
 async fn get_index_status(
-    State(state): State<RoutesInnerState>,
-    Path((keyspace_name, index_name)): Path<(httpapi::KeyspaceName, httpapi::IndexName)>,
+    state: State<RoutesInnerState>,
+    path: Path<(httpapi::KeyspaceName, httpapi::IndexName)>,
 ) -> Response {
-    let keyspace_name: crate::KeyspaceName = keyspace_name.into();
-    let index_name: crate::IndexName = index_name.into();
-    let index_key = IndexKey::new(&keyspace_name, &index_name);
-
-    let (index, status, progress) = {
-        let indexes = state.indexes.read().unwrap();
-        if let Some(entry) = indexes.get_vs(&index_key) {
-            (
-                IndexSender::Vs(entry.index().clone()),
-                entry.status(),
-                entry.progress(),
-            )
-        } else if let Some(entry) = indexes.get_fts(&index_key) {
-            (
-                IndexSender::Fts(entry.index().clone()),
-                entry.status(),
-                entry.progress(),
-            )
-        } else {
-            let msg = format!("missing index: {keyspace_name}.{index_name}");
-            debug!("get_index_status: {msg}");
-            return (StatusCode::NOT_FOUND, msg).into_response();
-        }
-    };
-
-    match index.count(index_key).await {
-        Err(err) => {
-            let msg = format!("index.count request error: {err}");
-            debug!("get_index_status: {msg}");
-            (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
-        }
-        Ok(count) => (
-            StatusCode::OK,
-            response::Json(httpapi::IndexStatusResponse {
-                status: status.into(),
-                count,
-                build_progress: progress_to_percentage(progress),
-            }),
-        )
-            .into_response(),
-    }
+    get_index_info(state, path).await
 }
 
 #[utoipa::path(
