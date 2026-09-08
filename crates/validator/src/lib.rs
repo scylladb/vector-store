@@ -3,22 +3,10 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
-mod alternator;
-mod ann;
-mod cdc;
-mod coexisting_indexes;
 mod common;
-mod crud;
-mod filtering;
-mod fts;
-mod index_create;
-mod index_modify;
-mod index_status;
 mod owned;
 mod proxy;
-mod quantization_and_rescoring;
-mod serde;
-mod similarity_functions;
+mod standard;
 
 use clap::Parser;
 use clap::Subcommand;

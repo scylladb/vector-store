@@ -9,8 +9,8 @@
 //! tombstone is consumed by Vector Store and the expired vector is removed
 //! from the index.
 
+use super::query::QueryBuilderExt;
 use crate::TestActors;
-use crate::alternator::query::QueryBuilderExt;
 use crate::common;
 use crate::common::alternator;
 use crate::common::alternator::Item;
