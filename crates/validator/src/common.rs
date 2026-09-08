@@ -683,6 +683,41 @@ impl Cluster for OwnedProxyCluster {
 
 pub type OwnedProxyContext = TestEnv<OwnedProxyCluster>;
 
+/// A proxy cluster running every Vector Store node, for the tests whose claim
+/// is about all of them at once.
+pub struct AllVsProxyCluster {
+    actors: Arc<TestActors>,
+}
+
+impl e2etest::Fixture for AllVsProxyCluster {
+    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
+        let actors = setup.setup::<TestActors>().await?;
+        init_with_proxy(&actors).await;
+        Some(Self { actors })
+    }
+
+    async fn teardown(self) {
+        cleanup(&self.actors).await;
+    }
+}
+
+impl Cluster for AllVsProxyCluster {
+    fn actors(&self) -> &TestActors {
+        &self.actors
+    }
+
+    async fn connect(actors: &TestActors) -> (Arc<Session>, Vec<HttpClient>) {
+        prepare_connection_no_tls(actors).await
+    }
+
+    async fn reset(actors: &TestActors) {
+        actors.db_proxy.turn_off_rules().await;
+        actors.firewall.turn_off_rules().await;
+    }
+}
+
+pub type AllVsProxyContext = TestEnv<AllVsProxyCluster>;
+
 #[framed]
 pub async fn prepare_connection_with_custom_vs_ips(
     actors: &TestActors,
