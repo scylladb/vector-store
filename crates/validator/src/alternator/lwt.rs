@@ -210,11 +210,7 @@ async fn alternator_with_always_use_lwt(actors: Arc<TestActors>) {
     info!("finished");
 }
 
-e2etest::group!(
-    name = lwt,
-    fixtures = (Fixture),
-    parent = alternator::alternator
-);
+e2etest::group!(name = lwt, fixtures = (Fixture), parent = crate::owned);
 
 struct Fixture {
     actors: Arc<TestActors>,

@@ -3,11 +3,10 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
-use crate::TestActors;
 use crate::alternator;
+use crate::alternator::AlternatorContext;
 use crate::alternator::Item;
 use crate::alternator::TableContext;
-use crate::common;
 use aws_sdk_dynamodb::operation::update_item::builders::UpdateItemFluentBuilder;
 use aws_sdk_dynamodb::types::AttributeValue;
 use std::sync::Arc;
@@ -53,7 +52,7 @@ fn update_item_expr(
 ///
 /// Starting state: `a` and `b` indexed, `c` has no vector (count=2).
 #[e2etest::test(group = update_item)]
-async fn update_item_updates_index(actors: Arc<TestActors>) {
+async fn update_item_updates_index(ctx: Arc<AlternatorContext>) {
     info!("started");
 
     for shape in &alternator::name_patterns() {
@@ -66,7 +65,7 @@ async fn update_item_updates_index(actors: Arc<TestActors>) {
         let c_no_vec = Item::key(shape.pk(), shape.sk(), "pk", "c");
 
         let ctx = TableContext::create_with_invalid_data(
-            &actors,
+            ctx.actors(),
             shape,
             &[a.clone(), b.clone()],
             std::slice::from_ref(&c_no_vec),
@@ -151,7 +150,7 @@ async fn update_item_updates_index(actors: Arc<TestActors>) {
 /// vector column is accepted but not indexed), and wrong-type updates are
 /// rejected by Scylla with `ValidationException`.
 #[e2etest::test(group = update_item)]
-async fn update_item_with_invalid_vector_is_not_indexed(actors: Arc<TestActors>) {
+async fn update_item_with_invalid_vector_is_not_indexed(ctx: Arc<AlternatorContext>) {
     info!("started");
 
     let shape = &alternator::name_patterns()[0]; // plain names, HASH-only
@@ -160,7 +159,7 @@ async fn update_item_with_invalid_vector_is_not_indexed(actors: Arc<TestActors>)
     let a = Item::key(shape.pk(), shape.sk(), "pk", "a").vec(vec_attr, [1.0, 2.0, 4.0]);
     let b = Item::key(shape.pk(), shape.sk(), "pk", "b").vec(vec_attr, [1.0, 1.0, 1.0]);
 
-    let ctx = TableContext::create_with_data(&actors, shape, &[a.clone(), b.clone()]).await;
+    let ctx = TableContext::create_with_data(ctx.actors(), shape, &[a.clone(), b.clone()]).await;
 
     update_item_expr(&ctx, &b, "REMOVE #vec", None)
         .send()
@@ -207,7 +206,7 @@ async fn update_item_with_invalid_vector_is_not_indexed(actors: Arc<TestActors>)
 /// Tests CDC rows where Alternator's physical `:attrs` map is present because
 /// an unrelated attribute changed, but the logical vector attribute did not.
 #[e2etest::test(group = update_item)]
-async fn update_item_unrelated_attribute_does_not_deindex(actors: Arc<TestActors>) {
+async fn update_item_unrelated_attribute_does_not_deindex(ctx: Arc<AlternatorContext>) {
     info!("started");
 
     let shape = &alternator::name_patterns()[1]; // plain names, HASH+RANGE for same-partition barriers
@@ -216,7 +215,7 @@ async fn update_item_unrelated_attribute_does_not_deindex(actors: Arc<TestActors
     let a = Item::key(shape.pk(), shape.sk(), "pk", "a").vec(vec_attr, [1.0, 2.0, 4.0]);
     let b = Item::key(shape.pk(), shape.sk(), "pk", "b").vec(vec_attr, [-1.0, -1.0, -1.0]);
 
-    let ctx = TableContext::create_with_data(&actors, shape, &[a.clone(), b.clone()]).await;
+    let ctx = TableContext::create_with_data(ctx.actors(), shape, &[a.clone(), b.clone()]).await;
     ctx.wait_for_ann([1.0, 1.0, 1.0], &[a.clone(), b.clone()])
         .await;
 
@@ -249,7 +248,7 @@ async fn update_item_unrelated_attribute_does_not_deindex(actors: Arc<TestActors
 /// attribute in the same `:attrs` map delta. The vector deletion must not be
 /// masked by unrelated replacement data.
 #[e2etest::test(group = update_item)]
-async fn update_item_remove_vector_and_set_unrelated_deindexes(actors: Arc<TestActors>) {
+async fn update_item_remove_vector_and_set_unrelated_deindexes(ctx: Arc<AlternatorContext>) {
     info!("started");
 
     let shape = &alternator::name_patterns()[1]; // plain names, HASH+RANGE for same-partition barriers
@@ -258,7 +257,7 @@ async fn update_item_remove_vector_and_set_unrelated_deindexes(actors: Arc<TestA
     let a = Item::key(shape.pk(), shape.sk(), "pk", "a").vec(vec_attr, [1.0, 1.0, 1.0]);
     let b = Item::key(shape.pk(), shape.sk(), "pk", "b").vec(vec_attr, [4.0, 2.0, 1.0]);
 
-    let ctx = TableContext::create_with_data(&actors, shape, &[a.clone(), b.clone()]).await;
+    let ctx = TableContext::create_with_data(ctx.actors(), shape, &[a.clone(), b.clone()]).await;
     ctx.wait_for_ann([1.0, 1.0, 1.0], &[a.clone(), b.clone()])
         .await;
 
@@ -283,7 +282,7 @@ async fn update_item_remove_vector_and_set_unrelated_deindexes(actors: Arc<TestA
 /// vector attribute. Unrelated deleted-elements metadata must not de-index the
 /// vector.
 #[e2etest::test(group = update_item)]
-async fn update_item_remove_unrelated_and_set_vector_updates_index(actors: Arc<TestActors>) {
+async fn update_item_remove_unrelated_and_set_vector_updates_index(ctx: Arc<AlternatorContext>) {
     info!("started");
 
     let shape = &alternator::name_patterns()[0]; // plain names, HASH-only
@@ -294,7 +293,7 @@ async fn update_item_remove_unrelated_and_set_vector_updates_index(actors: Arc<T
         .vec(vec_attr, [-1.0, -1.0, -1.0])
         .attr("unrelated", AttributeValue::S("old".into()));
 
-    let ctx = TableContext::create_with_data(&actors, shape, &[a.clone(), b.clone()]).await;
+    let ctx = TableContext::create_with_data(ctx.actors(), shape, &[a.clone(), b.clone()]).await;
     ctx.wait_for_ann([1.0, 1.0, 1.0], &[a.clone(), b.clone()])
         .await;
 
@@ -324,7 +323,7 @@ async fn update_item_remove_unrelated_and_set_vector_updates_index(actors: Arc<T
 /// dimensions). Steps 1-5 exercise mutations on a valid item (accepted and
 /// rejected). Steps 6-8 fix the invalid items. Step 9 tests ADD (LWT path).
 #[e2etest::test(group = update_item)]
-async fn update_item_vector_element_operations(actors: Arc<TestActors>) {
+async fn update_item_vector_element_operations(ctx: Arc<AlternatorContext>) {
     info!("started");
 
     let patterns = alternator::name_patterns();
@@ -350,7 +349,7 @@ async fn update_item_vector_element_operations(actors: Arc<TestActors>) {
         .attr(vec_attr, alternator::float_list([1.0_f32, 2.0, 4.0, 8.0]));
 
     let ctx = TableContext::create_with_invalid_data(
-        &actors,
+        ctx.actors(),
         shape,
         &[valid_a.clone(), valid_b.clone()],
         &[mixed.clone(), too_short.clone(), too_long.clone()],
@@ -469,22 +468,6 @@ async fn update_item_vector_element_operations(actors: Arc<TestActors>) {
 
 e2etest::group!(
     name = update_item,
-    fixtures = (Fixture),
+    fixtures = (AlternatorContext),
     parent = alternator::alternator
 );
-
-struct Fixture {
-    actors: Arc<TestActors>,
-}
-
-impl e2etest::Fixture for Fixture {
-    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
-        let actors = setup.setup::<TestActors>().await?;
-        alternator::init(&actors).await;
-        Some(Self { actors })
-    }
-
-    async fn teardown(self) {
-        common::cleanup(&self.actors).await;
-    }
-}

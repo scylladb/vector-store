@@ -250,7 +250,7 @@ async fn alternator_with_auth_enabled(actors: Arc<TestActors>) {
 e2etest::group!(
     name = alternator_auth,
     fixtures = (Fixture),
-    parent = alternator::alternator
+    parent = crate::owned
 );
 
 struct Fixture {

@@ -9,8 +9,8 @@
 //! tombstone is consumed by Vector Store and the expired vector is removed
 //! from the index.
 
-use crate::TestActors;
 use crate::alternator;
+use crate::alternator::AlternatorContext;
 use crate::alternator::Item;
 use crate::alternator::TableContext;
 use crate::alternator::TableShape;
@@ -56,7 +56,7 @@ fn ttl_epoch(seconds_from_now: i64) -> i64 {
 ///
 /// Covers both HASH-only and HASH+RANGE key schemas.
 #[e2etest::test(group = ttl)]
-async fn ttl_expiration_removes_vector(actors: Arc<TestActors>) {
+async fn ttl_expiration_removes_vector(ctx: Arc<AlternatorContext>) {
     info!("started");
 
     let shapes: &[TableShape] = &[
@@ -92,7 +92,7 @@ async fn ttl_expiration_removes_vector(actors: Arc<TestActors>) {
             .attr(ttl_attribute, AttributeValue::N(ttl_epoch(2).to_string()));
 
         let ctx = TableContext::create_with_data(
-            &actors,
+            ctx.actors(),
             shape,
             &[perm1.clone(), perm2.clone(), expiring],
         )
@@ -120,7 +120,7 @@ async fn ttl_expiration_removes_vector(actors: Arc<TestActors>) {
 /// Like [`ttl_expiration_removes_vector`] but uses `Select::AllProjectedAttributes`
 /// - an index-only read that skips the base table.
 #[e2etest::test(group = ttl)]
-async fn ttl_expiration_verified_via_query_with_all_projected(actors: Arc<TestActors>) {
+async fn ttl_expiration_verified_via_query_with_all_projected(ctx: Arc<AlternatorContext>) {
     info!("started");
 
     let shape = TableShape {
@@ -141,9 +141,12 @@ async fn ttl_expiration_verified_via_query_with_all_projected(actors: Arc<TestAc
         .vec(vec_attr, [1.0, 4.0, 8.0])
         .attr(ttl_attribute, AttributeValue::N(ttl_epoch(2).to_string()));
 
-    let ctx =
-        TableContext::create_with_data(&actors, &shape, &[perm1.clone(), perm2.clone(), expiring])
-            .await;
+    let ctx = TableContext::create_with_data(
+        ctx.actors(),
+        &shape,
+        &[perm1.clone(), perm2.clone(), expiring],
+    )
+    .await;
 
     info!(
         "Enabling TTL on attribute '{ttl_attribute}' for '{}'",
@@ -191,22 +194,6 @@ async fn ttl_expiration_verified_via_query_with_all_projected(actors: Arc<TestAc
 
 e2etest::group!(
     name = ttl,
-    fixtures = (Fixture),
+    fixtures = (AlternatorContext),
     parent = alternator::alternator
 );
-
-struct Fixture {
-    actors: Arc<TestActors>,
-}
-
-impl e2etest::Fixture for Fixture {
-    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
-        let actors = setup.setup::<TestActors>().await?;
-        alternator::init(&actors).await;
-        Some(Self { actors })
-    }
-
-    async fn teardown(self) {
-        common::cleanup(&self.actors).await;
-    }
-}
