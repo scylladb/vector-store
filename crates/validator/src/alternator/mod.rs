@@ -17,7 +17,9 @@ mod update_table;
 
 use crate::TestActors;
 use crate::common;
-use async_backtrace::framed;
+use crate::common::ALTERNATOR_PORT;
+use crate::common::Cluster;
+use crate::common::StandardCluster;
 use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
 use aws_sdk_dynamodb::Client;
@@ -57,6 +59,7 @@ use std::collections::HashMap;
 use std::fmt::Write;
 use std::net::Ipv4Addr;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 use tracing::info;
@@ -97,9 +100,31 @@ const MAX_ALTERNATOR_INDEX_NAME_LEN: usize = MAX_ALTERNATOR_TABLE_NAME_LEN;
 /// See <https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/HowItWorks.NamingRulesDataTypes.html>.
 const MAX_ALTERNATOR_ATTRIBUTE_NAME_LEN: usize = 255;
 
-e2etest::group!(name = alternator, fixtures = (), parent = crate::validator);
+// The groups needing a differently-configured cluster (`always_use_lwt`,
+// enforce-authorization) cannot coexist with the standard one and live outside
+// this namespace.
+e2etest::group!(name = alternator, fixtures = (), parent = crate::standard);
 
-const ALTERNATOR_PORT: u16 = 8000;
+/// Alternator tests need no keyspace of their own — each table they create is
+/// one — so this hands out the cluster handles and nothing else.
+pub(crate) struct AlternatorContext {
+    cluster: Arc<StandardCluster>,
+}
+
+impl e2etest::Fixture for AlternatorContext {
+    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
+        let cluster = setup.setup::<StandardCluster>().await?;
+        Some(Self { cluster })
+    }
+
+    async fn teardown(self) {}
+}
+
+impl AlternatorContext {
+    pub fn actors(&self) -> &TestActors {
+        self.cluster.actors()
+    }
+}
 
 /// In ScyllaDB Alternator, a DynamoDB table named `T` is stored under the CQL
 /// keyspace `alternator_T`. Vector Store discovers indexes by scanning
@@ -308,9 +333,9 @@ async fn make_dynamodb_client(db_ip: Ipv4Addr) -> Client {
 /// Polls the Alternator HTTP endpoint on `db_ip` until it responds successfully.
 ///
 /// The Alternator port may become available slightly after the CQL port (which
-/// is what `db.wait_for_ready()` checks), so `init` should call this once after
-/// the cluster has started before any tests run.
-async fn wait_for_alternator(db_ip: Ipv4Addr) {
+/// is what `db.wait_for_ready()` checks), so cluster init calls this once
+/// after the cluster has started.
+pub(crate) async fn wait_for_alternator(db_ip: Ipv4Addr) {
     let client = make_dynamodb_client(db_ip).await;
     common::wait_for(
         || {
@@ -628,9 +653,9 @@ where
     );
 }
 
-/// Applies the standard alternator base arguments plus `extra_args` overrides
-/// to default scylla node configs.
-async fn get_scylla_configs(
+/// Applies `extra_args` overrides to default scylla node configs; the base
+/// alternator arguments are already in them.
+pub(crate) async fn get_scylla_configs(
     actors: &TestActors,
     extra_args: impl IntoIterator<Item = (&str, &str)>,
     extra_config: Option<Vec<u8>>,
@@ -640,16 +665,6 @@ async fn get_scylla_configs(
     let mut scylla_configs = common::get_default_scylla_node_configs(actors).await;
 
     for config in &mut scylla_configs {
-        let node_ip = config.db_ip;
-        config.args.extend([
-            format!("--alternator-port={ALTERNATOR_PORT}"),
-            format!("--alternator-address={node_ip}"),
-            "--alternator-write-isolation=only_rmw_uses_lwt".to_string(),
-            "--alternator-enforce-authorization=false".to_string(),
-            // NOTE: --alternator-ttl-period-in-seconds is already set in
-            // DEFAULT_SCYLLA_ARGS (0.5s). ScyllaDB rejects duplicate flags.
-        ]);
-
         for (name, value) in &args {
             config.args.retain(|arg| !arg.starts_with(name));
             config.args.push(format!("{name}={value}"));
@@ -664,7 +679,10 @@ async fn get_scylla_configs(
 /// Starts ScyllaDB with the Alternator endpoint enabled alongside the Vector
 /// Store. `extra_args` is a list of `(name, value)` pairs that override or
 /// extend the default alternator arguments.
-async fn init_with_args(actors: &TestActors, extra_args: impl IntoIterator<Item = (&str, &str)>) {
+pub(crate) async fn init_with_args(
+    actors: &TestActors,
+    extra_args: impl IntoIterator<Item = (&str, &str)>,
+) {
     info!("started");
     let scylla_configs = get_scylla_configs(actors, extra_args, None).await;
     let vs_configs = common::get_default_vs_node_configs(actors).await;
@@ -675,13 +693,6 @@ async fn init_with_args(actors: &TestActors, extra_args: impl IntoIterator<Item 
 
     wait_for_alternator(db_ip).await;
     info!("finished");
-}
-
-/// Standard test init: starts ScyllaDB with the Alternator endpoint enabled on
-/// each node's own IP, alongside the Vector Store.
-#[framed]
-pub async fn init(actors: &TestActors) {
-    init_with_args(actors, []).await;
 }
 
 /// Describes the key schema, attribute names, and name prefixes for a test

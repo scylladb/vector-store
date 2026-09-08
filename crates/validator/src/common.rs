@@ -6,6 +6,7 @@
 use crate::TestActors;
 use async_backtrace::framed;
 use e2etest_dns::DnsExt;
+use e2etest_firewall::FirewallExt;
 use e2etest_scylla_cluster::ScyllaClusterExt;
 use e2etest_scylla_cluster::ScyllaNodeConfig;
 use e2etest_scylla_proxy_cluster::ScyllaProxyClusterExt;
@@ -48,6 +49,7 @@ pub const VS_NAMES: [&str; 3] = ["vs1", "vs2", "vs3"];
 
 pub const VS_PORT: u16 = 6080;
 pub const DB_PORT: u16 = 9042;
+pub const ALTERNATOR_PORT: u16 = 8000;
 
 pub const DB_OCTET_1: u8 = 1;
 pub const DB_OCTET_2: u8 = 2;
@@ -216,6 +218,21 @@ pub fn get_default_db_proxy_ips(actors: &TestActors) -> Vec<Ipv4Addr> {
     ]
 }
 
+/// Arguments enabling the Alternator (DynamoDB-compatible) endpoint on a node.
+/// Enabled on every node so that all test clusters share one canonical node
+/// configuration; CQL-only tests are unaffected by it.
+///
+/// NOTE: `--alternator-ttl-period-in-seconds` is already set in the default
+/// scylla args (0.5s). ScyllaDB rejects duplicate flags.
+pub fn default_alternator_args(node_ip: Ipv4Addr) -> Vec<String> {
+    vec![
+        format!("--alternator-port={ALTERNATOR_PORT}"),
+        format!("--alternator-address={node_ip}"),
+        "--alternator-write-isolation=only_rmw_uses_lwt".to_string(),
+        "--alternator-enforce-authorization=false".to_string(),
+    ]
+}
+
 #[framed]
 pub async fn get_default_scylla_node_configs(actors: &TestActors) -> Vec<ScyllaNodeConfig> {
     let default_vs_urls = get_default_vs_urls(actors).await;
@@ -226,11 +243,13 @@ pub async fn get_default_scylla_node_configs(actors: &TestActors) -> Vec<ScyllaN
         .enumerate()
         .map(|(i, &ip)| {
             let mut vs_urls = default_vs_urls.clone();
+            let mut args = e2etest_scylla_cluster::default_scylla_args();
+            args.extend(default_alternator_args(ip));
             ScyllaNodeConfig {
                 db_ip: ip,
                 primary_vs_uris: vec![vs_urls.remove(i)],
                 secondary_vs_uris: vs_urls,
-                args: e2etest_scylla_cluster::default_scylla_args(),
+                args,
                 cert_path: Some(cert_path.clone()),
                 key_path: Some(key_path.clone()),
                 extra_config: Some(scylla_auth_config()),
@@ -462,6 +481,10 @@ pub async fn init_with_config(
 #[framed]
 pub async fn cleanup(actors: &TestActors) {
     info!("started");
+    // A panicking test can leak firewall rules into the host routing table and
+    // poison every later cluster on the same addresses; the firewall actor has
+    // no cleanup of its own.
+    actors.firewall.turn_off_rules().await;
     for name in VS_NAMES.iter() {
         actors.dns.remove(name.to_string()).await;
     }
@@ -469,6 +492,323 @@ pub async fn cleanup(actors: &TestActors) {
     actors.db_proxy.stop().await;
     actors.db.stop().await;
     info!("finished");
+}
+
+/// A cluster a test group runs on. `reset` undoes the cluster-global state a
+/// test may have changed; it runs before the keyspace is dropped, so anything
+/// that leaves the database unreachable has to be undone there.
+pub trait Cluster: e2etest::Fixture {
+    fn actors(&self) -> &TestActors;
+
+    fn connect(actors: &TestActors)
+    -> impl Future<Output = (Arc<Session>, Vec<HttpClient>)> + Send;
+
+    fn reset(actors: &TestActors) -> impl Future<Output = ()> + Send {
+        async move {
+            let _ = actors;
+        }
+    }
+}
+
+/// A session on cluster `C`, its Vector Store clients, and a keyspace to
+/// create tables in.
+///
+/// Where it is named decides how long one lives: in a group's
+/// `fixtures = (...)` tuple it is set up once for the group, in test arguments
+/// alone it is set up and torn down around every test.
+pub struct TestEnv<C: Cluster> {
+    cluster: Arc<C>,
+    pub session: Arc<Session>,
+    pub clients: Vec<HttpClient>,
+    pub keyspace: KeyspaceName,
+}
+
+impl<C: Cluster> e2etest::Fixture for TestEnv<C> {
+    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
+        let cluster = setup.setup::<C>().await?;
+        let (session, clients) = C::connect(cluster.actors()).await;
+        let keyspace = create_keyspace(&session).await;
+        Some(Self {
+            cluster,
+            session,
+            clients,
+            keyspace,
+        })
+    }
+
+    async fn teardown(self) {
+        C::reset(self.cluster.actors()).await;
+        drop_keyspace(&self.session, &self.keyspace).await;
+    }
+}
+
+impl<C: Cluster> TestEnv<C> {
+    pub fn actors(&self) -> &TestActors {
+        self.cluster.actors()
+    }
+
+    /// The first Vector Store client, for the clusters that run only one.
+    pub fn client(&self) -> &HttpClient {
+        &self.clients[0]
+    }
+
+    pub async fn create_table(&self, columns: &str, options: Option<&str>) -> TableName {
+        create_table(&self.session, columns, options).await
+    }
+
+    /// Starts a `CREATE CUSTOM INDEX` query, for the tests that need index
+    /// options or filter columns. Finish it with [`create_index`].
+    pub fn index_query<'a>(
+        &'a self,
+        table: &TableName,
+        target_column: &str,
+    ) -> CreateIndexQuery<'a> {
+        CreateIndexQuery::new(&self.session, &self.clients, table, target_column)
+    }
+
+    pub async fn create_index(&self, table: &TableName, target_column: &str) -> IndexInfo {
+        create_index(self.index_query(table, target_column)).await
+    }
+}
+
+/// The default cluster, started once for the whole `standard` umbrella group.
+///
+/// Its tests must confine themselves to their own schema: it is shared, so
+/// restarting a node, installing rules, editing DNS or granting roles would
+/// break whatever sibling group runs next to them.
+pub struct StandardCluster {
+    actors: Arc<TestActors>,
+}
+
+impl e2etest::Fixture for StandardCluster {
+    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
+        let actors = setup.setup::<TestActors>().await?;
+        init(&actors).await;
+        // The Alternator port opens after the CQL one, which is all
+        // `wait_for_ready` checks.
+        crate::alternator::wait_for_alternator(actors.services_subnet.ip(DB_OCTET_1)).await;
+        Some(Self { actors })
+    }
+
+    async fn teardown(self) {
+        cleanup(&self.actors).await;
+    }
+}
+
+impl Cluster for StandardCluster {
+    fn actors(&self) -> &TestActors {
+        &self.actors
+    }
+
+    async fn connect(actors: &TestActors) -> (Arc<Session>, Vec<HttpClient>) {
+        prepare_connection(actors).await
+    }
+}
+
+/// One keyspace per group; every test still names its own tables and indexes.
+pub type TestContext = TestEnv<StandardCluster>;
+
+/// scylla-proxy in front of the database with a single Vector Store node,
+/// started once for the whole `proxy` umbrella group. The proxy works at CQL
+/// frame level and cannot carry TLS, so this cluster runs without it.
+pub struct ProxyCluster {
+    actors: Arc<TestActors>,
+}
+
+impl e2etest::Fixture for ProxyCluster {
+    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
+        let actors = setup.setup::<TestActors>().await?;
+        init_with_proxy_single_vs(&actors).await;
+        Some(Self { actors })
+    }
+
+    async fn teardown(self) {
+        cleanup(&self.actors).await;
+    }
+}
+
+impl Cluster for ProxyCluster {
+    fn actors(&self) -> &TestActors {
+        &self.actors
+    }
+
+    async fn connect(actors: &TestActors) -> (Arc<Session>, Vec<HttpClient>) {
+        prepare_connection_single_vs_no_tls(actors).await
+    }
+
+    async fn reset(actors: &TestActors) {
+        actors.db_proxy.turn_off_rules().await;
+        actors.firewall.turn_off_rules().await;
+    }
+}
+
+/// Name it in test arguments only, never in a group's `fixtures = (...)`: the
+/// rules are cluster-global, so every test must start from its own and leave
+/// none behind, even after failing half way through.
+pub type ProxyTestContext = TestEnv<ProxyCluster>;
+
+/// A proxy cluster of one group's own, for tests that go further than rules —
+/// stopping nodes, cutting their traffic off, restarting Vector Store with a
+/// different configuration. No sibling group could survive that.
+pub struct OwnedProxyCluster {
+    actors: Arc<TestActors>,
+}
+
+impl e2etest::Fixture for OwnedProxyCluster {
+    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
+        let actors = setup.setup::<TestActors>().await?;
+        init_with_proxy_single_vs(&actors).await;
+        Some(Self { actors })
+    }
+
+    async fn teardown(self) {
+        cleanup(&self.actors).await;
+    }
+}
+
+impl Cluster for OwnedProxyCluster {
+    fn actors(&self) -> &TestActors {
+        &self.actors
+    }
+
+    async fn connect(actors: &TestActors) -> (Arc<Session>, Vec<HttpClient>) {
+        prepare_connection_single_vs_no_tls(actors).await
+    }
+
+    async fn reset(actors: &TestActors) {
+        actors.db_proxy.turn_off_rules().await;
+        actors.firewall.turn_off_rules().await;
+    }
+}
+
+pub type OwnedProxyContext = TestEnv<OwnedProxyCluster>;
+
+/// A proxy cluster running every Vector Store node, for the tests whose claim
+/// is about all of them at once.
+pub struct AllVsProxyCluster {
+    actors: Arc<TestActors>,
+}
+
+impl e2etest::Fixture for AllVsProxyCluster {
+    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
+        let actors = setup.setup::<TestActors>().await?;
+        init_with_proxy(&actors).await;
+        Some(Self { actors })
+    }
+
+    async fn teardown(self) {
+        cleanup(&self.actors).await;
+    }
+}
+
+impl Cluster for AllVsProxyCluster {
+    fn actors(&self) -> &TestActors {
+        &self.actors
+    }
+
+    async fn connect(actors: &TestActors) -> (Arc<Session>, Vec<HttpClient>) {
+        prepare_connection_no_tls(actors).await
+    }
+
+    async fn reset(actors: &TestActors) {
+        actors.db_proxy.turn_off_rules().await;
+        actors.firewall.turn_off_rules().await;
+    }
+}
+
+pub type AllVsProxyContext = TestEnv<AllVsProxyCluster>;
+
+/// Starts nothing: the tests whose subject is the cluster configuration build
+/// the node configs themselves. Name it in test arguments only, so whatever a
+/// test started is stopped before the next one runs.
+pub struct CustomCluster {
+    actors: Arc<TestActors>,
+}
+
+impl e2etest::Fixture for CustomCluster {
+    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
+        let actors = setup.setup::<TestActors>().await?;
+        Some(Self { actors })
+    }
+
+    async fn teardown(self) {
+        cleanup(&self.actors).await;
+    }
+}
+
+impl CustomCluster {
+    pub fn actors(&self) -> &TestActors {
+        &self.actors
+    }
+}
+
+/// Alternator routing every write through LWT. The setting is cluster-wide, so
+/// it cannot share the standard cluster.
+pub struct LwtAlternatorCluster {
+    actors: Arc<TestActors>,
+}
+
+impl e2etest::Fixture for LwtAlternatorCluster {
+    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
+        let actors = setup.setup::<TestActors>().await?;
+        crate::alternator::init_with_args(
+            &actors,
+            [("--alternator-write-isolation", "always_use_lwt")],
+        )
+        .await;
+        Some(Self { actors })
+    }
+
+    async fn teardown(self) {
+        cleanup(&self.actors).await;
+    }
+}
+
+impl LwtAlternatorCluster {
+    pub fn actors(&self) -> &TestActors {
+        &self.actors
+    }
+}
+
+/// Alternator checking every request against a ScyllaDB role. Vector Store
+/// connects as the superuser, because the reduced-privilege default role
+/// cannot read the tables the limited roles under test create.
+pub struct AuthAlternatorCluster {
+    actors: Arc<TestActors>,
+}
+
+impl e2etest::Fixture for AuthAlternatorCluster {
+    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
+        let actors = setup.setup::<TestActors>().await?;
+
+        let scylla_configs = crate::alternator::get_scylla_configs(
+            &actors,
+            [("--alternator-enforce-authorization", "true")],
+            Some(scylla_auth_config()),
+        )
+        .await;
+
+        let mut vs_configs = get_default_vs_node_configs(&actors).await;
+        for config in &mut vs_configs {
+            config.user = Some(SUPERUSER_NAME.clone());
+            config.password = Some(SUPERUSER_PASSWORD.clone());
+        }
+
+        // The tests grant their own roles the permissions they are about.
+        init_with_config(&actors, scylla_configs, vs_configs, false).await;
+
+        Some(Self { actors })
+    }
+
+    async fn teardown(self) {
+        cleanup(&self.actors).await;
+    }
+}
+
+impl AuthAlternatorCluster {
+    pub fn actors(&self) -> &TestActors {
+        &self.actors
+    }
 }
 
 #[framed]
@@ -542,15 +882,6 @@ pub async fn prepare_connection_with_auth_no_tls(
 #[framed]
 pub async fn prepare_connection(actors: &TestActors) -> (Arc<Session>, Vec<HttpClient>) {
     prepare_connection_with_custom_vs_ips(actors, get_default_vs_ips(actors)).await
-}
-
-#[framed]
-pub async fn prepare_connection_single_vs(actors: &TestActors) -> (Arc<Session>, Vec<HttpClient>) {
-    prepare_connection_with_custom_vs_ips(
-        actors,
-        get_default_vs_ips(actors).into_iter().take(1).collect(),
-    )
-    .await
 }
 
 /// Creates a CQL session and VS HTTP clients without TLS.
@@ -759,15 +1090,48 @@ pub fn unique_index_name() -> IndexName {
     unique_name("idx", &INDEX_COUNTER).into()
 }
 
+/// Runs a schema-changing statement, retrying while ScyllaDB rejects it with
+/// "concurrent modification" because another schema change is in flight.
+///
+/// The statement must be idempotent (`IF EXISTS` / `IF NOT EXISTS`), because a
+/// rejected attempt may still have applied.
+#[framed]
+pub async fn apply_schema_change(session: &Session, query: impl Into<String>) {
+    let query = query.into();
+    wait_for(
+        || async {
+            match session.query_unpaged(query.clone(), ()).await {
+                Ok(_) => true,
+                Err(err) if is_concurrent_schema_change(&err) => {
+                    info!("Retrying schema change rejected by a concurrent one: {query}");
+                    false
+                }
+                Err(err) => panic!("failed to apply schema change '{query}': {err}"),
+            }
+        },
+        format!("schema change to be applied: {query}"),
+        DEFAULT_OPERATION_TIMEOUT,
+    )
+    .await;
+}
+
+fn is_concurrent_schema_change(err: &impl std::fmt::Display) -> bool {
+    err.to_string().contains("concurrent modification")
+}
+
 #[framed]
 pub async fn create_keyspace(session: &Session) -> KeyspaceName {
     let keyspace = unique_keyspace_name();
 
     // Create keyspace with replication factor of 3 for the 3-node cluster
-    session.query_unpaged(
-        format!("CREATE KEYSPACE {keyspace} WITH replication = {{'class': 'NetworkTopologyStrategy', 'replication_factor': 3}}"),
-        (),
-    ).await.expect("failed to create a keyspace");
+    apply_schema_change(
+        session,
+        format!(
+            "CREATE KEYSPACE IF NOT EXISTS {keyspace} WITH replication = \
+             {{'class': 'NetworkTopologyStrategy', 'replication_factor': 3}}"
+        ),
+    )
+    .await;
 
     // Use keyspace
     session
@@ -776,6 +1140,20 @@ pub async fn create_keyspace(session: &Session) -> KeyspaceName {
         .expect("failed to use a keyspace");
 
     keyspace
+}
+
+#[framed]
+pub async fn drop_index(session: &Session, index: &IndexInfo) {
+    apply_schema_change(
+        session,
+        format!("DROP INDEX IF EXISTS {index}", index = index.index),
+    )
+    .await;
+}
+
+#[framed]
+pub async fn drop_keyspace(session: &Session, keyspace: &KeyspaceName) {
+    apply_schema_change(session, format!("DROP KEYSPACE IF EXISTS {keyspace}")).await;
 }
 
 #[framed]
@@ -789,10 +1167,11 @@ pub async fn create_table(session: &Session, columns: &str, options: Option<&str
     };
 
     // Create table
-    session
-        .query_unpaged(format!("CREATE TABLE {table} ({columns}) {extra}"), ())
-        .await
-        .expect("failed to create a table");
+    apply_schema_change(
+        session,
+        format!("CREATE TABLE IF NOT EXISTS {table} ({columns}) {extra}"),
+    )
+    .await;
 
     table
 }
@@ -805,7 +1184,7 @@ pub async fn create_index(query: CreateIndexQuery<'_>) -> IndexInfo {
         format!(" WITH OPTIONS = {{{}}}", query.options)
     };
     let cql_query = format!(
-        "CREATE CUSTOM INDEX {index} ON {table}({partition_columns}{target_column}{filter_columns}) USING '{index_type}'{options_clause}",
+        "CREATE CUSTOM INDEX IF NOT EXISTS {index} ON {table}({partition_columns}{target_column}{filter_columns}) USING '{index_type}'{options_clause}",
         index = query.index,
         table = query.table,
         partition_columns = query.partition_columns,
@@ -814,11 +1193,7 @@ pub async fn create_index(query: CreateIndexQuery<'_>) -> IndexInfo {
         index_type = query.index_type,
     );
     info!("Create index: '{cql_query}'");
-    query
-        .session
-        .query_unpaged(cql_query, ())
-        .await
-        .expect("failed to create an index");
+    apply_schema_change(query.session, cql_query).await;
 
     for client in query.clients {
         wait_for(
