@@ -494,6 +494,74 @@ pub async fn cleanup(actors: &TestActors) {
     info!("finished");
 }
 
+/// A cluster a test group runs on. `reset` undoes the cluster-global state a
+/// test may have changed; it runs before the keyspace is dropped, so anything
+/// that leaves the database unreachable has to be undone there.
+pub trait Cluster: e2etest::Fixture {
+    fn actors(&self) -> &TestActors;
+
+    fn connect(actors: &TestActors)
+    -> impl Future<Output = (Arc<Session>, Vec<HttpClient>)> + Send;
+
+    fn reset(actors: &TestActors) -> impl Future<Output = ()> + Send {
+        async move {
+            let _ = actors;
+        }
+    }
+}
+
+/// A session on cluster `C`, its Vector Store clients, and a keyspace to
+/// create tables in.
+///
+/// Where it is named decides how long one lives: in a group's
+/// `fixtures = (...)` tuple it is set up once for the group, in test arguments
+/// alone it is set up and torn down around every test.
+pub struct TestEnv<C: Cluster> {
+    cluster: Arc<C>,
+    pub session: Arc<Session>,
+    pub clients: Vec<HttpClient>,
+    pub keyspace: KeyspaceName,
+}
+
+impl<C: Cluster> e2etest::Fixture for TestEnv<C> {
+    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
+        let cluster = setup.setup::<C>().await?;
+        let (session, clients) = C::connect(cluster.actors()).await;
+        let keyspace = create_keyspace(&session).await;
+        Some(Self {
+            cluster,
+            session,
+            clients,
+            keyspace,
+        })
+    }
+
+    async fn teardown(self) {
+        C::reset(self.cluster.actors()).await;
+        drop_keyspace(&self.session, &self.keyspace).await;
+    }
+}
+
+impl<C: Cluster> TestEnv<C> {
+    pub async fn create_table(&self, columns: &str, options: Option<&str>) -> TableName {
+        create_table(&self.session, columns, options).await
+    }
+
+    /// Starts a `CREATE CUSTOM INDEX` query, for the tests that need index
+    /// options or filter columns. Finish it with [`create_index`].
+    pub fn index_query<'a>(
+        &'a self,
+        table: &TableName,
+        target_column: &str,
+    ) -> CreateIndexQuery<'a> {
+        CreateIndexQuery::new(&self.session, &self.clients, table, target_column)
+    }
+
+    pub async fn create_index(&self, table: &TableName, target_column: &str) -> IndexInfo {
+        create_index(self.index_query(table, target_column)).await
+    }
+}
+
 /// The default cluster, started once for the whole `standard` umbrella group.
 ///
 /// Its tests must confine themselves to their own schema: it is shared, so
@@ -517,6 +585,19 @@ impl e2etest::Fixture for StandardCluster {
         cleanup(&self.actors).await;
     }
 }
+
+impl Cluster for StandardCluster {
+    fn actors(&self) -> &TestActors {
+        &self.actors
+    }
+
+    async fn connect(actors: &TestActors) -> (Arc<Session>, Vec<HttpClient>) {
+        prepare_connection(actors).await
+    }
+}
+
+/// One keyspace per group; every test still names its own tables and indexes.
+pub type TestContext = TestEnv<StandardCluster>;
 
 #[framed]
 pub async fn prepare_connection_with_custom_vs_ips(
@@ -856,6 +937,11 @@ pub async fn create_keyspace(session: &Session) -> KeyspaceName {
         .expect("failed to use a keyspace");
 
     keyspace
+}
+
+#[framed]
+pub async fn drop_keyspace(session: &Session, keyspace: &KeyspaceName) {
+    apply_schema_change(session, format!("DROP KEYSPACE IF EXISTS {keyspace}")).await;
 }
 
 #[framed]
