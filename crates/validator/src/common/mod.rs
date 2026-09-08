@@ -545,6 +545,15 @@ impl<C: Cluster> e2etest::Fixture for TestEnv<C> {
 }
 
 impl<C: Cluster> TestEnv<C> {
+    pub fn actors(&self) -> &TestActors {
+        self.cluster.actors()
+    }
+
+    /// The first Vector Store client, for the clusters that run only one.
+    pub fn client(&self) -> &HttpClient {
+        &self.clients[0]
+    }
+
     pub async fn create_table(&self, columns: &str, options: Option<&str>) -> TableName {
         create_table(&self.session, columns, options).await
     }
@@ -902,6 +911,15 @@ pub async fn create_keyspace(session: &Session) -> KeyspaceName {
         .expect("failed to use a keyspace");
 
     keyspace
+}
+
+#[framed]
+pub async fn drop_index(session: &Session, index: &IndexInfo) {
+    apply_schema_change(
+        session,
+        format!("DROP INDEX IF EXISTS {index}", index = index.index),
+    )
+    .await;
 }
 
 #[framed]
