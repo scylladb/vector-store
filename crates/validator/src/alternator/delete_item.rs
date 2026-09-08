@@ -4,10 +4,10 @@
  */
 
 use crate::TestActors;
-use crate::alternator;
-use crate::alternator::Item;
-use crate::alternator::TableContext;
 use crate::common;
+use crate::common::alternator;
+use crate::common::alternator::Item;
+use crate::common::alternator::TableContext;
 use aws_sdk_dynamodb::operation::delete_item::builders::DeleteItemFluentBuilder;
 use std::sync::Arc;
 use tracing::info;
@@ -82,7 +82,7 @@ async fn delete_item_updates_index(actors: Arc<TestActors>) {
 e2etest::group!(
     name = delete_item,
     fixtures = (Fixture),
-    parent = alternator::alternator
+    parent = super::alternator
 );
 
 struct Fixture {

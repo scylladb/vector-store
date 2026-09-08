@@ -4,12 +4,12 @@
  */
 
 use crate::TestActors;
-use crate::alternator;
-use crate::alternator::Item;
-use crate::alternator::TableContext;
-use crate::alternator::TableShape;
 use crate::alternator::query::QueryBuilderExt;
 use crate::common;
+use crate::common::alternator;
+use crate::common::alternator::Item;
+use crate::common::alternator::TableContext;
+use crate::common::alternator::TableShape;
 use aws_sdk_dynamodb::primitives::Blob;
 use aws_sdk_dynamodb::types::AttributeValue;
 use aws_sdk_dynamodb::types::ScalarAttributeType;
@@ -182,7 +182,7 @@ async fn query_with_optimized_vector_type(actors: Arc<TestActors>) {
 e2etest::group!(
     name = types,
     fixtures = (Fixture),
-    parent = alternator::alternator
+    parent = super::alternator
 );
 
 struct Fixture {
