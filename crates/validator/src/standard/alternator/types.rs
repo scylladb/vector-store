@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
+use super::query::QueryBuilderExt;
 use crate::TestActors;
-use crate::alternator::query::QueryBuilderExt;
 use crate::common;
 use crate::common::alternator;
 use crate::common::alternator::Item;
