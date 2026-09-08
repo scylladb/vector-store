@@ -718,6 +718,30 @@ impl Cluster for AllVsProxyCluster {
 
 pub type AllVsProxyContext = TestEnv<AllVsProxyCluster>;
 
+/// Starts nothing: the tests whose subject is the cluster configuration build
+/// the node configs themselves. Name it in test arguments only, so whatever a
+/// test started is stopped before the next one runs.
+pub struct CustomCluster {
+    actors: Arc<TestActors>,
+}
+
+impl e2etest::Fixture for CustomCluster {
+    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
+        let actors = setup.setup::<TestActors>().await?;
+        Some(Self { actors })
+    }
+
+    async fn teardown(self) {
+        cleanup(&self.actors).await;
+    }
+}
+
+impl CustomCluster {
+    pub fn actors(&self) -> &TestActors {
+        &self.actors
+    }
+}
+
 #[framed]
 pub async fn prepare_connection_with_custom_vs_ips(
     actors: &TestActors,
