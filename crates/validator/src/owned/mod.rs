@@ -5,6 +5,8 @@
 
 //! Groups that cannot share a cluster and start one of their own.
 
+mod alternator_auth;
+mod alternator_lwt;
 mod auth;
 mod connection_timeout;
 mod db_timeout;
