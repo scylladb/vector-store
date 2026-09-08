@@ -47,7 +47,7 @@ fn delete_write_request(
 
 /// Verifies that VS correctly indexes writes made through the LWT path when
 /// `--alternator-write-isolation=always_use_lwt` is active.
-#[e2etest::test(group = lwt)]
+#[e2etest::test(group = alternator_lwt)]
 async fn alternator_with_always_use_lwt(actors: Arc<TestActors>) {
     info!("started");
 
@@ -210,7 +210,11 @@ async fn alternator_with_always_use_lwt(actors: Arc<TestActors>) {
     info!("finished");
 }
 
-e2etest::group!(name = lwt, fixtures = (Fixture), parent = super::alternator);
+e2etest::group!(
+    name = alternator_lwt,
+    fixtures = (Fixture),
+    parent = super::owned
+);
 
 struct Fixture {
     actors: Arc<TestActors>,
