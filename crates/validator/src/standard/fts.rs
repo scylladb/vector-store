@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
-use crate::TestActors;
+use super::TestContext;
 use crate::common::*;
 use async_backtrace::framed;
 use httpapi::FulltextIndexOptions;
@@ -17,23 +17,11 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use tracing::info;
 
-e2etest::group!(name = fts, fixtures = (Cluster), parent = crate::validator);
-
-struct Cluster {
-    actors: Arc<TestActors>,
-}
-
-impl e2etest::Fixture for Cluster {
-    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
-        let actors = setup.setup::<TestActors>().await?;
-        init(&actors).await;
-        Some(Self { actors })
-    }
-
-    async fn teardown(self) {
-        cleanup(&self.actors).await;
-    }
-}
+e2etest::group!(
+    name = fts,
+    fixtures = (TestContext),
+    parent = super::standard
+);
 
 struct Fixture {
     session: Arc<Session>,
@@ -45,20 +33,21 @@ struct Fixture {
 
 impl e2etest::Fixture for Fixture {
     async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
-        let cluster = setup.setup::<Cluster>().await?;
-        let (session, clients, keyspace, table) = Self::init_fts_table(&cluster.actors).await;
+        let ctx = setup.setup::<TestContext>().await?;
+        let table = ctx
+            .create_table("pk INT PRIMARY KEY, content TEXT", None)
+            .await;
         Some(Self {
-            session,
-            keyspace,
+            session: Arc::clone(&ctx.session),
+            keyspace: ctx.keyspace.clone(),
             table,
-            clients,
+            clients: ctx.clients.clone(),
             index: RwLock::new(None),
         })
     }
 
-    async fn teardown(self) {
-        drop_fts_keyspace(&self.session, &self.keyspace).await;
-    }
+    // The table lives in the group keyspace, dropped by the TestContext.
+    async fn teardown(self) {}
 }
 
 impl Fixture {
@@ -143,10 +132,7 @@ impl Fixture {
     #[framed]
     async fn drop_index(&self) {
         let index = self.index();
-        self.session
-            .query_unpaged(format!("DROP INDEX {}", index.index), ())
-            .await
-            .expect("failed to drop index");
+        drop_index(&self.session, &index).await;
         for client in &self.clients {
             wait_for_no_index(client, &index).await;
         }
@@ -166,18 +152,6 @@ impl Fixture {
             .expect("failed to get rows")
             .map(|row| row.expect("failed to get row").0)
             .collect()
-    }
-
-    #[framed]
-    async fn init_fts_table(
-        actors: &TestActors,
-    ) -> (Arc<Session>, Vec<HttpClient>, KeyspaceName, TableName) {
-        let (session, clients) = prepare_connection(actors).await;
-
-        let keyspace = create_keyspace(&session).await;
-        let table = create_table(&session, "pk INT PRIMARY KEY, content TEXT", None).await;
-
-        (session, clients, keyspace, table)
     }
 }
 
@@ -203,43 +177,29 @@ async fn create_fts_index_with_options(
     .await
 }
 
-#[framed]
-async fn drop_fts_keyspace(session: &Session, keyspace: &KeyspaceName) {
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop a keyspace");
-}
-
 #[e2etest::test(group = fts)]
-async fn fts_index_lifecycle(actors: Arc<TestActors>) {
+async fn fts_index_lifecycle(ctx: Arc<TestContext>) {
     info!("started");
 
-    let (session, clients) = prepare_connection(&actors).await;
-
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(&session, "pk INT PRIMARY KEY, content TEXT", None).await;
+    let table = ctx
+        .create_table("pk INT PRIMARY KEY, content TEXT", None)
+        .await;
 
     info!("Creating fulltext index");
-    let index = create_fts_index(&session, &clients, &table).await;
+    let index = create_fts_index(&ctx.session, &ctx.clients, &table).await;
 
     info!("Verifying index is SERVING on all nodes");
-    for client in &clients {
+    for client in &ctx.clients {
         wait_for_index(client, &index).await;
     }
 
     info!("Dropping fulltext index");
-    session
-        .query_unpaged(format!("DROP INDEX {}", index.index), ())
-        .await
-        .expect("failed to drop index");
+    drop_index(&ctx.session, &index).await;
 
     info!("Verifying index is removed on all nodes");
-    for client in &clients {
+    for client in &ctx.clients {
         wait_for_no_index(client, &index).await;
     }
-
-    drop_fts_keyspace(&session, &keyspace).await;
 
     info!("finished");
 }
@@ -668,15 +628,14 @@ async fn fts_query_without_limit_returns_error(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn fts_index_on_int_column_returns_error(actors: Arc<TestActors>) {
+async fn fts_index_on_int_column_returns_error(ctx: Arc<TestContext>) {
     info!("started");
 
-    let (session, _clients) = prepare_connection(&actors).await;
-    let keyspace = create_keyspace(&session).await;
-    let table = create_table(&session, "pk INT PRIMARY KEY, num INT", None).await;
+    let table = ctx.create_table("pk INT PRIMARY KEY, num INT", None).await;
     let index = unique_index_name();
 
-    let err = session
+    let err = ctx
+        .session
         .query_unpaged(
             format!("CREATE CUSTOM INDEX {index} ON {table}(num) USING 'fulltext_index'"),
             (),
@@ -689,8 +648,6 @@ async fn fts_index_on_int_column_returns_error(actors: Arc<TestActors>) {
             .contains("Fulltext index is only supported on text, varchar, or ascii columns"),
         "unexpected error message: {err}"
     );
-
-    drop_fts_keyspace(&session, &keyspace).await;
 
     info!("finished");
 }
