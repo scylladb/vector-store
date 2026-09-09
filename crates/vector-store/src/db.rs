@@ -53,6 +53,7 @@ use scylla::client::session_builder::SessionBuilder;
 use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
 use scylla::cluster::metadata::Table;
+use scylla::statement::Consistency;
 use scylla::statement::prepared::PreparedStatement;
 use secrecy::ExposeSecret;
 use std::collections::BTreeMap;
@@ -61,6 +62,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tap::Pipe;
+use tap::Tap;
 use tokio::sync::Notify;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
@@ -94,6 +96,7 @@ type GetVsIndexParamsR = anyhow::Result<
 >;
 type GetFtsIndexParamsR = anyhow::Result<Option<IndexOptionsFts>>;
 type IsValidIndexR = bool;
+type IsValidSchemaR = bool;
 
 const RECONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -140,16 +143,21 @@ pub enum Db {
         tx: oneshot::Sender<GetFtsIndexParamsR>,
     },
 
-    // Schema changes are concurrent processes without an atomic view from the client/driver side.
-    // A process of retrieving an index metadata from the vector-store could be faster than similar
-    // process in a driver itself. The vector-store reads some schema metadata from system tables
-    // directly, because they are not available from a rust driver, and it reads some other schema
-    // metadata from the rust driver, so there must be an agreement between data read directly from
-    // a db and a driver. This message checks if index metadata are correct and if there is an
-    // agreement on a db schema in the rust driver.
+    // The vector-store reads some schema metadata from system tables directly, because they are
+    // not available from a rust driver, and it reads some other schema metadata from the rust
+    // driver, so there must be an agreement between data read directly from a db and a driver.
+    // This message checks if index metadata are aligned between a vector-store and a rust driver.
     IsValidIndex {
         metadata: IndexMetadata,
         tx: oneshot::Sender<IsValidIndexR>,
+    },
+
+    // Schema changes are concurrently processed and a vector-store uses system tables which are
+    // in LocalStrategy, so we need to check if the latest schema_version didn't change and
+    // is agreed between all nodes in a cluster.
+    IsValidSchema {
+        schema_version: Uuid,
+        tx: oneshot::Sender<IsValidSchemaR>,
     },
 }
 
@@ -190,6 +198,8 @@ pub(crate) trait DbExt {
     ) -> GetFtsIndexParamsR;
 
     async fn is_valid_index(&self, metadata: IndexMetadata) -> IsValidIndexR;
+
+    async fn is_valid_schema(&self, schema_version: Uuid) -> IsValidSchemaR;
 }
 
 impl DbExt for mpsc::Sender<Db> {
@@ -288,6 +298,15 @@ impl DbExt for mpsc::Sender<Db> {
             .expect("DbExt::is_valid_index: internal actor should receive request");
         rx.await
             .expect("DbExt::is_valid_index: internal actor should send response")
+    }
+
+    async fn is_valid_schema(&self, schema_version: Uuid) -> IsValidSchemaR {
+        let (tx, rx) = oneshot::channel();
+        self.send(Db::IsValidSchema { schema_version, tx })
+            .await
+            .expect("DbExt::is_valid_schema: internal actor should receive request");
+        rx.await
+            .expect("DbExt::is_valid_schema: internal actor should send response")
     }
 }
 
@@ -428,6 +447,9 @@ fn respond_with_error(msg: Db, error: anyhow::Error) {
         Db::IsValidIndex { tx, .. } => {
             let _ = tx.send(false);
         }
+        Db::IsValidSchema { tx, .. } => {
+            let _ = tx.send(false);
+        }
     }
 }
 
@@ -505,6 +527,10 @@ async fn process(
         Db::IsValidIndex { metadata, tx } => tx
             .send(statements.is_valid_index(metadata).await)
             .unwrap_or_else(|_| trace!("process: Db::IsValidIndex: unable to send response")),
+
+        Db::IsValidSchema { schema_version, tx } => tx
+            .send(statements.is_valid_schema(schema_version).await)
+            .unwrap_or_else(|_| trace!("process: Db::IsValidSchema: unable to send response")),
     }
 }
 
@@ -741,7 +767,14 @@ impl Statements {
             st_latest_schema_version: session
                 .prepare(Self::ST_LATEST_SCHEMA_VERSION)
                 .await
-                .context("ST_LATEST_SCHEMA_VERSION")?,
+                .context("ST_LATEST_SCHEMA_VERSION")?
+                .tap_mut(|stmt| {
+                    // Use ONE consistency for schema version queries - this is a local query
+                    // that reads from system.local, so ONE is appropriate. During reading
+                    // indexes list we will check the schema agreement.
+                    stmt.set_consistency(Consistency::One);
+                    stmt.set_is_idempotent(true);
+                }),
 
             st_get_indexes: session
                 .prepare(Self::ST_GET_INDEXES)
@@ -785,11 +818,9 @@ impl Statements {
     }
 
     const ST_LATEST_SCHEMA_VERSION: &str = "
-        SELECT state_id
-        FROM system.group0_history
-        WHERE key = 'history'
-        ORDER BY state_id DESC
-        LIMIT 1
+        SELECT schema_version
+        FROM system.local
+        WHERE key='local'
         ";
 
     async fn latest_schema_version(&self) -> LatestSchemaVersionR {
@@ -1045,10 +1076,6 @@ impl Statements {
             debug!("is_valid_index: no active session for {}", metadata.key());
             return false;
         };
-        let Ok(version_begin) = session.await_schema_agreement().await else {
-            debug!("is_valid_index: schema not agreed for {}", metadata.key());
-            return false;
-        };
         let cluster_state = session.get_cluster_state();
 
         // check a keyspace
@@ -1081,15 +1108,19 @@ impl Statements {
             return false;
         }
 
-        // check if schema version changed
-        let Ok(Some(version_end)) = session.check_schema_agreement().await else {
-            debug!(
-                "is_valid_index: schema not agreed for {} finally",
-                metadata.key()
-            );
+        true
+    }
+
+    async fn is_valid_schema(&self, schema_version: Uuid) -> IsValidSchemaR {
+        let Some(session) = self.session_rx.borrow().clone() else {
+            debug!("is_valid_schema: no active session");
             return false;
         };
-        version_begin == version_end
+        let Ok(Some(agreed_version)) = session.check_schema_agreement().await else {
+            debug!("is_valid_schema: schema not agreed");
+            return false;
+        };
+        agreed_version == schema_version
     }
 }
 
@@ -1367,6 +1398,12 @@ pub(crate) mod tests {
             metadata: IndexMetadata,
             tx: oneshot::Sender<IsValidIndexR>,
         ) -> impl Future<Output = ()> + Send + 'static;
+
+        fn is_valid_schema(
+            &self,
+            schema_version: Uuid,
+            tx: oneshot::Sender<IsValidSchemaR>,
+        ) -> impl Future<Output = ()> + Send + 'static;
     }
 
     pub(crate) fn new(sim: impl SimDb + Send + 'static) -> mpsc::Sender<Db> {
@@ -1421,6 +1458,10 @@ pub(crate) mod tests {
                         } => sim.get_fts_index_params(keyspace, table, index, tx).await,
 
                         Db::IsValidIndex { metadata, tx } => sim.is_valid_index(metadata, tx).await,
+
+                        Db::IsValidSchema { schema_version, tx } => {
+                            sim.is_valid_schema(schema_version, tx).await
+                        }
                     }
                 }
 

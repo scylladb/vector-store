@@ -520,6 +520,11 @@ fn process_db(db: &DbBasic, msg: Db, node_state: Sender<NodeState>) {
             .send(true)
             .map_err(|_| anyhow!("Db::IsValidIndex: unable to send response"))
             .unwrap(),
+
+        Db::IsValidSchema { tx, .. } => tx
+            .send(true)
+            .map_err(|_| anyhow!("Db::IsValidSchema: unable to send response"))
+            .unwrap(),
     }
 }
 
