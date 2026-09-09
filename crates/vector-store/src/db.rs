@@ -53,6 +53,8 @@ use scylla::client::session_builder::SessionBuilder;
 use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
 use scylla::cluster::metadata::Table;
+use scylla::policies::load_balancing::NodeIdentifier;
+use scylla::policies::load_balancing::SingleTargetLoadBalancingPolicy;
 use scylla::statement::prepared::PreparedStatement;
 use scylla::value::CqlTimeuuid;
 use secrecy::ExposeSecret;
@@ -80,7 +82,7 @@ type GetDbIndexR = anyhow::Result<(
     mpsc::Sender<DbIndex>,
     mpsc::Receiver<(DbIndexedRow, AsyncInProgress)>,
 )>;
-pub(crate) type LatestSchemaVersionR = anyhow::Result<Option<CqlTimeuuid>>;
+pub(crate) type LatestSchemaVersionR = anyhow::Result<SchemaVersionSnapshot>;
 type GetIndexesR = anyhow::Result<Vec<DbCustomIndex>>;
 type GetIndexVersionR = anyhow::Result<Option<IndexVersion>>;
 type GetIndexTargetTypeR = anyhow::Result<Option<Dimensions>>;
@@ -96,6 +98,18 @@ type GetVsIndexParamsR = anyhow::Result<
 type GetFtsIndexParamsR = anyhow::Result<Option<IndexOptionsFts>>;
 type IsValidIndexR = bool;
 
+/// The cluster schema version as a single node reported it.
+///
+/// `system` and `system_schema` are node-local, and a group0 command is applied
+/// on each node on its own, so the version is only meaningful together with the
+/// node that served it. `coordinator` lets a caller send its follow-up schema
+/// reads to that same node.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SchemaVersionSnapshot {
+    pub version: Option<CqlTimeuuid>,
+    pub coordinator: Option<Uuid>,
+}
+
 const RECONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub enum Db {
@@ -109,6 +123,7 @@ pub enum Db {
     },
 
     GetIndexes {
+        coordinator: Option<Uuid>,
         tx: oneshot::Sender<GetIndexesR>,
     },
 
@@ -159,7 +174,7 @@ pub(crate) trait DbExt {
 
     async fn latest_schema_version(&self) -> LatestSchemaVersionR;
 
-    async fn get_indexes(&self) -> GetIndexesR;
+    async fn get_indexes(&self, coordinator: Option<Uuid>) -> GetIndexesR;
 
     async fn get_index_version(
         &self,
@@ -206,9 +221,9 @@ impl DbExt for mpsc::Sender<Db> {
         rx.await?
     }
 
-    async fn get_indexes(&self) -> GetIndexesR {
+    async fn get_indexes(&self, coordinator: Option<Uuid>) -> GetIndexesR {
         let (tx, rx) = oneshot::channel();
-        self.send(Db::GetIndexes { tx }).await?;
+        self.send(Db::GetIndexes { coordinator, tx }).await?;
         rx.await?
     }
 
@@ -411,7 +426,7 @@ fn respond_with_error(msg: Db, error: anyhow::Error) {
         Db::LatestSchemaVersion { tx } => {
             let _ = tx.send(Err(error));
         }
-        Db::GetIndexes { tx } => {
+        Db::GetIndexes { tx, .. } => {
             let _ = tx.send(Err(error));
         }
         Db::GetIndexVersion { tx, .. } => {
@@ -454,8 +469,8 @@ async fn process(
                 trace!("process: Db::LatestSchemaVersion: unable to send response")
             }),
 
-        Db::GetIndexes { tx } => tx
-            .send(statements.get_indexes().await)
+        Db::GetIndexes { coordinator, tx } => tx
+            .send(statements.get_indexes(coordinator).await)
             .unwrap_or_else(|_| trace!("process: Db::GetIndexes: unable to send response")),
 
         Db::GetIndexVersion {
@@ -799,13 +814,19 @@ impl Statements {
             .borrow()
             .clone()
             .ok_or_else(|| anyhow::anyhow!("No active session"))?;
-        Ok(session
+        let mut rows = session
             .execute_iter(self.st_latest_schema_version.clone(), &[])
             .await?
-            .rows_stream::<(CqlTimeuuid,)>()?
-            .try_next()
-            .await?
-            .map(|(timeuuid,)| timeuuid))
+            .rows_stream::<(CqlTimeuuid,)>()?;
+        let version = rows.try_next().await?.map(|(timeuuid,)| timeuuid);
+        let coordinator = rows
+            .request_coordinators()
+            .next()
+            .map(|coordinator| coordinator.node().host_id);
+        Ok(SchemaVersionSnapshot {
+            version,
+            coordinator,
+        })
     }
 
     const ST_GET_INDEXES: &str = "
@@ -815,7 +836,7 @@ impl Statements {
         ALLOW FILTERING
         ";
 
-    async fn get_indexes(&self) -> GetIndexesR {
+    async fn get_indexes(&self, coordinator: Option<Uuid>) -> GetIndexesR {
         let session = self
             .session_rx
             .borrow()
@@ -826,7 +847,7 @@ impl Statements {
         struct InvalidMetadata;
 
         let result = session
-            .execute_iter(self.st_get_indexes.clone(), &[])
+            .execute_iter(pin_to_coordinator(&self.st_get_indexes, coordinator), &[])
             .await?
             .rows_stream::<(String, String, String, BTreeMap<String, String>)>()?
             .map_err(|err| anyhow::anyhow!("Failed to fetch indexes: {}", err))
@@ -1186,6 +1207,24 @@ fn convert_legacy_target_option(
     })
 }
 
+/// Sends `statement` to `coordinator` instead of letting the driver pick a node.
+///
+/// `system` and `system_schema` are node-local, so a schema read is only
+/// comparable with another schema read served by the same node.
+fn pin_to_coordinator(
+    statement: &PreparedStatement,
+    coordinator: Option<Uuid>,
+) -> PreparedStatement {
+    let mut statement = statement.clone();
+    if let Some(host_id) = coordinator {
+        statement.set_load_balancing_policy(Some(SingleTargetLoadBalancingPolicy::new(
+            NodeIdentifier::HostId(host_id),
+            None,
+        )));
+    }
+    statement
+}
+
 fn db_index_kind_from_options(options: &mut BTreeMap<String, String>) -> Option<DbIndexKind> {
     match options.remove("class_name").as_deref() {
         Some("vector_index") | None => Some(DbIndexKind::VectorSearch),
@@ -1328,6 +1367,7 @@ pub(crate) mod tests {
 
         fn get_indexes(
             &self,
+            coordinator: Option<Uuid>,
             tx: oneshot::Sender<GetIndexesR>,
         ) -> impl Future<Output = ()> + Send + 'static;
 
@@ -1388,7 +1428,9 @@ pub(crate) mod tests {
 
                         Db::LatestSchemaVersion { tx } => sim.latest_schema_version(tx).await,
 
-                        Db::GetIndexes { tx } => sim.get_indexes(tx).await,
+                        Db::GetIndexes { coordinator, tx } => {
+                            sim.get_indexes(coordinator, tx).await
+                        }
 
                         Db::GetIndexVersion {
                             keyspace,

@@ -43,6 +43,7 @@ use vector_store::Timestamp;
 use vector_store::Timestamped;
 use vector_store::Vector;
 use vector_store::db::Db;
+use vector_store::db::SchemaVersionSnapshot;
 use vector_store::db_index::DbIndex;
 use vector_store::node_state::Event;
 use vector_store::node_state::NodeState;
@@ -381,11 +382,14 @@ fn process_db(db: &DbBasic, msg: Db, node_state: Sender<NodeState>) {
             .unwrap(),
 
         Db::LatestSchemaVersion { tx } => tx
-            .send(Ok(Some(db.0.read().unwrap().schema_version)))
+            .send(Ok(SchemaVersionSnapshot {
+                version: Some(db.0.read().unwrap().schema_version),
+                coordinator: None,
+            }))
             .map_err(|_| anyhow!("Db::LatestSchemaVersion: unable to send response"))
             .unwrap(),
 
-        Db::GetIndexes { tx } => {
+        Db::GetIndexes { tx, .. } => {
             if db.0.read().unwrap().simulate_endless_get_indexes_processing {
                 tokio::spawn(async move {
                     let _ = tx;
