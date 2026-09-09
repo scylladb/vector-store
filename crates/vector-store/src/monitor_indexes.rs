@@ -26,7 +26,6 @@ use crate::perf;
 use anyhow::bail;
 use futures::StreamExt;
 use futures::stream;
-use scylla::value::CqlTimeuuid;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -42,6 +41,7 @@ use tracing::debug;
 use tracing::error_span;
 use tracing::info;
 use tracing::warn;
+use uuid::Uuid;
 
 pub(crate) enum MonitorIndexes {}
 
@@ -152,8 +152,7 @@ pub(crate) async fn new(
     Ok(tx)
 }
 
-#[derive(PartialEq)]
-struct SchemaVersion(Option<CqlTimeuuid>);
+struct SchemaVersion(Option<Uuid>);
 
 impl SchemaVersion {
     fn new() -> Self {
@@ -453,8 +452,8 @@ mod tests {
 
     #[tokio::test]
     async fn schema_version_changed() {
-        let version1 = CqlTimeuuid::from_bytes([1; 16]);
-        let version2 = CqlTimeuuid::from_bytes([2; 16]);
+        let version1 = Uuid::new_v4();
+        let version2 = Uuid::new_v4();
         let latest_schema_version: Arc<Mutex<Option<LatestSchemaVersionR>>> =
             Arc::new(Mutex::new(None));
         let set_latest_schema_version = |v| {
@@ -550,7 +549,7 @@ mod tests {
             // The indexes that the engine currently has
             engine_indexes: Arc<Mutex<IndexesT>>,
             // Schema version counter
-            schema_version: Arc<Mutex<u16>>,
+            schema_version: Arc<Mutex<Uuid>>,
             // Indexes version map
             index_versions: Arc<Mutex<HashMap<IndexName, Uuid>>>,
             // Notify to signal changes
@@ -564,7 +563,7 @@ mod tests {
                 Self {
                     db_indexes: Arc::new(Mutex::new(Vec::new())),
                     engine_indexes: Arc::new(Mutex::new(HashSet::new())),
-                    schema_version: Arc::new(Mutex::new(0)),
+                    schema_version: Arc::new(Mutex::new(Uuid::new_v4())),
                     index_versions: Arc::new(Mutex::new(HashMap::new())),
                     notify: Arc::new(Notify::new()),
                     del_calls: Arc::new(Mutex::new(HashMap::new())),
@@ -573,7 +572,7 @@ mod tests {
 
             async fn add_index(&self, index: DbCustomIndex) {
                 self.db_indexes.lock().unwrap().push(index);
-                *self.schema_version.lock().unwrap() += 1;
+                *self.schema_version.lock().unwrap() = Uuid::new_v4();
                 self.notify.notified().await;
             }
 
@@ -582,7 +581,7 @@ mod tests {
                     .lock()
                     .unwrap()
                     .retain(|idx| idx.index != index_name);
-                *self.schema_version.lock().unwrap() += 1;
+                *self.schema_version.lock().unwrap() = Uuid::new_v4();
                 self.notify.notified().await;
             }
 
@@ -647,9 +646,7 @@ mod tests {
                 let state = state.clone();
                 async move {
                     let version = *state.schema_version.lock().unwrap();
-                    let version_bytes = [version as u8; 16];
-                    tx.send(Ok(Some(CqlTimeuuid::from_bytes(version_bytes))))
-                        .unwrap();
+                    tx.send(Ok(Some(version))).unwrap();
                 }
                 .boxed()
             }

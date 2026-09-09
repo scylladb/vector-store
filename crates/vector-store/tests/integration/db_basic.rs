@@ -8,7 +8,6 @@ use anyhow::bail;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use scylla::cluster::metadata::NativeType;
-use scylla::value::CqlTimeuuid;
 use scylla::value::CqlValue;
 use std::collections::HashMap;
 use std::iter;
@@ -208,7 +207,7 @@ impl Keyspace {
 }
 
 struct DbMock {
-    schema_version: CqlTimeuuid,
+    schema_version: Uuid,
     keyspaces: HashMap<KeyspaceName, Keyspace>,
     next_get_db_index_failed: bool,
     next_full_scan_progress: Option<Progress>,
@@ -219,14 +218,14 @@ struct DbMock {
 
 impl DbMock {
     fn create_new_schema_version(&mut self) {
-        self.schema_version = Uuid::new_v4().into();
+        self.schema_version = Uuid::new_v4();
     }
 }
 
 impl DbBasic {
     fn new(store_vectors: StoreVectors) -> Self {
         Self(Arc::new(RwLock::new(DbMock {
-            schema_version: CqlTimeuuid::from(Uuid::new_v4()),
+            schema_version: Uuid::new_v4(),
             keyspaces: HashMap::new(),
             next_get_db_index_failed: false,
             next_full_scan_progress: None,

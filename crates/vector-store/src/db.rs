@@ -54,7 +54,6 @@ use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
 use scylla::cluster::metadata::Table;
 use scylla::statement::prepared::PreparedStatement;
-use scylla::value::CqlTimeuuid;
 use secrecy::ExposeSecret;
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
@@ -80,7 +79,7 @@ type GetDbIndexR = anyhow::Result<(
     mpsc::Sender<DbIndex>,
     mpsc::Receiver<(DbIndexedRow, AsyncInProgress)>,
 )>;
-pub(crate) type LatestSchemaVersionR = anyhow::Result<Option<CqlTimeuuid>>;
+pub(crate) type LatestSchemaVersionR = anyhow::Result<Option<Uuid>>;
 type GetIndexesR = anyhow::Result<Vec<DbCustomIndex>>;
 type GetIndexVersionR = anyhow::Result<Option<IndexVersion>>;
 type GetIndexTargetTypeR = anyhow::Result<Option<Dimensions>>;
@@ -802,10 +801,10 @@ impl Statements {
         Ok(session
             .execute_iter(self.st_latest_schema_version.clone(), &[])
             .await?
-            .rows_stream::<(CqlTimeuuid,)>()?
+            .rows_stream::<(Uuid,)>()?
             .try_next()
             .await?
-            .map(|(timeuuid,)| timeuuid))
+            .map(|(uuid,)| uuid))
     }
 
     const ST_GET_INDEXES: &str = "
