@@ -79,7 +79,7 @@ type GetDbIndexR = anyhow::Result<(
     mpsc::Sender<DbIndex>,
     mpsc::Receiver<(DbIndexedRow, AsyncInProgress)>,
 )>;
-pub(crate) type LatestSchemaVersionR = anyhow::Result<Option<Uuid>>;
+pub(crate) type LatestSchemaVersionR = anyhow::Result<Uuid>;
 type GetIndexesR = anyhow::Result<Vec<DbCustomIndex>>;
 type GetIndexVersionR = anyhow::Result<Option<IndexVersion>>;
 type GetIndexTargetTypeR = anyhow::Result<Option<Dimensions>>;
@@ -799,12 +799,11 @@ impl Statements {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("No active session"))?;
         Ok(session
-            .execute_iter(self.st_latest_schema_version.clone(), &[])
+            .execute_unpaged(&self.st_latest_schema_version, &[])
             .await?
-            .rows_stream::<(Uuid,)>()?
-            .try_next()
-            .await?
-            .map(|(uuid,)| uuid))
+            .into_rows_result()?
+            .single_row::<(Uuid,)>()?
+            .0)
     }
 
     const ST_GET_INDEXES: &str = "

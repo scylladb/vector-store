@@ -380,7 +380,7 @@ fn process_db(db: &DbBasic, msg: Db, node_state: Sender<NodeState>) {
             .unwrap(),
 
         Db::LatestSchemaVersion { tx } => tx
-            .send(Ok(Some(db.0.read().unwrap().schema_version)))
+            .send(Ok(db.0.read().unwrap().schema_version))
             .map_err(|_| anyhow!("Db::LatestSchemaVersion: unable to send response"))
             .unwrap(),
 

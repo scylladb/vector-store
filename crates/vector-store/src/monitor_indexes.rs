@@ -152,18 +152,19 @@ pub(crate) async fn new(
     Ok(tx)
 }
 
-struct SchemaVersion(Option<Uuid>);
+struct SchemaVersion(Uuid);
 
 impl SchemaVersion {
     fn new() -> Self {
-        Self(None)
+        Self(Uuid::nil())
     }
 
     async fn has_changed(&mut self, db: &Sender<Db>) -> bool {
-        let schema_version = db.latest_schema_version().await.unwrap_or_else(|err| {
+        let Ok(schema_version) = db.latest_schema_version().await.inspect_err(|err| {
             warn!("unable to get latest schema change from db: {err}");
-            None
-        });
+        }) else {
+            return false;
+        };
         if self.0 == schema_version {
             return false;
         };
@@ -172,7 +173,7 @@ impl SchemaVersion {
     }
 
     fn reset(&mut self) {
-        self.0 = None;
+        self.0 = Uuid::nil();
     }
 }
 
@@ -486,36 +487,20 @@ mod tests {
         set_latest_schema_version(Err(anyhow!("test issue")));
         assert!(!sv.has_changed(&tx_db).await);
 
-        // step 2: None should not change the schema version
-        set_latest_schema_version(Ok(None));
-        assert!(!sv.has_changed(&tx_db).await);
-
-        // step 3: value1 should change the schema version
-        set_latest_schema_version(Ok(Some(version1)));
+        // step 2: value1 should change the schema version
+        set_latest_schema_version(Ok(version1));
         assert!(sv.has_changed(&tx_db).await);
 
-        // step 4: Err should change the schema version
+        // step 3: Err shouldn't change the schema version
         set_latest_schema_version(Err(anyhow!("test issue")));
-        assert!(sv.has_changed(&tx_db).await);
-
-        // step 5: value1 should change the schema version
-        set_latest_schema_version(Ok(Some(version1)));
-        assert!(sv.has_changed(&tx_db).await);
-
-        // step 6: None should change the schema version
-        set_latest_schema_version(Ok(None));
-        assert!(sv.has_changed(&tx_db).await);
-
-        // step 7: value1 should change the schema version
-        set_latest_schema_version(Ok(Some(version1)));
-        assert!(sv.has_changed(&tx_db).await);
-
-        // step 8: value1 should not change the schema version
-        set_latest_schema_version(Ok(Some(version1)));
         assert!(!sv.has_changed(&tx_db).await);
 
-        // step 9: value2 should change the schema version
-        set_latest_schema_version(Ok(Some(version2)));
+        // step 4: value1 shouldn't change the schema version
+        set_latest_schema_version(Ok(version1));
+        assert!(!sv.has_changed(&tx_db).await);
+
+        // step 5: value2 should change the schema version
+        set_latest_schema_version(Ok(version2));
         assert!(sv.has_changed(&tx_db).await);
     }
 
@@ -646,7 +631,7 @@ mod tests {
                 let state = state.clone();
                 async move {
                     let version = *state.schema_version.lock().unwrap();
-                    tx.send(Ok(Some(version))).unwrap();
+                    tx.send(Ok(version)).unwrap();
                 }
                 .boxed()
             }
