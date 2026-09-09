@@ -480,10 +480,10 @@ async fn search<B: DiskannBackend>(
 
     let k = k.min(params.max_points.get());
     let l_value = params.l_default.get().max(k);
-    let knn = Knn::new(k, l_value, Some(params.beam_width.get()))
+    let knn = Knn::new(l_value, Some(params.beam_width.get()))
         .context("failed to build DiskANN search parameters")?;
 
-    let mut neighbors: Vec<Neighbor<PrimaryId>> = Vec::with_capacity(knn.k_value().get());
+    let mut neighbors: Vec<Neighbor<PrimaryId>> = Vec::with_capacity(k);
     let SearchStats { result_count, .. } = partition
         .index
         .search(
@@ -499,7 +499,7 @@ async fn search<B: DiskannBackend>(
     Ok(neighbors.into_iter().map(move |neighbor| {
         let raw_distance = match space_type {
             SpaceType::DotProduct => neighbor.distance() + 1.0,
-            _ => neighbor.distance(),
+            _ => *neighbor.distance(),
         };
         Distance::try_from((raw_distance, space_type, dimensions))
             .map(|distance| (*neighbor.id(), distance))
