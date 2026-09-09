@@ -103,7 +103,7 @@ impl Scylla {
         .query_unpaged(
             format!(
                 "
-                CREATE KEYSPACE {keyspace}
+                CREATE KEYSPACE IF NOT EXISTS {keyspace}
                 WITH replication = {{'class': 'NetworkTopologyStrategy' , 'replication_factor': '{replication_factor}'}}
                 "
             ),
@@ -117,7 +117,7 @@ impl Scylla {
             .query_unpaged(
                 format!(
                     "
-                CREATE TABLE {keyspace}.{table} (
+                CREATE TABLE IF NOT EXISTS {keyspace}.{table} (
                     {BUCKET} bigint,
                     {VECTOR_ID} bigint,
                     {VECTOR} vector<float, {dimension}>,
