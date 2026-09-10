@@ -131,6 +131,16 @@ workflow opens a `feat(vectorstore): add version X.Y.Z [automation]` PR
 against siren's `info/version/versions.yaml`. No manual step is needed for a
 GA release.
 
+The dispatch is authenticated with the `SIREN_REPO_TOKEN` Actions secret of
+`scylladb/vector-store` (provisioned in VECTOR-854). It must be a *secret*,
+not a repository variable of the same name — `secrets.` cannot read
+variables — and it must hold a fine-grained PAT owned by `scylladb`, listing
+`scylladb/siren` among its repositories, approved by the organization, and
+granting the `Actions: read and write` repository permission. `Actions` is
+the permission GitHub checks for starting a workflow; `Contents` is not
+needed. A PAT also expires, so note its expiry and rotate it before a release
+runs into it.
+
 Two caveats:
 
 - Only GA `X.Y.Z` versions are dispatched. Pre-release and dev tags
@@ -146,8 +156,25 @@ Two caveats:
 
 If the dispatch fails, or the siren run does, the cloud images do not need to
 be rebuilt: re-run just the `trigger-siren` job, which re-reads the packer
-manifest artifact of the same workflow run. To trigger siren by hand
-instead, start the same workflow the same way:
+manifest artifact of the same workflow run. A rejection caused by the token,
+though, persists until the token is fixed, so re-running changes nothing.
+The job's error says which call failed, and GitHub's message, logged just
+above it, says whether the token is at fault:
+
+- `Bad credentials` — the token has expired or been revoked, or the secret
+  holds something that is not a token.
+- `Not Found` while reading siren's default branch — the token does not have
+  `scylladb/siren` among its repositories, or the organization has not
+  approved it.
+- `Resource not accessible by personal access token` while starting the
+  workflow — the token lacks `Actions: read and write`.
+
+Fix the token in the organization's settings, then re-run `trigger-siren`.
+Any other message need not be the token's fault: siren may have renamed the
+workflow or its inputs, or GitHub may be having an outage, in which case a
+plain re-run can help.
+
+To trigger siren by hand instead, start the same workflow the same way:
 [add-vectorstore-ver](https://github.com/scylladb/siren/actions/workflows/add-vectorstore-ver.yml)
 via `workflow_dispatch`, copying the version, the bare `us-east-1` amd64 and
 arm64 AMI IDs, and the GCP image name from the packer manifest. For a release
