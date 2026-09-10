@@ -343,10 +343,33 @@ jobs:
             echo "${var}=${!var}" >> "$GITHUB_OUTPUT"
           done
 
+      - name: Check the siren token is set
+        if: steps.ga.outputs.ga == 'true'
+        env:
+          SIREN_REPO_TOKEN: ${{ secrets.SIREN_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          # An unset secret expands to the empty string and the dispatch then
+          # fails on `Bad credentials`, which reads like a broken token rather
+          # than a missing one. The usual cause is the value having been added
+          # under Settings > Secrets and variables > Actions on the
+          # *Variables* tab: `secrets.` cannot see repository variables.
+          if [[ -z "${SIREN_REPO_TOKEN:-}" ]] ; then
+            echo "::error::SIREN_REPO_TOKEN is empty — it must be an Actions secret (not a repository variable) in scylladb/vector-store; see docs/releasing.md"
+            exit 1
+          fi
+
       - name: Trigger the siren add-vectorstore-ver workflow
+        id: dispatch
         if: steps.ga.outputs.ga == 'true'
         uses: peter-evans/repository-dispatch@ff45666b9427631e3450c54a1bcbee4d9ff4d7c0 # v3.0.0
         with:
+          # The credential must be allowed to POST /repos/scylladb/siren/
+          # dispatches: a fine-grained PAT owned by scylladb, listing
+          # scylladb/siren among its repositories, approved by the org and
+          # granting `Contents: read and write`. Contents is what the
+          # repository-dispatch endpoint checks — `Actions: write` grants only
+          # workflow_dispatch and is rejected here. Provisioned in VECTOR-854.
           token: ${{ secrets.SIREN_REPO_TOKEN }}
           repository: scylladb/siren
           event-type: vectorstore-release
@@ -357,6 +380,27 @@ jobs:
               "gcp_amd64_image": "${{ steps.images.outputs.gcp_amd64_image }}",
               "aws_arm64_ami": "${{ steps.images.outputs.aws_arm64_ami }}"
             }
+
+      # GitHub rejects an under-privileged token with a message that names
+      # neither the repository nor the permission it wanted, so say which
+      # token is at fault and what it needs.
+      - name: Explain a rejected dispatch
+        if: failure() && steps.dispatch.conclusion == 'failure'
+        run: |
+          set -euo pipefail
+          {
+            echo "The \`vectorstore-release\` dispatch to scylladb/siren was rejected."
+            echo ""
+            echo "\`Resource not accessible by personal access token\` means the"
+            echo "\`SIREN_REPO_TOKEN\` secret reached scylladb/siren but is not allowed to"
+            echo "dispatch there: it needs the \`Contents: read and write\` repository"
+            echo "permission (not \`Actions: write\`), and a fine-grained token also needs"
+            echo "the organization to have approved it. \`Not Found\` instead means the"
+            echo "token cannot see scylladb/siren at all, and \`Bad credentials\` that it"
+            echo "has expired. None of these are fixed by re-running the job — fix the"
+            echo "token, then re-run \`trigger-siren\` alone (see docs/releasing.md)."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::The dispatch to scylladb/siren was rejected — SIREN_REPO_TOKEN lacks the rights to dispatch; see the job summary and docs/releasing.md"
 
       - name: Log the siren workflow link
         if: steps.ga.outputs.ga == 'true'
