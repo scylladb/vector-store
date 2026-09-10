@@ -26,7 +26,6 @@ use crate::perf;
 use anyhow::bail;
 use futures::StreamExt;
 use futures::stream;
-use scylla::value::CqlTimeuuid;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -42,6 +41,7 @@ use tracing::debug;
 use tracing::error_span;
 use tracing::info;
 use tracing::warn;
+use uuid::Uuid;
 
 pub(crate) enum MonitorIndexes {}
 
@@ -82,13 +82,13 @@ pub(crate) async fn new(
                         };
 
                         // check if schema has changed from the last time
-                        if !schema_version.has_changed(&db).await {
+                        let Some(version) = schema_version.has_changed(&db).await else {
                             continue;
-                        }
+                        };
                         node_state.send_event(
                             Event::DiscoveringIndexes,
                         ).await;
-                        let Ok(new_indexes) = get_indexes(&db).await.inspect_err(|err| {
+                        let Ok(new_indexes) = get_indexes(&db, version).await.inspect_err(|err| {
                             info!("monitor_indexes: unable to get the list of indexes: {err}");
                         }) else {
                             // there was an error during retrieving indexes, reset schema version
@@ -152,32 +152,40 @@ pub(crate) async fn new(
     Ok(tx)
 }
 
-#[derive(PartialEq)]
-struct SchemaVersion(Option<CqlTimeuuid>);
+struct SchemaVersion(Uuid);
 
 impl SchemaVersion {
     fn new() -> Self {
-        Self(None)
+        Self(Uuid::nil())
     }
 
-    async fn has_changed(&mut self, db: &Sender<Db>) -> bool {
-        let schema_version = db.latest_schema_version().await.unwrap_or_else(|err| {
+    async fn has_changed(&mut self, db: &Sender<Db>) -> Option<Uuid> {
+        let Ok(schema_version) = db.latest_schema_version().await.inspect_err(|err| {
             warn!("unable to get latest schema change from db: {err}");
-            None
-        });
+        }) else {
+            return None;
+        };
         if self.0 == schema_version {
-            return false;
+            return None;
         };
         self.0 = schema_version;
-        true
+        Some(schema_version)
     }
 
     fn reset(&mut self) {
-        self.0 = None;
+        self.0 = Uuid::nil();
     }
 }
 
-async fn get_indexes(db: &Sender<Db>) -> anyhow::Result<HashSet<IndexMetadata>> {
+async fn get_indexes(
+    db: &Sender<Db>,
+    schema_version: Uuid,
+) -> anyhow::Result<HashSet<IndexMetadata>> {
+    if !db.is_valid_schema(schema_version).await {
+        let msg = format!("get_indexes: not valid schema {schema_version} at the start");
+        debug!(msg);
+        bail!(msg);
+    }
     let mut indexes = HashSet::new();
     for idx in db.get_indexes().await?.into_iter() {
         let Some(version) = db
@@ -222,6 +230,11 @@ async fn get_indexes(db: &Sender<Db>) -> anyhow::Result<HashSet<IndexMetadata>> 
         }
 
         indexes.insert(metadata);
+    }
+    if !db.is_valid_schema(schema_version).await {
+        let msg = format!("get_indexes: not valid schema {schema_version} at the end");
+        debug!(msg);
+        bail!(msg);
     }
     Ok(indexes)
 }
@@ -406,6 +419,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::collections::HashMap;
     use std::collections::HashSet;
+    use std::collections::VecDeque;
     use std::num::NonZeroUsize;
     use std::sync::Arc;
     use std::sync::Mutex;
@@ -453,8 +467,8 @@ mod tests {
 
     #[tokio::test]
     async fn schema_version_changed() {
-        let version1 = CqlTimeuuid::from_bytes([1; 16]);
-        let version2 = CqlTimeuuid::from_bytes([2; 16]);
+        let version1 = Uuid::new_v4();
+        let version2 = Uuid::new_v4();
         let latest_schema_version: Arc<Mutex<Option<LatestSchemaVersionR>>> =
             Arc::new(Mutex::new(None));
         let set_latest_schema_version = |v| {
@@ -485,39 +499,23 @@ mod tests {
 
         // step 1: Err should not change the schema version
         set_latest_schema_version(Err(anyhow!("test issue")));
-        assert!(!sv.has_changed(&tx_db).await);
+        assert_eq!(sv.has_changed(&tx_db).await, None);
 
-        // step 2: None should not change the schema version
-        set_latest_schema_version(Ok(None));
-        assert!(!sv.has_changed(&tx_db).await);
+        // step 2: value1 should change the schema version
+        set_latest_schema_version(Ok(version1));
+        assert_eq!(sv.has_changed(&tx_db).await, Some(version1));
 
-        // step 3: value1 should change the schema version
-        set_latest_schema_version(Ok(Some(version1)));
-        assert!(sv.has_changed(&tx_db).await);
-
-        // step 4: Err should change the schema version
+        // step 3: Err shouldn't change the schema version
         set_latest_schema_version(Err(anyhow!("test issue")));
-        assert!(sv.has_changed(&tx_db).await);
+        assert_eq!(sv.has_changed(&tx_db).await, None);
 
-        // step 5: value1 should change the schema version
-        set_latest_schema_version(Ok(Some(version1)));
-        assert!(sv.has_changed(&tx_db).await);
+        // step 4: value1 shouldn't change the schema version
+        set_latest_schema_version(Ok(version1));
+        assert_eq!(sv.has_changed(&tx_db).await, None);
 
-        // step 6: None should change the schema version
-        set_latest_schema_version(Ok(None));
-        assert!(sv.has_changed(&tx_db).await);
-
-        // step 7: value1 should change the schema version
-        set_latest_schema_version(Ok(Some(version1)));
-        assert!(sv.has_changed(&tx_db).await);
-
-        // step 8: value1 should not change the schema version
-        set_latest_schema_version(Ok(Some(version1)));
-        assert!(!sv.has_changed(&tx_db).await);
-
-        // step 9: value2 should change the schema version
-        set_latest_schema_version(Ok(Some(version2)));
-        assert!(sv.has_changed(&tx_db).await);
+        // step 5: value2 should change the schema version
+        set_latest_schema_version(Ok(version2));
+        assert_eq!(sv.has_changed(&tx_db).await, Some(version2));
     }
 
     #[rstest]
@@ -549,8 +547,11 @@ mod tests {
             db_indexes: Arc<Mutex<Vec<DbCustomIndex>>>,
             // The indexes that the engine currently has
             engine_indexes: Arc<Mutex<IndexesT>>,
-            // Schema version counter
-            schema_version: Arc<Mutex<u16>>,
+            // Schema version
+            schema_version: Arc<Mutex<Uuid>>,
+            // Agreed schema versions for testing schema changes between latest schema version and
+            // get_indexes calls
+            schema_version_agreed: Arc<Mutex<VecDeque<Uuid>>>,
             // Indexes version map
             index_versions: Arc<Mutex<HashMap<IndexName, Uuid>>>,
             // Notify to signal changes
@@ -564,7 +565,8 @@ mod tests {
                 Self {
                     db_indexes: Arc::new(Mutex::new(Vec::new())),
                     engine_indexes: Arc::new(Mutex::new(HashSet::new())),
-                    schema_version: Arc::new(Mutex::new(0)),
+                    schema_version: Arc::new(Mutex::new(Uuid::new_v4())),
+                    schema_version_agreed: Arc::new(Mutex::new(VecDeque::new())),
                     index_versions: Arc::new(Mutex::new(HashMap::new())),
                     notify: Arc::new(Notify::new()),
                     del_calls: Arc::new(Mutex::new(HashMap::new())),
@@ -573,7 +575,12 @@ mod tests {
 
             async fn add_index(&self, index: DbCustomIndex) {
                 self.db_indexes.lock().unwrap().push(index);
-                *self.schema_version.lock().unwrap() += 1;
+                let version = Uuid::new_v4();
+                *self.schema_version.lock().unwrap() = version;
+                self.schema_version_agreed
+                    .lock()
+                    .unwrap()
+                    .extend([version, Uuid::new_v4()]);
                 self.notify.notified().await;
             }
 
@@ -582,7 +589,12 @@ mod tests {
                     .lock()
                     .unwrap()
                     .retain(|idx| idx.index != index_name);
-                *self.schema_version.lock().unwrap() += 1;
+                let version = Uuid::new_v4();
+                *self.schema_version.lock().unwrap() = version;
+                self.schema_version_agreed
+                    .lock()
+                    .unwrap()
+                    .extend([Uuid::new_v4(), version]);
                 self.notify.notified().await;
             }
 
@@ -647,9 +659,7 @@ mod tests {
                 let state = state.clone();
                 async move {
                     let version = *state.schema_version.lock().unwrap();
-                    let version_bytes = [version as u8; 16];
-                    tx.send(Ok(Some(CqlTimeuuid::from_bytes(version_bytes))))
-                        .unwrap();
+                    tx.send(Ok(version)).unwrap();
                 }
                 .boxed()
             }
@@ -717,11 +727,37 @@ mod tests {
             .boxed()
         });
 
+        mock_db.expect_is_valid_schema().returning({
+            let state = state.clone();
+            move |version, tx| {
+                let state = state.clone();
+                async move {
+                    let schema_version = state
+                        .schema_version_agreed
+                        .lock()
+                        .unwrap()
+                        .pop_front()
+                        .unwrap_or_else(|| *state.schema_version.lock().unwrap());
+                    tx.send(schema_version == version).unwrap();
+                }
+                .boxed()
+            }
+        });
+
         let tx_db = db::tests::new(mock_db);
         let tx_eng = engine::tests::new(mock_engine);
-        let (tx_ns, _rx_ns) = mpsc::channel(10);
 
-        let (_config_tx, config_rx) = watch::channel(Arc::new(Config::default()));
+        let (tx_ns, mut rx_ns) = mpsc::channel(10);
+        tokio::spawn(async move {
+            while let Some(_event) = rx_ns.recv().await {
+                // Just consume events for this test
+            }
+        });
+
+        let (_config_tx, config_rx) = watch::channel(Arc::new(Config {
+            monitor_indexes_interval: Some(Duration::from_millis(10)),
+            ..Config::default()
+        }));
 
         // Start the monitor
         let _monitor = new(tx_db.clone(), tx_eng.downgrade(), tx_ns.clone(), config_rx)
@@ -735,7 +771,18 @@ mod tests {
         let index2_key = index2.key();
 
         state.add_index(index1).await;
+
+        assert!(
+            state.schema_version_agreed.lock().unwrap().is_empty(),
+            "Agreed schema version should be reset"
+        );
+
         state.add_index(index2).await;
+
+        assert!(
+            state.schema_version_agreed.lock().unwrap().is_empty(),
+            "Agreed schema version should be reset"
+        );
 
         let engine_indexes = state.engine_indexes.lock().unwrap().clone();
         assert!(
@@ -751,6 +798,10 @@ mod tests {
             engine_indexes.contains(&index1_key) && !engine_indexes.contains(&index2_key),
             "Only index1 should remain"
         );
+        assert!(
+            state.schema_version_agreed.lock().unwrap().is_empty(),
+            "Agreed schema version should be reset"
+        );
 
         // Remove index1 from the list
         state.del_index(index1_key.index()).await;
@@ -759,6 +810,10 @@ mod tests {
         assert!(
             !engine_indexes.contains(&index1_key) && !engine_indexes.contains(&index2_key),
             "Both indexes should be removed"
+        );
+        assert!(
+            state.schema_version_agreed.lock().unwrap().is_empty(),
+            "Agreed schema version should be reset"
         );
 
         // Assert del_index called only once per index
@@ -853,15 +908,127 @@ mod tests {
             }
         });
 
+        mock_db.expect_is_valid_schema().returning(move |_, tx| {
+            async move {
+                tx.send(true).unwrap();
+            }
+            .boxed()
+        });
+
         let db = db::tests::new(mock_db);
 
         // all indexes are valid
         set_valid_indexes(vec![true, true, true]);
-        assert!(get_indexes(&db).await.is_ok());
+        assert!(get_indexes(&db, Uuid::new_v4()).await.is_ok());
 
         // second index is invalid
         set_valid_indexes(vec![true, false, true]);
-        assert!(get_indexes(&db).await.is_err());
+        assert!(get_indexes(&db, Uuid::new_v4()).await.is_err());
+    }
+
+    #[rstest]
+    #[timeout(Duration::from_secs(5))]
+    #[tokio::test]
+    async fn get_indexes_failed_while_schema_is_invalid() {
+        let valid_schemas: Arc<Mutex<Vec<Uuid>>> = Arc::new(Mutex::new(vec![]));
+        let set_valid_schemas = |v| {
+            *valid_schemas.lock().unwrap() = v;
+        };
+
+        let mut mock_db = MockSimDb::new();
+
+        mock_db.expect_get_indexes().returning({
+            move |tx| {
+                async move {
+                    let index = || DbCustomIndex {
+                        keyspace: "ks".to_string().into(),
+                        index: "idx".to_string().into(),
+                        table: "tbl".to_string().into(),
+                        primary_key_columns: NonemptyArc::new(["pk"]).unwrap(),
+                        partition_key_count: NonZeroUsize::new(1).unwrap(),
+                        target_columns: NonemptyArc::new(["embedding"]).unwrap(),
+                        partitioning: DbIndexPartitioning::Global,
+                        filtering_columns: Arc::new([]),
+                        alternator_attribute_types: Arc::new(BTreeMap::new()),
+                        kind: DbIndexKind::VectorSearch,
+                    };
+                    tx.send(Ok(vec![index(), index(), index()])).unwrap();
+                }
+                .boxed()
+            }
+        });
+
+        mock_db.expect_get_index_version().returning({
+            move |_, _, _, tx| {
+                async move {
+                    tx.send(Ok(Some(Uuid::new_v4().into()))).unwrap();
+                }
+                .boxed()
+            }
+        });
+
+        mock_db
+            .expect_get_index_target_type()
+            .returning(move |_, _, _, _, tx| {
+                async move {
+                    tx.send(Ok(Some(NonZeroUsize::new(3).unwrap().into())))
+                        .unwrap();
+                }
+                .boxed()
+            });
+
+        mock_db
+            .expect_get_vs_index_params()
+            .returning(move |_, _, _, tx| {
+                async move {
+                    tx.send(Ok(Some((
+                        Default::default(),
+                        Default::default(),
+                        Default::default(),
+                        Default::default(),
+                        Default::default(),
+                    ))))
+                    .unwrap();
+                }
+                .boxed()
+            });
+
+        mock_db.expect_is_valid_index().returning({
+            move |_, tx| {
+                async move {
+                    tx.send(true).unwrap();
+                }
+                .boxed()
+            }
+        });
+
+        mock_db.expect_is_valid_schema().returning({
+            let valid_schemas = Arc::clone(&valid_schemas);
+            move |version, tx| {
+                let valid_schemas = Arc::clone(&valid_schemas);
+                async move {
+                    tx.send(valid_schemas.lock().unwrap().remove(0) == version)
+                        .unwrap();
+                }
+                .boxed()
+            }
+        });
+
+        let db = db::tests::new(mock_db);
+
+        let schema_version = Uuid::new_v4();
+
+        // all schemas are valid
+        set_valid_schemas(vec![schema_version, schema_version]);
+        assert!(get_indexes(&db, schema_version).await.is_ok());
+
+        // schema at the start is invalid
+        set_valid_schemas(vec![Uuid::new_v4(), schema_version]);
+        assert!(get_indexes(&db, schema_version).await.is_err());
+
+        // schema at the end is invalid
+        set_valid_schemas(vec![schema_version, Uuid::new_v4()]);
+        assert!(get_indexes(&db, schema_version).await.is_err());
     }
 
     #[rstest]
@@ -902,9 +1069,16 @@ mod tests {
                 .boxed()
             });
 
+        mock_db.expect_is_valid_schema().returning(move |_, tx| {
+            async move {
+                tx.send(true).unwrap();
+            }
+            .boxed()
+        });
+
         let db = db::tests::new(mock_db);
 
-        assert!(get_indexes(&db).await.is_err());
+        assert!(get_indexes(&db, Uuid::new_v4()).await.is_err());
     }
 
     fn mock_db_with_fts_index(options: Option<IndexOptionsFts>) -> MockSimDb {
@@ -954,6 +1128,13 @@ mod tests {
             .boxed()
         });
 
+        mock_db.expect_is_valid_schema().returning(move |_, tx| {
+            async move {
+                tx.send(true).unwrap();
+            }
+            .boxed()
+        });
+
         mock_db
     }
 
@@ -965,7 +1146,7 @@ mod tests {
         };
         let db = db::tests::new(mock_db_with_fts_index(Some(options)));
 
-        let result = get_indexes(&db).await.unwrap();
+        let result = get_indexes(&db, Uuid::new_v4()).await.unwrap();
 
         assert_eq!(result.len(), 1);
         let idx = result.into_iter().next().unwrap();
@@ -977,7 +1158,7 @@ mod tests {
     async fn get_indexes_defaults_fts_options_when_db_has_none() {
         let db = db::tests::new(mock_db_with_fts_index(None));
 
-        let result = get_indexes(&db).await.unwrap();
+        let result = get_indexes(&db, Uuid::new_v4()).await.unwrap();
 
         let idx = result.into_iter().next().unwrap();
         assert_eq!(idx.kind, IndexKind::Fts(IndexOptionsFts::default()));
