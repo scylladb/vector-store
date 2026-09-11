@@ -29,7 +29,6 @@ use std::time::SystemTime;
 use tokio::sync::Notify;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::Sender;
 use tokio::sync::watch;
 use tokio::time;
 use tracing::Instrument;
@@ -110,7 +109,7 @@ pub(crate) fn new(
     config_rx: watch::Receiver<Arc<Config>>,
     mut session_rx: watch::Receiver<Option<Arc<Session>>>,
     metadata: IndexMetadata,
-    internals: Sender<Internals>,
+    internals: mpsc::Sender<Internals>,
     metrics: Arc<Metrics>,
     tx_embeddings: mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
     semaphore: Arc<Semaphore>,
@@ -285,7 +284,7 @@ impl CdcReaderState {
         session: &Arc<Session>,
         metadata: &IndexMetadata,
         tx_embeddings: &mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
-        internals: &Sender<Internals>,
+        internals: &mpsc::Sender<Internals>,
     ) {
         self.stop().await;
         drain_pending_notifications(&self.shutdown_notify);
@@ -339,7 +338,7 @@ impl CdcReaderState {
         config_rx: &watch::Receiver<Arc<Config>>,
         metadata: &IndexMetadata,
         tx_embeddings: &mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
-        internals: &Sender<Internals>,
+        internals: &mpsc::Sender<Internals>,
     ) {
         match session {
             Some(session) => {
@@ -375,7 +374,7 @@ impl CdcReaderState {
         config_rx: &watch::Receiver<Arc<Config>>,
         metadata: &IndexMetadata,
         tx_embeddings: &mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
-        internals: &Sender<Internals>,
+        internals: &mpsc::Sender<Internals>,
     ) {
         let session = session_rx.borrow().clone();
         if let Some(session) = session {
@@ -492,7 +491,7 @@ fn spawn_handler_task(
     handler: impl std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
     shutdown_notify: Arc<Notify>,
     cdc_error_notify: Arc<Notify>,
-    internals: Sender<Internals>,
+    internals: mpsc::Sender<Internals>,
     metrics: Arc<Metrics>,
     metadata: &IndexMetadata,
     reader_name: &str,
