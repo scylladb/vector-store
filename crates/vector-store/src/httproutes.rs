@@ -853,6 +853,17 @@ async fn post_index_ann(
             ))
             .await;
 
+        // Filtering-column names whose stored values the caller wants back
+        // alongside the primary keys, instead of having to separately read
+        // every result row from the base table. A column not tracked by
+        // the index comes back as null, same as a tracked column with no
+        // stored value for a given row - neither is an error.
+        let return_columns: Arc<[crate::ColumnName]> = request
+            .return_columns
+            .into_iter()
+            .map(crate::ColumnName::from)
+            .collect();
+
         let search_result = if let Some(filter) = request.filter {
             let filter = match try_from_post_index_ann_filter(
                 filter,
@@ -871,11 +882,17 @@ async fn post_index_ann(
                     request.vector.into(),
                     filter,
                     request.limit.into(),
+                    Arc::clone(&return_columns),
                 )
                 .await
         } else {
             index
-                .ann(routed_key, request.vector.into(), request.limit.into())
+                .ann(
+                    routed_key,
+                    request.vector.into(),
+                    request.limit.into(),
+                    Arc::clone(&return_columns),
+                )
                 .await
         };
 
@@ -891,7 +908,7 @@ async fn post_index_ann(
                     (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
                 }
             },
-            Ok((primary_keys, distances)) => {
+            Ok((primary_keys, distances, column_values)) => {
                 if primary_keys.len() != distances.len() {
                     let msg = format!(
                         "wrong size of an ann response: \
@@ -917,15 +934,29 @@ async fn post_index_ann(
                             debug!("post_index_ann: {err}");
                             (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
                         }
-                        Ok(primary_keys) => (
-                            StatusCode::OK,
-                            response::Json(httpapi::PostIndexAnnResponse {
-                                primary_keys,
-                                distances: distances.into_iter().map(|d| d.into()).collect(),
-                                similarity_scores,
-                            }),
-                        )
-                            .into_response(),
+                        Ok(primary_keys) => {
+                            let column_values: HashMap<httpapi::ColumnName, Vec<Option<Value>>> =
+                                column_values
+                                    .into_iter()
+                                    .map(|(col_name, values)| {
+                                        let values = values
+                                            .into_iter()
+                                            .map(|v| v.and_then(|v| cql_types::to_json(v).ok()))
+                                            .collect();
+                                        (col_name.into(), values)
+                                    })
+                                    .collect();
+                            (
+                                StatusCode::OK,
+                                response::Json(httpapi::PostIndexAnnResponse {
+                                    primary_keys,
+                                    distances: distances.into_iter().map(|d| d.into()).collect(),
+                                    similarity_scores,
+                                    column_values,
+                                }),
+                            )
+                                .into_response()
+                        }
                     }
                 }
             }

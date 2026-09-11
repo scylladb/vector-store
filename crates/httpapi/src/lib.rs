@@ -366,6 +366,9 @@ pub struct PostIndexAnnRequest {
     /// By default, the query may be routed to a different, better-matching index on the same column. Set to `false` to force the query to be served by exactly the index named in the URL.
     #[serde(default = "default_routing")]
     pub routing: bool,
+    /// Column names whose stored values should be returned alongside the primary keys. A column the index doesn't track comes back as null for every row, the same as a tracked column with no stored value for a given row. Empty (the default) means return no column values.
+    #[serde(default)]
+    pub return_columns: Vec<ColumnName>,
 }
 
 fn default_routing() -> bool {
@@ -377,6 +380,9 @@ pub struct PostIndexAnnResponse {
     pub primary_keys: HashMap<ColumnName, Vec<Value>>,
     pub distances: Vec<Distance>,
     pub similarity_scores: Vec<SimilarityScore>,
+    /// Per-column stored values for the columns requested in `return_columns`. Each entry maps a column name to a Vec of `Option<Value>` — one entry per returned nearest neighbour, in the same order as `primary_keys`. `None` means the value was not present for that row (e.g. the attribute did not exist when the row was indexed, or the column isn't tracked by the index). Absent when `return_columns` was empty.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub column_values: HashMap<ColumnName, Vec<Option<Value>>>,
 }
 
 #[derive(Copy, Clone, Debug, serde::Deserialize, derive_more::From, utoipa::ToSchema)]
@@ -425,6 +431,7 @@ mod tests {
                 SimilarityScore::from(f32::NEG_INFINITY),
                 SimilarityScore::from(0.5),
             ],
+            column_values: HashMap::new(),
         })
         .unwrap();
 
