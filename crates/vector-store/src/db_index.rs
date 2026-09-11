@@ -25,6 +25,8 @@ use crate::Vector;
 use crate::db_cdc;
 use crate::db_cdc::CdcReaderConfig;
 use crate::db_index_backend;
+use crate::db_value::DbRow;
+use crate::db_value::DbValue;
 use crate::internals::Internals;
 use crate::invariant_key::InvariantKey;
 use crate::node_state::Event;
@@ -47,7 +49,6 @@ use scylla::errors::PagerExecutionError;
 use scylla::routing::Token;
 use scylla::statement::prepared::PreparedStatement;
 use scylla::value::CqlValue;
-use scylla::value::Row;
 use scylla_cdc::CqlIdentifier;
 use std::collections::HashMap;
 use std::iter;
@@ -521,11 +522,8 @@ impl Statements {
             .execute_unpaged(&self.st_fetch_vector, &key)
             .await?
             .into_rows_result()?;
-        let Some(row) = rows_result.maybe_first_row::<Row>()? else {
-            // The row is gone from the base table.
-            return Ok(None);
-        };
-        parse_vector_row(row.columns)
+        let row = rows_result.maybe_first_row::<(Option<Vector>,)>()?;
+        Ok(row.and_then(|(vector,)| vector))
     }
 
     async fn preform_range_scan(&self, begin: Token, end: Token) -> RangeScanResult {
@@ -717,7 +715,7 @@ impl Statements {
         Ok(session
             .execute_iter(self.st_range_scan.clone(), (begin.value(), end.value()))
             .await?
-            .rows_stream::<Row>()?
+            .rows_stream::<DbRow>()?
             .map_err(anyhow::Error::from)
             .map_ok(move |mut row| {
                 if row.columns.len() != columns_len_expected {
@@ -825,7 +823,7 @@ pub(crate) fn alternator_decode_types<'a>(
 }
 
 pub(crate) fn parse_values(
-    columns: impl IntoIterator<Item = Option<CqlValue>>,
+    columns: impl IntoIterator<Item = Option<DbValue>>,
     default_timestamp: Option<Timestamp>,
     target_columns_len: NonZeroUsize,
     kind: &IndexKind,
@@ -856,7 +854,7 @@ pub(crate) fn parse_values(
                     .cloned()
                     .flatten();
                 let value = value
-                    .map(|value| match (value, native_type) {
+                    .map(|value| match (filtering_value(value)?, native_type) {
                         (CqlValue::Blob(bytes), Some(native_type)) => {
                             crate::alternator::parse_alternator_scalar(&bytes, &native_type)
                         }
@@ -872,7 +870,7 @@ pub(crate) fn parse_values(
                     "parse_values: unable to get timestamp value from chunk"
                 ))?
                 .map(|timestamp| {
-                    if let CqlValue::BigInt(timestamp) = timestamp {
+                    if let DbValue::Value(CqlValue::BigInt(timestamp)) = timestamp {
                         Ok(Timestamp::from_micros(timestamp as u64))
                     } else {
                         bail!("parse_values: bad type of a writetime")
@@ -894,48 +892,50 @@ pub(crate) fn parse_values(
     Ok(NonemptyBox::try_from(values).unwrap())
 }
 
-fn parse_primary_key(columns: impl IntoIterator<Item = Option<CqlValue>>) -> Option<PrimaryKey> {
+fn parse_primary_key(columns: impl IntoIterator<Item = Option<DbValue>>) -> Option<PrimaryKey> {
     columns
         .into_iter()
-        .inspect(|value| {
-            if value.is_none() {
+        .map(|value| match value {
+            Some(DbValue::Value(value)) => Some(value),
+            // A primary key column is never of a vector type.
+            Some(DbValue::Vector(_)) => {
+                debug!("parse_primary_key: unexpected vector primary key column");
+                None
+            }
+            None => {
                 debug!("parse_primary_key: missing a primary key column");
-            };
+                None
+            }
         })
         .collect::<Option<_>>()
 }
 
-fn parse_indexed_value(value: CqlValue, kind: &IndexKind) -> anyhow::Result<DbIndexedValue> {
+fn filtering_value(value: DbValue) -> anyhow::Result<CqlValue> {
+    match value {
+        DbValue::Value(value) => Ok(value),
+        DbValue::Vector(_) => {
+            bail!("parse_values: unexpected vector value of a filtering column")
+        }
+    }
+}
+
+fn parse_indexed_value(value: DbValue, kind: &IndexKind) -> anyhow::Result<DbIndexedValue> {
     match kind {
-        IndexKind::Vs(_) => Vector::try_from(value)
-            .map_err(|err| anyhow!("parse_indexed_value: {err}"))
-            .map(DbIndexedValue::Vector),
+        IndexKind::Vs(_) => match value {
+            DbValue::Vector(vector) => Ok(DbIndexedValue::Vector(vector)),
+            DbValue::Value(value) => Vector::try_from(value)
+                .map_err(|err| anyhow!("parse_indexed_value: {err}"))
+                .map(DbIndexedValue::Vector),
+        },
         IndexKind::Fts(_) => match value {
-            CqlValue::Text(s) => Ok(DbIndexedValue::Document(s)),
-            CqlValue::Ascii(s) => Ok(DbIndexedValue::Document(s)),
+            DbValue::Value(CqlValue::Text(s) | CqlValue::Ascii(s)) => {
+                Ok(DbIndexedValue::Document(s))
+            }
             other => {
                 bail!("parse_indexed_value: expected text column, got {:?}", other);
             }
         },
     }
-}
-
-/// Parse a row of `[value]`, as selected by
-/// [`db_index_backend::fetch_vector_query`].
-fn parse_vector_row(columns: Vec<Option<CqlValue>>) -> anyhow::Result<Option<Vector>> {
-    const EXPECTED_COLUMNS: usize = 1;
-    if columns.len() != EXPECTED_COLUMNS {
-        bail!(
-            "parse_vector_row: expected {EXPECTED_COLUMNS} columns, got {}",
-            columns.len()
-        );
-    }
-    columns
-        .into_iter()
-        .next()
-        .unwrap()
-        .map(|value| Vector::try_from(value).map_err(|err| anyhow!("parse_vector_row: {err}")))
-        .transpose()
 }
 
 fn concurrency_limit() -> usize {
@@ -995,13 +995,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_indexed_value_vector_from_cql_vector() {
-        let cql = CqlValue::Vector(vec![
-            CqlValue::Float(1.0),
-            CqlValue::Float(2.0),
-            CqlValue::Float(3.0),
-        ]);
-        let result = parse_indexed_value(cql, &vs_kind());
+    fn parse_indexed_value_vector_from_vector_column() {
+        let column = DbValue::Vector(Vector::from(vec![1.0, 2.0, 3.0]));
+        let result = parse_indexed_value(column, &vs_kind());
         assert_eq!(
             result.unwrap(),
             DbIndexedValue::Vector(Vector::from(vec![1.0, 2.0, 3.0]))
@@ -1009,16 +1005,39 @@ mod tests {
     }
 
     #[test]
+    fn parse_indexed_value_vector_from_alternator_blob() {
+        // Tag 5 = ALTERNATOR_TYPE_FLOAT32VECTOR, followed by big-endian
+        // floats: an Alternator embedding is still decoded from a blob.
+        let mut tagged_vector = vec![5u8];
+        tagged_vector.extend_from_slice(&1.0f32.to_be_bytes());
+        tagged_vector.extend_from_slice(&2.0f32.to_be_bytes());
+
+        let column = DbValue::Value(CqlValue::Blob(tagged_vector));
+        let result = parse_indexed_value(column, &vs_kind());
+        assert_eq!(
+            result.unwrap(),
+            DbIndexedValue::Vector(Vector::from(vec![1.0, 2.0]))
+        );
+    }
+
+    #[test]
     fn parse_indexed_value_vector_rejects_invalid_type() {
-        let cql = CqlValue::Text("not a vector".to_string());
-        let result = parse_indexed_value(cql, &vs_kind());
+        let column = DbValue::Value(CqlValue::Text("not a vector".to_string()));
+        let result = parse_indexed_value(column, &vs_kind());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_indexed_value_fts_rejects_a_vector_column() {
+        let column = DbValue::Vector(Vector::from(vec![1.0]));
+        let result = parse_indexed_value(column, &fts_kind());
         assert!(result.is_err());
     }
 
     #[test]
     fn parse_indexed_value_fts_from_text() {
-        let cql = CqlValue::Text("hello world".to_string());
-        let result = parse_indexed_value(cql, &fts_kind());
+        let column = DbValue::Value(CqlValue::Text("hello world".to_string()));
+        let result = parse_indexed_value(column, &fts_kind());
         assert_eq!(
             result.unwrap(),
             DbIndexedValue::Document("hello world".to_string())
@@ -1027,8 +1046,8 @@ mod tests {
 
     #[test]
     fn parse_indexed_value_fts_from_ascii() {
-        let cql = CqlValue::Ascii("ascii doc".to_string());
-        let result = parse_indexed_value(cql, &fts_kind());
+        let column = DbValue::Value(CqlValue::Ascii("ascii doc".to_string()));
+        let result = parse_indexed_value(column, &fts_kind());
         assert_eq!(
             result.unwrap(),
             DbIndexedValue::Document("ascii doc".to_string())
@@ -1037,51 +1056,17 @@ mod tests {
 
     #[test]
     fn parse_indexed_value_fts_rejects_invalid_type() {
-        let cql = CqlValue::Int(42);
-        let result = parse_indexed_value(cql, &fts_kind());
+        let column = DbValue::Value(CqlValue::Int(42));
+        let result = parse_indexed_value(column, &fts_kind());
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn parse_vector_row_returns_the_vector() {
-        let columns = vec![Some(CqlValue::Vector(vec![
-            CqlValue::Float(1.0),
-            CqlValue::Float(2.0),
-        ]))];
-        let result = parse_vector_row(columns);
-        assert_eq!(result.unwrap(), Some(Vector::from(vec![1.0, 2.0])));
-    }
-
-    #[test]
-    fn parse_vector_row_null_value_is_none() {
-        let columns = vec![None];
-        let result = parse_vector_row(columns);
-        assert_eq!(result.unwrap(), None);
-    }
-
-    #[test]
-    fn parse_vector_row_rejects_a_wrong_column_count() {
-        let columns = vec![
-            Some(CqlValue::Vector(vec![CqlValue::Float(1.0)])),
-            Some(CqlValue::BigInt(12345)),
-        ];
-        assert!(parse_vector_row(columns).is_err());
-
-        assert!(parse_vector_row(vec![]).is_err());
-    }
-
-    #[test]
-    fn parse_vector_row_rejects_a_non_vector_value() {
-        let columns = vec![Some(CqlValue::Text("not a vector".to_string()))];
-        assert!(parse_vector_row(columns).is_err());
     }
 
     #[test]
     fn parse_values_with_missing_timestamp() {
         let columns = vec![
-            Some(CqlValue::Vector(vec![CqlValue::Float(1.0)])),
-            Some(CqlValue::BigInt(1234567890)),
-            Some(CqlValue::Int(1)),
+            Some(DbValue::Vector(Vector::from(vec![1.0]))),
+            Some(DbValue::Value(CqlValue::BigInt(1234567890))),
+            Some(DbValue::Value(CqlValue::Int(1))),
             None, // missing timestamp
         ];
 
@@ -1129,8 +1114,8 @@ mod tests {
     #[test]
     fn parse_values_with_wrong_timestamp() {
         let columns = vec![
-            Some(CqlValue::Vector(vec![CqlValue::Float(1.0)])),
-            Some(CqlValue::Int(1234567890)),
+            Some(DbValue::Vector(Vector::from(vec![1.0]))),
+            Some(DbValue::Value(CqlValue::Int(1234567890))),
         ];
         let result = parse_values(
             columns.clone(),
@@ -1149,7 +1134,10 @@ mod tests {
 
     #[test]
     fn parse_values_with_wrong_value() {
-        let columns = vec![Some(CqlValue::Int(1)), Some(CqlValue::BigInt(1234567890))];
+        let columns = vec![
+            Some(DbValue::Value(CqlValue::Int(1))),
+            Some(DbValue::Value(CqlValue::BigInt(1234567890))),
+        ];
         let result = parse_values(
             columns.clone(),
             None,
@@ -1167,10 +1155,11 @@ mod tests {
 
     #[test]
     fn parse_values_with_wrong_columns_len() {
+        // A dangling filtering column, with no writetime to pair it with.
         let columns = vec![
-            Some(CqlValue::Vector(vec![CqlValue::Float(1.0)])),
-            Some(CqlValue::BigInt(1234567890)),
-            Some(CqlValue::Vector(vec![CqlValue::Float(1.0)])),
+            Some(DbValue::Vector(Vector::from(vec![1.0]))),
+            Some(DbValue::Value(CqlValue::BigInt(1234567890))),
+            Some(DbValue::Value(CqlValue::Int(42))),
         ];
         let result = parse_values(
             columns.clone(),
@@ -1190,10 +1179,10 @@ mod tests {
     #[test]
     fn parse_values_with_wrong_target_len() {
         let columns = vec![
-            Some(CqlValue::Vector(vec![CqlValue::Float(1.0)])),
-            Some(CqlValue::BigInt(1234567890)),
-            Some(CqlValue::Vector(vec![CqlValue::Float(2.0)])),
-            Some(CqlValue::BigInt(1234567891)),
+            Some(DbValue::Vector(Vector::from(vec![1.0]))),
+            Some(DbValue::Value(CqlValue::BigInt(1234567890))),
+            Some(DbValue::Vector(Vector::from(vec![2.0]))),
+            Some(DbValue::Value(CqlValue::BigInt(1234567891))),
         ];
         let result = parse_values(
             columns.clone(),
@@ -1211,16 +1200,37 @@ mod tests {
     }
 
     #[test]
+    fn parse_values_rejects_a_vector_filtering_column() {
+        let columns = vec![
+            Some(DbValue::Vector(Vector::from(vec![1.0]))),
+            Some(DbValue::Value(CqlValue::BigInt(1234567890))),
+            Some(DbValue::Vector(Vector::from(vec![2.0]))),
+            Some(DbValue::Value(CqlValue::BigInt(1234567890))),
+        ];
+        let result = parse_values(
+            columns,
+            None,
+            NonZeroUsize::new(1).unwrap(),
+            &vs_kind(),
+            &[],
+        );
+        assert_matches!(
+            result.unwrap_err().to_string(),
+            err if err.contains("unexpected vector value of a filtering column")
+        );
+    }
+
+    #[test]
     fn parse_values_decodes_alternator_filtering_column() {
         // Tag 0 = ALTERNATOR_TYPE_S (string), per vector.rs.
         let mut tagged_name = vec![0u8];
         tagged_name.extend_from_slice(b"red");
 
         let columns = vec![
-            Some(CqlValue::Vector(vec![CqlValue::Float(1.0)])),
-            Some(CqlValue::BigInt(1234567890)),
-            Some(CqlValue::Blob(tagged_name)),
-            Some(CqlValue::BigInt(1234567890)),
+            Some(DbValue::Vector(Vector::from(vec![1.0]))),
+            Some(DbValue::Value(CqlValue::BigInt(1234567890))),
+            Some(DbValue::Value(CqlValue::Blob(tagged_name))),
+            Some(DbValue::Value(CqlValue::BigInt(1234567890))),
         ];
         let result = parse_values(
             columns,
@@ -1244,10 +1254,10 @@ mod tests {
         // because it's a real CQL column, not a virtual Alternator
         // attribute - its raw value must pass through unchanged.
         let columns = vec![
-            Some(CqlValue::Vector(vec![CqlValue::Float(1.0)])),
-            Some(CqlValue::BigInt(1234567890)),
-            Some(CqlValue::Int(42)),
-            Some(CqlValue::BigInt(1234567890)),
+            Some(DbValue::Vector(Vector::from(vec![1.0]))),
+            Some(DbValue::Value(CqlValue::BigInt(1234567890))),
+            Some(DbValue::Value(CqlValue::Int(42))),
+            Some(DbValue::Value(CqlValue::BigInt(1234567890))),
         ];
         let result = parse_values(
             columns,
@@ -1270,10 +1280,10 @@ mod tests {
         // "S" (Text) - parse_alternator_scalar() must reject this rather
         // than silently misinterpreting the payload.
         let columns = vec![
-            Some(CqlValue::Vector(vec![CqlValue::Float(1.0)])),
-            Some(CqlValue::BigInt(1234567890)),
-            Some(CqlValue::Blob(vec![1u8, 0xDE, 0xAD])),
-            Some(CqlValue::BigInt(1234567890)),
+            Some(DbValue::Vector(Vector::from(vec![1.0]))),
+            Some(DbValue::Value(CqlValue::BigInt(1234567890))),
+            Some(DbValue::Value(CqlValue::Blob(vec![1u8, 0xDE, 0xAD]))),
+            Some(DbValue::Value(CqlValue::BigInt(1234567890))),
         ];
         let result = parse_values(
             columns,
