@@ -65,7 +65,6 @@ use tap::Pipe;
 use tap::Tap;
 use tokio::sync::Notify;
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio::time::interval;
@@ -311,8 +310,8 @@ impl DbExt for mpsc::Sender<Db> {
 }
 
 pub(crate) async fn new(
-    node_state: Sender<NodeState>,
-    internals: Sender<Internals>,
+    node_state: mpsc::Sender<NodeState>,
+    internals: mpsc::Sender<Internals>,
     mut config_rx: watch::Receiver<Arc<Config>>,
     metrics: Arc<Metrics>,
 ) -> anyhow::Result<mpsc::Sender<Db>> {
@@ -456,8 +455,8 @@ fn respond_with_error(msg: Db, error: anyhow::Error) {
 async fn process(
     statements: Arc<Statements>,
     msg: Db,
-    node_state: Sender<NodeState>,
-    internals: Sender<Internals>,
+    node_state: mpsc::Sender<NodeState>,
+    internals: mpsc::Sender<Internals>,
     cdc_error_notify: Arc<Notify>,
 ) {
     match msg {
@@ -614,7 +613,7 @@ struct Statements {
 
 async fn create_session(
     config: Arc<Config>,
-    node_state: &Sender<NodeState>,
+    node_state: &mpsc::Sender<NodeState>,
 ) -> anyhow::Result<Arc<Session>> {
     node_state.send_event(Event::ConnectingToDb).await;
     let mut builder = SessionBuilder::new()
@@ -801,8 +800,8 @@ impl Statements {
     async fn get_db_index(
         &self,
         metadata: IndexMetadata,
-        node_state: Sender<NodeState>,
-        internals: Sender<Internals>,
+        node_state: mpsc::Sender<NodeState>,
+        internals: mpsc::Sender<Internals>,
         cdc_error_notify: Arc<Notify>,
     ) -> GetDbIndexR {
         db_index::new(

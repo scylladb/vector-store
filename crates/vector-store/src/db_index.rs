@@ -61,7 +61,6 @@ use tap::Pipe;
 use tokio::sync::Notify;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tracing::Instrument;
@@ -146,8 +145,8 @@ pub(crate) async fn new(
     config_rx: watch::Receiver<Arc<Config>>,
     session_rx: watch::Receiver<Option<Arc<Session>>>,
     metadata: IndexMetadata,
-    node_state: Sender<NodeState>,
-    internals: Sender<Internals>,
+    node_state: mpsc::Sender<NodeState>,
+    internals: mpsc::Sender<Internals>,
     metrics: Arc<Metrics>,
     cdc_error_notify: Arc<Notify>,
 ) -> anyhow::Result<(
