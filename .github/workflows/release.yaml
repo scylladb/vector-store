@@ -278,7 +278,7 @@ jobs:
           asset_content_type: application/json
 
   # Hand the freshly built cloud images over to siren: extract the image IDs
-  # from the packer manifest and send the repository_dispatch that starts
+  # from the packer manifest and start
   # https://github.com/scylladb/siren/actions/workflows/add-vectorstore-ver.yml,
   # which opens a versions.yaml PR in scylladb/siren. A separate job consuming
   # the manifest artifact (the push-docker pattern) keeps the dispatch
@@ -345,18 +345,39 @@ jobs:
 
       - name: Trigger the siren add-vectorstore-ver workflow
         if: steps.ga.outputs.ga == 'true'
-        uses: peter-evans/repository-dispatch@ff45666b9427631e3450c54a1bcbee4d9ff4d7c0 # v3.0.0
-        with:
-          token: ${{ secrets.SIREN_REPO_TOKEN }}
-          repository: scylladb/siren
-          event-type: vectorstore-release
-          client-payload: |
-            {
-              "version": "${{ env.VECTOR_VERSION }}",
-              "aws_amd64_ami": "${{ steps.images.outputs.aws_amd64_ami }}",
-              "gcp_amd64_image": "${{ steps.images.outputs.gcp_amd64_image }}",
-              "aws_arm64_ami": "${{ steps.images.outputs.aws_arm64_ami }}"
-            }
+        env:
+          GH_TOKEN: ${{ secrets.SIREN_REPO_TOKEN }}
+          AWS_AMD64_AMI: ${{ steps.images.outputs.aws_amd64_ami }}
+          AWS_ARM64_AMI: ${{ steps.images.outputs.aws_arm64_ami }}
+          GCP_AMD64_IMAGE: ${{ steps.images.outputs.gcp_amd64_image }}
+        run: |
+          set -euo pipefail
+          # add-vectorstore-ver accepts both triggers with the same four
+          # values, but they are reached through different endpoints, and
+          # each endpoint checks a different permission of SIREN_REPO_TOKEN:
+          # repository_dispatch needs `Contents: write` on scylladb/siren,
+          # workflow_dispatch `Actions: write`. Use workflow_dispatch, the
+          # narrower of the two — dispatching a release must not come with
+          # the right to write siren's contents.
+          #
+          # Unlike repository_dispatch, workflow_dispatch names the ref to
+          # run on. Ask siren which one that is instead of hardcoding a
+          # branch name that only siren gets to change.
+          ref=$(gh api /repos/scylladb/siren --jq .default_branch)
+          jq -n \
+            --arg ref "${ref}" \
+            --arg version "${VECTOR_VERSION}" \
+            --arg aws_amd64_ami "${AWS_AMD64_AMI}" \
+            --arg aws_arm64_ami "${AWS_ARM64_AMI}" \
+            --arg gcp_amd64_image "${GCP_AMD64_IMAGE}" \
+            '{ref: $ref, inputs: {
+               version: $version,
+               aws_amd64_ami: $aws_amd64_ami,
+               aws_arm64_ami: $aws_arm64_ami,
+               gcp_amd64_image: $gcp_amd64_image
+             }}' \
+            | gh api --method POST --input - \
+              /repos/scylladb/siren/actions/workflows/add-vectorstore-ver.yml/dispatches
 
       - name: Log the siren workflow link
         if: steps.ga.outputs.ga == 'true'
@@ -366,10 +387,10 @@ jobs:
           GCP_AMD64_IMAGE: ${{ steps.images.outputs.gcp_amd64_image }}
         run: |
           set -euo pipefail
-          # repository_dispatch returns 204 with no run id, so the run status
+          # workflow_dispatch returns 204 with no run id, so the run status
           # cannot be reported here — link to the siren workflow page instead.
           {
-            echo "Dispatched \`vectorstore-release\` for \`${VECTOR_VERSION}\` to scylladb/siren:"
+            echo "Started \`add-vectorstore-ver\` for \`${VECTOR_VERSION}\` in scylladb/siren:"
             echo ""
             echo "- \`aws_amd64_ami\`: \`${AWS_AMD64_AMI}\`"
             echo "- \`aws_arm64_ami\`: \`${AWS_ARM64_AMI}\`"

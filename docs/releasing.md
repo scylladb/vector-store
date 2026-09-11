@@ -104,12 +104,12 @@ authenticated.
 The release workflow registers a GA release with siren automatically: after
 `build-cloud-images` uploads the packer manifest, the `trigger-siren` job
 extracts the `us-east-1` amd64/arm64 AMI IDs and the GCP image name from it
-and sends a `vectorstore-release` `repository_dispatch` to scylladb/siren.
-That starts siren's
+and hands them to siren's
 [add-vectorstore-ver](https://github.com/scylladb/siren/actions/workflows/add-vectorstore-ver.yml)
-workflow, which opens a `feat(vectorstore): add version X.Y.Z [automation]`
-PR against siren's `info/version/versions.yaml`. No manual step is needed for
-a GA release.
+workflow as a `workflow_dispatch` against siren's default branch. That
+workflow opens a `feat(vectorstore): add version X.Y.Z [automation]` PR
+against siren's `info/version/versions.yaml`. No manual step is needed for a
+GA release.
 
 Two caveats:
 
@@ -119,15 +119,15 @@ Two caveats:
   `defaults.vectorstore` to the dispatched version. For the same reason,
   releasing a patch on an *older* series still moves `defaults.vectorstore`
   back to it — review the siren PR before merging in that case.
-- `repository_dispatch` returns no run id, so the job cannot report the siren
+- `workflow_dispatch` returns no run id, so the job cannot report the siren
   run status. It logs the dispatched image IDs and a link to the siren
   workflow page in its job summary — verify there that the run succeeded and
   the PR appeared.
 
 If the dispatch fails, or the siren run does, the cloud images do not need to
 be rebuilt: re-run just the `trigger-siren` job, which re-reads the packer
-manifest artifact of the same workflow run. To trigger siren fully by hand
-instead, start
+manifest artifact of the same workflow run. To trigger siren by hand
+instead, start the same workflow the same way:
 [add-vectorstore-ver](https://github.com/scylladb/siren/actions/workflows/add-vectorstore-ver.yml)
 via `workflow_dispatch`, copying the version, the bare `us-east-1` amd64 and
 arm64 AMI IDs, and the GCP image name from the packer manifest. For a release
