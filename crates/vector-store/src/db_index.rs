@@ -45,7 +45,6 @@ use itertools::Itertools;
 use scylla::client::session::Session;
 use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
-use scylla::errors::PagerExecutionError;
 use scylla::routing::Token;
 use scylla::statement::prepared::PreparedStatement;
 use scylla::value::CqlValue;
@@ -141,6 +140,90 @@ impl DbIndexExt for mpsc::Sender<DbIndex> {
     }
 }
 
+#[derive(Debug, derive_more::Display)]
+pub(crate) struct NonRetryable;
+
+/// A wrapper around a Session watch.
+#[derive(Clone)]
+pub(crate) struct DbIndexSession {
+    session_rx: watch::Receiver<Option<Arc<Session>>>,
+    alive_rx: watch::Receiver<bool>,
+}
+
+impl DbIndexSession {
+    fn new(session_rx: watch::Receiver<Option<Arc<Session>>>) -> (Self, SessionGuard) {
+        let (alive_tx, alive_rx) = watch::channel(true);
+        (
+            Self {
+                session_rx,
+                alive_rx,
+            },
+            SessionGuard(alive_tx),
+        )
+    }
+
+    /// Waits for a session to be available, or returns Err if the index is no longer alive.
+    pub(crate) async fn wait_for_session(&self) -> anyhow::Result<Arc<Session>> {
+        let mut session_rx = self.session_rx.clone();
+        let mut alive_rx = self.alive_rx.clone();
+        tokio::select! {
+            biased;
+
+            _ = alive_rx.wait_for(|alive| !alive) => {
+                bail!("DbIndexSession is no longer alive");
+            }
+
+            session = session_rx.wait_for(|session| session.is_some()) => {
+                session.map(|session| Arc::clone(session.as_ref().unwrap()))
+                    .map_err(|err| anyhow!("DbIndexSession: session stream is no longer alive: {err}"))
+            }
+        }
+    }
+
+    /// Waits for a session change, or returns None if the index is no longer alive.
+    pub(crate) async fn wait_for_changed(&mut self) -> Option<Option<Arc<Session>>> {
+        tokio::select! {
+            biased;
+
+            _ = self.alive_rx.wait_for(|alive| !alive) => {
+                None
+            }
+
+            result = self.session_rx.changed() => {
+                if result.is_err() {
+                    return None;
+                }
+                Some(self.session_rx.borrow_and_update().clone())
+            }
+        }
+    }
+
+    /// Returns current session or returns None if the index is no longer alive.
+    pub(crate) fn current(&self) -> Option<Option<Arc<Session>>> {
+        self.alive_rx
+            .borrow()
+            .then(|| self.session_rx.borrow().clone())
+    }
+
+    /// Marks the session as changed, so that wait_for_changed() will return immediately.
+    pub(crate) fn mark_changed(&mut self) {
+        self.session_rx.mark_changed();
+    }
+
+    /// Waits until index is no longer alive.
+    pub(crate) async fn wait_for_dead(&mut self) {
+        _ = self.alive_rx.wait_for(|alive| !alive).await;
+    }
+}
+
+struct SessionGuard(watch::Sender<bool>);
+
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        let _ = self.0.send(false);
+    }
+}
+
 pub(crate) async fn new(
     config_rx: watch::Receiver<Arc<Config>>,
     session_rx: watch::Receiver<Option<Arc<Session>>>,
@@ -158,17 +241,9 @@ pub(crate) async fn new(
     let (tx_index, mut rx_index) = mpsc::channel(perf::channel_size().into());
     let (tx_embeddings, rx_embeddings) = mpsc::channel(perf::channel_size().into());
 
-    // Wait for initial session to create statements.
-    let mut statements_session_rx = session_rx.clone();
-    while statements_session_rx.borrow().is_none() {
-        if statements_session_rx.changed().await.is_err() {
-            return Err(anyhow::anyhow!(
-                "Session sender dropped before initialization"
-            ));
-        }
-    }
+    let (db_session, session_guard) = DbIndexSession::new(session_rx);
 
-    let statements = Arc::new(Statements::new(statements_session_rx, metadata.clone()).await?);
+    let statements = Arc::new(Statements::new(db_session.clone(), metadata.clone()).await?);
 
     let semaphore = Arc::new(Semaphore::new(concurrency_limit()));
 
@@ -177,7 +252,7 @@ pub(crate) async fn new(
     // Create wide-framed CDC actor
     let cdc_wide = db_cdc::new(
         config_rx.clone(),
-        session_rx.clone(),
+        db_session.clone(),
         metadata.clone(),
         internals.clone(),
         metrics.clone(),
@@ -189,7 +264,7 @@ pub(crate) async fn new(
     // Create fine-grained CDC actor
     let cdc_fine = db_cdc::new(
         config_rx,
-        session_rx.clone(),
+        db_session.clone(),
         metadata.clone(),
         internals,
         metrics,
@@ -198,21 +273,15 @@ pub(crate) async fn new(
         CdcReaderConfig::Fine,
     );
 
-    // Signal from the main db_index task to the CDC monitor task that
-    // this db_index is shutting down. Without it, the monitor would keep
-    // the CDC senders alive across a db_index replacement, leaving
-    // orphaned CDC actors running (VECTOR-653).
-    let db_index_stopped = Arc::new(Notify::new());
-
     // Monitor CDC actor channels for closure to notify about errors, or
     // exit when the main db_index task signals shutdown.
     tokio::spawn({
-        let db_index_stopped = Arc::clone(&db_index_stopped);
+        let mut db_session = db_session.clone();
         async move {
             tokio::select! {
                 _ = cdc_wide.closed() => cdc_error_notify.notify_one(),
                 _ = cdc_fine.closed() => cdc_error_notify.notify_one(),
-                _ = db_index_stopped.notified() => {}
+                _ = db_session.wait_for_dead() => {}
             }
         }
     });
@@ -228,47 +297,66 @@ pub(crate) async fn new(
 
             info!("starting full scan on {}", metadata.key());
 
-            let mut initial_scan = Box::pin(statements.initial_scan(
-                tx_embeddings.clone(),
-                completed_scan_length.clone(),
-            ));
+            let mut initial_scan = Box::pin(
+                statements.initial_scan(tx_embeddings.clone(), completed_scan_length.clone()),
+            );
 
             // Initial scan and message processing loop
-            loop {
+            let cancel = loop {
                 tokio::select! {
-                    _ = &mut initial_scan => {
-                        node_state
-                            .send_event(Event::FullScanFinished(metadata.clone()))
-                            .await;
-                        break;
+                    result = &mut initial_scan => {
+                        if let Err(err) = result {
+                            error!(
+                                "error during full scan of index {key}: {err}",
+                                key = metadata.key()
+                            );
+                            break true;
+                        }
+                        break false;
                     }
 
                     msg = rx_index.recv() => {
                         match msg {
                             Some(msg) => {
-                                tokio::spawn(process(Arc::clone(&statements), msg, completed_scan_length.clone(), Arc::clone(&fetch_permits)));
+                                tokio::spawn(process(
+                                        Arc::clone(&statements),
+                                        msg,
+                                        completed_scan_length.clone(),
+                                        Arc::clone(&fetch_permits)
+                                ));
                             }
                             None => {
-                                // Index was dropped, stop fullscan.
-                                break;
+                                info!(
+                                    "shutdown during full scan of index {key}",
+                                    key = metadata.key()
+                                );
+                                break true;
                             }
                         }
                     }
+                }
+            };
 
-                    else => {
-                        break;
-                    }
+            if cancel {
+                info!("cancelling full scan of index {key}", key = metadata.key());
+            } else {
+                info!("finished full scan on {key}", key = metadata.key());
+                node_state
+                    .send_event(Event::FullScanFinished(metadata.clone()))
+                    .await;
+
+                // Continue processing messages after scan completes
+                while let Some(msg) = rx_index.recv().await {
+                    tokio::spawn(process(
+                        Arc::clone(&statements),
+                        msg,
+                        completed_scan_length.clone(),
+                        Arc::clone(&fetch_permits),
+                    ));
                 }
             }
 
-            info!("finished full scan on {}", metadata.key());
-
-            // Continue processing messages after scan completes
-            while let Some(msg) = rx_index.recv().await {
-                tokio::spawn(process(Arc::clone(&statements), msg, completed_scan_length.clone(), Arc::clone(&fetch_permits)));
-            }
-
-            db_index_stopped.notify_one();
+            drop(session_guard);
             debug!("finished");
         }
         .instrument(error_span!("db_index", "{}", key)),
@@ -308,7 +396,7 @@ async fn process(
 }
 
 struct Statements {
-    session_rx: tokio::sync::watch::Receiver<Option<Arc<Session>>>,
+    db_session: DbIndexSession,
     primary_key_columns: NonemptyArc<ColumnName>,
     target_columns: NonemptyArc<ColumnName>,
     nonpk_partition_key_columns: Box<[ColumnName]>,
@@ -324,14 +412,9 @@ struct Statements {
 }
 
 impl Statements {
-    async fn new(
-        session_rx: tokio::sync::watch::Receiver<Option<Arc<Session>>>,
-        metadata: IndexMetadata,
-    ) -> anyhow::Result<Self> {
-        let session = session_rx
-            .borrow()
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("No session available for Statements initialization"))?;
+    async fn new(db_session: DbIndexSession, metadata: IndexMetadata) -> anyhow::Result<Self> {
+        let session = db_session.wait_for_session().await?;
+
         session.await_schema_agreement().await?;
 
         let cluster_state = session.get_cluster_state();
@@ -456,7 +539,7 @@ impl Statements {
             alternator_decode_types,
             st_range_scan,
             st_fetch_vector,
-            session_rx,
+            db_session,
             kind: metadata.kind.clone(),
         })
     }
@@ -470,11 +553,7 @@ impl Statements {
         keys: Vec<PrimaryKey>,
         fetch_permits: Arc<Semaphore>,
     ) -> anyhow::Result<Vec<Option<Vector>>> {
-        let session = self
-            .session_rx
-            .borrow()
-            .clone()
-            .ok_or_else(|| anyhow!("fetch_vectors: no active session"))?;
+        let session = self.db_session.wait_for_session().await?;
 
         let requested = keys.len();
         let mut failures = 0;
@@ -529,17 +608,11 @@ impl Statements {
         let mut range_scan = self.range_scan_stream(begin, end).await;
         let mut retry_timeout = START_RETRY_TIMEOUT;
         while let Err(err) = &range_scan {
-            let connection_error = err.downcast_ref::<PagerExecutionError>();
-            if connection_error.is_none()
-                || !matches!(
-                    connection_error.unwrap(),
-                    PagerExecutionError::NextPageError(_)
-                )
-            {
-                error!("Fatal error during scan of the range ({begin:?}, {end:?}): {err}");
+            if err.downcast_ref::<NonRetryable>().is_some() {
+                error!("Non-retryable error during scan of the range ({begin:?}, {end:?}): {err}");
                 break;
             }
-            warn!("Lost connection during scan of the range ({begin:?}, {end:?}), retrying");
+            warn!("Retryable error during scan of the range ({begin:?}, {end:?}): {err}, retrying");
             tokio::time::sleep(retry_timeout).await;
             range_scan = self.range_scan_stream(begin, end).await;
 
@@ -557,50 +630,53 @@ impl Statements {
     /// token ranges read from a rust driver. At first it prepares ranges, limits concurrent scans
     /// using semaphore, and runs each scan in separate concurrent task using cloned mpsc channel
     /// to send read embeddings into the pipeline.
+    ///
+    /// Returns None if the index is no longer alive.
     async fn initial_scan(
         &self,
         tx: mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
         completed_scan_length: Arc<AtomicU64>,
-    ) {
-        let semaphore_capacity = self.nr_parallel_queries().get();
+    ) -> anyhow::Result<()> {
+        let semaphore_capacity = self.nr_parallel_queries().await?.get();
         let semaphore = Arc::new(Semaphore::new(semaphore_capacity));
 
-        for (begin, end) in self.fullscan_ranges() {
+        for (begin, end) in self.fullscan_ranges().await? {
             let permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
 
-            let range_scan = self.preform_range_scan(begin, end).await;
-            if let Ok(embeddings) = range_scan {
-                let tx = tx.clone();
-                let scan_length = completed_scan_length.clone();
-                tokio::spawn(async move {
-                    let (tx_in_progress, mut rx_in_progress) = mpsc::channel(1);
-                    embeddings
-                        .for_each(move |embedding| {
-                            let tx = tx.clone();
-                            let tx_in_progress = tx_in_progress.clone();
-                            async move {
-                                _ = tx
-                                    .send((embedding, AsyncInProgress::Fullscan(tx_in_progress)))
-                                    .await;
-                            }
-                        })
-                        .await;
+            let embeddings = self
+                .preform_range_scan(begin, end)
+                .await
+                .inspect_err(|err| {
+                    error!("Error during scan of the range ({begin:?}, {end:?}): {err}",);
+                })?;
+            let tx = tx.clone();
+            let scan_length = completed_scan_length.clone();
+            tokio::spawn(async move {
+                let (tx_in_progress, mut rx_in_progress) = mpsc::channel(1);
+                embeddings
+                    .for_each(move |embedding| {
+                        let tx = tx.clone();
+                        let tx_in_progress = tx_in_progress.clone();
+                        async move {
+                            _ = tx
+                                .send((embedding, AsyncInProgress::Fullscan(tx_in_progress)))
+                                .await;
+                        }
+                    })
+                    .await;
 
-                    // wait until all in-progress markers are dropped
-                    while rx_in_progress.recv().await.is_some() {
-                        rx_in_progress.len();
-                    }
+                // wait until all in-progress markers are dropped
+                while rx_in_progress.recv().await.is_some() {
+                    rx_in_progress.len();
+                }
 
-                    //Safety: end > begin, and the range fits into u64
-                    scan_length.fetch_add(
-                        end.value().abs_diff(begin.value() - 1),
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
-                    drop(permit);
-                });
-            } else {
+                //Safety: end > begin, and the range fits into u64
+                scan_length.fetch_add(
+                    end.value().abs_diff(begin.value() - 1),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 drop(permit);
-            }
+            });
         }
 
         // Acquire all permits to wait until all spawned tasks have finished and released their permits.
@@ -608,33 +684,33 @@ impl Statements {
             .acquire_many(semaphore_capacity as u32)
             .await
             .unwrap();
+
+        Ok(())
     }
 
-    fn nr_shards_in_cluster(&self) -> NonZeroUsize {
-        self.session_rx
-            .borrow()
-            .as_ref()
-            .and_then(|session| {
-                NonZeroUsize::try_from(
-                    session
-                        .get_cluster_state()
-                        .get_nodes_info()
-                        .iter()
-                        .filter_map(|node| node.sharder())
-                        .map(|sharder| sharder.nr_shards.get() as usize)
-                        .sum::<usize>(),
-                )
-                .ok()
-            })
-            .unwrap_or(NonZeroUsize::new(1).unwrap())
+    async fn nr_shards_in_cluster(&self) -> anyhow::Result<NonZeroUsize> {
+        Ok(NonZeroUsize::try_from(
+            self.db_session
+                .wait_for_session()
+                .await?
+                .get_cluster_state()
+                .get_nodes_info()
+                .iter()
+                .filter_map(|node| node.sharder())
+                .map(|sharder| sharder.nr_shards.get() as usize)
+                .sum::<usize>(),
+        )
+        .unwrap_or(NonZeroUsize::new(1).unwrap()))
     }
 
     // Parallel queries = (cores in cluster) * (smuge factor)
-    fn nr_parallel_queries(&self) -> NonZeroUsize {
+    async fn nr_parallel_queries(&self) -> anyhow::Result<NonZeroUsize> {
         const SMUGE_FACTOR: NonZeroUsize = NonZeroUsize::new(3).unwrap();
-        self.nr_shards_in_cluster()
+        Ok(self
+            .nr_shards_in_cluster()
+            .await?
             .checked_mul(SMUGE_FACTOR)
-            .unwrap()
+            .unwrap())
     }
 
     /// Creates an iterator over all tokens ranges available in a cluster. A token ring is taken
@@ -645,29 +721,25 @@ impl Statements {
     /// highest possible token - for support the specific token range after the highest token to
     /// the lowest token. The highest possible token value is not decremented, because it doesn't
     /// start a new range.
-    fn fullscan_ranges(&self) -> impl Iterator<Item = (Token, Token)> {
+    async fn fullscan_ranges(&self) -> anyhow::Result<impl Iterator<Item = (Token, Token)>> {
+        let session = self.db_session.wait_for_session().await?;
+
         const TOKEN_MAX: i64 = i64::MAX; // the highest possible token value in the ScyllaDB
         const TOKEN_MIN: i64 = -TOKEN_MAX; // the lowest possible token value in the ScyllaDB
 
         let tokens = iter::once(Token::new(TOKEN_MIN))
             .chain(
-                self.session_rx
-                    .borrow()
-                    .as_ref()
-                    .map(|session| {
-                        session
-                            .get_cluster_state()
-                            .replica_locator()
-                            .ring()
-                            .iter()
-                            .map(|(token, _)| token)
-                            .copied()
-                            .collect_vec()
-                    })
-                    .unwrap_or_default(),
+                session
+                    .get_cluster_state()
+                    .replica_locator()
+                    .ring()
+                    .iter()
+                    .map(|(token, _)| token)
+                    .copied()
+                    .collect_vec(),
             )
             .collect_vec();
-        tokens
+        Ok(tokens
             .into_iter()
             .circular_tuple_windows()
             .map(|(begin, end)| {
@@ -678,7 +750,7 @@ impl Statements {
                     // prepare a range without the last token
                     (begin, Token::new(end.value() - 1))
                 }
-            })
+            }))
     }
 
     async fn range_scan_stream(
@@ -697,24 +769,17 @@ impl Statements {
         let kind = self.kind.clone();
         let alternator_decode_types = self.alternator_decode_types.clone();
 
-        // wait for an active session
-        let session = {
-            let mut session_rx = self.session_rx.clone();
-            loop {
-                if let Some(session) = session_rx.borrow_and_update().clone() {
-                    break session;
-                }
-                session_rx
-                    .changed()
-                    .await
-                    .map_err(|err| anyhow::anyhow!("No active session for range scan: {err}"))?;
-            }
-        };
+        let session = self
+            .db_session
+            .wait_for_session()
+            .await
+            .context(NonRetryable)?;
 
         Ok(session
             .execute_iter(self.st_range_scan.clone(), (begin.value(), end.value()))
             .await?
-            .rows_stream::<DbRow>()?
+            .rows_stream::<DbRow>()
+            .context(NonRetryable)?
             .map_err(anyhow::Error::from)
             .map_ok(move |mut row| {
                 if row.columns.len() != columns_len_expected {
