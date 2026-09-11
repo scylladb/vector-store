@@ -14,6 +14,7 @@ use crate::db_cdc::READER_FINE;
 use crate::db_cdc::READER_WIDE;
 use crate::db_cdc::checkpoint_saver::MetricsCheckpointSaver;
 use crate::db_cdc::consumer::CdcConsumerFactory;
+use crate::db_index::DbIndexSession;
 use crate::internals::Internals;
 use crate::internals::InternalsExt;
 use crate::perf;
@@ -107,7 +108,7 @@ impl CdcReaderConfig {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn new(
     config_rx: watch::Receiver<Arc<Config>>,
-    mut session_rx: watch::Receiver<Option<Arc<Session>>>,
+    mut db_session: DbIndexSession,
     metadata: IndexMetadata,
     internals: mpsc::Sender<Internals>,
     metrics: Arc<Metrics>,
@@ -117,8 +118,8 @@ pub(crate) fn new(
 ) -> mpsc::Sender<DbCdc> {
     let (tx, mut rx) = mpsc::channel::<DbCdc>(perf::channel_size().into());
 
-    // Mark the receiver to ensure first session update is visible
-    session_rx.mark_changed();
+    // Mark the db_session to ensure first session update is visible
+    db_session.mark_changed();
 
     let (name, params_fn) = config.name_and_params_fn();
     let mut reader = CdcReaderState::new(
@@ -148,14 +149,14 @@ pub(crate) fn new(
                     _ = rx.recv() => { break; }
 
                     // Wait for session changes
-                    result = session_rx.changed() => {
-                        if result.is_err() {
+                    session = db_session.wait_for_changed() => {
+                        let Some(session) = session else {
+                            // Db index dropped
                             break;
-                        }
+                        };
 
-                        let session_opt = session_rx.borrow_and_update().clone();
                         reader.handle_session_change(
-                            session_opt, &config_rx, &metadata,
+                            session, &config_rx, &metadata,
                             &tx_embeddings, &internals,
                         ).await;
                         err_counter = 0;
@@ -174,8 +175,12 @@ pub(crate) fn new(
                     }
 
                     _ = sleep_for_retry(backoff_duration.take()) => {
+                        let Some(session) = db_session.current() else {
+                            // Db index dropped
+                            break;
+                        };
                         reader.restart_after_backoff(
-                            &session_rx, &config_rx, &metadata,
+                            session, &config_rx, &metadata,
                             &tx_embeddings, &internals,
                         ).await;
                     }
@@ -370,13 +375,12 @@ impl CdcReaderState {
     /// Completes a pending backoff by restarting the CDC reader.
     async fn restart_after_backoff(
         &mut self,
-        session_rx: &watch::Receiver<Option<Arc<Session>>>,
+        session: Option<Arc<Session>>,
         config_rx: &watch::Receiver<Arc<Config>>,
         metadata: &IndexMetadata,
         tx_embeddings: &mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
         internals: &mpsc::Sender<Internals>,
     ) {
-        let session = session_rx.borrow().clone();
         if let Some(session) = session {
             record_reader_restart(&self.metrics, &self.keyspace, &self.index_name, self.name);
             let config = config_rx.borrow().clone();

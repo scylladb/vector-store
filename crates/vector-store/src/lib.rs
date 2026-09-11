@@ -874,6 +874,9 @@ pub struct DbIndexedRow {
     pub operation: DbIndexedOperation,
 }
 
+#[derive(Debug, derive_more::Display)]
+struct NonRetryable;
+
 pub fn block_on<Output>(threads: Option<usize>, f: impl AsyncFnOnce() -> Output) -> Output {
     let mut builder = match threads {
         Some(0) | None => Builder::new_multi_thread(),
