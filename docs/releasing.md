@@ -25,6 +25,26 @@ is published, or manually via Run workflow with `VECTOR_VERSION`, and runs on
 both amd64 and arm64 runners. Before building artifacts it runs the full
 validator test suite.
 
+The `upload-release-assets` job attaches to the GitHub release the same set of
+files `scripts/upload-release` uploads by hand:
+
+- `vector-store-{version}-{amd64,arm64}.tar.gz`
+- `vector-store-{version}.cdx.json`
+- `vector-store-docker-{version}-{amd64,arm64}.cdx.json`
+
+It runs before `build-cloud-images` on purpose: the packer provisioner installs
+the service by downloading the tarball from the release page (see
+`packer/files/vector_store_install_image`), so as long as the release carries no
+assets the cloud image build cannot succeed.
+
+Only a run started by publishing a release uploads anything. A
+`workflow_dispatch` run takes an arbitrary `VECTOR_VERSION` and must not replace
+the assets of an already-published release, so it attaches nothing and builds
+its images from whatever the release page already carries; if the tarball is
+missing there, the image build fails at the download, naming the URL.
+Re-running a failed release run keeps its `release` event, so that recovery
+path uploads normally.
+
 ## Manual release
 
 In case you want to build the release manually, you can use the scripts in

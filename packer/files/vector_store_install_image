@@ -63,7 +63,10 @@ def update_swap(size):
 
 def install_vector_store(version, arch):
     name = 'vector-store-{VERSION}-{ARC}'.format(VERSION=version, ARC=arch)
-    run('sudo -u {_USER} curl -L -o {_HOME}/vector-store.tar.gz  https://github.com/scylladb/vector-store/releases/download/{VERSION}/{NAME}.tar.gz'.format(VERSION=version, _HOME=HOME_DIR, _USER=USER, NAME=name))
+    # -f so a release without the tarball attached fails here, naming the URL,
+    # instead of saving GitHub's 404 page and failing in tar below with an
+    # error that says nothing about the missing asset
+    run('sudo -u {_USER} curl -fL --retry 3 --retry-delay 5 -o {_HOME}/vector-store.tar.gz  https://github.com/scylladb/vector-store/releases/download/{VERSION}/{NAME}.tar.gz'.format(VERSION=version, _HOME=HOME_DIR, _USER=USER, NAME=name))
     run('sudo -u {_USER} tar -xvf {_HOME}/vector-store.tar.gz -C {_HOME}/')
     run('sudo -u {_USER} {_COPY_OR_MOVE} {_HOME}/{NAME} {_HOME}/vector-store'.format(NAME=name, _HOME=HOME_DIR, _USER=USER, _COPY_OR_MOVE=COPY_OR_MOVE))
 
