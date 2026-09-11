@@ -7,6 +7,12 @@ use crate::Dimensions;
 use crate::alternator;
 use anyhow::anyhow;
 use anyhow::bail;
+use scylla::cluster::metadata::ColumnType;
+use scylla::cluster::metadata::NativeType;
+use scylla::deserialize::DeserializationError;
+use scylla::deserialize::FrameSlice;
+use scylla::deserialize::TypeCheckError;
+use scylla::deserialize::value::DeserializeValue;
 use scylla::value::CqlValue;
 use std::num::NonZeroUsize;
 
@@ -60,6 +66,48 @@ impl TryFrom<CqlValue> for Vector {
     }
 }
 
+/// A failure of [`Vector`] decoding, reported through the driver's error
+/// types, which require [`std::error::Error`].
+#[derive(Debug, thiserror::Error)]
+enum EmbeddingColumnError {
+    #[error("unsupported CQL type for an embedding column: {0:?}")]
+    UnsupportedType(ColumnType<'static>),
+    #[error("invalid Alternator embedding: {0:#}")]
+    Alternator(anyhow::Error),
+}
+
+/// Deserializes a [`Vector`] straight out of the frame, accepting both
+/// representations an embedding column can have: a native
+/// `vector<float, N>`, deserialized by the driver's [`Vec<f32>`]
+/// deserializer, and a blob, which is an Alternator embedding.
+impl<'frame, 'metadata> DeserializeValue<'frame, 'metadata> for Vector {
+    fn type_check(typ: &ColumnType) -> Result<(), TypeCheckError> {
+        match typ {
+            ColumnType::Vector { .. } => <Vec<f32>>::type_check(typ),
+            ColumnType::Native(NativeType::Blob) => Ok(()),
+            other => Err(TypeCheckError::new(EmbeddingColumnError::UnsupportedType(
+                other.clone().into_owned(),
+            ))),
+        }
+    }
+
+    fn deserialize(
+        typ: &'metadata ColumnType<'metadata>,
+        v: Option<FrameSlice<'frame>>,
+    ) -> Result<Self, DeserializationError> {
+        match typ {
+            ColumnType::Vector { .. } => <Vec<f32>>::deserialize(typ, v).map(Self::from),
+            // Type-checked above
+            _ => {
+                let bytes = <&'frame [u8]>::deserialize(typ, v)?;
+                alternator::parse_alternator_vector(bytes)
+                    .map(Self::from)
+                    .map_err(|err| DeserializationError::new(EmbeddingColumnError::Alternator(err)))
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,6 +130,53 @@ mod tests {
             v.extend_from_slice(&f.to_be_bytes());
         }
         v
+    }
+
+    fn deserialize_cql_vector(floats: &[f32]) -> anyhow::Result<Vector> {
+        let typ = ColumnType::Vector {
+            typ: Box::new(ColumnType::Native(NativeType::Float)),
+            dimensions: floats.len() as u16,
+        };
+        let bytes: Vec<u8> = floats.iter().flat_map(|f| f.to_be_bytes()).collect();
+        deserialize_column(&typ, &bytes)
+    }
+
+    fn deserialize_blob(bytes: &[u8]) -> anyhow::Result<Vector> {
+        deserialize_column(&ColumnType::Native(NativeType::Blob), bytes)
+    }
+
+    fn deserialize_column(typ: &ColumnType<'static>, bytes: &[u8]) -> anyhow::Result<Vector> {
+        <Vector>::type_check(typ).map_err(|err| anyhow!("{err}"))?;
+        <Vector>::deserialize(typ, Some(FrameSlice::new_borrowed(bytes)))
+            .map_err(|err| anyhow!("{err}"))
+    }
+
+    #[test]
+    fn deserialize_from_cql_vector() {
+        let result = deserialize_cql_vector(&[1.0, 2.5, 3.0]).unwrap();
+        assert_eq!(result, Vector::from(vec![1.0, 2.5, 3.0]));
+    }
+
+    #[test]
+    fn deserialize_from_dynamodb_json_blob() {
+        let json = r#"{"L": [{"N": "123.4"}, {"N": "234.5"}, {"N": "345.6"}]}"#;
+        let result = deserialize_blob(&alternator_list_blob(json)).unwrap();
+        assert_eq!(result, Vector::from(vec![123.4, 234.5, 345.6]));
+    }
+
+    #[test]
+    fn deserialize_from_alternator_vector_blob() {
+        let result = deserialize_blob(&alternator_vector_blob(&[1.0, 2.5, 3.0])).unwrap();
+        assert_eq!(result, Vector::from(vec![1.0, 2.5, 3.0]));
+    }
+
+    #[test]
+    fn deserialize_rejects_a_wrong_vector_element_type() {
+        let typ = ColumnType::Vector {
+            typ: Box::new(ColumnType::Native(NativeType::Int)),
+            dimensions: 1,
+        };
+        assert!(<Vector>::type_check(&typ).is_err());
     }
 
     #[test]

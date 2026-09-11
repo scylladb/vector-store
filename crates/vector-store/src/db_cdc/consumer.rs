@@ -17,6 +17,7 @@ use crate::PrimaryKey;
 use crate::Timestamp;
 use crate::db_index;
 use crate::db_index_backend;
+use crate::db_value::DbRow;
 use anyhow::Context;
 use anyhow::anyhow;
 use anyhow::bail;
@@ -26,7 +27,6 @@ use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
 use scylla::statement::prepared::PreparedStatement;
 use scylla::value::CqlValue;
-use scylla::value::Row;
 use scylla_cdc::consumer::CDCRow;
 use scylla_cdc::consumer::Consumer;
 use scylla_cdc::consumer::ConsumerFactory;
@@ -82,7 +82,7 @@ impl CdcConsumerData {
             timestamp,
         );
 
-        let Some(row) = rows_result.maybe_first_row::<Row>()? else {
+        let Some(row) = rows_result.maybe_first_row::<DbRow>()? else {
             // If no row is found for the primary key, it is deleted
             _ = self
                 .tx
