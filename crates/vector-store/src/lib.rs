@@ -9,6 +9,7 @@ mod config_manager;
 mod cql_types;
 pub mod db;
 mod db_cdc;
+mod db_driver;
 pub mod db_index;
 mod db_index_backend;
 mod db_value;
@@ -45,6 +46,7 @@ pub use crate::config_manager::ConfigManager;
 pub use crate::config_manager::ConfigReceivers;
 pub use crate::config_manager::HttpServerConfig;
 pub use crate::config_manager::load_config;
+pub use crate::db_driver::DbDriver;
 pub use crate::distance::Distance;
 pub use crate::httpserver::HttpServer;
 pub use crate::httpserver::HttpServerExt;
@@ -906,6 +908,7 @@ pub async fn run(
     let opensearch_addr = config_rx.borrow().opensearch_addr.clone();
     let diskann_backend = config_rx.borrow().diskann_backend;
 
+    let db_driver = db_driver::new_scylla();
     let internals = internals::new();
     let memory = memory::new(internals.clone(), config_rx.clone());
     let worker = worker::new();
@@ -929,6 +932,7 @@ pub async fn run(
             node_state.clone(),
             internals.clone(),
             config_rx,
+            db_driver,
             Arc::clone(&metrics),
         )
         .await?

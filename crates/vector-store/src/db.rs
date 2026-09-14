@@ -10,6 +10,7 @@ use crate::Config;
 use crate::Connectivity;
 use crate::Credentials;
 use crate::DbCustomIndex;
+use crate::DbDriver;
 use crate::DbIndexKind;
 use crate::DbIndexPartitioning;
 use crate::DbIndexedRow;
@@ -70,6 +71,7 @@ use tokio::sync::watch;
 use tokio::time::interval;
 use tracing::Instrument;
 use tracing::debug;
+use tracing::error;
 use tracing::error_span;
 use tracing::info;
 use tracing::trace;
@@ -309,10 +311,11 @@ impl DbExt for mpsc::Sender<Db> {
     }
 }
 
-pub(crate) async fn new(
+pub(crate) async fn new<T: DbDriver>(
     node_state: mpsc::Sender<NodeState>,
     internals: mpsc::Sender<Internals>,
     mut config_rx: watch::Receiver<Arc<Config>>,
+    db_driver: T,
     metrics: Arc<Metrics>,
 ) -> anyhow::Result<mpsc::Sender<Db>> {
     let (tx, mut rx) = mpsc::channel(perf::channel_size().into());
@@ -327,7 +330,7 @@ pub(crate) async fn new(
 
             // Use watch channel to share session, starting with None
             let (session_tx, session_rx) = watch::channel(None);
-            let mut statements: Option<Arc<Statements>> = None;
+            let mut statements: Option<Arc<Statements<T>>> = None;
 
             loop {
                 tokio::select! {
@@ -339,16 +342,28 @@ pub(crate) async fn new(
                                 &node_state
                             ).await {
                                 Ok(session) => {
+                                    if statements.is_none() {
+                                        let new_statements = Statements::new(
+                                            session.clone(),
+                                            config_rx.clone(),
+                                            db_driver.clone(),
+                                            session_rx.clone(),
+                                            metrics.clone()
+                                        )
+                                        .await;
+                                        if let Err(err) = new_statements {
+                                            error!("Failed to prepare statements: {err}");
+                                            continue;
+                                        }
+                                        statements = Some(Arc::new(new_statements.unwrap()));
+                                    }
                                     node_state.send_event(Event::ConnectedToDb).await;
                                     internals.create_session(Some(session.clone())).await;
                                     session_tx.send(Some(session)).ok();
-                                    if statements.is_none() {
-                                        statements = Some(Arc::new(Statements::new(config_rx.clone(), session_rx.clone(), metrics.clone()).await.unwrap()));
-                                    }
                                     info!("Connected to ScyllaDB at {}", config.scylladb_uri);
                                 }
                                 Err(e) => {
-                                    tracing::error!(
+                                    error!(
                                         "Failed to connect to ScyllaDB (error: {}) at {}, retrying in {}s",
                                         e,
                                         config.scylladb_uri,
@@ -452,8 +467,8 @@ fn respond_with_error(msg: Db, error: anyhow::Error) {
     }
 }
 
-async fn process(
-    statements: Arc<Statements>,
+async fn process<T: DbDriver>(
+    statements: Arc<Statements<T>>,
     msg: Db,
     node_state: mpsc::Sender<NodeState>,
     internals: mpsc::Sender<Internals>,
@@ -600,8 +615,9 @@ fn credentials_changed(
     }
 }
 
-struct Statements {
+struct Statements<T: DbDriver> {
     config_rx: watch::Receiver<Arc<Config>>,
+    db_driver: T,
     session_rx: watch::Receiver<Option<Arc<Session>>>,
     metrics: Arc<Metrics>,
     st_latest_schema_version: PreparedStatement,
@@ -749,16 +765,14 @@ async fn create_session(
     Ok(session)
 }
 
-impl Statements {
+impl<T: DbDriver> Statements<T> {
     async fn new(
+        session: Arc<Session>,
         config_rx: watch::Receiver<Arc<Config>>,
+        db_driver: T,
         session_rx: watch::Receiver<Option<Arc<Session>>>,
         metrics: Arc<Metrics>,
     ) -> anyhow::Result<Self> {
-        let session = session_rx.borrow().clone().ok_or_else(|| {
-            anyhow::anyhow!("No session available during Statements initialization")
-        })?;
-
         Ok(Self {
             config_rx,
             metrics,
@@ -793,6 +807,7 @@ impl Statements {
             re_get_index_target_type: Regex::new(Self::RE_GET_INDEX_TARGET_TYPE)
                 .context("RE_GET_INDEX_TARGET_TYPE")?,
 
+            db_driver,
             session_rx,
         })
     }
@@ -806,6 +821,7 @@ impl Statements {
     ) -> GetDbIndexR {
         db_index::new(
             self.config_rx.clone(),
+            self.db_driver.clone(),
             self.session_rx.clone(),
             metadata,
             node_state,

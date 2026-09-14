@@ -6,6 +6,7 @@
 use crate::AsyncInProgress;
 use crate::ColumnName;
 use crate::Config;
+use crate::DbDriver;
 use crate::DbIndexedOperation;
 use crate::DbIndexedRow;
 use crate::DbIndexedValue;
@@ -224,8 +225,10 @@ impl Drop for SessionGuard {
     }
 }
 
-pub(crate) async fn new(
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn new<T: DbDriver>(
     config_rx: watch::Receiver<Arc<Config>>,
+    db_driver: T,
     session_rx: watch::Receiver<Option<Arc<Session>>>,
     metadata: IndexMetadata,
     node_state: mpsc::Sender<NodeState>,
@@ -243,7 +246,8 @@ pub(crate) async fn new(
 
     let (db_session, session_guard) = DbIndexSession::new(session_rx);
 
-    let statements = Arc::new(Statements::new(db_session.clone(), metadata.clone()).await?);
+    let statements =
+        Arc::new(Statements::new(db_driver.clone(), db_session.clone(), metadata.clone()).await?);
 
     let semaphore = Arc::new(Semaphore::new(concurrency_limit()));
 
@@ -252,6 +256,7 @@ pub(crate) async fn new(
     // Create wide-framed CDC actor
     let cdc_wide = db_cdc::new(
         config_rx.clone(),
+        db_driver.clone(),
         db_session.clone(),
         metadata.clone(),
         internals.clone(),
@@ -264,6 +269,7 @@ pub(crate) async fn new(
     // Create fine-grained CDC actor
     let cdc_fine = db_cdc::new(
         config_rx,
+        db_driver,
         db_session.clone(),
         metadata.clone(),
         internals,
@@ -365,8 +371,8 @@ pub(crate) async fn new(
     Ok((tx_index, rx_embeddings))
 }
 
-async fn process(
-    statements: Arc<Statements>,
+async fn process<T: DbDriver>(
+    statements: Arc<Statements<T>>,
     msg: DbIndex,
     completed_scan_length: Arc<AtomicU64>,
     fetch_permits: Arc<Semaphore>,
@@ -395,7 +401,8 @@ async fn process(
     }
 }
 
-struct Statements {
+struct Statements<T: DbDriver> {
+    db_driver: T,
     db_session: DbIndexSession,
     primary_key_columns: NonemptyArc<ColumnName>,
     target_columns: NonemptyArc<ColumnName>,
@@ -411,8 +418,12 @@ struct Statements {
     kind: IndexKind,
 }
 
-impl Statements {
-    async fn new(db_session: DbIndexSession, metadata: IndexMetadata) -> anyhow::Result<Self> {
+impl<T: DbDriver> Statements<T> {
+    async fn new(
+        db_driver: T,
+        db_session: DbIndexSession,
+        metadata: IndexMetadata,
+    ) -> anyhow::Result<Self> {
         let session = db_session.wait_for_session().await?;
 
         session.await_schema_agreement().await?;
@@ -539,6 +550,7 @@ impl Statements {
             alternator_decode_types,
             st_range_scan,
             st_fetch_vector,
+            db_driver,
             db_session,
             kind: metadata.kind.clone(),
         })
