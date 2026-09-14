@@ -33,7 +33,6 @@ use crate::cql_types;
 use crate::db_driver::DbIndexInfo;
 use crate::db_index;
 use crate::db_index::DbIndex;
-use crate::db_index_backend;
 use crate::internals::Internals;
 use crate::internals::InternalsExt;
 use crate::node_state::Event;
@@ -76,7 +75,7 @@ type GetDbIndexR = anyhow::Result<(
 pub(crate) type LatestSchemaVersionR = anyhow::Result<Uuid>;
 type GetIndexesR = anyhow::Result<Vec<DbCustomIndex>>;
 type GetIndexVersionR = anyhow::Result<Option<IndexVersion>>;
-type GetIndexTargetTypeR = anyhow::Result<Option<Dimensions>>;
+type GetIndexTargetDimensionsR = anyhow::Result<Option<Dimensions>>;
 type GetVsIndexParamsR = anyhow::Result<
     Option<(
         Connectivity,
@@ -113,12 +112,12 @@ pub enum Db {
         tx: oneshot::Sender<GetIndexVersionR>,
     },
 
-    GetIndexTargetType {
+    GetIndexTargetDimensions {
         keyspace: KeyspaceName,
         table: TableName,
-        target_column: ColumnName,
         index: IndexName,
-        tx: oneshot::Sender<GetIndexTargetTypeR>,
+        target_column: ColumnName,
+        tx: oneshot::Sender<GetIndexTargetDimensionsR>,
     },
 
     GetVsIndexParams {
@@ -167,13 +166,13 @@ pub(crate) trait DbExt {
         index: IndexName,
     ) -> GetIndexVersionR;
 
-    async fn get_index_target_type(
+    async fn get_index_target_dimensions(
         &self,
         keyspace: KeyspaceName,
         table: TableName,
-        target_column: ColumnName,
         index: IndexName,
-    ) -> GetIndexTargetTypeR;
+        target_column: ColumnName,
+    ) -> GetIndexTargetDimensionsR;
 
     async fn get_vs_index_params(
         &self,
@@ -230,19 +229,19 @@ impl DbExt for mpsc::Sender<Db> {
         rx.await?
     }
 
-    async fn get_index_target_type(
+    async fn get_index_target_dimensions(
         &self,
         keyspace: KeyspaceName,
         table: TableName,
-        target_column: ColumnName,
         index: IndexName,
-    ) -> GetIndexTargetTypeR {
+        target_column: ColumnName,
+    ) -> GetIndexTargetDimensionsR {
         let (tx, rx) = oneshot::channel();
-        self.send(Db::GetIndexTargetType {
+        self.send(Db::GetIndexTargetDimensions {
             keyspace,
             table,
-            target_column,
             index,
+            target_column,
             tx,
         })
         .await?;
@@ -441,7 +440,7 @@ fn respond_with_error(msg: Db, error: anyhow::Error) {
         Db::GetIndexVersion { tx, .. } => {
             let _ = tx.send(Err(error));
         }
-        Db::GetIndexTargetType { tx, .. } => {
+        Db::GetIndexTargetDimensions { tx, .. } => {
             let _ = tx.send(Err(error));
         }
         Db::GetVsIndexParams { tx, .. } => {
@@ -494,19 +493,21 @@ async fn process<T: DbDriver>(
             .send(statements.get_index_version(keyspace, table, index).await)
             .unwrap_or_else(|_| trace!("process: Db::GetIndexVersion: unable to send response")),
 
-        Db::GetIndexTargetType {
+        Db::GetIndexTargetDimensions {
             keyspace,
             table,
-            target_column,
             index,
+            target_column,
             tx,
         } => tx
             .send(
                 statements
-                    .get_index_target_type(keyspace, table, target_column, index)
+                    .get_index_target_dimensions(keyspace, table, index, target_column)
                     .await,
             )
-            .unwrap_or_else(|_| trace!("process: Db::GetIndexTargetType: unable to send response")),
+            .unwrap_or_else(|_| {
+                trace!("process: Db::GetIndexTargetDimensions: unable to send response")
+            }),
 
         Db::GetVsIndexParams {
             keyspace,
@@ -616,7 +617,7 @@ struct Statements<T: DbDriver> {
     st_get_indexes: T::Statement,
     st_get_index_target_type: T::Statement,
     st_get_index_options: T::Statement,
-    re_get_index_target_type: Regex,
+    re_get_index_target_dimensions: Regex,
 }
 
 async fn create_session<T: DbDriver>(
@@ -648,8 +649,11 @@ impl<T: DbDriver> Statements<T> {
 
             st_get_index_options: db_driver.prepare_get_index_options(&session).await?,
 
-            re_get_index_target_type: Regex::new(Self::RE_GET_INDEX_TARGET_TYPE)
-                .context("RE_GET_INDEX_TARGET_TYPE")?,
+            re_get_index_target_dimensions: Regex::new(Self::RE_GET_INDEX_TARGET_DIMENSIONS)
+                .context(format!(
+                    "regex: {regex}",
+                    regex = Self::RE_GET_INDEX_TARGET_DIMENSIONS
+                ))?,
 
             db_driver,
             session_rx,
@@ -790,35 +794,99 @@ impl<T: DbDriver> Statements<T> {
         result
     }
 
-    const RE_GET_INDEX_TARGET_TYPE: &str = r"^vector<float, (?<dimensions>\d+)>$";
+    const RE_GET_INDEX_TARGET_DIMENSIONS: &str = r"^vector<float, (?<dimensions>\d+)>$";
 
-    async fn get_index_target_type(
+    async fn get_index_target_dimensions(
         &self,
         keyspace: KeyspaceName,
         table: TableName,
-        target_column: ColumnName,
         index: IndexName,
-    ) -> GetIndexTargetTypeR {
+        target_column: ColumnName,
+    ) -> GetIndexTargetDimensionsR {
         let session = self
             .session_rx
             .borrow()
             .clone()
             .ok_or_else(|| anyhow::anyhow!("No active session"))?;
 
-        db_index_backend::get_dimensions(
-            &target_column,
-            &self.db_driver,
-            &session,
-            &self.st_get_index_target_type,
-            &self.re_get_index_target_type,
-            &self.st_get_index_options,
-            db_index_backend::IndexLocation {
+        if keyspace.is_alternator() {
+            self.get_dimensions_from_index_options(&session, &keyspace, &table, &index)
+                .await
+        } else {
+            self.get_dimensions_from_column_type(
+                &session,
+                &keyspace,
+                &table,
+                &index,
+                &target_column,
+            )
+            .await
+        }
+    }
+
+    /// Retrieves the vector dimensions for a CQL-native table by parsing the column type.
+    async fn get_dimensions_from_column_type(
+        &self,
+        session: &Session,
+        keyspace: &KeyspaceName,
+        table: &TableName,
+        index: &IndexName,
+        target_column: &ColumnName,
+    ) -> GetIndexTargetDimensionsR {
+        let column_type = self
+            .db_driver
+            .execute_get_index_target_type(
+                session,
+                &self.st_get_index_target_type,
                 keyspace,
                 table,
-                index,
-            },
-        )
-        .await
+                target_column,
+            )
+            .await?;
+
+        // A missing row means the node that served the read has not applied the schema change yet.
+        let Some(column_type) = column_type else {
+            bail!(
+                "no type of the column {target_column} for the table {keyspace}.{table} \
+                of the index {index}"
+            );
+        };
+        let dimensions = self
+            .re_get_index_target_dimensions
+            .captures(&column_type)
+            .and_then(|captures| captures["dimensions"].parse::<usize>().ok())
+            .and_then(|dimensions| {
+                NonZeroUsize::new(dimensions).map(|dimensions| dimensions.into())
+            });
+        Ok(dimensions)
+    }
+
+    /// Retrieves the vector dimensions for an Alternator table from the index options.
+    ///
+    /// In Alternator, the schema has no native `VECTOR` type, so the dimension
+    /// is stored in the index option `"dimensions"`.
+    async fn get_dimensions_from_index_options(
+        &self,
+        session: &Session,
+        keyspace: &KeyspaceName,
+        table: &TableName,
+        index: &IndexName,
+    ) -> GetIndexTargetDimensionsR {
+        let index_options = self
+            .db_driver
+            .execute_get_index_options(session, &self.st_get_index_options, keyspace, table, index)
+            .await?;
+
+        let Some(mut index_options) = index_options else {
+            bail!("no options for the index {index}");
+        };
+        let dimensions = index_options
+            .remove("dimensions")
+            .and_then(|s| s.parse::<usize>().ok())
+            .and_then(|dimensions| {
+                NonZeroUsize::new(dimensions).map(|dimensions| dimensions.into())
+            });
+        Ok(dimensions)
     }
 
     async fn get_index_version(
@@ -1214,13 +1282,13 @@ pub(crate) mod tests {
             tx: oneshot::Sender<GetIndexVersionR>,
         ) -> impl Future<Output = ()> + Send + 'static;
 
-        fn get_index_target_type(
+        fn get_index_target_dimensions(
             &self,
             keyspace: KeyspaceName,
             table: TableName,
             target_column: ColumnName,
             index: IndexName,
-            tx: oneshot::Sender<GetIndexTargetTypeR>,
+            tx: oneshot::Sender<GetIndexTargetDimensionsR>,
         ) -> impl Future<Output = ()> + Send + 'static;
 
         fn get_vs_index_params(
@@ -1278,15 +1346,21 @@ pub(crate) mod tests {
                             tx,
                         } => sim.get_index_version(keyspace, table, index, tx).await,
 
-                        Db::GetIndexTargetType {
+                        Db::GetIndexTargetDimensions {
                             keyspace,
                             table,
                             target_column,
                             index,
                             tx,
                         } => {
-                            sim.get_index_target_type(keyspace, table, target_column, index, tx)
-                                .await
+                            sim.get_index_target_dimensions(
+                                keyspace,
+                                table,
+                                target_column,
+                                index,
+                                tx,
+                            )
+                            .await
                         }
 
                         Db::GetVsIndexParams {
