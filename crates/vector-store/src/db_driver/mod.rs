@@ -5,6 +5,7 @@
 
 mod scylla;
 
+use crate::ColumnName;
 use crate::Config;
 use crate::IndexName;
 use crate::KeyspaceName;
@@ -53,6 +54,20 @@ pub trait DbDriver: Clone + Send + Sync + 'static {
     ) -> impl Future<
         Output = anyhow::Result<impl Stream<Item = anyhow::Result<DbIndexInfo>> + Send + 'static>,
     > + Send;
+
+    fn prepare_get_index_target_type(
+        &self,
+        session: &Session,
+    ) -> impl Future<Output = anyhow::Result<Self::Statement>> + Send;
+
+    fn execute_get_index_target_type(
+        &self,
+        session: &Session,
+        statement: &Self::Statement,
+        keyspace: &KeyspaceName,
+        table: &TableName,
+        target: &ColumnName,
+    ) -> impl Future<Output = anyhow::Result<Option<String>>> + Send;
 }
 
 pub fn new_scylla() -> impl DbDriver {
@@ -99,6 +114,24 @@ pub(crate) mod tests {
         ) -> anyhow::Result<impl Stream<Item = anyhow::Result<DbIndexInfo>> + Send + 'static>
         {
             Ok(stream::poll_fn(|_| unimplemented!()))
+        }
+
+        async fn prepare_get_index_target_type(
+            &self,
+            _: &Session,
+        ) -> anyhow::Result<Self::Statement> {
+            unimplemented!()
+        }
+
+        async fn execute_get_index_target_type(
+            &self,
+            _: &Session,
+            _: &Self::Statement,
+            _: &KeyspaceName,
+            _: &TableName,
+            _: &ColumnName,
+        ) -> anyhow::Result<Option<String>> {
+            unimplemented!()
         }
     }
 }
