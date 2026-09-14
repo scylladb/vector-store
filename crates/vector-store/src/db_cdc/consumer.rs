@@ -5,6 +5,7 @@
 
 use crate::AsyncInProgress;
 use crate::ColumnName;
+use crate::DbDriver;
 use crate::DbIndexedOperation;
 use crate::DbIndexedRow;
 use crate::IndexKey;
@@ -45,7 +46,8 @@ enum Operation {
     Delete,
 }
 
-struct CdcConsumerData {
+struct CdcConsumerData<T: DbDriver> {
+    db_driver: T,
     session: Arc<Session>,
     st_select_values: PreparedStatement,
     index_key: IndexKey,
@@ -61,7 +63,7 @@ struct CdcConsumerData {
     semaphore: Arc<Semaphore>,
 }
 
-impl CdcConsumerData {
+impl<T: DbDriver> CdcConsumerData<T> {
     async fn process_upsert(
         &self,
         primary_key: Arc<Vec<CqlValue>>,
@@ -132,14 +134,14 @@ impl CdcConsumerData {
     }
 }
 
-struct CdcConsumer {
-    consumer_data: Arc<CdcConsumerData>,
+struct CdcConsumer<T: DbDriver> {
+    consumer_data: Arc<CdcConsumerData<T>>,
     primary_key: Arc<Vec<CqlValue>>,
     timestamp: Timestamp,
     operation: Operation,
 }
 
-impl CdcConsumer {
+impl<T: DbDriver> CdcConsumer<T> {
     async fn process_row(&self) {
         if matches!(self.operation, Operation::Upsert) {
             self.process_upsert().await;
@@ -186,7 +188,7 @@ impl CdcConsumer {
 }
 
 #[async_trait]
-impl Consumer for CdcConsumer {
+impl<T: DbDriver> Consumer for CdcConsumer<T> {
     async fn consume_cdc(&mut self, mut row: CDCRow<'_>) -> anyhow::Result<()> {
         if self.consumer_data.tx.is_closed() {
             // a consumer should be closed now, some concurrent tasks could stay in a pipeline
@@ -243,10 +245,10 @@ impl Consumer for CdcConsumer {
     }
 }
 
-pub(super) struct CdcConsumerFactory(Arc<CdcConsumerData>);
+pub(super) struct CdcConsumerFactory<T: DbDriver>(Arc<CdcConsumerData<T>>);
 
 #[async_trait]
-impl ConsumerFactory for CdcConsumerFactory {
+impl<T: DbDriver> ConsumerFactory for CdcConsumerFactory<T> {
     async fn new_consumer(&self) -> Box<dyn Consumer> {
         Box::new(CdcConsumer {
             consumer_data: Arc::clone(&self.0),
@@ -257,8 +259,9 @@ impl ConsumerFactory for CdcConsumerFactory {
     }
 }
 
-impl CdcConsumerFactory {
+impl<T: DbDriver> CdcConsumerFactory<T> {
     pub(super) async fn new(
+        db_driver: T,
         session: Arc<Session>,
         metadata: &IndexMetadata,
         metrics: Arc<Metrics>,
@@ -330,6 +333,7 @@ impl CdcConsumerFactory {
             });
 
         Ok(Self(Arc::new(CdcConsumerData {
+            db_driver,
             session,
             st_select_values,
             index_key: metadata.key(),
