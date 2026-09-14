@@ -6,9 +6,21 @@
 mod scylla;
 
 use crate::Config;
+use crate::IndexName;
+use crate::KeyspaceName;
+use crate::TableName;
 use ::scylla::client::session::Session;
+use futures::Stream;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use uuid::Uuid;
+
+pub struct DbIndexInfo {
+    pub keyspace_name: KeyspaceName,
+    pub index_name: IndexName,
+    pub table_name: TableName,
+    pub options: BTreeMap<String, String>,
+}
 
 pub trait DbDriver: Clone + Send + Sync + 'static {
     type Statement: Send + Sync;
@@ -28,6 +40,19 @@ pub trait DbDriver: Clone + Send + Sync + 'static {
         session: &Session,
         statement: &Self::Statement,
     ) -> impl Future<Output = anyhow::Result<Uuid>> + Send;
+
+    fn prepare_get_indexes(
+        &self,
+        session: &Session,
+    ) -> impl Future<Output = anyhow::Result<Self::Statement>> + Send;
+
+    fn execute_get_indexes(
+        &self,
+        session: &Session,
+        statement: &Self::Statement,
+    ) -> impl Future<
+        Output = anyhow::Result<impl Stream<Item = anyhow::Result<DbIndexInfo>> + Send + 'static>,
+    > + Send;
 }
 
 pub fn new_scylla() -> impl DbDriver {
@@ -37,6 +62,7 @@ pub fn new_scylla() -> impl DbDriver {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use futures::stream;
 
     #[derive(Clone, Debug)]
     pub(crate) struct UnimplementedDbDriver;
@@ -60,6 +86,19 @@ pub(crate) mod tests {
             _: &Self::Statement,
         ) -> anyhow::Result<Uuid> {
             unimplemented!()
+        }
+
+        async fn prepare_get_indexes(&self, _: &Session) -> anyhow::Result<Self::Statement> {
+            unimplemented!()
+        }
+
+        async fn execute_get_indexes(
+            &self,
+            _: &Session,
+            _: &Self::Statement,
+        ) -> anyhow::Result<impl Stream<Item = anyhow::Result<DbIndexInfo>> + Send + 'static>
+        {
+            Ok(stream::poll_fn(|_| unimplemented!()))
         }
     }
 }
