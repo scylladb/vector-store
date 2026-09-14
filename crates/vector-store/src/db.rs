@@ -48,7 +48,6 @@ use scylla::client::session::Session;
 use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
 use scylla::cluster::metadata::Table;
-use scylla::statement::Consistency;
 use scylla::statement::prepared::PreparedStatement;
 use secrecy::ExposeSecret;
 use std::collections::BTreeMap;
@@ -56,7 +55,6 @@ use std::num::NonZeroUsize;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tap::Tap;
 use tokio::sync::Notify;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -614,7 +612,7 @@ struct Statements<T: DbDriver> {
     db_driver: T,
     session_rx: watch::Receiver<Option<Arc<Session>>>,
     metrics: Arc<Metrics>,
-    st_latest_schema_version: PreparedStatement,
+    st_latest_schema_version: T::Statement,
     st_get_indexes: PreparedStatement,
     st_get_index_target_type: PreparedStatement,
     st_get_index_options: PreparedStatement,
@@ -642,17 +640,7 @@ impl<T: DbDriver> Statements<T> {
             config_rx,
             metrics,
 
-            st_latest_schema_version: session
-                .prepare(Self::ST_LATEST_SCHEMA_VERSION)
-                .await
-                .context("ST_LATEST_SCHEMA_VERSION")?
-                .tap_mut(|stmt| {
-                    // Use ONE consistency for schema version queries - this is a local query
-                    // that reads from system.local, so ONE is appropriate. During reading
-                    // indexes list we will check the schema agreement.
-                    stmt.set_consistency(Consistency::One);
-                    stmt.set_is_idempotent(true);
-                }),
+            st_latest_schema_version: db_driver.prepare_latest_schema_version(&session).await?,
 
             st_get_indexes: session
                 .prepare(Self::ST_GET_INDEXES)
@@ -697,24 +685,15 @@ impl<T: DbDriver> Statements<T> {
         .await
     }
 
-    const ST_LATEST_SCHEMA_VERSION: &str = "
-        SELECT schema_version
-        FROM system.local
-        WHERE key='local'
-        ";
-
     async fn latest_schema_version(&self) -> LatestSchemaVersionR {
         let session = self
             .session_rx
             .borrow()
             .clone()
             .ok_or_else(|| anyhow::anyhow!("No active session"))?;
-        Ok(session
-            .execute_unpaged(&self.st_latest_schema_version, &[])
-            .await?
-            .into_rows_result()?
-            .single_row::<(Uuid,)>()?
-            .0)
+        self.db_driver
+            .execute_latest_schema_version(&session, &self.st_latest_schema_version)
+            .await
     }
 
     const ST_GET_INDEXES: &str = "
