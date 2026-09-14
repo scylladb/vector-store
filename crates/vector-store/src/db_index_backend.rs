@@ -5,6 +5,7 @@
 
 use crate::ColumnName;
 use crate::CqlLiteral;
+use crate::DbDriver;
 use crate::Dimensions;
 use crate::IndexName;
 use crate::KeyspaceIdentifier;
@@ -141,10 +142,11 @@ pub(crate) fn fetch_vector_query<'a, 'b>(
 
 /// Retrieves the vector dimensions for the given index, dispatching to the
 /// appropriate strategy based on whether the keyspace is Alternator- or CQL-backed.
-pub(crate) async fn get_dimensions(
+pub(crate) async fn get_dimensions<T: DbDriver>(
     target_column: &ColumnName,
+    db_driver: &T,
     session: &Session,
-    st_get_index_target_type: &PreparedStatement,
+    st_get_index_target_type: &T::Statement,
     re_get_index_target_type: &Regex,
     st_get_index_options: &PreparedStatement,
     location: IndexLocation,
@@ -154,6 +156,7 @@ pub(crate) async fn get_dimensions(
     } else {
         get_dimensions_from_column_type(
             target_column,
+            db_driver,
             session,
             st_get_index_target_type,
             re_get_index_target_type,
@@ -164,10 +167,11 @@ pub(crate) async fn get_dimensions(
 }
 
 /// Retrieves the vector dimensions for a CQL-native table by parsing the column type.
-async fn get_dimensions_from_column_type(
+async fn get_dimensions_from_column_type<T: DbDriver>(
     target_column: &ColumnName,
+    db_driver: &T,
     session: &Session,
-    st_get_index_target_type: &PreparedStatement,
+    st_get_index_target_type: &T::Statement,
     re_get_index_target_type: &Regex,
     location: IndexLocation,
 ) -> anyhow::Result<Option<Dimensions>> {
@@ -176,18 +180,18 @@ async fn get_dimensions_from_column_type(
         table,
         index,
     } = location;
-    let column_type = session
-        .execute_iter(
-            st_get_index_target_type.clone(),
-            (keyspace, table, target_column.clone()),
+    let column_type = db_driver
+        .execute_get_index_target_type(
+            session,
+            st_get_index_target_type,
+            &keyspace,
+            &table,
+            target_column,
         )
-        .await?
-        .rows_stream::<(String,)>()?
-        .try_next()
         .await?;
 
     // A missing row means the node that served the read has not applied the schema change yet.
-    let Some((column_type,)) = column_type else {
+    let Some(column_type) = column_type else {
         bail!("no type of the column {target_column} for the index {index}");
     };
     let dimensions = re_get_index_target_type

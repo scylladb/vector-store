@@ -3,8 +3,11 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
+use crate::ColumnName;
 use crate::Config;
 use crate::Credentials;
+use crate::KeyspaceName;
+use crate::TableName;
 use crate::db_driver::DbDriver;
 use crate::db_driver::DbIndexInfo;
 use anyhow::Context;
@@ -235,6 +238,38 @@ impl DbDriver for ScyllaDriver {
                 },
             )
             .map_err(|err| anyhow::anyhow!("Failed to fetch indexes: {err}")))
+    }
+
+    async fn prepare_get_index_target_type(
+        &self,
+        session: &Session,
+    ) -> anyhow::Result<Self::Statement> {
+        const QUERY: &str = "
+            SELECT type
+            FROM system_schema.columns
+            WHERE keyspace_name = ? AND table_name = ? AND column_name = ?
+        ";
+        session
+            .prepare(QUERY)
+            .await
+            .context(format!("query: {QUERY}"))
+    }
+
+    async fn execute_get_index_target_type(
+        &self,
+        session: &Session,
+        statement: &Self::Statement,
+        keyspace: &KeyspaceName,
+        table: &TableName,
+        target: &ColumnName,
+    ) -> anyhow::Result<Option<String>> {
+        Ok(session
+            .execute_iter(statement.clone(), (keyspace, table, target))
+            .await?
+            .rows_stream::<(String,)>()?
+            .try_next()
+            .await?
+            .map(|(type_name,)| type_name))
     }
 }
 

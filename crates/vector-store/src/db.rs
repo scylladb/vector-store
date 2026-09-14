@@ -615,7 +615,7 @@ struct Statements<T: DbDriver> {
     metrics: Arc<Metrics>,
     st_latest_schema_version: T::Statement,
     st_get_indexes: T::Statement,
-    st_get_index_target_type: PreparedStatement,
+    st_get_index_target_type: T::Statement,
     st_get_index_options: PreparedStatement,
     re_get_index_target_type: Regex,
 }
@@ -645,10 +645,7 @@ impl<T: DbDriver> Statements<T> {
 
             st_get_indexes: db_driver.prepare_get_indexes(&session).await?,
 
-            st_get_index_target_type: session
-                .prepare(Self::ST_GET_INDEX_TARGET_TYPE)
-                .await
-                .context("ST_GET_INDEX_TARGET_TYPE")?,
+            st_get_index_target_type: db_driver.prepare_get_index_target_type(&session).await?,
 
             st_get_index_options: session
                 .prepare(Self::ST_GET_INDEX_OPTIONS)
@@ -797,11 +794,6 @@ impl<T: DbDriver> Statements<T> {
         result
     }
 
-    const ST_GET_INDEX_TARGET_TYPE: &str = "
-        SELECT type
-        FROM system_schema.columns
-        WHERE keyspace_name = ? AND table_name = ? AND column_name = ?
-        ";
     const RE_GET_INDEX_TARGET_TYPE: &str = r"^vector<float, (?<dimensions>\d+)>$";
 
     async fn get_index_target_type(
@@ -819,6 +811,7 @@ impl<T: DbDriver> Statements<T> {
 
         db_index_backend::get_dimensions(
             &target_column,
+            &self.db_driver,
             &session,
             &self.st_get_index_target_type,
             &self.re_get_index_target_type,
