@@ -13,12 +13,9 @@ use crate::KeyspaceName;
 use crate::TableIdentifier;
 use crate::TableName;
 use anyhow::bail;
-use futures::TryStreamExt;
 use regex::Regex;
 use scylla::client::session::Session;
-use scylla::statement::prepared::PreparedStatement;
 use scylla_cdc::CqlIdentifier;
-use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 
 /// Alternator tables store all user attributes in a single map column `:attrs`.
@@ -148,11 +145,11 @@ pub(crate) async fn get_dimensions<T: DbDriver>(
     session: &Session,
     st_get_index_target_type: &T::Statement,
     re_get_index_target_type: &Regex,
-    st_get_index_options: &PreparedStatement,
+    st_get_index_options: &T::Statement,
     location: IndexLocation,
 ) -> anyhow::Result<Option<Dimensions>> {
     if location.keyspace.is_alternator() {
-        get_dimensions_from_index_options(session, st_get_index_options, location).await
+        get_dimensions_from_index_options(db_driver, session, st_get_index_options, location).await
     } else {
         get_dimensions_from_column_type(
             target_column,
@@ -205,9 +202,10 @@ async fn get_dimensions_from_column_type<T: DbDriver>(
 ///
 /// In Alternator, the schema has no native `VECTOR` type, so the dimension
 /// is stored in the index option `"dimensions"`.
-async fn get_dimensions_from_index_options(
+async fn get_dimensions_from_index_options<T: DbDriver>(
+    db_driver: &T,
     session: &Session,
-    st_get_index_options: &PreparedStatement,
+    st_get_index_options: &T::Statement,
     location: IndexLocation,
 ) -> anyhow::Result<Option<Dimensions>> {
     let IndexLocation {
@@ -215,16 +213,11 @@ async fn get_dimensions_from_index_options(
         table,
         index,
     } = location;
-    let index_options = session
-        .execute_iter(
-            st_get_index_options.clone(),
-            (keyspace, table, index.clone()),
-        )
-        .await?
-        .rows_stream::<(BTreeMap<String, String>,)>()?
-        .try_next()
+    let index_options = db_driver
+        .execute_get_index_options(session, st_get_index_options, &keyspace, &table, &index)
         .await?;
-    let Some((mut index_options,)) = index_options else {
+
+    let Some(mut index_options) = index_options else {
         bail!("no options for the index {index}");
     };
     let dimensions = index_options

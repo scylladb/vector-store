@@ -49,7 +49,6 @@ use scylla::client::session::Session;
 use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
 use scylla::cluster::metadata::Table;
-use scylla::statement::prepared::PreparedStatement;
 use secrecy::ExposeSecret;
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
@@ -616,7 +615,7 @@ struct Statements<T: DbDriver> {
     st_latest_schema_version: T::Statement,
     st_get_indexes: T::Statement,
     st_get_index_target_type: T::Statement,
-    st_get_index_options: PreparedStatement,
+    st_get_index_options: T::Statement,
     re_get_index_target_type: Regex,
 }
 
@@ -647,10 +646,7 @@ impl<T: DbDriver> Statements<T> {
 
             st_get_index_target_type: db_driver.prepare_get_index_target_type(&session).await?,
 
-            st_get_index_options: session
-                .prepare(Self::ST_GET_INDEX_OPTIONS)
-                .await
-                .context("ST_GET_INDEX_OPTIONS")?,
+            st_get_index_options: db_driver.prepare_get_index_options(&session).await?,
 
             re_get_index_target_type: Regex::new(Self::RE_GET_INDEX_TARGET_TYPE)
                 .context("RE_GET_INDEX_TARGET_TYPE")?,
@@ -825,12 +821,6 @@ impl<T: DbDriver> Statements<T> {
         .await
     }
 
-    const ST_GET_INDEX_OPTIONS: &str = "
-        SELECT options
-        FROM system_schema.indexes
-        WHERE keyspace_name = ? AND table_name = ? AND index_name = ?
-        ";
-
     async fn get_index_version(
         &self,
         keyspace: KeyspaceName,
@@ -842,13 +832,16 @@ impl<T: DbDriver> Statements<T> {
             .borrow()
             .clone()
             .ok_or_else(|| anyhow::anyhow!("No active session"))?;
-        let options = session
-            .execute_iter(self.st_get_index_options.clone(), (keyspace, table, index))
-            .await?
-            .rows_stream::<(BTreeMap<String, String>,)>()?
-            .try_next()
-            .await?
-            .map(|(options,)| options);
+        let options = self
+            .db_driver
+            .execute_get_index_options(
+                &session,
+                &self.st_get_index_options,
+                &keyspace,
+                &table,
+                &index,
+            )
+            .await?;
         Ok(options.map(|mut options| {
             IndexVersion(
                 options
@@ -870,13 +863,15 @@ impl<T: DbDriver> Statements<T> {
             .borrow()
             .clone()
             .ok_or_else(|| anyhow::anyhow!("No active session"))?;
-        Ok(session
-            .execute_iter(self.st_get_index_options.clone(), (keyspace, table, index))
-            .await?
-            .rows_stream::<(BTreeMap<String, String>,)>()?
-            .try_next()
-            .await?
-            .map(|(options,)| options))
+        self.db_driver
+            .execute_get_index_options(
+                &session,
+                &self.st_get_index_options,
+                &keyspace,
+                &table,
+                &index,
+            )
+            .await
     }
 
     async fn get_vs_index_params(
