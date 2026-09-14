@@ -30,6 +30,7 @@ use crate::Quantization;
 use crate::SpaceType;
 use crate::TableName;
 use crate::cql_types;
+use crate::db_driver::DbIndexInfo;
 use crate::db_index;
 use crate::db_index::DbIndex;
 use crate::db_index_backend;
@@ -613,7 +614,7 @@ struct Statements<T: DbDriver> {
     session_rx: watch::Receiver<Option<Arc<Session>>>,
     metrics: Arc<Metrics>,
     st_latest_schema_version: T::Statement,
-    st_get_indexes: PreparedStatement,
+    st_get_indexes: T::Statement,
     st_get_index_target_type: PreparedStatement,
     st_get_index_options: PreparedStatement,
     re_get_index_target_type: Regex,
@@ -642,10 +643,7 @@ impl<T: DbDriver> Statements<T> {
 
             st_latest_schema_version: db_driver.prepare_latest_schema_version(&session).await?,
 
-            st_get_indexes: session
-                .prepare(Self::ST_GET_INDEXES)
-                .await
-                .context("ST_GET_INDEXES")?,
+            st_get_indexes: db_driver.prepare_get_indexes(&session).await?,
 
             st_get_index_target_type: session
                 .prepare(Self::ST_GET_INDEX_TARGET_TYPE)
@@ -696,13 +694,6 @@ impl<T: DbDriver> Statements<T> {
             .await
     }
 
-    const ST_GET_INDEXES: &str = "
-        SELECT keyspace_name, index_name, table_name, options
-        FROM system_schema.indexes
-        WHERE kind = 'CUSTOM'
-        ALLOW FILTERING
-        ";
-
     async fn get_indexes(&self) -> GetIndexesR {
         let session = self
             .session_rx
@@ -713,79 +704,87 @@ impl<T: DbDriver> Statements<T> {
         #[derive(Debug, derive_more::Display)]
         struct InvalidMetadata;
 
-        let result = session
-            .execute_iter(self.st_get_indexes.clone(), &[])
+        let result = self
+            .db_driver
+            .execute_get_indexes(&session, &self.st_get_indexes)
             .await?
-            .rows_stream::<(String, String, String, BTreeMap<String, String>)>()?
-            .map_err(|err| anyhow::anyhow!("Failed to fetch indexes: {}", err))
-            .try_filter_map(|(keyspace_name, index_name, table_name, mut options)| {
-                let session = session.clone();
-                async move {
-                    let cluster_state = session.get_cluster_state();
-                    let table = cluster_state
-                        .get_keyspace(&keyspace_name)
-                        .ok_or_else(|| {
-                            anyhow!("keyspace {keyspace_name} does not exist")
-                                .context(InvalidMetadata)
-                        })?
-                        .tables
-                        .get(&table_name)
-                        .ok_or_else(|| {
-                            anyhow!("table {table_name} does not exist").context(InvalidMetadata)
-                        })?;
-                    let primary_key_columns = table
-                        .partition_key
-                        .iter()
-                        .chain(table.clustering_key.iter())
-                        .map(ColumnName::from)
-                        .collect_nonempty_arc()
-                        .ok_or_else(|| {
-                            anyhow!("table {table_name} has no primary key columns")
-                                .context(InvalidMetadata)
-                        })?;
-                    let partition_key_count = NonZeroUsize::new(table.partition_key.len()).unwrap();
-                    let is_alternator = KeyspaceName::from(&keyspace_name).is_alternator();
-                    let alternator_attribute_types = Arc::new(if is_alternator {
-                        options
-                            .remove("alternator_attribute_types")
-                            .map(|v| parse_alternator_attribute_types(&v))
-                            .unwrap_or_default()
-                    } else {
-                        BTreeMap::new()
-                    });
-                    Ok(options.remove("target").and_then(|target| {
-                        let kind = db_index_kind_from_options(&mut options)?;
-                        validate_primary_key_columns(table)
-                            .inspect_err(|err| {
-                                warn!("Skipping index {index_name}: {err}");
-                            })
-                            .ok()?;
-                        from_target_option(table, target, kind, is_alternator)
-                            .map(
-                                |(partitioning, target_column, filtering_columns)| DbCustomIndex {
-                                    keyspace: keyspace_name.into(),
-                                    index: index_name.clone().into(),
-                                    table: table_name.into(),
-                                    primary_key_columns,
-                                    partition_key_count,
-                                    target_columns: NonemptyArc::new([target_column])
-                                        .expect("target column should be non-empty"),
-                                    partitioning,
-                                    filtering_columns,
-                                    alternator_attribute_types,
-                                    kind,
-                                },
-                            )
-                            .inspect_err(|err| {
-                                warn!(
-                                    "Skipping index {index_name} \
+            .try_filter_map(
+                |DbIndexInfo {
+                     keyspace_name,
+                     index_name,
+                     table_name,
+                     mut options,
+                 }| {
+                    let session = session.clone();
+                    async move {
+                        let cluster_state = session.get_cluster_state();
+                        let table = cluster_state
+                            .get_keyspace(&keyspace_name)
+                            .ok_or_else(|| {
+                                anyhow!("keyspace {keyspace_name} does not exist")
+                                    .context(InvalidMetadata)
+                            })?
+                            .tables
+                            .get(table_name.as_ref())
+                            .ok_or_else(|| {
+                                anyhow!("table {table_name} does not exist")
+                                    .context(InvalidMetadata)
+                            })?;
+                        let primary_key_columns = table
+                            .partition_key
+                            .iter()
+                            .chain(table.clustering_key.iter())
+                            .map(ColumnName::from)
+                            .collect_nonempty_arc()
+                            .ok_or_else(|| {
+                                anyhow!("table {table_name} has no primary key columns")
+                                    .context(InvalidMetadata)
+                            })?;
+                        let partition_key_count =
+                            NonZeroUsize::new(table.partition_key.len()).unwrap();
+                        let is_alternator = keyspace_name.is_alternator();
+                        let alternator_attribute_types = Arc::new(if is_alternator {
+                            options
+                                .remove("alternator_attribute_types")
+                                .map(|v| parse_alternator_attribute_types(&v))
+                                .unwrap_or_default()
+                        } else {
+                            BTreeMap::new()
+                        });
+                        Ok(options.remove("target").and_then(|target| {
+                            let kind = db_index_kind_from_options(&mut options)?;
+                            validate_primary_key_columns(table)
+                                .inspect_err(|err| {
+                                    warn!("Skipping index {index_name}: {err}");
+                                })
+                                .ok()?;
+                            from_target_option(table, target, kind, is_alternator)
+                                .map(|(partitioning, target_column, filtering_columns)| {
+                                    DbCustomIndex {
+                                        keyspace: keyspace_name,
+                                        index: index_name.clone(),
+                                        table: table_name,
+                                        primary_key_columns,
+                                        partition_key_count,
+                                        target_columns: NonemptyArc::new([target_column])
+                                            .expect("target column should be non-empty"),
+                                        partitioning,
+                                        filtering_columns,
+                                        alternator_attribute_types,
+                                        kind,
+                                    }
+                                })
+                                .inspect_err(|err| {
+                                    warn!(
+                                        "Skipping index {index_name} \
                                     due to invalid target option: {err}"
-                                );
-                            })
-                            .ok()
-                    }))
-                }
-            })
+                                    );
+                                })
+                                .ok()
+                        }))
+                    }
+                },
+            )
             .try_collect()
             .await;
         if let Err(err) = &result

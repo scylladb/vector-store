@@ -6,8 +6,11 @@
 use crate::Config;
 use crate::Credentials;
 use crate::db_driver::DbDriver;
+use crate::db_driver::DbIndexInfo;
 use anyhow::Context;
 use anyhow::anyhow;
+use futures::Stream;
+use futures::TryStreamExt;
 use rustls::ClientConfig;
 use rustls::RootCertStore;
 use rustls::pki_types::CertificateDer;
@@ -18,6 +21,7 @@ use scylla::client::session_builder::SessionBuilder;
 use scylla::statement::Consistency;
 use scylla::statement::prepared::PreparedStatement;
 use secrecy::ExposeSecret;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use tap::Pipe;
 use tap::Tap;
@@ -198,6 +202,39 @@ impl DbDriver for ScyllaDriver {
             .into_rows_result()?
             .single_row::<(Uuid,)>()?
             .0)
+    }
+
+    async fn prepare_get_indexes(&self, session: &Session) -> anyhow::Result<Self::Statement> {
+        const QUERY: &str = "
+            SELECT keyspace_name, index_name, table_name, options
+            FROM system_schema.indexes
+            WHERE kind = 'CUSTOM'
+            ALLOW FILTERING
+        ";
+        session
+            .prepare(QUERY)
+            .await
+            .context(format!("query: {QUERY}"))
+    }
+
+    async fn execute_get_indexes(
+        &self,
+        session: &Session,
+        statement: &Self::Statement,
+    ) -> anyhow::Result<impl Stream<Item = anyhow::Result<DbIndexInfo>> + Send + 'static> {
+        Ok(session
+            .execute_iter(statement.clone(), &[])
+            .await?
+            .rows_stream::<(String, String, String, BTreeMap<String, String>)>()?
+            .map_ok(
+                |(keyspace_name, index_name, table_name, options)| DbIndexInfo {
+                    keyspace_name: keyspace_name.into(),
+                    index_name: index_name.into(),
+                    table_name: table_name.into(),
+                    options,
+                },
+            )
+            .map_err(|err| anyhow::anyhow!("Failed to fetch indexes: {err}")))
     }
 }
 
