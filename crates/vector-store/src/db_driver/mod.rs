@@ -5,7 +5,16 @@
 
 mod scylla;
 
-pub trait DbDriver: Clone + Send + Sync + 'static {}
+use crate::Config;
+use ::scylla::client::session::Session;
+use std::sync::Arc;
+
+pub trait DbDriver: Clone + Send + Sync + 'static {
+    fn connect(
+        &self,
+        config: Arc<Config>,
+    ) -> impl Future<Output = anyhow::Result<Arc<Session>>> + Send;
+}
 
 pub fn new_scylla() -> impl DbDriver {
     scylla::new()
@@ -19,5 +28,8 @@ pub(crate) mod tests {
     pub(crate) struct UnimplementedDbDriver;
 
     impl DbDriver for UnimplementedDbDriver {
+        async fn connect(&self, _: Arc<Config>) -> anyhow::Result<Arc<Session>> {
+            unimplemented!()
+        }
     }
 }

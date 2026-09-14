@@ -44,13 +44,7 @@ use anyhow::anyhow;
 use anyhow::bail;
 use futures::TryStreamExt;
 use regex::Regex;
-use rustls::ClientConfig;
-use rustls::RootCertStore;
-use rustls::pki_types::CertificateDer;
-use rustls_pki_types::pem::PemObject;
 use scylla::client::session::Session;
-use scylla::client::session::TlsContext;
-use scylla::client::session_builder::SessionBuilder;
 use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
 use scylla::cluster::metadata::Table;
@@ -62,7 +56,6 @@ use std::num::NonZeroUsize;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tap::Pipe;
 use tap::Tap;
 use tokio::sync::Notify;
 use tokio::sync::mpsc;
@@ -339,6 +332,7 @@ pub(crate) async fn new<T: DbDriver>(
                         if session_rx.borrow().is_none() {
                             match create_session(
                                 config.clone(),
+                                db_driver.clone(),
                                 &node_state
                             ).await {
                                 Ok(session) => {
@@ -627,142 +621,13 @@ struct Statements<T: DbDriver> {
     re_get_index_target_type: Regex,
 }
 
-async fn create_session(
+async fn create_session<T: DbDriver>(
     config: Arc<Config>,
+    db_driver: T,
     node_state: &mpsc::Sender<NodeState>,
 ) -> anyhow::Result<Arc<Session>> {
     node_state.send_event(Event::ConnectingToDb).await;
-    let mut builder = SessionBuilder::new()
-        .known_node(&config.scylladb_uri)
-        .pipe(|builder| {
-            if let Some(interval) = config.cql_keepalive_interval {
-                info!("Setting CQL keepalive interval to {interval:?}");
-                builder.keepalive_interval(interval)
-            } else {
-                builder
-            }
-        })
-        .pipe(|builder| {
-            if let Some(timeout) = config.cql_keepalive_timeout {
-                info!("Setting CQL keepalive timeout to {timeout:?}");
-                builder.keepalive_timeout(timeout)
-            } else {
-                builder
-            }
-        })
-        .pipe(|builder| {
-            if let Some(interval) = config.cql_tcp_keepalive_interval {
-                info!("Setting CQL TCP keepalive interval to {interval:?}");
-                builder.tcp_keepalive_interval(interval)
-            } else {
-                builder
-            }
-        })
-        .pipe(|builder| {
-            if let Some(translation_map) = config.cql_uri_translation_map.as_ref() {
-                info!("Setting CQL translation map to {translation_map:?}");
-                builder.address_translator(Arc::new(translation_map.clone()))
-            } else {
-                builder
-            }
-        })
-        .pipe(
-            |builder| match (&config.cql_preferred_datacenter, &config.cql_preferred_rack) {
-                (Some(dc), Some(rack)) => {
-                    info!("Setting preferred CQL datacenter/rack to {dc}/{rack}");
-                    builder.prefer_datacenter_and_rack(dc.clone(), rack.clone())
-                }
-                (Some(dc), None) => {
-                    info!("Setting preferred CQL datacenter to {dc}");
-                    builder.prefer_datacenter(dc.clone())
-                }
-                (None, _) => builder,
-            },
-        );
-
-    if let Some(Credentials {
-        username,
-        password,
-        certificate_path,
-    }) = &config.credentials
-    {
-        // Configure username/password authentication if provided
-        if let (Some(username), Some(password)) = (username, password) {
-            builder = builder.user(username, password.expose_secret());
-            debug!("Username/password authentication configured");
-        }
-
-        // Configure TLS if certificate path is provided
-        if let Some(cert_path) = certificate_path {
-            // Load the CA certificates from the PEM file using async tokio fs
-            let cert_pem = tokio::fs::read(&cert_path)
-                .await
-                .with_context(|| format!("Failed to read certificate file at {cert_path:?}"))?;
-
-            let ca_der = CertificateDer::pem_slice_iter(&cert_pem)
-                .collect::<Result<Vec<_>, _>>()
-                .context("Failed to parse certificate PEM")?;
-
-            let mut root_store = RootCertStore::empty();
-            root_store.add_parsable_certificates(ca_der);
-
-            let client_cfg = ClientConfig::builder()
-                .with_root_certificates(root_store)
-                .with_no_client_auth();
-
-            let tls_context = TlsContext::from(Arc::new(client_cfg));
-            builder = builder.tls_context(Some(tls_context));
-
-            debug!("TLS (rustls) enabled with certificate from {:?}", cert_path);
-        }
-    }
-
-    let session = if let Some(timeout) = config.cql_connection_timeout {
-        info!("Setting CQL connection timeout to {timeout:?}");
-        let session = tokio::time::timeout(timeout, builder.build())
-            .await
-            .map_err(|_| {
-                anyhow!(
-                    "Connection to ScyllaDB at {} timed out after {timeout:?}",
-                    config.scylladb_uri
-                )
-            })??;
-        Arc::new(session)
-    } else {
-        Arc::new(builder.build().await?)
-    };
-
-    let cluster_state = session.get_cluster_state();
-
-    let node = &cluster_state.get_nodes_info()[0];
-
-    if !node.is_enabled() {
-        return Err(anyhow::anyhow!("Node is not enabled"));
-    }
-    // From docs: If the node is enabled and does not have a sharder, this means it's not a ScyllaDB node.
-    let connected_to_scylla = node.sharder().is_some();
-
-    if connected_to_scylla {
-        let version: (String,) = session
-            .query_unpaged(
-                "SELECT version FROM system.versions WHERE key = 'local'",
-                &[],
-            )
-            .await?
-            .into_rows_result()?
-            .single_row()?;
-        info!(
-            "Connected to ScyllaDB {} at {}",
-            version.0, config.scylladb_uri
-        );
-    } else {
-        warn!(
-            "No ScyllaDB node at {}, please verify the URI",
-            config.scylladb_uri
-        );
-    }
-
-    Ok(session)
+    db_driver.connect(config).await
 }
 
 impl<T: DbDriver> Statements<T> {
