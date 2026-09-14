@@ -8,6 +8,7 @@ use crate::create_config_channels;
 use crate::db_basic;
 use crate::db_basic::DbBasic;
 use crate::db_basic::ScanFn;
+use crate::db_basic::StoreEdges;
 use crate::db_basic::StoreVectors;
 use crate::db_basic::Table;
 use crate::wait_for;
@@ -70,10 +71,24 @@ fn diskann_test_config() -> Config {
     }
 }
 
-/// The DiskANN Scylla backend re-reads the vectors it indexed from the base
+/// Both DiskANN Scylla backends re-read the vectors they indexed from the base
 /// table, so the db mock has to keep them.
 fn store_vectors(config: &Config) -> StoreVectors {
-    (config.diskann_backend == Some(DiskannBackendKind::Scylla)).into()
+    matches!(
+        config.diskann_backend,
+        Some(DiskannBackendKind::Scylla | DiskannBackendKind::ScyllaGraph)
+    )
+    .into()
+}
+
+/// Only the scylla-graph backend keeps its adjacency lists out of RAM, so it is
+/// the only one whose edges the mock has to hold.
+fn store_edges(config: &Config) -> StoreEdges {
+    matches!(
+        config.diskann_backend,
+        Some(DiskannBackendKind::ScyllaGraph)
+    )
+    .into()
 }
 
 fn diskann_scylla_test_config() -> Config {
@@ -131,7 +146,11 @@ pub(crate) async fn setup_store_with_quantization(
 ) {
     let node_state = vector_store::new_node_state().await;
 
-    let (db_actor, db) = db_basic::new_with(node_state.clone(), store_vectors(&config));
+    let (db_actor, db) = db_basic::new_with(
+        node_state.clone(),
+        store_vectors(&config),
+        store_edges(&config),
+    );
 
     let primary_keys = primary_keys.into_iter().collect_nonempty_arc().unwrap();
     let columns: Arc<HashMap<_, _>> = Arc::new(columns.into_iter().collect());
@@ -344,7 +363,11 @@ async fn failed_db_index_create(#[case] config: Config) {
     crate::enable_tracing();
 
     let node_state = vector_store::new_node_state().await;
-    let (db_actor, db) = db_basic::new_with(node_state.clone(), store_vectors(&config));
+    let (db_actor, db) = db_basic::new_with(
+        node_state.clone(),
+        store_vectors(&config),
+        store_edges(&config),
+    );
 
     let index = IndexMetadata {
         keyspace_name: "vector".into(),
@@ -2315,7 +2338,11 @@ async fn similarity_scores_are_decreasing_and_correctly_converted(#[case] config
     crate::enable_tracing();
 
     let node_state = vector_store::new_node_state().await;
-    let (db_actor, db) = db_basic::new_with(node_state.clone(), store_vectors(&config));
+    let (db_actor, db) = db_basic::new_with(
+        node_state.clone(),
+        store_vectors(&config),
+        store_edges(&config),
+    );
 
     // Use a 1-D Euclidean index so distances are easy to predict.
     let index = IndexMetadata {

@@ -5,6 +5,15 @@
 
 use crate::table::Idx;
 use anyhow::bail;
+use scylla::cluster::metadata::ColumnType;
+use scylla::deserialize::DeserializationError;
+use scylla::deserialize::FrameSlice;
+use scylla::deserialize::TypeCheckError;
+use scylla::deserialize::value::DeserializeValue;
+use scylla::serialize::SerializationError;
+use scylla::serialize::value::SerializeValue;
+use scylla::serialize::writers::CellWriter;
+use scylla::serialize::writers::WrittenCellProof;
 use std::mem;
 use tracing::info;
 
@@ -71,6 +80,30 @@ impl PrimaryId {
 impl Default for PrimaryId {
     fn default() -> Self {
         Self(Self::RESERVED)
+    }
+}
+
+/// A `bigint` on the wire, so an adjacency list crosses the driver as itself.
+impl SerializeValue for PrimaryId {
+    fn serialize<'b>(
+        &self,
+        typ: &ColumnType,
+        writer: CellWriter<'b>,
+    ) -> Result<WrittenCellProof<'b>, SerializationError> {
+        (self.0 as i64).serialize(typ, writer)
+    }
+}
+
+impl<'frame, 'metadata> DeserializeValue<'frame, 'metadata> for PrimaryId {
+    fn type_check(typ: &ColumnType) -> Result<(), TypeCheckError> {
+        <i64>::type_check(typ)
+    }
+
+    fn deserialize(
+        typ: &'metadata ColumnType<'metadata>,
+        v: Option<FrameSlice<'frame>>,
+    ) -> Result<Self, DeserializationError> {
+        <i64>::deserialize(typ, v).map(|id| Self::from(id as u64))
     }
 }
 

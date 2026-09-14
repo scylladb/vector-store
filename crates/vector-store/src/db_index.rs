@@ -9,6 +9,7 @@ use crate::Config;
 use crate::DbIndexedOperation;
 use crate::DbIndexedRow;
 use crate::DbIndexedValue;
+use crate::IndexKey;
 use crate::IndexKind;
 use crate::IndexMetadata;
 use crate::KeyspaceIdentifier;
@@ -16,7 +17,9 @@ use crate::Metrics;
 use crate::NonemptyArc;
 use crate::NonemptyBox;
 use crate::NonemptyIteratorExt;
+use crate::PartitionId;
 use crate::Percentage;
+use crate::PrimaryId;
 use crate::PrimaryKey;
 use crate::Progress;
 use crate::TableIdentifier;
@@ -55,10 +58,12 @@ use std::iter;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::LazyLock;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 use tap::Pipe;
 use tokio::sync::Notify;
+use tokio::sync::OnceCell;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
@@ -71,6 +76,7 @@ use tracing::error_span;
 use tracing::info;
 use tracing::trace;
 use tracing::warn;
+use uuid::Uuid;
 
 type GetTableColumnsR = Arc<HashMap<ColumnName, NativeType>>;
 type RangeScanResult =
@@ -107,12 +113,40 @@ pub enum DbIndex {
         keys: Vec<PrimaryKey>,
         tx: oneshot::Sender<anyhow::Result<Vec<Option<Vector>>>>,
     },
+    GetEdges {
+        partition_id: PartitionId,
+        id: PrimaryId,
+        tx: oneshot::Sender<anyhow::Result<Option<Vec<PrimaryId>>>>,
+    },
+    SetEdges {
+        partition_id: PartitionId,
+        id: PrimaryId,
+        edges: Vec<PrimaryId>,
+        tx: oneshot::Sender<anyhow::Result<()>>,
+    },
+    DeleteEdges {
+        partition_id: PartitionId,
+        id: PrimaryId,
+        tx: oneshot::Sender<anyhow::Result<()>>,
+    },
 }
 
 pub(crate) trait DbIndexExt {
     async fn get_table_columns(&self) -> GetTableColumnsR;
     async fn full_scan_progress(&self) -> Progress;
     async fn get_vectors(&self, keys: Vec<PrimaryKey>) -> anyhow::Result<Vec<Option<Vector>>>;
+    async fn get_edges(
+        &self,
+        partition_id: PartitionId,
+        id: PrimaryId,
+    ) -> anyhow::Result<Option<Vec<PrimaryId>>>;
+    async fn set_edges(
+        &self,
+        partition_id: PartitionId,
+        id: PrimaryId,
+        edges: Vec<PrimaryId>,
+    ) -> anyhow::Result<()>;
+    async fn delete_edges(&self, partition_id: PartitionId, id: PrimaryId) -> anyhow::Result<()>;
 }
 
 impl DbIndexExt for mpsc::Sender<DbIndex> {
@@ -139,6 +173,55 @@ impl DbIndexExt for mpsc::Sender<DbIndex> {
             .map_err(|e| anyhow!("get_vectors: db_index actor is not available: {}", e))?;
         rx.await
             .map_err(|e| anyhow!("get_vectors: db_index actor dropped the request: {}", e))?
+    }
+
+    async fn get_edges(
+        &self,
+        partition_id: PartitionId,
+        id: PrimaryId,
+    ) -> anyhow::Result<Option<Vec<PrimaryId>>> {
+        let (tx, rx) = oneshot::channel();
+        self.send(DbIndex::GetEdges {
+            partition_id,
+            id,
+            tx,
+        })
+        .await
+        .map_err(|e| anyhow!("get_edges: db_index actor is not available: {}", e))?;
+        rx.await
+            .map_err(|e| anyhow!("get_edges: db_index actor dropped the request: {}", e))?
+    }
+
+    async fn set_edges(
+        &self,
+        partition_id: PartitionId,
+        id: PrimaryId,
+        edges: Vec<PrimaryId>,
+    ) -> anyhow::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.send(DbIndex::SetEdges {
+            partition_id,
+            id,
+            edges,
+            tx,
+        })
+        .await
+        .map_err(|e| anyhow!("set_edges: db_index actor is not available: {}", e))?;
+        rx.await
+            .map_err(|e| anyhow!("set_edges: db_index actor dropped the request: {}", e))?
+    }
+
+    async fn delete_edges(&self, partition_id: PartitionId, id: PrimaryId) -> anyhow::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.send(DbIndex::DeleteEdges {
+            partition_id,
+            id,
+            tx,
+        })
+        .await
+        .map_err(|e| anyhow!("delete_edges: db_index actor is not available: {}", e))?;
+        rx.await
+            .map_err(|e| anyhow!("delete_edges: db_index actor dropped the request: {}", e))?
     }
 }
 
@@ -305,6 +388,46 @@ async fn process(
                 trace!("process: DbIndex::GetVectors: unable to send response");
             }
         }
+
+        DbIndex::GetEdges {
+            partition_id,
+            id,
+            tx,
+        } => {
+            if tx
+                .send(statements.get_edges(partition_id, id).await)
+                .is_err()
+            {
+                trace!("process: DbIndex::GetEdges: unable to send response");
+            }
+        }
+
+        DbIndex::SetEdges {
+            partition_id,
+            id,
+            edges,
+            tx,
+        } => {
+            if tx
+                .send(statements.set_edges(partition_id, id, &edges).await)
+                .is_err()
+            {
+                trace!("process: DbIndex::SetEdges: unable to send response");
+            }
+        }
+
+        DbIndex::DeleteEdges {
+            partition_id,
+            id,
+            tx,
+        } => {
+            if tx
+                .send(statements.delete_edges(partition_id, id).await)
+                .is_err()
+            {
+                trace!("process: DbIndex::DeleteEdges: unable to send response");
+            }
+        }
     }
 }
 
@@ -321,7 +444,56 @@ struct Statements {
     alternator_decode_types: Box<[Option<NativeType>]>,
     st_range_scan: PreparedStatement,
     st_fetch_vector: PreparedStatement,
+    /// This index's half of the shared edge table's key.
+    index_key: IndexKey,
+    /// Prepared on the first edge access, so an index on a backend that keeps
+    /// no edges in ScyllaDB never touches the edge table.
+    edges: OnceCell<EdgeStatements>,
     kind: IndexKind,
+}
+
+struct EdgeStatements {
+    get: PreparedStatement,
+    set: PreparedStatement,
+    delete: PreparedStatement,
+}
+
+const EDGES_KEYSPACE: &str = "vector_store_diskann";
+const EDGES_TABLE: &str = "vector_store_diskann.edges";
+/// Keys every row this process writes, so instances sharing a cluster, and
+/// runs sharing an instance, never read each other's edges.
+static RUN_ID: LazyLock<Uuid> = LazyLock::new(Uuid::new_v4);
+
+/// Create the edge schema if it is not there, once per index. Nothing is
+/// dropped: another instance may be serving the rows a previous run left
+/// behind.
+async fn ensure_edges_schema(session: &Session) -> anyhow::Result<()> {
+    session
+        .query_unpaged(
+            format!(
+                "CREATE KEYSPACE IF NOT EXISTS {EDGES_KEYSPACE} WITH replication = \
+                 {{'class': 'NetworkTopologyStrategy', 'replication_factor': 1}}"
+            ),
+            &[],
+        )
+        .await
+        .context("failed to create the DiskANN edge keyspace")?;
+
+    session
+        .query_unpaged(
+            format!(
+                "CREATE TABLE IF NOT EXISTS {EDGES_TABLE} (\
+                 run_id uuid, index_key text, partition_id bigint, \
+                 node_id bigint, edges frozen<list<bigint>>, \
+                 PRIMARY KEY ((run_id, index_key, partition_id, node_id)))"
+            ),
+            &[],
+        )
+        .await
+        .context("failed to create the DiskANN edge table")?;
+
+    session.await_schema_agreement().await?;
+    Ok(())
 }
 
 impl Statements {
@@ -457,9 +629,108 @@ impl Statements {
             alternator_decode_types,
             st_range_scan,
             st_fetch_vector,
+            index_key: metadata.key(),
+            edges: OnceCell::new(),
             session_rx,
             kind: metadata.kind.clone(),
         })
+    }
+
+    fn session(&self) -> anyhow::Result<Arc<Session>> {
+        self.session_rx
+            .borrow()
+            .clone()
+            .ok_or_else(|| anyhow!("no session available"))
+    }
+
+    /// The edge statements, prepared on first use together with the schema they
+    /// need.
+    async fn edges(&self) -> anyhow::Result<&EdgeStatements> {
+        self.edges
+            .get_or_try_init(|| async {
+                let session = self.session()?;
+                ensure_edges_schema(&session)
+                    .await
+                    .context("failed to create the DiskANN edge schema")?;
+
+                let idempotent = |mut stmt: PreparedStatement| {
+                    stmt.set_is_idempotent(true);
+                    stmt
+                };
+                Ok(EdgeStatements {
+                    get: session
+                        .prepare(format!(
+                            "SELECT edges FROM {EDGES_TABLE} WHERE run_id = ? \
+                             AND index_key = ? AND partition_id = ? AND node_id = ?"
+                        ))
+                        .await
+                        .context("get_edges")?
+                        .pipe(idempotent),
+                    set: session
+                        .prepare(format!(
+                            "INSERT INTO {EDGES_TABLE} \
+                             (run_id, index_key, partition_id, node_id, edges) \
+                             VALUES (?, ?, ?, ?, ?)"
+                        ))
+                        .await
+                        .context("set_edges")?
+                        .pipe(idempotent),
+                    delete: session
+                        .prepare(format!(
+                            "DELETE FROM {EDGES_TABLE} WHERE run_id = ? \
+                             AND index_key = ? AND partition_id = ? AND node_id = ?"
+                        ))
+                        .await
+                        .context("delete_edges")?
+                        .pipe(idempotent),
+                })
+            })
+            .await
+    }
+
+    async fn get_edges(
+        &self,
+        partition_id: PartitionId,
+        id: PrimaryId,
+    ) -> anyhow::Result<Option<Vec<PrimaryId>>> {
+        let rows = self
+            .session()?
+            .execute_unpaged(
+                &self.edges().await?.get,
+                (*RUN_ID, &self.index_key, partition_id, id),
+            )
+            .await?
+            .into_rows_result()?;
+
+        let Some((edges,)) = rows.maybe_first_row::<(Option<Vec<PrimaryId>>,)>()? else {
+            return Ok(None);
+        };
+        Ok(edges)
+    }
+
+    async fn set_edges(
+        &self,
+        partition_id: PartitionId,
+        id: PrimaryId,
+        edges: &[PrimaryId],
+    ) -> anyhow::Result<()> {
+        self.session()?
+            .execute_unpaged(
+                &self.edges().await?.set,
+                (*RUN_ID, &self.index_key, partition_id, id, edges),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn delete_edges(&self, partition_id: PartitionId, id: PrimaryId) -> anyhow::Result<()> {
+        self.session()?
+            .execute_unpaged(
+                &self.edges().await?.delete,
+                (*RUN_ID, &self.index_key, partition_id, id),
+            )
+            .await?;
+        Ok(())
     }
 
     fn get_table_columns(&self) -> GetTableColumnsR {

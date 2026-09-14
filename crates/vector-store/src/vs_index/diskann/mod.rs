@@ -129,11 +129,18 @@ impl VsIndexFactory for DiskannIndexFactory {
                 table,
                 params,
             ),
-            DiskannBackendKind::Scylla => {
-                let source = Arc::new(scylla::BaseTableSource::new(Arc::clone(&table), db_index));
-                let graph = Arc::new(scylla::InmemGraphStore::new(
-                    params.config.max_degree().get(),
+            DiskannBackendKind::Scylla | DiskannBackendKind::ScyllaGraph => {
+                let max_degree = params.config.max_degree().get();
+                let source = Arc::new(scylla::BaseTableSource::new(
+                    Arc::clone(&table),
+                    db_index.clone(),
                 ));
+                let graph: Arc<dyn scylla::GraphStore> =
+                    if self.backend == DiskannBackendKind::ScyllaGraph {
+                        Arc::new(scylla::ScyllaGraphStore::new(db_index, max_degree))
+                    } else {
+                        Arc::new(scylla::InmemGraphStore::new(max_degree))
+                    };
                 new(
                     scylla::ScyllaBackend::new(source, graph),
                     index.key,
