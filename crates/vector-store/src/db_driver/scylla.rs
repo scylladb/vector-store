@@ -15,17 +15,23 @@ use rustls_pki_types::pem::PemObject;
 use scylla::client::session::Session;
 use scylla::client::session::TlsContext;
 use scylla::client::session_builder::SessionBuilder;
+use scylla::statement::Consistency;
+use scylla::statement::prepared::PreparedStatement;
 use secrecy::ExposeSecret;
 use std::sync::Arc;
 use tap::Pipe;
+use tap::Tap;
 use tracing::debug;
 use tracing::info;
 use tracing::warn;
+use uuid::Uuid;
 
 #[derive(Clone, Debug)]
 struct ScyllaDriver;
 
 impl DbDriver for ScyllaDriver {
+    type Statement = PreparedStatement;
+
     async fn connect(&self, config: Arc<Config>) -> anyhow::Result<Arc<Session>> {
         let mut builder = SessionBuilder::new()
             .known_node(&config.scylladb_uri)
@@ -157,6 +163,41 @@ impl DbDriver for ScyllaDriver {
             );
         }
         Ok(session)
+    }
+
+    async fn prepare_latest_schema_version(
+        &self,
+        session: &Session,
+    ) -> anyhow::Result<Self::Statement> {
+        const QUERY: &str = "
+            SELECT schema_version
+            FROM system.local
+            WHERE key='local'
+        ";
+        Ok(session
+            .prepare(QUERY)
+            .await
+            .context(format!("query: {QUERY}"))?
+            .tap_mut(|stmt| {
+                // Use ONE consistency for schema version queries - this is a local query
+                // that reads from system.local, so ONE is appropriate. During reading
+                // indexes list we will check the schema agreement.
+                stmt.set_consistency(Consistency::One);
+                stmt.set_is_idempotent(true);
+            }))
+    }
+
+    async fn execute_latest_schema_version(
+        &self,
+        session: &Session,
+        statement: &Self::Statement,
+    ) -> anyhow::Result<Uuid> {
+        Ok(session
+            .execute_unpaged(statement, &[])
+            .await?
+            .into_rows_result()?
+            .single_row::<(Uuid,)>()?
+            .0)
     }
 }
 
