@@ -68,6 +68,20 @@ pub trait DbDriver: Clone + Send + Sync + 'static {
         table: &TableName,
         target: &ColumnName,
     ) -> impl Future<Output = anyhow::Result<Option<String>>> + Send;
+
+    fn prepare_get_index_options(
+        &self,
+        session: &Session,
+    ) -> impl Future<Output = anyhow::Result<Self::Statement>> + Send;
+
+    fn execute_get_index_options(
+        &self,
+        session: &Session,
+        statement: &Self::Statement,
+        keyspace: &KeyspaceName,
+        table: &TableName,
+        index: &IndexName,
+    ) -> impl Future<Output = anyhow::Result<Option<BTreeMap<String, String>>>> + Send;
 }
 
 pub fn new_scylla() -> impl DbDriver {
@@ -131,6 +145,21 @@ pub(crate) mod tests {
             _: &TableName,
             _: &ColumnName,
         ) -> anyhow::Result<Option<String>> {
+            unimplemented!()
+        }
+
+        async fn prepare_get_index_options(&self, _: &Session) -> anyhow::Result<Self::Statement> {
+            unimplemented!()
+        }
+
+        async fn execute_get_index_options(
+            &self,
+            _: &Session,
+            _: &Self::Statement,
+            _: &KeyspaceName,
+            _: &TableName,
+            _: &IndexName,
+        ) -> anyhow::Result<Option<BTreeMap<String, String>>> {
             unimplemented!()
         }
     }

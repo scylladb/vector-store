@@ -6,6 +6,7 @@
 use crate::ColumnName;
 use crate::Config;
 use crate::Credentials;
+use crate::IndexName;
 use crate::KeyspaceName;
 use crate::TableName;
 use crate::db_driver::DbDriver;
@@ -270,6 +271,38 @@ impl DbDriver for ScyllaDriver {
             .try_next()
             .await?
             .map(|(type_name,)| type_name))
+    }
+
+    async fn prepare_get_index_options(
+        &self,
+        session: &Session,
+    ) -> anyhow::Result<Self::Statement> {
+        const QUERY: &str = "
+            SELECT options
+            FROM system_schema.indexes
+            WHERE keyspace_name = ? AND table_name = ? AND index_name = ?
+        ";
+        session
+            .prepare(QUERY)
+            .await
+            .context(format!("query: {QUERY}"))
+    }
+
+    async fn execute_get_index_options(
+        &self,
+        session: &Session,
+        statement: &Self::Statement,
+        keyspace: &KeyspaceName,
+        table: &TableName,
+        index: &IndexName,
+    ) -> anyhow::Result<Option<BTreeMap<String, String>>> {
+        Ok(session
+            .execute_iter(statement.clone(), (keyspace, table, index))
+            .await?
+            .rows_stream::<(BTreeMap<String, String>,)>()?
+            .try_next()
+            .await?
+            .map(|(options,)| options))
     }
 }
 
