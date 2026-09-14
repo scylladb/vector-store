@@ -244,11 +244,11 @@ async fn build_vs_index_kind(
     idx: &DbCustomIndex,
 ) -> anyhow::Result<Option<IndexKind>> {
     let Some(dimensions) = db
-        .get_index_target_type(
+        .get_index_target_dimensions(
             idx.keyspace.clone(),
             idx.table.clone(),
-            idx.target_columns.first().clone(),
             idx.index.clone(),
+            idx.target_columns.first().clone(),
         )
         .await
         .inspect_err(|err| warn!("unable to get index target dimensions: {err}"))?
@@ -692,7 +692,7 @@ mod tests {
         });
 
         mock_db
-            .expect_get_index_target_type()
+            .expect_get_index_target_dimensions()
             .returning(move |_, _, _, _, tx| {
                 async move {
                     // Return dimensions for all indexes
@@ -872,7 +872,7 @@ mod tests {
         });
 
         mock_db
-            .expect_get_index_target_type()
+            .expect_get_index_target_dimensions()
             .returning(move |_, _, _, _, tx| {
                 async move {
                     tx.send(Ok(Some(NonZeroUsize::new(3).unwrap().into())))
@@ -968,7 +968,7 @@ mod tests {
         });
 
         mock_db
-            .expect_get_index_target_type()
+            .expect_get_index_target_dimensions()
             .returning(move |_, _, _, _, tx| {
                 async move {
                     tx.send(Ok(Some(NonZeroUsize::new(3).unwrap().into())))
