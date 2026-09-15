@@ -26,7 +26,6 @@ use crate::Vector;
 use crate::db_cdc;
 use crate::db_cdc::CdcReaderConfig;
 use crate::db_index_backend;
-use crate::db_value::DbRow;
 use crate::db_value::DbValue;
 use crate::internals::Internals;
 use crate::invariant_key::InvariantKey;
@@ -49,7 +48,6 @@ use scylla::cluster::metadata::NativeType;
 use scylla::routing::Token;
 use scylla::statement::prepared::PreparedStatement;
 use scylla::value::CqlValue;
-use scylla_cdc::CqlIdentifier;
 use std::collections::HashMap;
 use std::iter;
 use std::num::NonZeroUsize;
@@ -413,7 +411,7 @@ struct Statements<T: DbDriver> {
     /// NativeType to decode each one's raw ":attrs" value as, or None for a
     /// real CQL column. See parse_values().
     alternator_decode_types: Box<[Option<NativeType>]>,
-    st_range_scan: PreparedStatement,
+    st_range_scan: T::Statement,
     st_fetch_vector: PreparedStatement,
     kind: IndexKind,
 }
@@ -496,35 +494,9 @@ impl<T: DbDriver> Statements<T> {
             &metadata,
             &real_columns,
         );
-        let st_partition_key_list = table
-            .partition_key
-            .iter()
-            .map(|c| CqlIdentifier::new(c.as_str()))
-            .join(", ");
-        let st_primary_key_list = primary_key_columns
-            .iter()
-            .map(|c| CqlIdentifier::new(c.as_ref()))
-            .join(", ");
         let keyspace_identifier = KeyspaceIdentifier::from(&metadata.keyspace_name);
         let table_identifier = TableIdentifier::from(&metadata.table_name);
-        let query = db_index_backend::range_scan_query(
-            &keyspace_identifier,
-            &table_identifier,
-            target_columns
-                .iter()
-                .chain(nonpk_partition_key_columns.iter())
-                .chain(filtering_columns.iter()),
-            &st_primary_key_list,
-            &st_partition_key_list,
-        );
-        let st_range_scan = session
-            .prepare(query)
-            .await
-            .context("range_scan_query")?
-            .pipe(|mut stmt| {
-                stmt.set_is_idempotent(true);
-                stmt
-            });
+        let st_range_scan = db_driver.prepare_range_scan(&session, &metadata).await?;
 
         let query = db_index_backend::fetch_vector_query(
             &keyspace_identifier,
@@ -787,12 +759,10 @@ impl<T: DbDriver> Statements<T> {
             .await
             .context(NonRetryable)?;
 
-        Ok(session
-            .execute_iter(self.st_range_scan.clone(), (begin.value(), end.value()))
+        Ok(self
+            .db_driver
+            .execute_range_scan(&session, &self.st_range_scan, begin, end)
             .await?
-            .rows_stream::<DbRow>()
-            .context(NonRetryable)?
-            .map_err(anyhow::Error::from)
             .map_ok(move |mut row| {
                 if row.columns.len() != columns_len_expected {
                     debug!(

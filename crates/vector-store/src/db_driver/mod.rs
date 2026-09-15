@@ -7,10 +7,13 @@ mod scylla;
 
 use crate::ColumnName;
 use crate::Config;
+use crate::IndexMetadata;
 use crate::IndexName;
 use crate::KeyspaceName;
 use crate::TableName;
+use crate::db_value::DbRow;
 use ::scylla::client::session::Session;
+use ::scylla::routing::Token;
 use futures::Stream;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -82,6 +85,22 @@ pub trait DbDriver: Clone + Send + Sync + 'static {
         table: &TableName,
         index: &IndexName,
     ) -> impl Future<Output = anyhow::Result<Option<BTreeMap<String, String>>>> + Send;
+
+    fn prepare_range_scan(
+        &self,
+        session: &Session,
+        index: &IndexMetadata,
+    ) -> impl Future<Output = anyhow::Result<Self::Statement>> + Send;
+
+    fn execute_range_scan(
+        &self,
+        session: &Session,
+        statement: &Self::Statement,
+        begin: Token,
+        end: Token,
+    ) -> impl Future<
+        Output = anyhow::Result<impl Stream<Item = anyhow::Result<DbRow>> + Send + 'static>,
+    > + Send;
 }
 
 pub fn new_scylla() -> impl DbDriver {
@@ -161,6 +180,24 @@ pub(crate) mod tests {
             _: &IndexName,
         ) -> anyhow::Result<Option<BTreeMap<String, String>>> {
             unimplemented!()
+        }
+
+        async fn prepare_range_scan(
+            &self,
+            _: &Session,
+            _: &IndexMetadata,
+        ) -> anyhow::Result<Self::Statement> {
+            unimplemented!()
+        }
+
+        async fn execute_range_scan(
+            &self,
+            _: &Session,
+            _: &Self::Statement,
+            _: Token,
+            _: Token,
+        ) -> anyhow::Result<impl Stream<Item = anyhow::Result<DbRow>> + Send + 'static> {
+            Ok(stream::poll_fn(|_| unimplemented!()))
         }
     }
 }

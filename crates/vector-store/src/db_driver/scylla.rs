@@ -6,15 +6,22 @@
 use crate::ColumnName;
 use crate::Config;
 use crate::Credentials;
+use crate::IndexMetadata;
 use crate::IndexName;
+use crate::KeyspaceIdentifier;
 use crate::KeyspaceName;
+use crate::TableIdentifier;
 use crate::TableName;
 use crate::db_driver::DbDriver;
 use crate::db_driver::DbIndexInfo;
+use crate::db_index::NonRetryable;
+use crate::db_index_backend;
+use crate::db_value::DbRow;
 use anyhow::Context;
 use anyhow::anyhow;
 use futures::Stream;
 use futures::TryStreamExt;
+use itertools::Itertools;
 use rustls::ClientConfig;
 use rustls::RootCertStore;
 use rustls::pki_types::CertificateDer;
@@ -22,8 +29,10 @@ use rustls_pki_types::pem::PemObject;
 use scylla::client::session::Session;
 use scylla::client::session::TlsContext;
 use scylla::client::session_builder::SessionBuilder;
+use scylla::routing::Token;
 use scylla::statement::Consistency;
 use scylla::statement::prepared::PreparedStatement;
+use scylla_cdc::CqlIdentifier;
 use secrecy::ExposeSecret;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -303,6 +312,60 @@ impl DbDriver for ScyllaDriver {
             .try_next()
             .await?
             .map(|(options,)| options))
+    }
+
+    async fn prepare_range_scan(
+        &self,
+        session: &Session,
+        index: &IndexMetadata,
+    ) -> anyhow::Result<Self::Statement> {
+        let st_partition_key_list = index
+            .primary_key_columns
+            .iter()
+            .take(index.partition_key_count.get())
+            .map(|c| CqlIdentifier::new(c.as_ref()))
+            .join(", ");
+        let st_primary_key_list = index
+            .primary_key_columns
+            .iter()
+            .map(|c| CqlIdentifier::new(c.as_ref()))
+            .join(", ");
+        let keyspace_identifier = KeyspaceIdentifier::from(&index.keyspace_name);
+        let table_identifier = TableIdentifier::from(&index.table_name);
+        let query = db_index_backend::range_scan_query(
+            &keyspace_identifier,
+            &table_identifier,
+            index
+                .target_columns
+                .iter()
+                .chain(index.nonpk_partition_key_columns().into_iter().flatten())
+                .chain(index.nonpk_filtering_columns()),
+            &st_primary_key_list,
+            &st_partition_key_list,
+        );
+        Ok(session
+            .prepare(query.as_str())
+            .await
+            .context(format!("query: {query}"))?
+            .pipe(|mut stmt| {
+                stmt.set_is_idempotent(true);
+                stmt
+            }))
+    }
+
+    async fn execute_range_scan(
+        &self,
+        session: &Session,
+        statement: &Self::Statement,
+        begin: Token,
+        end: Token,
+    ) -> anyhow::Result<impl Stream<Item = anyhow::Result<DbRow>> + Send + 'static> {
+        Ok(session
+            .execute_iter(statement.clone(), (begin.value(), end.value()))
+            .await?
+            .rows_stream::<DbRow>()
+            .context(NonRetryable)?
+            .map_err(anyhow::Error::from))
     }
 }
 
