@@ -14,7 +14,6 @@ use crate::PrimaryKey;
 use crate::TableName;
 use crate::Vector;
 use crate::db_value::DbRow;
-use ::scylla::client::session::Session;
 use ::scylla::cluster::metadata::Column;
 use ::scylla::routing::Token;
 use futures::Stream;
@@ -47,35 +46,49 @@ pub struct CdcLogReaderConfig {
 }
 
 pub trait DbDriver: Clone + Send + Sync + 'static {
+    type Session: Clone + Send + Sync + 'static;
     type Statement: Send + Sync;
     type Cluster: Send + Sync;
     type Table;
     type CdcLogReader: Send;
+    type Metrics: Send + Sync;
 
     fn connect(
         &self,
         config: Arc<Config>,
-    ) -> impl Future<Output = anyhow::Result<Arc<Session>>> + Send;
+    ) -> impl Future<Output = anyhow::Result<Self::Session>> + Send;
+
+    fn refresh_metadata(&self, session: &Self::Session) -> impl Future<Output = ()> + Send;
+
+    fn await_schema_agreement(
+        &self,
+        session: &Self::Session,
+    ) -> impl Future<Output = anyhow::Result<Uuid>> + Send;
+
+    fn check_schema_agreement(
+        &self,
+        session: &Self::Session,
+    ) -> impl Future<Output = anyhow::Result<Option<Uuid>>> + Send;
 
     fn prepare_latest_schema_version(
         &self,
-        session: &Session,
+        session: &Self::Session,
     ) -> impl Future<Output = anyhow::Result<Self::Statement>> + Send;
 
     fn execute_latest_schema_version(
         &self,
-        session: &Session,
+        session: &Self::Session,
         statement: &Self::Statement,
     ) -> impl Future<Output = anyhow::Result<Uuid>> + Send;
 
     fn prepare_get_indexes(
         &self,
-        session: &Session,
+        session: &Self::Session,
     ) -> impl Future<Output = anyhow::Result<Self::Statement>> + Send;
 
     fn execute_get_indexes(
         &self,
-        session: &Session,
+        session: &Self::Session,
         statement: &Self::Statement,
     ) -> impl Future<
         Output = anyhow::Result<impl Stream<Item = anyhow::Result<DbIndexInfo>> + Send + 'static>,
@@ -83,12 +96,12 @@ pub trait DbDriver: Clone + Send + Sync + 'static {
 
     fn prepare_get_index_target_type(
         &self,
-        session: &Session,
+        session: &Self::Session,
     ) -> impl Future<Output = anyhow::Result<Self::Statement>> + Send;
 
     fn execute_get_index_target_type(
         &self,
-        session: &Session,
+        session: &Self::Session,
         statement: &Self::Statement,
         keyspace: &KeyspaceName,
         table: &TableName,
@@ -97,12 +110,12 @@ pub trait DbDriver: Clone + Send + Sync + 'static {
 
     fn prepare_get_index_options(
         &self,
-        session: &Session,
+        session: &Self::Session,
     ) -> impl Future<Output = anyhow::Result<Self::Statement>> + Send;
 
     fn execute_get_index_options(
         &self,
-        session: &Session,
+        session: &Self::Session,
         statement: &Self::Statement,
         keyspace: &KeyspaceName,
         table: &TableName,
@@ -111,13 +124,13 @@ pub trait DbDriver: Clone + Send + Sync + 'static {
 
     fn prepare_range_scan(
         &self,
-        session: &Session,
+        session: &Self::Session,
         index: &IndexMetadata,
     ) -> impl Future<Output = anyhow::Result<Self::Statement>> + Send;
 
     fn execute_range_scan(
         &self,
-        session: &Session,
+        session: &Self::Session,
         statement: &Self::Statement,
         begin: Token,
         end: Token,
@@ -127,31 +140,31 @@ pub trait DbDriver: Clone + Send + Sync + 'static {
 
     fn prepare_fetch_vector(
         &self,
-        session: &Session,
+        session: &Self::Session,
         index: &IndexMetadata,
     ) -> impl Future<Output = anyhow::Result<Self::Statement>> + Send;
 
     fn execute_fetch_vector(
         &self,
-        session: &Session,
+        session: &Self::Session,
         statement: &Self::Statement,
         primary_key: &PrimaryKey,
     ) -> impl Future<Output = anyhow::Result<Option<Vector>>> + Send;
 
     fn prepare_fetch_row(
         &self,
-        session: &Session,
+        session: &Self::Session,
         index: &IndexMetadata,
     ) -> impl Future<Output = anyhow::Result<Self::Statement>> + Send;
 
     fn execute_fetch_row(
         &self,
-        session: &Session,
+        session: &Self::Session,
         statement: &Self::Statement,
         primary_key: &PrimaryKey,
     ) -> impl Future<Output = anyhow::Result<Option<DbRow>>> + Send;
 
-    fn cluster(&self, session: &Session) -> Self::Cluster;
+    fn cluster(&self, session: &Self::Session) -> Self::Cluster;
 
     fn is_keyspace(&self, cluster: &Self::Cluster, keyspace: &KeyspaceName) -> bool;
 
@@ -182,12 +195,18 @@ pub trait DbDriver: Clone + Send + Sync + 'static {
 
     fn cdc_log_reader(
         &self,
-        session: Arc<Session>,
+        session: Self::Session,
         config: CdcLogReaderConfig,
     ) -> impl Future<Output = anyhow::Result<(Self::CdcLogReader, RemoteHandle<anyhow::Result<()>>)>>
     + Send;
 
     fn stop_cdc_log_reader(&self, cdc_log_reader: Self::CdcLogReader);
+
+    fn metrics(&self, session: &Self::Session) -> Self::Metrics;
+
+    fn total_connections(&self, metrics: &Self::Metrics) -> u64;
+
+    fn connection_timeouts(&self, metrics: &Self::Metrics) -> u64;
 }
 
 impl CdcLogReaderConfig {
@@ -246,39 +265,51 @@ pub(crate) mod tests {
     pub(crate) struct UnimplementedDbDriver;
 
     impl DbDriver for UnimplementedDbDriver {
+        type Session = ();
         type Statement = ();
         type Cluster = ();
         type Table = ();
         type CdcLogReader = ();
+        type Metrics = ();
 
-        async fn connect(&self, _: Arc<Config>) -> anyhow::Result<Arc<Session>> {
+        async fn connect(&self, _: Arc<Config>) -> anyhow::Result<Self::Session> {
+            unimplemented!()
+        }
+
+        async fn refresh_metadata(&self, _: &Self::Session) {
+            unimplemented!()
+        }
+
+        async fn await_schema_agreement(&self, _: &Self::Session) -> anyhow::Result<Uuid> {
+            unimplemented!()
+        }
+
+        async fn check_schema_agreement(&self, _: &Self::Session) -> anyhow::Result<Option<Uuid>> {
             unimplemented!()
         }
 
         async fn prepare_latest_schema_version(
             &self,
-            _: &Session,
+            _: &Self::Session,
         ) -> anyhow::Result<Self::Statement> {
             unimplemented!()
         }
 
         async fn execute_latest_schema_version(
             &self,
-            _: &Session,
+            _: &Self::Session,
             _: &Self::Statement,
         ) -> anyhow::Result<Uuid> {
             unimplemented!()
         }
 
-        // Implement other methods similarly, returning unimplemented!() for each
-
-        async fn prepare_get_indexes(&self, _: &Session) -> anyhow::Result<Self::Statement> {
+        async fn prepare_get_indexes(&self, _: &Self::Session) -> anyhow::Result<Self::Statement> {
             unimplemented!()
         }
 
         async fn execute_get_indexes(
             &self,
-            _: &Session,
+            _: &Self::Session,
             _: &Self::Statement,
         ) -> anyhow::Result<impl Stream<Item = anyhow::Result<DbIndexInfo>> + Send + 'static>
         {
@@ -287,14 +318,14 @@ pub(crate) mod tests {
 
         async fn prepare_get_index_target_type(
             &self,
-            _: &Session,
+            _: &Self::Session,
         ) -> anyhow::Result<Self::Statement> {
             unimplemented!()
         }
 
         async fn execute_get_index_target_type(
             &self,
-            _: &Session,
+            _: &Self::Session,
             _: &Self::Statement,
             _: &KeyspaceName,
             _: &TableName,
@@ -303,13 +334,16 @@ pub(crate) mod tests {
             unimplemented!()
         }
 
-        async fn prepare_get_index_options(&self, _: &Session) -> anyhow::Result<Self::Statement> {
+        async fn prepare_get_index_options(
+            &self,
+            _: &Self::Session,
+        ) -> anyhow::Result<Self::Statement> {
             unimplemented!()
         }
 
         async fn execute_get_index_options(
             &self,
-            _: &Session,
+            _: &Self::Session,
             _: &Self::Statement,
             _: &KeyspaceName,
             _: &TableName,
@@ -320,7 +354,7 @@ pub(crate) mod tests {
 
         async fn prepare_range_scan(
             &self,
-            _: &Session,
+            _: &Self::Session,
             _: &IndexMetadata,
         ) -> anyhow::Result<Self::Statement> {
             unimplemented!()
@@ -328,7 +362,7 @@ pub(crate) mod tests {
 
         async fn execute_range_scan(
             &self,
-            _: &Session,
+            _: &Self::Session,
             _: &Self::Statement,
             _: Token,
             _: Token,
@@ -338,7 +372,7 @@ pub(crate) mod tests {
 
         async fn prepare_fetch_vector(
             &self,
-            _: &Session,
+            _: &Self::Session,
             _: &IndexMetadata,
         ) -> anyhow::Result<Self::Statement> {
             unimplemented!()
@@ -346,7 +380,7 @@ pub(crate) mod tests {
 
         async fn execute_fetch_vector(
             &self,
-            _: &Session,
+            _: &Self::Session,
             _: &Self::Statement,
             _: &PrimaryKey,
         ) -> anyhow::Result<Option<Vector>> {
@@ -355,7 +389,7 @@ pub(crate) mod tests {
 
         async fn prepare_fetch_row(
             &self,
-            _: &Session,
+            _: &Self::Session,
             _: &IndexMetadata,
         ) -> anyhow::Result<Self::Statement> {
             unimplemented!()
@@ -363,14 +397,14 @@ pub(crate) mod tests {
 
         async fn execute_fetch_row(
             &self,
-            _: &Session,
+            _: &Self::Session,
             _: &Self::Statement,
             _: &PrimaryKey,
         ) -> anyhow::Result<Option<DbRow>> {
             unimplemented!()
         }
 
-        fn cluster(&self, _: &Session) -> Self::Cluster {
+        fn cluster(&self, _: &Self::Session) -> Self::Cluster {
             unimplemented!()
         }
 
@@ -424,13 +458,25 @@ pub(crate) mod tests {
 
         async fn cdc_log_reader(
             &self,
-            _: Arc<Session>,
+            _: Self::Session,
             _: CdcLogReaderConfig,
         ) -> anyhow::Result<(Self::CdcLogReader, RemoteHandle<anyhow::Result<()>>)> {
             unimplemented!()
         }
 
         fn stop_cdc_log_reader(&self, _: Self::CdcLogReader) {
+            unimplemented!()
+        }
+
+        fn metrics(&self, _: &Self::Session) -> Self::Metrics {
+            unimplemented!()
+        }
+
+        fn total_connections(&self, _: &Self::Metrics) -> u64 {
+            unimplemented!()
+        }
+
+        fn connection_timeouts(&self, _: &Self::Metrics) -> u64 {
             unimplemented!()
         }
     }

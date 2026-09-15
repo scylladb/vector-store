@@ -44,7 +44,6 @@ use anyhow::anyhow;
 use anyhow::bail;
 use futures::TryStreamExt;
 use regex::Regex;
-use scylla::client::session::Session;
 use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
 use secrecy::ExposeSecret;
@@ -350,7 +349,7 @@ pub(crate) async fn new<T: DbDriver>(
                                         };
                                     }
                                     node_state.send_event(Event::ConnectedToDb).await;
-                                    internals.create_session(Some(session.clone())).await;
+                                    internals.create_session(Some(Box::new(session.clone()))).await;
                                     session_tx.send(Some(session)).ok();
                                     info!("Connected to ScyllaDB at {}", config.scylladb_uri);
                                 }
@@ -612,7 +611,7 @@ fn credentials_changed(
 struct Statements<T: DbDriver> {
     config_rx: watch::Receiver<Arc<Config>>,
     db_driver: T,
-    session_rx: watch::Receiver<Option<Arc<Session>>>,
+    session_rx: watch::Receiver<Option<T::Session>>,
     metrics: Arc<Metrics>,
     st_latest_schema_version: T::Statement,
     st_get_indexes: T::Statement,
@@ -625,17 +624,17 @@ async fn create_session<T: DbDriver>(
     config: Arc<Config>,
     db_driver: T,
     node_state: &mpsc::Sender<NodeState>,
-) -> anyhow::Result<Arc<Session>> {
+) -> anyhow::Result<T::Session> {
     node_state.send_event(Event::ConnectingToDb).await;
     db_driver.connect(config).await
 }
 
 impl<T: DbDriver> Statements<T> {
     async fn new(
-        session: Arc<Session>,
+        session: T::Session,
         config_rx: watch::Receiver<Arc<Config>>,
         db_driver: T,
-        session_rx: watch::Receiver<Option<Arc<Session>>>,
+        session_rx: watch::Receiver<Option<T::Session>>,
         metrics: Arc<Metrics>,
     ) -> anyhow::Result<Self> {
         Ok(Self {
@@ -792,7 +791,7 @@ impl<T: DbDriver> Statements<T> {
         {
             // If we encountered invalid metadata, it's likely due to a concurrent schema change.
             // Refresh metadata and return an error to trigger a retry.
-            session.refresh_metadata().await.unwrap_or(());
+            self.db_driver.refresh_metadata(&session).await;
         }
         result
     }
@@ -830,7 +829,7 @@ impl<T: DbDriver> Statements<T> {
     /// Retrieves the vector dimensions for a CQL-native table by parsing the column type.
     async fn get_dimensions_from_column_type(
         &self,
-        session: &Session,
+        session: &T::Session,
         keyspace: &KeyspaceName,
         table: &TableName,
         index: &IndexName,
@@ -870,7 +869,7 @@ impl<T: DbDriver> Statements<T> {
     /// is stored in the index option `"dimensions"`.
     async fn get_dimensions_from_index_options(
         &self,
-        session: &Session,
+        session: &T::Session,
         keyspace: &KeyspaceName,
         table: &TableName,
         index: &IndexName,
@@ -1006,7 +1005,7 @@ impl<T: DbDriver> Statements<T> {
                 metadata.key()
             );
             // missing the keyspace in the cluster_state, metadata should be refreshed
-            session.refresh_metadata().await.unwrap_or(());
+            self.db_driver.refresh_metadata(&session).await;
             return false;
         };
 
@@ -1017,7 +1016,7 @@ impl<T: DbDriver> Statements<T> {
         {
             debug!("is_valid_index: no table for {}", metadata.key());
             // missing the table in the cluster_state, metadata should be refreshed
-            session.refresh_metadata().await.unwrap_or(());
+            self.db_driver.refresh_metadata(&session).await;
             return false;
         }
 
@@ -1028,7 +1027,7 @@ impl<T: DbDriver> Statements<T> {
         {
             debug!("is_valid_index: no cdc log for {}", metadata.key());
             // missing the cdc log in the cluster_state, metadata should be refreshed
-            session.refresh_metadata().await.unwrap_or(());
+            self.db_driver.refresh_metadata(&session).await;
             return false;
         }
 
@@ -1040,7 +1039,7 @@ impl<T: DbDriver> Statements<T> {
             debug!("is_valid_schema: no active session");
             return false;
         };
-        let Ok(Some(agreed_version)) = session.check_schema_agreement().await else {
+        let Ok(Some(agreed_version)) = self.db_driver.check_schema_agreement(&session).await else {
             debug!("is_valid_schema: schema not agreed");
             return false;
         };
