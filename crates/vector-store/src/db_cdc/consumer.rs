@@ -17,16 +17,12 @@ use crate::NonemptyIteratorExt;
 use crate::PrimaryKey;
 use crate::Timestamp;
 use crate::db_index;
-use crate::db_index_backend;
-use crate::db_value::DbRow;
-use anyhow::Context;
 use anyhow::anyhow;
 use anyhow::bail;
 use async_trait::async_trait;
 use scylla::client::session::Session;
 use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
-use scylla::statement::prepared::PreparedStatement;
 use scylla::value::CqlValue;
 use scylla_cdc::consumer::CDCRow;
 use scylla_cdc::consumer::Consumer;
@@ -34,7 +30,6 @@ use scylla_cdc::consumer::ConsumerFactory;
 use scylla_cdc::consumer::OperationType;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tap::Pipe;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tracing::debug;
@@ -49,7 +44,7 @@ enum Operation {
 struct CdcConsumerData<T: DbDriver> {
     db_driver: T,
     session: Arc<Session>,
-    st_select_values: PreparedStatement,
+    st_select_values: T::Statement,
     index_key: IndexKey,
     primary_key_columns: NonemptyArc<ColumnName>,
     nonpk_partition_key_columns: Box<[ColumnName]>,
@@ -69,12 +64,11 @@ impl<T: DbDriver> CdcConsumerData<T> {
         primary_key: Arc<Vec<CqlValue>>,
         timestamp: Timestamp,
     ) -> anyhow::Result<()> {
-        let rows_result = self
-            .session
-            .execute_unpaged(&self.st_select_values, primary_key.as_slice())
-            .await?
-            .into_rows_result()?;
         let primary_key = PrimaryKey::from(primary_key.iter().cloned());
+        let rows_result = self
+            .db_driver
+            .execute_fetch_row(&self.session, &self.st_select_values, &primary_key)
+            .await?;
 
         let async_in_progress = AsyncInProgress::cdc(
             self.metrics.indexing_lag.with_label_values(&[
@@ -84,7 +78,7 @@ impl<T: DbDriver> CdcConsumerData<T> {
             timestamp,
         );
 
-        let Some(row) = rows_result.maybe_first_row::<DbRow>()? else {
+        let Some(row) = rows_result else {
             // If no row is found for the primary key, it is deleted
             _ = self
                 .tx
@@ -314,23 +308,7 @@ impl<T: DbDriver> CdcConsumerFactory<T> {
             &real_columns,
         );
 
-        let query = db_index_backend::request_query(
-            &metadata.keyspace_name.as_ref().into(),
-            &metadata.table_name.as_ref().into(),
-            target_columns
-                .iter()
-                .chain(nonpk_partition_key_columns.iter())
-                .chain(filtering_columns.iter()),
-            primary_key_columns.iter(),
-        );
-        let st_select_values = session
-            .prepare(query.as_str())
-            .await
-            .with_context(|| format!("request_query: {}", query.replace('\n', " ").trim()))?
-            .pipe(|mut stmt| {
-                stmt.set_is_idempotent(true);
-                stmt
-            });
+        let st_select_values = db_driver.prepare_fetch_row(&session, metadata).await?;
 
         Ok(Self(Arc::new(CdcConsumerData {
             db_driver,
