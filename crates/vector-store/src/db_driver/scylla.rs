@@ -406,6 +406,46 @@ impl DbDriver for ScyllaDriver {
             .maybe_first_row::<(Option<Vector>,)>()?
             .and_then(|(vector,)| vector))
     }
+
+    async fn prepare_fetch_row(
+        &self,
+        session: &Session,
+        index: &IndexMetadata,
+    ) -> anyhow::Result<Self::Statement> {
+        let keyspace_identifier = KeyspaceIdentifier::from(&index.keyspace_name);
+        let table_identifier = TableIdentifier::from(&index.table_name);
+        let query = db_index_backend::request_query(
+            &keyspace_identifier,
+            &table_identifier,
+            index
+                .target_columns
+                .iter()
+                .chain(index.nonpk_partition_key_columns().into_iter().flatten())
+                .chain(index.nonpk_filtering_columns()),
+            index.primary_key_columns.iter(),
+        );
+        Ok(session
+            .prepare(query.as_str())
+            .await
+            .context(format!("query: {query}"))?
+            .pipe(|mut stmt| {
+                stmt.set_is_idempotent(true);
+                stmt
+            }))
+    }
+
+    async fn execute_fetch_row(
+        &self,
+        session: &Session,
+        statement: &Self::Statement,
+        primary_key: &PrimaryKey,
+    ) -> anyhow::Result<Option<DbRow>> {
+        Ok(session
+            .execute_unpaged(statement, primary_key)
+            .await?
+            .into_rows_result()?
+            .maybe_first_row::<DbRow>()?)
+    }
 }
 
 pub(super) fn new() -> impl DbDriver {

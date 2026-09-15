@@ -116,6 +116,19 @@ pub trait DbDriver: Clone + Send + Sync + 'static {
         statement: &Self::Statement,
         primary_key: &PrimaryKey,
     ) -> impl Future<Output = anyhow::Result<Option<Vector>>> + Send;
+
+    fn prepare_fetch_row(
+        &self,
+        session: &Session,
+        index: &IndexMetadata,
+    ) -> impl Future<Output = anyhow::Result<Self::Statement>> + Send;
+
+    fn execute_fetch_row(
+        &self,
+        session: &Session,
+        statement: &Self::Statement,
+        primary_key: &PrimaryKey,
+    ) -> impl Future<Output = anyhow::Result<Option<DbRow>>> + Send;
 }
 
 pub fn new_scylla() -> impl DbDriver {
@@ -229,6 +242,23 @@ pub(crate) mod tests {
             _: &Self::Statement,
             _: &PrimaryKey,
         ) -> anyhow::Result<Option<Vector>> {
+            unimplemented!()
+        }
+
+        async fn prepare_fetch_row(
+            &self,
+            _: &Session,
+            _: &IndexMetadata,
+        ) -> anyhow::Result<Self::Statement> {
+            unimplemented!()
+        }
+
+        async fn execute_fetch_row(
+            &self,
+            _: &Session,
+            _: &Self::Statement,
+            _: &PrimaryKey,
+        ) -> anyhow::Result<Option<DbRow>> {
             unimplemented!()
         }
     }
