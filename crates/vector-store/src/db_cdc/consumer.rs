@@ -261,13 +261,16 @@ impl<T: DbDriver> CdcConsumerFactory<T> {
         tx: mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
         semaphore: Arc<Semaphore>,
     ) -> anyhow::Result<Self> {
-        let cluster_state = session.get_cluster_state();
-        let table = cluster_state
-            .get_keyspace(metadata.keyspace_name.as_ref())
-            .ok_or_else(|| anyhow!("keyspace {} does not exist", metadata.keyspace_name))?
-            .tables
-            .get(metadata.table_name.as_ref())
-            .ok_or_else(|| anyhow!("table {} does not exist", metadata.table_name))?;
+        let cluster = db_driver.cluster(&session);
+        let table = db_driver
+            .table(&cluster, &metadata.keyspace_name, &metadata.table_name)
+            .ok_or_else(|| {
+                anyhow!(
+                    "table {}.{} does not exist",
+                    metadata.keyspace_name,
+                    metadata.table_name
+                )
+            })?;
 
         let primary_key_columns = metadata.primary_key_columns.clone();
 
@@ -281,12 +284,11 @@ impl<T: DbDriver> CdcConsumerFactory<T> {
             .cloned()
             .collect();
 
-        let real_columns: HashMap<ColumnName, NativeType> = table
-            .columns
-            .iter()
+        let real_columns: HashMap<ColumnName, NativeType> = db_driver
+            .columns(table)
             .filter_map(|(name, coltype)| {
                 if let ColumnType::Native(typ) = &coltype.typ {
-                    Some((ColumnName::from(name.clone()), typ.clone()))
+                    Some((name, typ.clone()))
                 } else {
                     None
                 }
