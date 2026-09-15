@@ -47,7 +47,6 @@ use regex::Regex;
 use scylla::client::session::Session;
 use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
-use scylla::cluster::metadata::Table;
 use secrecy::ExposeSecret;
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
@@ -714,31 +713,33 @@ impl<T: DbDriver> Statements<T> {
                  }| {
                     let session = session.clone();
                     async move {
-                        let cluster_state = session.get_cluster_state();
-                        let table = cluster_state
-                            .get_keyspace(&keyspace_name)
-                            .ok_or_else(|| {
-                                anyhow!("keyspace {keyspace_name} does not exist")
-                                    .context(InvalidMetadata)
-                            })?
-                            .tables
-                            .get(table_name.as_ref())
-                            .ok_or_else(|| {
-                                anyhow!("table {table_name} does not exist")
-                                    .context(InvalidMetadata)
-                            })?;
-                        let primary_key_columns = table
-                            .partition_key
-                            .iter()
-                            .chain(table.clustering_key.iter())
-                            .map(ColumnName::from)
+                        let cluster = self.db_driver.cluster(&session);
+                        let Some(table) =
+                            self.db_driver.table(&cluster, &keyspace_name, &table_name)
+                        else {
+                            return Err(anyhow!(
+                                "table {keyspace_name}.{table_name} does not exist"
+                            )
+                            .context(InvalidMetadata));
+                        };
+                        let mut partition_key_count = 0;
+                        let primary_key_columns = self
+                            .db_driver
+                            .partition_key(table)
+                            .inspect(|_| {
+                                partition_key_count += 1;
+                            })
+                            .chain(self.db_driver.clustering_key(table))
                             .collect_nonempty_arc()
                             .ok_or_else(|| {
                                 anyhow!("table {table_name} has no primary key columns")
                                     .context(InvalidMetadata)
                             })?;
-                        let partition_key_count =
-                            NonZeroUsize::new(table.partition_key.len()).unwrap();
+                        let Some(partition_key_count) = NonZeroUsize::new(partition_key_count)
+                        else {
+                            return Err(anyhow!("table {table_name} has no partition key columns")
+                                .context(InvalidMetadata));
+                        };
                         let is_alternator = keyspace_name.is_alternator();
                         let alternator_attribute_types = Arc::new(if is_alternator {
                             options
@@ -750,12 +751,12 @@ impl<T: DbDriver> Statements<T> {
                         });
                         Ok(options.remove("target").and_then(|target| {
                             let kind = db_index_kind_from_options(&mut options)?;
-                            validate_primary_key_columns(table)
+                            validate_primary_key_columns(&self.db_driver, table)
                                 .inspect_err(|err| {
                                     warn!("Skipping index {index_name}: {err}");
                                 })
                                 .ok()?;
-                            from_target_option(table, target, kind, is_alternator)
+                            from_target_option(&self.db_driver, table, target, kind, is_alternator)
                                 .map(|(partitioning, target_column, filtering_columns)| {
                                     DbCustomIndex {
                                         keyspace: keyspace_name,
@@ -990,10 +991,14 @@ impl<T: DbDriver> Statements<T> {
             debug!("is_valid_index: no active session for {}", metadata.key());
             return false;
         };
-        let cluster_state = session.get_cluster_state();
+
+        let cluster = self.db_driver.cluster(&session);
 
         // check a keyspace
-        let Some(keyspace) = cluster_state.get_keyspace(metadata.keyspace_name.as_ref()) else {
+        if !self
+            .db_driver
+            .is_keyspace(&cluster, &metadata.keyspace_name)
+        {
             debug!(
                 "is_valid_index: no keyspace in a cluster state for {}",
                 metadata.key()
@@ -1004,7 +1009,10 @@ impl<T: DbDriver> Statements<T> {
         };
 
         // check a table
-        if !keyspace.tables.contains_key(metadata.table_name.as_ref()) {
+        if !self
+            .db_driver
+            .is_table(&cluster, &metadata.keyspace_name, &metadata.table_name)
+        {
             debug!("is_valid_index: no table for {}", metadata.key());
             // missing the table in the cluster_state, metadata should be refreshed
             session.refresh_metadata().await.unwrap_or(());
@@ -1012,9 +1020,9 @@ impl<T: DbDriver> Statements<T> {
         }
 
         // check a cdc log table
-        if !keyspace
-            .tables
-            .contains_key(&format!("{}_scylla_cdc_log", metadata.table_name))
+        if !self
+            .db_driver
+            .is_cdc(&cluster, &metadata.keyspace_name, &metadata.table_name)
         {
             debug!("is_valid_index: no cdc log for {}", metadata.key());
             // missing the cdc log in the cluster_state, metadata should be refreshed
@@ -1054,12 +1062,18 @@ struct LegacyTargetOption {
     ck: Vec<String>,
 }
 
-fn parse_target_option(table: &Table, value: &str) -> anyhow::Result<Option<TargetOption>> {
+fn parse_target_option<T: DbDriver>(
+    db_driver: &T,
+    table: &T::Table,
+    value: &str,
+) -> anyhow::Result<Option<TargetOption>> {
     if let Ok(target) = serde_json::from_str::<TargetOption>(value) {
         return Ok(Some(target));
     }
     if let Ok(legacy) = serde_json::from_str::<LegacyTargetOption>(value) {
-        return Ok(Some(convert_legacy_target_option(table, legacy)?));
+        return Ok(Some(convert_legacy_target_option(
+            db_driver, table, legacy,
+        )?));
     };
     Ok(None)
 }
@@ -1097,14 +1111,16 @@ fn parse_alternator_attribute_types(value: &str) -> BTreeMap<ColumnName, NativeT
         .collect()
 }
 
-fn convert_legacy_target_option(
-    table: &Table,
+fn convert_legacy_target_option<T: DbDriver>(
+    db_driver: &T,
+    table: &T::Table,
     mut target_option: LegacyTargetOption,
 ) -> anyhow::Result<TargetOption> {
-    let is_local = target_option
-        .pk
-        .iter()
-        .all(|pk_col| table.partition_key.contains(pk_col));
+    let is_local = target_option.pk.iter().all(|pk_col| {
+        db_driver
+            .partition_key(table)
+            .any(|col| col.as_ref() == pk_col)
+    });
 
     if is_local {
         let Some(target_column) = target_option.ck.first().cloned() else {
@@ -1140,20 +1156,21 @@ fn db_index_kind_from_options(options: &mut BTreeMap<String, String>) -> Option<
     }
 }
 
-fn from_target_option(
-    table: &Table,
+fn from_target_option<T: DbDriver>(
+    db_driver: &T,
+    table: &T::Table,
     value: String,
     kind: DbIndexKind,
     is_alternator: bool,
 ) -> anyhow::Result<(DbIndexPartitioning, ColumnName, Arc<[ColumnName]>)> {
-    let Some(target) = parse_target_option(table, &value)? else {
+    let Some(target) = parse_target_option(db_driver, table, &value)? else {
         // Global index with a single target column
         return Ok((DbIndexPartitioning::Global, value.into(), Arc::new([])));
     };
 
     // Alternator's tc/pk columns may not be real columns in the table.
     if !is_alternator {
-        validate_target_column(table, &target.target_column, kind)?;
+        validate_target_column(db_driver, table, &target.target_column, kind)?;
     }
 
     let partitioning = if target.partition_key_columns.is_empty() {
@@ -1163,7 +1180,7 @@ fn from_target_option(
             && let Some(invalid) = target
                 .partition_key_columns
                 .iter()
-                .find(|pk_col| !table.columns.contains_key(*pk_col))
+                .find(|pk_col| db_driver.column(table, &(*pk_col).into()).is_none())
         {
             bail!("invalid target option: pk column {invalid} is not in the table's columns");
         }
@@ -1190,24 +1207,29 @@ fn from_target_option(
     ))
 }
 
-fn validate_target_column(
-    table: &Table,
+fn validate_target_column<T: DbDriver>(
+    db_driver: &T,
+    table: &T::Table,
     target_name: &str,
     kind: DbIndexKind,
 ) -> anyhow::Result<()> {
-    let column = table.columns.get(target_name).ok_or_else(|| {
-        anyhow!("invalid target option: column {target_name} does not exist in a table")
-    })?;
+    let column = db_driver
+        .column(table, &target_name.into())
+        .ok_or_else(|| {
+            anyhow!("invalid target option: column {target_name} does not exist in a table")
+        })?;
     validate_column_type_for_kind(target_name, &column.typ, kind)
 }
 
-fn validate_primary_key_columns(table: &Table) -> anyhow::Result<()> {
-    for name in table
-        .partition_key
-        .iter()
-        .chain(table.clustering_key.iter())
+fn validate_primary_key_columns<T: DbDriver>(
+    db_driver: &T,
+    table: &T::Table,
+) -> anyhow::Result<()> {
+    for name in db_driver
+        .partition_key(table)
+        .chain(db_driver.clustering_key(table))
     {
-        let column = table.columns.get(name).ok_or(anyhow!(
+        let column = db_driver.column(table, &name).ok_or(anyhow!(
             "primary key column {name} does not exist in a table"
         ))?;
         if !cql_types::is_supported(&column.typ) {

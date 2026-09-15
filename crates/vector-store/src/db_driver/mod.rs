@@ -15,6 +15,7 @@ use crate::TableName;
 use crate::Vector;
 use crate::db_value::DbRow;
 use ::scylla::client::session::Session;
+use ::scylla::cluster::metadata::Column;
 use ::scylla::routing::Token;
 use futures::Stream;
 use std::collections::BTreeMap;
@@ -30,6 +31,8 @@ pub struct DbIndexInfo {
 
 pub trait DbDriver: Clone + Send + Sync + 'static {
     type Statement: Send + Sync;
+    type Cluster: Send + Sync;
+    type Table;
 
     fn connect(
         &self,
@@ -129,6 +132,28 @@ pub trait DbDriver: Clone + Send + Sync + 'static {
         statement: &Self::Statement,
         primary_key: &PrimaryKey,
     ) -> impl Future<Output = anyhow::Result<Option<DbRow>>> + Send;
+
+    fn cluster(&self, session: &Session) -> Self::Cluster;
+
+    fn is_keyspace(&self, cluster: &Self::Cluster, keyspace: &KeyspaceName) -> bool;
+
+    fn is_table(&self, cluster: &Self::Cluster, keyspace: &KeyspaceName, table: &TableName)
+    -> bool;
+
+    fn is_cdc(&self, cluster: &Self::Cluster, keyspace: &KeyspaceName, table: &TableName) -> bool;
+
+    fn table<'a>(
+        &self,
+        cluster: &'a Self::Cluster,
+        keyspace: &KeyspaceName,
+        table: &TableName,
+    ) -> Option<&'a Self::Table>;
+
+    fn partition_key(&self, table: &Self::Table) -> impl Iterator<Item = ColumnName>;
+
+    fn clustering_key(&self, table: &Self::Table) -> impl Iterator<Item = ColumnName>;
+
+    fn column<'a>(&self, table: &'a Self::Table, column: &ColumnName) -> Option<&'a Column>;
 }
 
 pub fn new_scylla() -> impl DbDriver {
@@ -139,12 +164,15 @@ pub fn new_scylla() -> impl DbDriver {
 pub(crate) mod tests {
     use super::*;
     use futures::stream;
+    use std::iter;
 
     #[derive(Clone, Debug)]
     pub(crate) struct UnimplementedDbDriver;
 
     impl DbDriver for UnimplementedDbDriver {
         type Statement = ();
+        type Cluster = ();
+        type Table = ();
         async fn connect(&self, _: Arc<Config>) -> anyhow::Result<Arc<Session>> {
             unimplemented!()
         }
@@ -259,6 +287,43 @@ pub(crate) mod tests {
             _: &Self::Statement,
             _: &PrimaryKey,
         ) -> anyhow::Result<Option<DbRow>> {
+            unimplemented!()
+        }
+
+        fn cluster(&self, _: &Session) -> Self::Cluster {
+            unimplemented!()
+        }
+
+        fn is_keyspace(&self, _: &Self::Cluster, _: &KeyspaceName) -> bool {
+            unimplemented!()
+        }
+
+        fn is_table(&self, _: &Self::Cluster, _: &KeyspaceName, _: &TableName) -> bool {
+            unimplemented!()
+        }
+
+        fn is_cdc(&self, _: &Self::Cluster, _: &KeyspaceName, _: &TableName) -> bool {
+            unimplemented!()
+        }
+
+        fn table<'a>(
+            &self,
+            _: &'a Self::Cluster,
+            _: &KeyspaceName,
+            _: &TableName,
+        ) -> Option<&'a Self::Table> {
+            unimplemented!()
+        }
+
+        fn partition_key(&self, _: &Self::Table) -> impl Iterator<Item = ColumnName> {
+            iter::from_fn(|| unimplemented!())
+        }
+
+        fn clustering_key(&self, _: &Self::Table) -> impl Iterator<Item = ColumnName> {
+            iter::from_fn(|| unimplemented!())
+        }
+
+        fn column<'a>(&self, _: &'a Self::Table, _: &ColumnName) -> Option<&'a Column> {
             unimplemented!()
         }
     }

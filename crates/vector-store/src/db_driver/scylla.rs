@@ -31,6 +31,9 @@ use rustls_pki_types::pem::PemObject;
 use scylla::client::session::Session;
 use scylla::client::session::TlsContext;
 use scylla::client::session_builder::SessionBuilder;
+use scylla::cluster::ClusterState;
+use scylla::cluster::metadata::Column;
+use scylla::cluster::metadata::Table;
 use scylla::routing::Token;
 use scylla::statement::Consistency;
 use scylla::statement::prepared::PreparedStatement;
@@ -50,6 +53,8 @@ struct ScyllaDriver;
 
 impl DbDriver for ScyllaDriver {
     type Statement = PreparedStatement;
+    type Cluster = Arc<ClusterState>;
+    type Table = Table;
 
     async fn connect(&self, config: Arc<Config>) -> anyhow::Result<Arc<Session>> {
         let mut builder = SessionBuilder::new()
@@ -445,6 +450,54 @@ impl DbDriver for ScyllaDriver {
             .await?
             .into_rows_result()?
             .maybe_first_row::<DbRow>()?)
+    }
+
+    fn cluster(&self, session: &Session) -> Self::Cluster {
+        session.get_cluster_state()
+    }
+
+    fn is_keyspace(&self, cluster: &Self::Cluster, keyspace: &KeyspaceName) -> bool {
+        cluster.get_keyspace(keyspace.as_ref()).is_some()
+    }
+
+    fn is_table(
+        &self,
+        cluster: &Self::Cluster,
+        keyspace: &KeyspaceName,
+        table: &TableName,
+    ) -> bool {
+        cluster
+            .get_keyspace(keyspace.as_ref())
+            .is_some_and(|ks| ks.tables.contains_key(table.as_ref()))
+    }
+
+    fn is_cdc(&self, cluster: &Self::Cluster, keyspace: &KeyspaceName, table: &TableName) -> bool {
+        cluster
+            .get_keyspace(keyspace.as_ref())
+            .is_some_and(|ks| ks.tables.contains_key(&format!("{table}_scylla_cdc_log")))
+    }
+
+    fn table<'a>(
+        &self,
+        cluster: &'a Self::Cluster,
+        keyspace: &KeyspaceName,
+        table: &TableName,
+    ) -> Option<&'a Self::Table> {
+        cluster
+            .get_keyspace(keyspace.as_ref())
+            .and_then(|ks| ks.tables.get(table.as_ref()))
+    }
+
+    fn partition_key(&self, table: &Self::Table) -> impl Iterator<Item = ColumnName> {
+        table.partition_key.iter().map(ColumnName::from)
+    }
+
+    fn clustering_key(&self, table: &Self::Table) -> impl Iterator<Item = ColumnName> {
+        table.clustering_key.iter().map(ColumnName::from)
+    }
+
+    fn column<'a>(&self, table: &'a Self::Table, column: &ColumnName) -> Option<&'a Column> {
+        table.columns.get(column.as_ref())
     }
 }
 
