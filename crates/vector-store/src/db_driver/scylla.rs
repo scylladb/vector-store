@@ -40,6 +40,7 @@ use scylla::statement::prepared::PreparedStatement;
 use scylla_cdc::CqlIdentifier;
 use secrecy::ExposeSecret;
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tap::Pipe;
 use tap::Tap;
@@ -477,6 +478,27 @@ impl DbDriver for ScyllaDriver {
             .is_some_and(|ks| ks.tables.contains_key(&format!("{table}_scylla_cdc_log")))
     }
 
+    fn nr_shards(&self, cluster: &Self::Cluster) -> NonZeroUsize {
+        NonZeroUsize::try_from(
+            cluster
+                .get_nodes_info()
+                .iter()
+                .filter_map(|node| node.sharder())
+                .map(|sharder| sharder.nr_shards.get() as usize)
+                .sum::<usize>(),
+        )
+        .unwrap_or(NonZeroUsize::new(1).unwrap())
+    }
+
+    fn token_ring(&self, cluster: &Self::Cluster) -> impl Iterator<Item = Token> {
+        cluster
+            .replica_locator()
+            .ring()
+            .iter()
+            .map(|(token, _)| token)
+            .copied()
+    }
+
     fn table<'a>(
         &self,
         cluster: &'a Self::Cluster,
@@ -494,6 +516,16 @@ impl DbDriver for ScyllaDriver {
 
     fn clustering_key(&self, table: &Self::Table) -> impl Iterator<Item = ColumnName> {
         table.clustering_key.iter().map(ColumnName::from)
+    }
+
+    fn columns<'a>(
+        &self,
+        table: &'a Self::Table,
+    ) -> impl Iterator<Item = (ColumnName, &'a Column)> {
+        table
+            .columns
+            .iter()
+            .map(|(name, column)| (ColumnName::from(name), column))
     }
 
     fn column<'a>(&self, table: &'a Self::Table, column: &ColumnName) -> Option<&'a Column> {

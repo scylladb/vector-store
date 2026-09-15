@@ -19,6 +19,7 @@ use ::scylla::cluster::metadata::Column;
 use ::scylla::routing::Token;
 use futures::Stream;
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -142,6 +143,10 @@ pub trait DbDriver: Clone + Send + Sync + 'static {
 
     fn is_cdc(&self, cluster: &Self::Cluster, keyspace: &KeyspaceName, table: &TableName) -> bool;
 
+    fn nr_shards(&self, cluster: &Self::Cluster) -> NonZeroUsize;
+
+    fn token_ring(&self, cluster: &Self::Cluster) -> impl Iterator<Item = Token>;
+
     fn table<'a>(
         &self,
         cluster: &'a Self::Cluster,
@@ -152,6 +157,9 @@ pub trait DbDriver: Clone + Send + Sync + 'static {
     fn partition_key(&self, table: &Self::Table) -> impl Iterator<Item = ColumnName>;
 
     fn clustering_key(&self, table: &Self::Table) -> impl Iterator<Item = ColumnName>;
+
+    fn columns<'a>(&self, table: &'a Self::Table)
+    -> impl Iterator<Item = (ColumnName, &'a Column)>;
 
     fn column<'a>(&self, table: &'a Self::Table, column: &ColumnName) -> Option<&'a Column>;
 }
@@ -306,6 +314,14 @@ pub(crate) mod tests {
             unimplemented!()
         }
 
+        fn nr_shards(&self, _: &Self::Cluster) -> NonZeroUsize {
+            unimplemented!()
+        }
+
+        fn token_ring(&self, _: &Self::Cluster) -> impl Iterator<Item = Token> {
+            iter::from_fn(|| unimplemented!())
+        }
+
         fn table<'a>(
             &self,
             _: &'a Self::Cluster,
@@ -320,6 +336,13 @@ pub(crate) mod tests {
         }
 
         fn clustering_key(&self, _: &Self::Table) -> impl Iterator<Item = ColumnName> {
+            iter::from_fn(|| unimplemented!())
+        }
+
+        fn columns<'a>(
+            &self,
+            _: &'a Self::Table,
+        ) -> impl Iterator<Item = (ColumnName, &'a Column)> {
             iter::from_fn(|| unimplemented!())
         }
 
