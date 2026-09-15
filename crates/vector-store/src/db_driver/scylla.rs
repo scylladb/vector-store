@@ -10,8 +10,10 @@ use crate::IndexMetadata;
 use crate::IndexName;
 use crate::KeyspaceIdentifier;
 use crate::KeyspaceName;
+use crate::PrimaryKey;
 use crate::TableIdentifier;
 use crate::TableName;
+use crate::Vector;
 use crate::db_driver::DbDriver;
 use crate::db_driver::DbIndexInfo;
 use crate::db_index::NonRetryable;
@@ -366,6 +368,43 @@ impl DbDriver for ScyllaDriver {
             .rows_stream::<DbRow>()
             .context(NonRetryable)?
             .map_err(anyhow::Error::from))
+    }
+
+    async fn prepare_fetch_vector(
+        &self,
+        session: &Session,
+        index: &IndexMetadata,
+    ) -> anyhow::Result<Self::Statement> {
+        let keyspace_identifier = KeyspaceIdentifier::from(&index.keyspace_name);
+        let table_identifier = TableIdentifier::from(&index.table_name);
+        let query = db_index_backend::fetch_vector_query(
+            &keyspace_identifier,
+            &table_identifier,
+            index.target_columns.iter(),
+            index.primary_key_columns.iter(),
+        );
+        Ok(session
+            .prepare(query.as_str())
+            .await
+            .context(format!("query: {query}"))?
+            .pipe(|mut stmt| {
+                stmt.set_is_idempotent(true);
+                stmt
+            }))
+    }
+
+    async fn execute_fetch_vector(
+        &self,
+        session: &Session,
+        statement: &Self::Statement,
+        primary_key: &PrimaryKey,
+    ) -> anyhow::Result<Option<Vector>> {
+        Ok(session
+            .execute_unpaged(statement, primary_key)
+            .await?
+            .into_rows_result()?
+            .maybe_first_row::<(Option<Vector>,)>()?
+            .and_then(|(vector,)| vector))
     }
 }
 

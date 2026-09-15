@@ -20,12 +20,10 @@ use crate::NonemptyIteratorExt;
 use crate::Percentage;
 use crate::PrimaryKey;
 use crate::Progress;
-use crate::TableIdentifier;
 use crate::Timestamp;
 use crate::Vector;
 use crate::db_cdc;
 use crate::db_cdc::CdcReaderConfig;
-use crate::db_index_backend;
 use crate::db_value::DbValue;
 use crate::internals::Internals;
 use crate::invariant_key::InvariantKey;
@@ -46,7 +44,6 @@ use scylla::client::session::Session;
 use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
 use scylla::routing::Token;
-use scylla::statement::prepared::PreparedStatement;
 use scylla::value::CqlValue;
 use std::collections::HashMap;
 use std::iter;
@@ -55,7 +52,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
-use tap::Pipe;
 use tokio::sync::Notify;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
@@ -412,7 +408,7 @@ struct Statements<T: DbDriver> {
     /// real CQL column. See parse_values().
     alternator_decode_types: Box<[Option<NativeType>]>,
     st_range_scan: T::Statement,
-    st_fetch_vector: PreparedStatement,
+    st_fetch_vector: T::Statement,
     kind: IndexKind,
 }
 
@@ -494,24 +490,9 @@ impl<T: DbDriver> Statements<T> {
             &metadata,
             &real_columns,
         );
-        let keyspace_identifier = KeyspaceIdentifier::from(&metadata.keyspace_name);
-        let table_identifier = TableIdentifier::from(&metadata.table_name);
         let st_range_scan = db_driver.prepare_range_scan(&session, &metadata).await?;
 
-        let query = db_index_backend::fetch_vector_query(
-            &keyspace_identifier,
-            &table_identifier,
-            target_columns.iter(),
-            primary_key_columns.iter(),
-        );
-        let st_fetch_vector = session
-            .prepare(query)
-            .await
-            .context("fetch_vector_query")?
-            .pipe(|mut stmt| {
-                stmt.set_is_idempotent(true);
-                stmt
-            });
+        let st_fetch_vector = db_driver.prepare_fetch_vector(&session, &metadata).await?;
 
         Ok(Self {
             primary_key_columns,
@@ -580,12 +561,9 @@ impl<T: DbDriver> Statements<T> {
         session: Arc<Session>,
         key: PrimaryKey,
     ) -> anyhow::Result<Option<Vector>> {
-        let rows_result = session
-            .execute_unpaged(&self.st_fetch_vector, &key)
-            .await?
-            .into_rows_result()?;
-        let row = rows_result.maybe_first_row::<(Option<Vector>,)>()?;
-        Ok(row.and_then(|(vector,)| vector))
+        self.db_driver
+            .execute_fetch_vector(&session, &self.st_fetch_vector, &key)
+            .await
     }
 
     async fn preform_range_scan(&self, begin: Token, end: Token) -> RangeScanResult {

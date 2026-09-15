@@ -10,7 +10,9 @@ use crate::Config;
 use crate::IndexMetadata;
 use crate::IndexName;
 use crate::KeyspaceName;
+use crate::PrimaryKey;
 use crate::TableName;
+use crate::Vector;
 use crate::db_value::DbRow;
 use ::scylla::client::session::Session;
 use ::scylla::routing::Token;
@@ -101,6 +103,19 @@ pub trait DbDriver: Clone + Send + Sync + 'static {
     ) -> impl Future<
         Output = anyhow::Result<impl Stream<Item = anyhow::Result<DbRow>> + Send + 'static>,
     > + Send;
+
+    fn prepare_fetch_vector(
+        &self,
+        session: &Session,
+        index: &IndexMetadata,
+    ) -> impl Future<Output = anyhow::Result<Self::Statement>> + Send;
+
+    fn execute_fetch_vector(
+        &self,
+        session: &Session,
+        statement: &Self::Statement,
+        primary_key: &PrimaryKey,
+    ) -> impl Future<Output = anyhow::Result<Option<Vector>>> + Send;
 }
 
 pub fn new_scylla() -> impl DbDriver {
@@ -198,6 +213,23 @@ pub(crate) mod tests {
             _: Token,
         ) -> anyhow::Result<impl Stream<Item = anyhow::Result<DbRow>> + Send + 'static> {
             Ok(stream::poll_fn(|_| unimplemented!()))
+        }
+
+        async fn prepare_fetch_vector(
+            &self,
+            _: &Session,
+            _: &IndexMetadata,
+        ) -> anyhow::Result<Self::Statement> {
+            unimplemented!()
+        }
+
+        async fn execute_fetch_vector(
+            &self,
+            _: &Session,
+            _: &Self::Statement,
+            _: &PrimaryKey,
+        ) -> anyhow::Result<Option<Vector>> {
+            unimplemented!()
         }
     }
 }
