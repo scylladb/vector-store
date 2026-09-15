@@ -16,7 +16,6 @@ use crate::KeyspaceIdentifier;
 use crate::Metrics;
 use crate::NonemptyArc;
 use crate::NonemptyBox;
-use crate::NonemptyIteratorExt;
 use crate::Percentage;
 use crate::PrimaryKey;
 use crate::Progress;
@@ -430,20 +429,7 @@ impl<T: DbDriver> Statements<T> {
             .get(metadata.table_name.as_ref())
             .ok_or_else(|| anyhow!("table {} does not exist", metadata.table_name))?;
 
-        let primary_key_columns = table
-            .partition_key
-            .iter()
-            .chain(table.clustering_key.iter())
-            .cloned()
-            .map(ColumnName::from)
-            .collect_nonempty_arc()
-            .ok_or_else(|| {
-                anyhow!(
-                    "table {}.{} has no primary key",
-                    metadata.keyspace_name,
-                    metadata.table_name
-                )
-            })?;
+        let primary_key_columns = metadata.primary_key_columns.clone();
         let nonpk_partition_key_columns: Box<[_]> = metadata
             .nonpk_partition_key_columns()
             .into_iter()

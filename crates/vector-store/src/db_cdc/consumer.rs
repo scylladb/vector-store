@@ -13,7 +13,6 @@ use crate::IndexKind;
 use crate::IndexMetadata;
 use crate::Metrics;
 use crate::NonemptyArc;
-use crate::NonemptyIteratorExt;
 use crate::PrimaryKey;
 use crate::Timestamp;
 use crate::db_index;
@@ -270,14 +269,7 @@ impl<T: DbDriver> CdcConsumerFactory<T> {
             .get(metadata.table_name.as_ref())
             .ok_or_else(|| anyhow!("table {} does not exist", metadata.table_name))?;
 
-        let primary_key_columns = table
-            .partition_key
-            .iter()
-            .chain(table.clustering_key.iter())
-            .cloned()
-            .map(ColumnName::from)
-            .collect_nonempty_arc()
-            .ok_or_else(|| anyhow!("primary key must have at least one column"))?;
+        let primary_key_columns = metadata.primary_key_columns.clone();
 
         let target_columns = metadata.target_columns.clone();
         let filtering_columns: Arc<[_]> = metadata.nonpk_filtering_columns().cloned().collect();
