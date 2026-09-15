@@ -912,7 +912,7 @@ pub async fn run(
     let diskann_backend = config_rx.borrow().diskann_backend;
 
     let db_driver = db_driver::new_scylla();
-    let internals = internals::new();
+    let internals = internals::new(db_driver.clone());
     let memory = memory::new(internals.clone(), config_rx.clone());
     let worker = worker::new();
 

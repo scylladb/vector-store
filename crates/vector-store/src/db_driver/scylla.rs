@@ -36,6 +36,7 @@ use scylla::client::session_builder::SessionBuilder;
 use scylla::cluster::ClusterState;
 use scylla::cluster::metadata::Column;
 use scylla::cluster::metadata::Table;
+use scylla::observability::metrics::Metrics;
 use scylla::routing::Token;
 use scylla::statement::Consistency;
 use scylla::statement::prepared::PreparedStatement;
@@ -57,12 +58,14 @@ use uuid::Uuid;
 struct ScyllaDriver;
 
 impl DbDriver for ScyllaDriver {
+    type Session = Arc<Session>;
     type Statement = PreparedStatement;
     type Cluster = Arc<ClusterState>;
     type Table = Table;
     type CdcLogReader = CDCLogReader;
+    type Metrics = Arc<Metrics>;
 
-    async fn connect(&self, config: Arc<Config>) -> anyhow::Result<Arc<Session>> {
+    async fn connect(&self, config: Arc<Config>) -> anyhow::Result<Self::Session> {
         let mut builder = SessionBuilder::new()
             .known_node(&config.scylladb_uri)
             .pipe(|builder| {
@@ -195,9 +198,24 @@ impl DbDriver for ScyllaDriver {
         Ok(session)
     }
 
+    async fn refresh_metadata(&self, session: &Self::Session) {
+        _ = session.refresh_metadata().await;
+    }
+
+    async fn await_schema_agreement(&self, session: &Self::Session) -> anyhow::Result<Uuid> {
+        Ok(session.await_schema_agreement().await?)
+    }
+
+    async fn check_schema_agreement(
+        &self,
+        session: &Self::Session,
+    ) -> anyhow::Result<Option<Uuid>> {
+        Ok(session.check_schema_agreement().await?)
+    }
+
     async fn prepare_latest_schema_version(
         &self,
-        session: &Session,
+        session: &Self::Session,
     ) -> anyhow::Result<Self::Statement> {
         const QUERY: &str = "
             SELECT schema_version
@@ -219,7 +237,7 @@ impl DbDriver for ScyllaDriver {
 
     async fn execute_latest_schema_version(
         &self,
-        session: &Session,
+        session: &Self::Session,
         statement: &Self::Statement,
     ) -> anyhow::Result<Uuid> {
         Ok(session
@@ -230,7 +248,10 @@ impl DbDriver for ScyllaDriver {
             .0)
     }
 
-    async fn prepare_get_indexes(&self, session: &Session) -> anyhow::Result<Self::Statement> {
+    async fn prepare_get_indexes(
+        &self,
+        session: &Self::Session,
+    ) -> anyhow::Result<Self::Statement> {
         const QUERY: &str = "
             SELECT keyspace_name, index_name, table_name, options
             FROM system_schema.indexes
@@ -245,7 +266,7 @@ impl DbDriver for ScyllaDriver {
 
     async fn execute_get_indexes(
         &self,
-        session: &Session,
+        session: &Self::Session,
         statement: &Self::Statement,
     ) -> anyhow::Result<impl Stream<Item = anyhow::Result<DbIndexInfo>> + Send + 'static> {
         Ok(session
@@ -265,7 +286,7 @@ impl DbDriver for ScyllaDriver {
 
     async fn prepare_get_index_target_type(
         &self,
-        session: &Session,
+        session: &Self::Session,
     ) -> anyhow::Result<Self::Statement> {
         const QUERY: &str = "
             SELECT type
@@ -280,7 +301,7 @@ impl DbDriver for ScyllaDriver {
 
     async fn execute_get_index_target_type(
         &self,
-        session: &Session,
+        session: &Self::Session,
         statement: &Self::Statement,
         keyspace: &KeyspaceName,
         table: &TableName,
@@ -297,7 +318,7 @@ impl DbDriver for ScyllaDriver {
 
     async fn prepare_get_index_options(
         &self,
-        session: &Session,
+        session: &Self::Session,
     ) -> anyhow::Result<Self::Statement> {
         const QUERY: &str = "
             SELECT options
@@ -312,7 +333,7 @@ impl DbDriver for ScyllaDriver {
 
     async fn execute_get_index_options(
         &self,
-        session: &Session,
+        session: &Self::Session,
         statement: &Self::Statement,
         keyspace: &KeyspaceName,
         table: &TableName,
@@ -329,7 +350,7 @@ impl DbDriver for ScyllaDriver {
 
     async fn prepare_range_scan(
         &self,
-        session: &Session,
+        session: &Self::Session,
         index: &IndexMetadata,
     ) -> anyhow::Result<Self::Statement> {
         let st_partition_key_list = index
@@ -368,7 +389,7 @@ impl DbDriver for ScyllaDriver {
 
     async fn execute_range_scan(
         &self,
-        session: &Session,
+        session: &Self::Session,
         statement: &Self::Statement,
         begin: Token,
         end: Token,
@@ -383,7 +404,7 @@ impl DbDriver for ScyllaDriver {
 
     async fn prepare_fetch_vector(
         &self,
-        session: &Session,
+        session: &Self::Session,
         index: &IndexMetadata,
     ) -> anyhow::Result<Self::Statement> {
         let keyspace_identifier = KeyspaceIdentifier::from(&index.keyspace_name);
@@ -406,7 +427,7 @@ impl DbDriver for ScyllaDriver {
 
     async fn execute_fetch_vector(
         &self,
-        session: &Session,
+        session: &Self::Session,
         statement: &Self::Statement,
         primary_key: &PrimaryKey,
     ) -> anyhow::Result<Option<Vector>> {
@@ -420,7 +441,7 @@ impl DbDriver for ScyllaDriver {
 
     async fn prepare_fetch_row(
         &self,
-        session: &Session,
+        session: &Self::Session,
         index: &IndexMetadata,
     ) -> anyhow::Result<Self::Statement> {
         let keyspace_identifier = KeyspaceIdentifier::from(&index.keyspace_name);
@@ -447,7 +468,7 @@ impl DbDriver for ScyllaDriver {
 
     async fn execute_fetch_row(
         &self,
-        session: &Session,
+        session: &Self::Session,
         statement: &Self::Statement,
         primary_key: &PrimaryKey,
     ) -> anyhow::Result<Option<DbRow>> {
@@ -458,7 +479,7 @@ impl DbDriver for ScyllaDriver {
             .maybe_first_row::<DbRow>()?)
     }
 
-    fn cluster(&self, session: &Session) -> Self::Cluster {
+    fn cluster(&self, session: &Self::Session) -> Self::Cluster {
         session.get_cluster_state()
     }
 
@@ -539,7 +560,7 @@ impl DbDriver for ScyllaDriver {
 
     async fn cdc_log_reader(
         &self,
-        session: Arc<Session>,
+        session: Self::Session,
         config: CdcLogReaderConfig,
     ) -> anyhow::Result<(Self::CdcLogReader, RemoteHandle<anyhow::Result<()>>)> {
         CDCLogReaderBuilder::new()
@@ -606,6 +627,18 @@ impl DbDriver for ScyllaDriver {
 
     fn stop_cdc_log_reader(&self, mut cdc_log_reader: Self::CdcLogReader) {
         cdc_log_reader.stop();
+    }
+
+    fn metrics(&self, session: &Self::Session) -> Self::Metrics {
+        session.get_metrics()
+    }
+
+    fn total_connections(&self, metrics: &Self::Metrics) -> u64 {
+        metrics.get_total_connections()
+    }
+
+    fn connection_timeouts(&self, metrics: &Self::Metrics) -> u64 {
+        metrics.get_connection_timeouts()
     }
 }
 

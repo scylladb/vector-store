@@ -3,8 +3,9 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
+use crate::DbDriver;
 use crate::perf;
-use scylla::client::session::Session;
+use std::any::Any;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -33,7 +34,7 @@ pub(crate) enum Internals {
         tx: oneshot::Sender<CountersR>,
     },
     CreateSession {
-        session: Option<Arc<Session>>,
+        session: Option<Box<dyn Any + Send>>,
     },
     SessionCounters {
         tx: oneshot::Sender<CountersR>,
@@ -45,7 +46,7 @@ pub(crate) trait InternalsExt {
     async fn increment_counter(&self, name: String);
     async fn clear_counters(&self);
     async fn counters(&self) -> CountersR;
-    async fn create_session(&self, session: Option<Arc<Session>>);
+    async fn create_session(&self, session: Option<Box<dyn Any + Send>>);
     async fn session_counters(&self) -> CountersR;
 }
 
@@ -83,7 +84,7 @@ impl InternalsExt for mpsc::Sender<Internals> {
             .expect("Internals::counters: internal actor should send response")
     }
 
-    async fn create_session(&self, session: Option<Arc<Session>>) {
+    async fn create_session(&self, session: Option<Box<dyn Any + Send>>) {
         self.send(Internals::CreateSession { session })
             .await
             .expect("Internals::create_session: internal actor should receive request");
@@ -101,7 +102,7 @@ impl InternalsExt for mpsc::Sender<Internals> {
 
 type Counters = RwLock<BTreeMap<String, AtomicU64>>;
 
-pub(crate) fn new() -> mpsc::Sender<Internals> {
+pub(crate) fn new(db_driver: impl DbDriver) -> mpsc::Sender<Internals> {
     let (tx, mut rx) = mpsc::channel(perf::channel_size().into());
 
     tokio::spawn(
@@ -114,7 +115,7 @@ pub(crate) fn new() -> mpsc::Sender<Internals> {
             while let Some(msg) = rx.recv().await {
                 match processing(&msg) {
                     Processing::Session => {
-                        process_session(msg, &mut session, counters.as_ref());
+                        process_session(&db_driver, msg, &mut session, counters.as_ref());
                     }
                     Processing::Counters => {
                         tokio::spawn(process_counters(msg, counters.clone()));
@@ -182,7 +183,12 @@ fn increment_counter(counters: &Counters, name: &str) {
     }
 }
 
-fn process_session(msg: Internals, session_saved: &mut Option<Arc<Session>>, counters: &Counters) {
+fn process_session<T: DbDriver>(
+    db_driver: &T,
+    msg: Internals,
+    session_saved: &mut Option<Box<dyn Any + Send>>,
+    counters: &Counters,
+) {
     match msg {
         Internals::CreateSession { session } => {
             if session.is_some() {
@@ -193,22 +199,27 @@ fn process_session(msg: Internals, session_saved: &mut Option<Arc<Session>>, cou
             *session_saved = session;
         }
         Internals::SessionCounters { tx } => {
-            _ = tx.send(if let Some(session) = session_saved {
-                [
-                    (
-                        "total-connections".to_string(),
-                        session.get_metrics().get_total_connections(),
-                    ),
-                    (
-                        "connection-timeouts".to_string(),
-                        session.get_metrics().get_connection_timeouts(),
-                    ),
-                ]
-                .into_iter()
-                .collect()
-            } else {
-                BTreeMap::new()
-            });
+            _ = tx.send(
+                if let Some(session) = session_saved
+                    && let Some(session) = session.downcast_ref::<T::Session>()
+                {
+                    let metrics = db_driver.metrics(session);
+                    [
+                        (
+                            "total-connections".to_string(),
+                            db_driver.total_connections(&metrics),
+                        ),
+                        (
+                            "connection-timeouts".to_string(),
+                            db_driver.connection_timeouts(&metrics),
+                        ),
+                    ]
+                    .into_iter()
+                    .collect()
+                } else {
+                    BTreeMap::new()
+                },
+            );
         }
         _ => unreachable!(),
     }

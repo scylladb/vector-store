@@ -39,7 +39,6 @@ use futures::StreamExt;
 use futures::TryStreamExt;
 use futures::stream::BoxStream;
 use itertools::Itertools;
-use scylla::client::session::Session;
 use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
 use scylla::routing::Token;
@@ -140,13 +139,13 @@ pub(crate) struct NonRetryable;
 
 /// A wrapper around a Session watch.
 #[derive(Clone)]
-pub(crate) struct DbIndexSession {
-    session_rx: watch::Receiver<Option<Arc<Session>>>,
+pub(crate) struct DbIndexSession<T: DbDriver> {
+    session_rx: watch::Receiver<Option<T::Session>>,
     alive_rx: watch::Receiver<bool>,
 }
 
-impl DbIndexSession {
-    fn new(session_rx: watch::Receiver<Option<Arc<Session>>>) -> (Self, SessionGuard) {
+impl<T: DbDriver> DbIndexSession<T> {
+    fn new(session_rx: watch::Receiver<Option<T::Session>>) -> (Self, SessionGuard) {
         let (alive_tx, alive_rx) = watch::channel(true);
         (
             Self {
@@ -157,8 +156,7 @@ impl DbIndexSession {
         )
     }
 
-    /// Waits for a session to be available, or returns Err if the index is no longer alive.
-    pub(crate) async fn wait_for_session(&self) -> anyhow::Result<Arc<Session>> {
+    pub(crate) async fn wait_for_session(&self) -> anyhow::Result<T::Session> {
         let mut session_rx = self.session_rx.clone();
         let mut alive_rx = self.alive_rx.clone();
         tokio::select! {
@@ -169,14 +167,14 @@ impl DbIndexSession {
             }
 
             session = session_rx.wait_for(|session| session.is_some()) => {
-                session.map(|session| Arc::clone(session.as_ref().unwrap()))
+                session.map(|session| session.as_ref().unwrap().clone())
                     .map_err(|err| anyhow!("DbIndexSession: session stream is no longer alive: {err}"))
             }
         }
     }
 
     /// Waits for a session change, or returns None if the index is no longer alive.
-    pub(crate) async fn wait_for_changed(&mut self) -> Option<Option<Arc<Session>>> {
+    pub(crate) async fn wait_for_changed(&mut self) -> Option<Option<T::Session>> {
         tokio::select! {
             biased;
 
@@ -194,7 +192,7 @@ impl DbIndexSession {
     }
 
     /// Returns current session or returns None if the index is no longer alive.
-    pub(crate) fn current(&self) -> Option<Option<Arc<Session>>> {
+    pub(crate) fn current(&self) -> Option<Option<T::Session>> {
         self.alive_rx
             .borrow()
             .then(|| self.session_rx.borrow().clone())
@@ -223,7 +221,7 @@ impl Drop for SessionGuard {
 pub(crate) async fn new<T: DbDriver>(
     config_rx: watch::Receiver<Arc<Config>>,
     db_driver: T,
-    session_rx: watch::Receiver<Option<Arc<Session>>>,
+    session_rx: watch::Receiver<Option<T::Session>>,
     metadata: IndexMetadata,
     node_state: mpsc::Sender<NodeState>,
     internals: mpsc::Sender<Internals>,
@@ -397,7 +395,7 @@ async fn process<T: DbDriver>(
 
 struct Statements<T: DbDriver> {
     db_driver: T,
-    db_session: DbIndexSession,
+    db_session: DbIndexSession<T>,
     primary_key_columns: NonemptyArc<ColumnName>,
     target_columns: NonemptyArc<ColumnName>,
     nonpk_partition_key_columns: Box<[ColumnName]>,
@@ -415,12 +413,12 @@ struct Statements<T: DbDriver> {
 impl<T: DbDriver> Statements<T> {
     async fn new(
         db_driver: T,
-        db_session: DbIndexSession,
+        db_session: DbIndexSession<T>,
         metadata: IndexMetadata,
     ) -> anyhow::Result<Self> {
         let session = db_session.wait_for_session().await?;
 
-        session.await_schema_agreement().await?;
+        db_driver.await_schema_agreement(&session).await?;
 
         let cluster = db_driver.cluster(&session);
         let table = db_driver
@@ -515,7 +513,7 @@ impl<T: DbDriver> Statements<T> {
 
         let vectors: Vec<Option<Vector>> = futures::stream::iter(keys)
             .map(|key| {
-                let session = Arc::clone(&session);
+                let session = session.clone();
                 let permits = Arc::clone(&fetch_permits);
                 async move {
                     let _permit = permits
@@ -547,7 +545,7 @@ impl<T: DbDriver> Statements<T> {
 
     async fn fetch_vector(
         &self,
-        session: Arc<Session>,
+        session: T::Session,
         key: PrimaryKey,
     ) -> anyhow::Result<Option<Vector>> {
         self.db_driver

@@ -23,7 +23,6 @@ use crate::perf;
 use ::time::OffsetDateTime;
 use anyhow::Context;
 use futures::FutureExt;
-use scylla::client::session::Session;
 use std::future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -110,7 +109,7 @@ impl CdcReaderConfig {
 pub(crate) fn new<T: DbDriver>(
     config_rx: watch::Receiver<Arc<Config>>,
     db_driver: T,
-    mut db_session: DbIndexSession,
+    mut db_session: DbIndexSession<T>,
     metadata: IndexMetadata,
     internals: mpsc::Sender<Internals>,
     metrics: Arc<Metrics>,
@@ -292,7 +291,7 @@ impl<T: DbDriver> CdcReaderState<T> {
     async fn restart(
         &mut self,
         params: CdcReaderParams,
-        session: &Arc<Session>,
+        session: &T::Session,
         metadata: &IndexMetadata,
         tx_embeddings: &mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
         internals: &mpsc::Sender<Internals>,
@@ -304,7 +303,7 @@ impl<T: DbDriver> CdcReaderState<T> {
             self.start,
             params.clone(),
             self.db_driver.clone(),
-            Arc::clone(session),
+            session.clone(),
             metadata.clone(),
             tx_embeddings.clone(),
             Arc::clone(&self.semaphore),
@@ -346,7 +345,7 @@ impl<T: DbDriver> CdcReaderState<T> {
     /// Handles a session change by restarting or stopping the CDC reader.
     async fn handle_session_change(
         &mut self,
-        session: Option<Arc<Session>>,
+        session: Option<T::Session>,
         config_rx: &watch::Receiver<Arc<Config>>,
         metadata: &IndexMetadata,
         tx_embeddings: &mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
@@ -382,7 +381,7 @@ impl<T: DbDriver> CdcReaderState<T> {
     /// Completes a pending backoff by restarting the CDC reader.
     async fn restart_after_backoff(
         &mut self,
-        session: Option<Arc<Session>>,
+        session: Option<T::Session>,
         config_rx: &watch::Receiver<Arc<Config>>,
         metadata: &IndexMetadata,
         tx_embeddings: &mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
@@ -450,7 +449,7 @@ async fn create_cdc_reader<T: DbDriver>(
     start: Duration,
     params: CdcReaderParams,
     db_driver: T,
-    session: Arc<Session>,
+    session: T::Session,
     metadata: IndexMetadata,
     tx_embeddings: mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
     semaphore: Arc<Semaphore>,
@@ -462,7 +461,7 @@ async fn create_cdc_reader<T: DbDriver>(
 )> {
     let consumer_factory = CdcConsumerFactory::new(
         db_driver.clone(),
-        Arc::clone(&session),
+        session.clone(),
         &metadata,
         Arc::clone(&metrics),
         tx_embeddings,

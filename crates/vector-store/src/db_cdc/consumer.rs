@@ -19,7 +19,6 @@ use crate::db_index;
 use anyhow::anyhow;
 use anyhow::bail;
 use async_trait::async_trait;
-use scylla::client::session::Session;
 use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
 use scylla::value::CqlValue;
@@ -42,7 +41,7 @@ enum Operation {
 
 struct CdcConsumerData<T: DbDriver> {
     db_driver: T,
-    session: Arc<Session>,
+    session: T::Session,
     st_select_values: T::Statement,
     index_key: IndexKey,
     primary_key_columns: NonemptyArc<ColumnName>,
@@ -255,7 +254,7 @@ impl<T: DbDriver> ConsumerFactory for CdcConsumerFactory<T> {
 impl<T: DbDriver> CdcConsumerFactory<T> {
     pub(super) async fn new(
         db_driver: T,
-        session: Arc<Session>,
+        session: T::Session,
         metadata: &IndexMetadata,
         metrics: Arc<Metrics>,
         tx: mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
