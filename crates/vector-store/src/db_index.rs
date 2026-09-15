@@ -51,6 +51,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
+use tap::Pipe;
 use tokio::sync::Notify;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
@@ -421,13 +422,16 @@ impl<T: DbDriver> Statements<T> {
 
         session.await_schema_agreement().await?;
 
-        let cluster_state = session.get_cluster_state();
-        let table = cluster_state
-            .get_keyspace(&metadata.keyspace_name)
-            .ok_or_else(|| anyhow!("keyspace {} does not exist", metadata.keyspace_name))?
-            .tables
-            .get(metadata.table_name.as_ref())
-            .ok_or_else(|| anyhow!("table {} does not exist", metadata.table_name))?;
+        let cluster = db_driver.cluster(&session);
+        let table = db_driver
+            .table(&cluster, &metadata.keyspace_name, &metadata.table_name)
+            .ok_or_else(|| {
+                anyhow!(
+                    "table {}.{} does not exist",
+                    metadata.keyspace_name,
+                    metadata.table_name
+                )
+            })?;
 
         let primary_key_columns = metadata.primary_key_columns.clone();
         let nonpk_partition_key_columns: Box<[_]> = metadata
@@ -450,12 +454,11 @@ impl<T: DbDriver> Statements<T> {
         let filtering_columns: Arc<[_]> = metadata.nonpk_filtering_columns().cloned().collect();
 
         let is_alternator = KeyspaceIdentifier::from(&metadata.keyspace_name).is_alternator();
-        let real_columns: HashMap<ColumnName, NativeType> = table
-            .columns
-            .iter()
+        let real_columns: HashMap<ColumnName, NativeType> = db_driver
+            .columns(table)
             .filter_map(|(name, coltype)| {
                 if let ColumnType::Native(typ) = &coltype.typ {
-                    Some((ColumnName::from(name.clone()), typ.clone()))
+                    Some((name, typ.clone()))
                 } else {
                     None
                 }
@@ -637,18 +640,12 @@ impl<T: DbDriver> Statements<T> {
     }
 
     async fn nr_shards_in_cluster(&self) -> anyhow::Result<NonZeroUsize> {
-        Ok(NonZeroUsize::try_from(
-            self.db_session
-                .wait_for_session()
-                .await?
-                .get_cluster_state()
-                .get_nodes_info()
-                .iter()
-                .filter_map(|node| node.sharder())
-                .map(|sharder| sharder.nr_shards.get() as usize)
-                .sum::<usize>(),
-        )
-        .unwrap_or(NonZeroUsize::new(1).unwrap()))
+        Ok(self
+            .db_session
+            .wait_for_session()
+            .await?
+            .pipe(|session| self.db_driver.cluster(&session))
+            .pipe(|cluster| self.db_driver.nr_shards(&cluster)))
     }
 
     // Parallel queries = (cores in cluster) * (smuge factor)
@@ -670,22 +667,17 @@ impl<T: DbDriver> Statements<T> {
     /// the lowest token. The highest possible token value is not decremented, because it doesn't
     /// start a new range.
     async fn fullscan_ranges(&self) -> anyhow::Result<impl Iterator<Item = (Token, Token)>> {
-        let session = self.db_session.wait_for_session().await?;
+        let cluster = self
+            .db_session
+            .wait_for_session()
+            .await?
+            .pipe(|session| self.db_driver.cluster(&session));
 
         const TOKEN_MAX: i64 = i64::MAX; // the highest possible token value in the ScyllaDB
         const TOKEN_MIN: i64 = -TOKEN_MAX; // the lowest possible token value in the ScyllaDB
 
         let tokens = iter::once(Token::new(TOKEN_MIN))
-            .chain(
-                session
-                    .get_cluster_state()
-                    .replica_locator()
-                    .ring()
-                    .iter()
-                    .map(|(token, _)| token)
-                    .copied()
-                    .collect_vec(),
-            )
+            .chain(self.db_driver.token_ring(&cluster))
             .collect_vec();
         Ok(tokens
             .into_iter()
