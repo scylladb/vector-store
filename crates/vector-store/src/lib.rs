@@ -11,7 +11,6 @@ pub mod db;
 mod db_cdc;
 mod db_driver;
 pub mod db_index;
-mod db_index_backend;
 mod db_value;
 mod distance;
 mod engine;
