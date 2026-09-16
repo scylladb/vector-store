@@ -18,9 +18,13 @@ use ::scylla::client::session::Session;
 use ::scylla::cluster::metadata::Column;
 use ::scylla::routing::Token;
 use futures::Stream;
+use futures::future::RemoteHandle;
+use scylla_cdc::checkpoints::CDCCheckpointSaver;
+use scylla_cdc::consumer::ConsumerFactory;
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::time::Duration;
 use uuid::Uuid;
 
 pub struct DbIndexInfo {
@@ -30,10 +34,23 @@ pub struct DbIndexInfo {
     pub options: BTreeMap<String, String>,
 }
 
+#[derive(Default)]
+pub struct CdcLogReaderConfig {
+    keyspace: Option<KeyspaceName>,
+    table_name: Option<TableName>,
+    consumer_factory: Option<Arc<dyn ConsumerFactory>>,
+    start_timestamp: Option<Duration>,
+    safety_interval: Option<Duration>,
+    sleep_interval: Option<Duration>,
+    should_save_progress: Option<bool>,
+    checkpoint_saver: Option<Arc<dyn CDCCheckpointSaver>>,
+}
+
 pub trait DbDriver: Clone + Send + Sync + 'static {
     type Statement: Send + Sync;
     type Cluster: Send + Sync;
     type Table;
+    type CdcLogReader: Send;
 
     fn connect(
         &self,
@@ -162,6 +179,57 @@ pub trait DbDriver: Clone + Send + Sync + 'static {
     -> impl Iterator<Item = (ColumnName, &'a Column)>;
 
     fn column<'a>(&self, table: &'a Self::Table, column: &ColumnName) -> Option<&'a Column>;
+
+    fn cdc_log_reader(
+        &self,
+        session: Arc<Session>,
+        config: CdcLogReaderConfig,
+    ) -> impl Future<Output = anyhow::Result<(Self::CdcLogReader, RemoteHandle<anyhow::Result<()>>)>>
+    + Send;
+
+    fn stop_cdc_log_reader(&self, cdc_log_reader: Self::CdcLogReader);
+}
+
+impl CdcLogReaderConfig {
+    pub fn keyspace(mut self, keyspace: KeyspaceName) -> Self {
+        self.keyspace = Some(keyspace);
+        self
+    }
+
+    pub fn table_name(mut self, table_name: TableName) -> Self {
+        self.table_name = Some(table_name);
+        self
+    }
+
+    pub fn consumer_factory(mut self, consumer_factory: Arc<dyn ConsumerFactory>) -> Self {
+        self.consumer_factory = Some(consumer_factory);
+        self
+    }
+
+    pub fn start_timestamp(mut self, start_timestamp: Duration) -> Self {
+        self.start_timestamp = Some(start_timestamp);
+        self
+    }
+
+    pub fn safety_interval(mut self, safety_interval: Duration) -> Self {
+        self.safety_interval = Some(safety_interval);
+        self
+    }
+
+    pub fn sleep_interval(mut self, sleep_interval: Duration) -> Self {
+        self.sleep_interval = Some(sleep_interval);
+        self
+    }
+
+    pub fn should_save_progress(mut self, should_save_progress: bool) -> Self {
+        self.should_save_progress = Some(should_save_progress);
+        self
+    }
+
+    pub fn checkpoint_saver(mut self, checkpoint_saver: Arc<dyn CDCCheckpointSaver>) -> Self {
+        self.checkpoint_saver = Some(checkpoint_saver);
+        self
+    }
 }
 
 pub fn new_scylla() -> impl DbDriver {
@@ -181,6 +249,8 @@ pub(crate) mod tests {
         type Statement = ();
         type Cluster = ();
         type Table = ();
+        type CdcLogReader = ();
+
         async fn connect(&self, _: Arc<Config>) -> anyhow::Result<Arc<Session>> {
             unimplemented!()
         }
@@ -199,6 +269,8 @@ pub(crate) mod tests {
         ) -> anyhow::Result<Uuid> {
             unimplemented!()
         }
+
+        // Implement other methods similarly, returning unimplemented!() for each
 
         async fn prepare_get_indexes(&self, _: &Session) -> anyhow::Result<Self::Statement> {
             unimplemented!()
@@ -347,6 +419,18 @@ pub(crate) mod tests {
         }
 
         fn column<'a>(&self, _: &'a Self::Table, _: &ColumnName) -> Option<&'a Column> {
+            unimplemented!()
+        }
+
+        async fn cdc_log_reader(
+            &self,
+            _: Arc<Session>,
+            _: CdcLogReaderConfig,
+        ) -> anyhow::Result<(Self::CdcLogReader, RemoteHandle<anyhow::Result<()>>)> {
+            unimplemented!()
+        }
+
+        fn stop_cdc_log_reader(&self, _: Self::CdcLogReader) {
             unimplemented!()
         }
     }
