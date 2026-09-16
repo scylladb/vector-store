@@ -15,6 +15,7 @@ use crate::db_cdc::READER_FINE;
 use crate::db_cdc::READER_WIDE;
 use crate::db_cdc::checkpoint_saver::MetricsCheckpointSaver;
 use crate::db_cdc::consumer::CdcConsumerFactory;
+use crate::db_driver::CdcLogReaderConfig;
 use crate::db_index::DbIndexSession;
 use crate::internals::Internals;
 use crate::internals::InternalsExt;
@@ -23,7 +24,6 @@ use ::time::OffsetDateTime;
 use anyhow::Context;
 use futures::FutureExt;
 use scylla::client::session::Session;
-use scylla_cdc::log_reader::CDCLogReaderBuilder;
 use std::future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -208,7 +208,7 @@ pub(crate) fn new<T: DbDriver>(
 /// State for managing a CDC reader's lifecycle.
 struct CdcReaderState<T: DbDriver> {
     db_driver: T,
-    reader: Option<scylla_cdc::log_reader::CDCLogReader>,
+    reader: Option<T::CdcLogReader>,
     handler_task: Option<tokio::task::JoinHandle<Duration>>,
     shutdown_notify: Arc<Notify>,
     error_notify: Arc<Notify>,
@@ -278,8 +278,8 @@ impl<T: DbDriver> CdcReaderState<T> {
 
     /// Stops the current CDC reader and handler task, preserving the last checkpoint.
     async fn stop(&mut self) {
-        if let Some(mut reader) = self.reader.take() {
-            reader.stop();
+        if let Some(reader) = self.reader.take() {
+            self.db_driver.stop_cdc_log_reader(reader);
         }
         if let Some(task) = self.handler_task.take() {
             self.shutdown_notify.notify_one();
@@ -457,7 +457,7 @@ async fn create_cdc_reader<T: DbDriver>(
     metrics: Arc<Metrics>,
     reader_name: &str,
 ) -> anyhow::Result<(
-    scylla_cdc::log_reader::CDCLogReader,
+    T::CdcLogReader,
     impl std::future::Future<Output = anyhow::Result<()>>,
 )> {
     let consumer_factory = CdcConsumerFactory::new(
@@ -484,17 +484,19 @@ async fn create_cdc_reader<T: DbDriver>(
         reader_name.to_string(),
     ));
 
-    CDCLogReaderBuilder::new()
-        .session(session)
-        .keyspace(metadata.keyspace_name.as_ref())
-        .table_name(metadata.table_name.as_ref())
-        .consumer_factory(Arc::new(consumer_factory))
-        .start_timestamp(cdc_start)
-        .safety_interval(params.safety_interval)
-        .sleep_interval(params.sleep_interval)
-        .should_save_progress(true)
-        .checkpoint_saver(checkpoint_saver)
-        .build()
+    db_driver
+        .cdc_log_reader(
+            session,
+            CdcLogReaderConfig::default()
+                .keyspace(metadata.keyspace_name)
+                .table_name(metadata.table_name)
+                .consumer_factory(Arc::new(consumer_factory))
+                .start_timestamp(cdc_start)
+                .safety_interval(params.safety_interval)
+                .sleep_interval(params.sleep_interval)
+                .should_save_progress(true)
+                .checkpoint_saver(checkpoint_saver),
+        )
         .await
         .context(format!("Failed to build {reader_name} CDC log reader"))
 }

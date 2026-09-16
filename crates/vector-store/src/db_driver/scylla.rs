@@ -15,6 +15,7 @@ use crate::PrimaryKey;
 use crate::TableIdentifier;
 use crate::TableName;
 use crate::Vector;
+use crate::db_driver::CdcLogReaderConfig;
 use crate::db_driver::DbDriver;
 use crate::db_driver::DbIndexInfo;
 use crate::db_index::NonRetryable;
@@ -23,6 +24,7 @@ use anyhow::Context;
 use anyhow::anyhow;
 use futures::Stream;
 use futures::TryStreamExt;
+use futures::future::RemoteHandle;
 use itertools::Itertools;
 use rustls::ClientConfig;
 use rustls::RootCertStore;
@@ -38,6 +40,8 @@ use scylla::routing::Token;
 use scylla::statement::Consistency;
 use scylla::statement::prepared::PreparedStatement;
 use scylla_cdc::CqlIdentifier;
+use scylla_cdc::log_reader::CDCLogReader;
+use scylla_cdc::log_reader::CDCLogReaderBuilder;
 use secrecy::ExposeSecret;
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
@@ -56,6 +60,7 @@ impl DbDriver for ScyllaDriver {
     type Statement = PreparedStatement;
     type Cluster = Arc<ClusterState>;
     type Table = Table;
+    type CdcLogReader = CDCLogReader;
 
     async fn connect(&self, config: Arc<Config>) -> anyhow::Result<Arc<Session>> {
         let mut builder = SessionBuilder::new()
@@ -530,6 +535,77 @@ impl DbDriver for ScyllaDriver {
 
     fn column<'a>(&self, table: &'a Self::Table, column: &ColumnName) -> Option<&'a Column> {
         table.columns.get(column.as_ref())
+    }
+
+    async fn cdc_log_reader(
+        &self,
+        session: Arc<Session>,
+        config: CdcLogReaderConfig,
+    ) -> anyhow::Result<(Self::CdcLogReader, RemoteHandle<anyhow::Result<()>>)> {
+        CDCLogReaderBuilder::new()
+            .session(session)
+            .pipe(|builder| {
+                if let Some(keyspace) = config.keyspace {
+                    builder.keyspace(keyspace.as_ref())
+                } else {
+                    builder
+                }
+            })
+            .pipe(|builder| {
+                if let Some(table_name) = config.table_name {
+                    builder.table_name(table_name.as_ref())
+                } else {
+                    builder
+                }
+            })
+            .pipe(|builder| {
+                if let Some(consumer_factory) = config.consumer_factory {
+                    builder.consumer_factory(consumer_factory)
+                } else {
+                    builder
+                }
+            })
+            .pipe(|builder| {
+                if let Some(start_timestamp) = config.start_timestamp {
+                    builder.start_timestamp(start_timestamp)
+                } else {
+                    builder
+                }
+            })
+            .pipe(|builder| {
+                if let Some(safety_interval) = config.safety_interval {
+                    builder.safety_interval(safety_interval)
+                } else {
+                    builder
+                }
+            })
+            .pipe(|builder| {
+                if let Some(sleep_interval) = config.sleep_interval {
+                    builder.sleep_interval(sleep_interval)
+                } else {
+                    builder
+                }
+            })
+            .pipe(|builder| {
+                if let Some(should_save_progress) = config.should_save_progress {
+                    builder.should_save_progress(should_save_progress)
+                } else {
+                    builder
+                }
+            })
+            .pipe(|builder| {
+                if let Some(checkpoint_saver) = config.checkpoint_saver {
+                    builder.checkpoint_saver(checkpoint_saver)
+                } else {
+                    builder
+                }
+            })
+            .build()
+            .await
+    }
+
+    fn stop_cdc_log_reader(&self, mut cdc_log_reader: Self::CdcLogReader) {
+        cdc_log_reader.stop();
     }
 }
 
