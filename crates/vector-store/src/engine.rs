@@ -202,7 +202,7 @@ fn build_table(
         metadata.primary_key_columns.clone(),
         metadata.partition_key_count,
         partition_key_columns,
-        metadata.target_columns.len(),
+        metadata.target_columns.clone(),
         filtering_columns,
         table_columns,
     )

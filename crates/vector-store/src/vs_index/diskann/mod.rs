@@ -36,6 +36,7 @@ use crate::vs_index::validator;
 use crate::worker::Worker;
 use crate::worker::WorkerExt;
 use anyhow::Context;
+use anyhow::bail;
 use diskann::graph::Config as DiskannConfig;
 use diskann::graph::DiskANNIndex;
 use diskann::graph::InplaceDeleteMethod;
@@ -524,11 +525,19 @@ where
     T: TableSearch + Send + Sync + 'static,
     B: DiskannBackend,
 {
+    let partition_id = partition.partition_id;
+    // Only usearch can reconstruct the vector it stored, so asking this index
+    // for its target column is an error rather than a silently missing value.
+    if let Some(target_column) = table.read().unwrap().target_column(partition_id.index_id())
+        && return_columns.contains(&target_column)
+    {
+        bail!("ann: returning the indexed column '{target_column}' is not supported by this index");
+    }
+
     let matches = search(backend, partition, params, &embedding, limit.0.get())
         .await
         .context("ann search failed")?;
 
-    let partition_id = partition.partition_id;
     let table = table.read().unwrap();
     let mut primary_keys = Vec::new();
     let mut distances = Vec::new();

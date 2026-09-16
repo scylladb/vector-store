@@ -289,6 +289,13 @@ struct Index {
 
     data: IndexData,
 
+    /// The columns this index indexes - for a vector index, the single
+    /// column holding the vector. Unlike the filtering columns below, no
+    /// value for them is stored in the table: a target column's value lives
+    /// in the index itself, which can reconstruct it when an ANN request
+    /// asks for that column.
+    target_columns: NonemptyArc<ColumnName>,
+
     filtering_columns: Arc<[ColumnName]>,
 
     /// Timestamps of the last vector update
@@ -323,14 +330,15 @@ impl Index {
 
     fn new_global(
         index_id: IndexId,
-        column_targets_count: NonZeroUsize,
+        target_columns: NonemptyArc<ColumnName>,
         filtering_columns: Arc<[ColumnName]>,
     ) -> Self {
         Self {
             index_id,
             data: IndexData::Global,
+            values_timestamps: ColumnVecChunks::new(ChunkTimestamps::new(target_columns.len())),
+            target_columns,
             filtering_columns,
-            values_timestamps: ColumnVecChunks::new(ChunkTimestamps::new(column_targets_count)),
         }
     }
 
@@ -338,13 +346,14 @@ impl Index {
         index_id: IndexId,
         primary_key_columns: &[ColumnName],
         partition_key_columns: NonemptyArc<ColumnName>,
-        column_targets_count: NonZeroUsize,
+        target_columns: NonemptyArc<ColumnName>,
         filtering_columns: Arc<[ColumnName]>,
     ) -> Self {
         Self {
             index_id,
+            values_timestamps: ColumnVecChunks::new(ChunkTimestamps::new(target_columns.len())),
+            target_columns,
             filtering_columns,
-            values_timestamps: ColumnVecChunks::new(ChunkTimestamps::new(column_targets_count)),
             data: IndexData::Local {
                 nonpk_partition_key_columns: partition_key_columns
                     .iter()
@@ -447,7 +456,7 @@ impl Table {
         primary_key_columns: NonemptyArc<ColumnName>,
         partition_primary_key_count: NonZeroUsize,
         partition_key_columns: Option<NonemptyArc<ColumnName>>,
-        column_targets_count: NonZeroUsize,
+        target_columns: NonemptyArc<ColumnName>,
         filtering_columns: Arc<[ColumnName]>,
         table_columns: Arc<HashMap<ColumnName, NativeType>>,
     ) -> anyhow::Result<Self> {
@@ -468,15 +477,11 @@ impl Table {
                 index_id,
                 primary_key_columns.as_slice(),
                 partition_key_columns.clone(),
-                column_targets_count,
+                target_columns,
                 Arc::clone(&filtering_columns),
             )
         } else {
-            Index::new_global(
-                index_id,
-                column_targets_count,
-                Arc::clone(&filtering_columns),
-            )
+            Index::new_global(index_id, target_columns, Arc::clone(&filtering_columns))
         };
         indexes.insert(index_id, index);
         index_ids.insert(index_key, index_id);
@@ -1145,6 +1150,11 @@ pub(crate) trait TableSearch {
         primary_id: PrimaryId,
         column: &ColumnName,
     ) -> Option<CqlValue>;
+
+    /// The column indexed by the given index - the one holding the vector.
+    /// No value for it is stored in the table (column_value_for() always
+    /// returns None for it): it lives in the index itself.
+    fn target_column(&self, index_id: IndexId) -> Option<ColumnName>;
 }
 
 impl TableSearch for Table {
@@ -1296,6 +1306,14 @@ impl TableSearch for Table {
         self.columns
             .get(column)
             .and_then(|col| col.get(primary_id, &self.primary_keys))
+    }
+
+    fn target_column(&self, index_id: IndexId) -> Option<ColumnName> {
+        // A vector index has exactly one target column, so its first target
+        // column is its only one.
+        self.indexes
+            .get(&index_id)
+            .map(|index| index.target_columns.first().clone())
     }
 }
 
@@ -1454,7 +1472,7 @@ mod tests {
                 NonemptyArc::new(["pk", "c1", "c2"]).unwrap(),
                 NonZeroUsize::new(1).unwrap(),
                 partition_key_columns.clone(),
-                NonZeroUsize::new(1).unwrap(),
+                NonemptyArc::new(["embedding"]).unwrap(),
                 filtering_columns,
                 Arc::new(
                     [
@@ -1672,7 +1690,7 @@ mod tests {
             NonemptyArc::new(["pk"]).unwrap(),
             NonZeroUsize::new(1).unwrap(),
             None,
-            NonZeroUsize::new(1).unwrap(),
+            NonemptyArc::new(["embedding"]).unwrap(),
             filtering_columns,
             Arc::new(
                 [
@@ -1795,7 +1813,7 @@ mod tests {
             NonemptyArc::new(["p"]).unwrap(),
             NonZeroUsize::new(1).unwrap(),
             None,
-            NonZeroUsize::new(1).unwrap(),
+            NonemptyArc::new(["embedding"]).unwrap(),
             Arc::new([]),
             Arc::new([("p".into(), NativeType::Int)].into_iter().collect()),
         )
@@ -1959,7 +1977,7 @@ mod tests {
                 primary_key_columns,
                 NonZeroUsize::new(1).unwrap(),
                 partition_key_columns,
-                NonZeroUsize::new(1).unwrap(),
+                NonemptyArc::new(["embedding"]).unwrap(),
                 Arc::new(["f".into()]),
                 Arc::new(
                     [
@@ -2059,7 +2077,7 @@ mod tests {
                 primary_key_columns,
                 NonZeroUsize::new(1).unwrap(),
                 partition_key_columns,
-                NonZeroUsize::new(1).unwrap(),
+                NonemptyArc::new(["embedding"]).unwrap(),
                 Arc::new([]),
                 Arc::new(
                     [("p".into(), NativeType::Int), ("c".into(), NativeType::Int)]
@@ -2132,7 +2150,7 @@ mod tests {
             primary_key_columns,
             NonZeroUsize::new(1).unwrap(),
             partition_key_columns,
-            NonZeroUsize::new(1).unwrap(),
+            NonemptyArc::new(["embedding"]).unwrap(),
             Arc::new([]),
             Arc::new(
                 [

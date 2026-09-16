@@ -385,6 +385,24 @@ async fn ann(
             .unwrap_or_else(|_| trace!("ann: unable to send response"));
     }
 
+    // Only usearch can reconstruct the vector it stored, so asking this index
+    // for its target column is an error rather than a silently missing value.
+    let target_column = {
+        let table = table.read().unwrap();
+        table
+            .index_id(&key)
+            .and_then(|index_id| table.target_column(index_id))
+    };
+    if let Some(target_column) = target_column
+        && return_columns.contains(&target_column)
+    {
+        return tx_ann
+            .send(Err(anyhow!(
+                "ann: returning the indexed column '{target_column}' is not supported by this index"
+            )))
+            .unwrap_or_else(|_| trace!("ann: unable to send response"));
+    }
+
     let response = client
         .search(opensearch::SearchParts::Index(&[key.as_ref().as_ref()]))
         .body(json!({

@@ -113,6 +113,17 @@ pub(crate) fn to_json(value: CqlValue) -> anyhow::Result<Value> {
             bail!("a primary key column holds an empty value, which has no JSON representation")
         }
 
+        // A vector becomes a JSON array of its elements. Unlike every other
+        // case here, this one is not used for primary keys - it is how an
+        // index's own target column is returned in an ANN response's
+        // column_values, reconstructed from the index.
+        CqlValue::Vector(values) => Ok(Value::Array(
+            values
+                .into_iter()
+                .map(to_json)
+                .collect::<anyhow::Result<Vec<_>>>()?,
+        )),
+
         _ => bail!("unsupported CQL type for a primary key column"),
     }
 }
