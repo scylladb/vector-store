@@ -1214,11 +1214,17 @@ fn check_memory_allocation(
     true
 }
 
+/// Pack a vector into one bit per dimension, for a 1-bit quantized index.
+/// The first dimension of each group of 8 becomes the byte's most significant
+/// bit, which is the order usearch itself uses when it reads such a vector
+/// back. Bit order doesn't affect a search - Hamming distance is the same
+/// under any bit permutation applied to both the stored and the query vectors
+/// - but it does decide which bit each dimension is reported as.
 fn f32_to_b1x8(f32_vec: &[f32]) -> Vec<b1x8> {
     fn chunk_to_byte(chunk: impl Iterator<Item = f32>) -> b1x8 {
         chunk.enumerate().fold(b1x8(0u8), |byte, (i, val)| {
             if val > 0.0 {
-                b1x8(byte.0 | (1 << i))
+                b1x8(byte.0 | (1 << (7 - i)))
             } else {
                 byte
             }
@@ -1669,21 +1675,21 @@ mod tests {
 
     #[test]
     fn f32_to_b1x8_single_byte() {
-        // =< 0 clears bits and > 0 sets bits
+        // =< 0 clears bits and > 0 sets bits, first dimension first
         let b1_vec = f32_to_b1x8(&[1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0]);
         assert_eq!(b1_vec.len(), 1);
-        assert_eq!(b1x8_to_u8_vec(&b1_vec), &[0b00001111]);
+        assert_eq!(b1x8_to_u8_vec(&b1_vec), &[0b11110000]);
     }
 
     #[test]
     fn f32_to_b1x8_multiple_bytes() {
         let input = vec![
-            1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, // 0b01010101
-            -1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 1.0, // 0b11110000
+            1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, // 0b10101010
+            -1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 1.0, // 0b00001111
         ];
         let b1_vec = f32_to_b1x8(&input);
         assert_eq!(b1_vec.len(), 2);
-        assert_eq!(b1x8_to_u8_vec(&b1_vec), &[0b01010101, 0b11110000]);
+        assert_eq!(b1x8_to_u8_vec(&b1_vec), &[0b10101010, 0b00001111]);
     }
 
     #[test]
@@ -1697,11 +1703,11 @@ mod tests {
     #[test]
     fn f32_to_b1x8_remainder() {
         let input = vec![
-            1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, // 0b01010101
-            1.0, -1.0, 1.0, // 0b00000101
+            1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, // 0b10101010
+            1.0, -1.0, 1.0, // 0b10100000
         ];
         let b1_vec = f32_to_b1x8(&input);
         assert_eq!(b1_vec.len(), 2);
-        assert_eq!(b1x8_to_u8_vec(&b1_vec), &[0b01010101, 0b00000101]);
+        assert_eq!(b1x8_to_u8_vec(&b1_vec), &[0b10101010, 0b10100000]);
     }
 }
