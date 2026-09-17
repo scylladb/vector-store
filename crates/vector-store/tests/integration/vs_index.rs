@@ -599,6 +599,102 @@ async fn ann_return_columns_null_for_column_not_tracked_by_index(#[case] config:
     );
 }
 
+/// An ANN request may also ask for the index's own target column - the one
+/// holding the vector. Unlike a filtering column, the table stores no value
+/// for it, so it is reconstructed from the index itself.
+/// This is usearch-only: the other backends can't reconstruct a vector, and
+/// reject the request instead (see the test below).
+#[rstest]
+#[timeout(Duration::from_secs(10))]
+#[tokio::test]
+async fn ann_return_columns_includes_target_vector() {
+    crate::enable_tracing();
+
+    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+        usearch_test_config(),
+        DbIndexPartitioning::Global,
+        ["pk".into()],
+        1,
+        [("pk".to_string().into(), NativeType::Int)],
+        Some(db_basic::scan_fn_vectors([(
+            [CqlValue::Int(1)].into(),
+            Some(vec![1., 2., -3.].into()),
+            [].into(),
+            Timestamp::from_millis(10),
+        )])),
+        None,
+        Some(1),
+    )
+    .await;
+
+    let response = client
+        .post_ann_data(
+            &index.keyspace_name.into(),
+            &index.index_name.into(),
+            &PostIndexAnnRequest {
+                vector: vec![1., 2., -3.].into(),
+                filter: None,
+                limit: NonZeroUsize::new(1).unwrap().into(),
+                routing: true,
+                return_columns: vec!["embedding".into()],
+            },
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let response: PostIndexAnnResponse = response.json().await.unwrap();
+    assert_eq!(
+        response.column_values.get(&"embedding".into()),
+        Some(&vec![Some(serde_json::json!([1.0, 2.0, -3.0]))])
+    );
+}
+
+/// Only usearch can reconstruct the vector it indexed, so asking another
+/// backend for the target column's value must fail loudly rather than come
+/// back as a silently missing value.
+#[rstest]
+#[case::diskann(diskann_test_config())]
+#[case::diskann_scylla(diskann_scylla_test_config())]
+#[timeout(Duration::from_secs(10))]
+#[tokio::test]
+async fn ann_return_columns_target_vector_unsupported(#[case] config: Config) {
+    crate::enable_tracing();
+
+    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+        config,
+        DbIndexPartitioning::Global,
+        ["pk".into()],
+        1,
+        [("pk".to_string().into(), NativeType::Int)],
+        Some(db_basic::scan_fn_vectors([(
+            [CqlValue::Int(1)].into(),
+            Some(vec![1., 2., -3.].into()),
+            [].into(),
+            Timestamp::from_millis(10),
+        )])),
+        None,
+        Some(1),
+    )
+    .await;
+
+    let response = client
+        .post_ann_data(
+            &index.keyspace_name.into(),
+            &index.index_name.into(),
+            &PostIndexAnnRequest {
+                vector: vec![1., 2., -3.].into(),
+                filter: None,
+                limit: NonZeroUsize::new(1).unwrap().into(),
+                routing: true,
+                return_columns: vec!["embedding".into()],
+            },
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(response.text().await.unwrap().contains("embedding"));
+}
+
 /// Unlike the `ann()` tests above, the `filtered_ann()` ones are usearch
 /// only: filtered search simply isn't implemented for the other backends -
 /// DiskANN rejects a `FilteredAnn` message with "DiskANN index does not

@@ -35,6 +35,7 @@ use crate::vs_index::validator;
 use crate::worker::Worker;
 use crate::worker::WorkerExt;
 use anyhow::anyhow;
+use scylla::value::CqlValue;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -159,6 +160,12 @@ trait UsearchIndex {
         filter: impl Fn(PrimaryId) -> bool,
     ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<(PrimaryId, Distance)>>>;
 
+    /// Reconstruct the vector stored for primary_id, or None if the index
+    /// holds none. The result is the vector in this index's own quantization,
+    /// which is what a search over it compares against - not necessarily the
+    /// vector that was added.
+    fn get_vector(&self, primary_id: PrimaryId) -> anyhow::Result<Option<Vec<f32>>>;
+
     fn stop(&self);
 }
 
@@ -201,6 +208,14 @@ impl UsearchIndex for ThreadedUsearchIndex {
 
     fn remove(&self, primary_id: PrimaryId) -> anyhow::Result<bool> {
         Ok(self.inner.remove(primary_id.into())? != 0)
+    }
+
+    fn get_vector(&self, primary_id: PrimaryId) -> anyhow::Result<Option<Vec<f32>>> {
+        let mut buffer = vec![0f32; self.inner.dimensions()];
+        if self.inner.get(primary_id.into(), &mut buffer)? == 0 {
+            return Ok(None);
+        }
+        Ok(Some(buffer))
     }
 
     fn search(
@@ -393,6 +408,11 @@ impl UsearchIndex for RwLock<Simulator> {
 
         sim.wait_add_remove(start);
         Ok(removed)
+    }
+
+    fn get_vector(&self, _primary_id: PrimaryId) -> anyhow::Result<Option<Vec<f32>>> {
+        // The simulator only tracks keys, not the vectors themselves.
+        Ok(None)
     }
 
     #[hotpath::measure]
@@ -1082,6 +1102,91 @@ fn validate_dimensions(
     }
 }
 
+/// The value to report for a request which asked for the index's own target
+/// column: the vector reconstructed from the index (see
+/// UsearchIndex::get_vector).
+fn reconstruct_target_vector<I>(
+    partition: &PartitionState<I>,
+    primary_id: PrimaryId,
+) -> anyhow::Result<Option<CqlValue>>
+where
+    I: UsearchIndex + Send + Sync + 'static,
+{
+    let vector = partition.idx.get_vector(primary_id).map_err(|err| {
+        anyhow!("ann: unable to reconstruct the vector for {primary_id:?}: {err}")
+    })?;
+    Ok(vector.map(|vector| CqlValue::Vector(vector.into_iter().map(CqlValue::Float).collect())))
+}
+
+/// Turn the matches of a search into an ANN response: the primary keys of the
+/// rows found, their distances, and the values of the requested columns.
+fn collect_results<I>(
+    partition: &PartitionState<I>,
+    table: &RwLock<impl TableSearch>,
+    return_columns: &[ColumnName],
+    matches: impl Iterator<Item = anyhow::Result<(PrimaryId, Distance)>>,
+) -> AnnR
+where
+    I: UsearchIndex + Send + Sync + 'static,
+{
+    let (primary_keys, distances, mut column_values, target_column, target_primary_ids) = {
+        let table = table.read().unwrap();
+        // The index's target column isn't one of the table's filtering
+        // columns: if asked for, it is reconstructed from the index itself,
+        // below, once the table's lock is no longer held.
+        let target_column = (!return_columns.is_empty())
+            .then(|| table.target_column(partition.partition_id.index_id()))
+            .flatten()
+            .filter(|target_column| return_columns.contains(target_column));
+        let mut primary_keys = Vec::new();
+        let mut distances = Vec::new();
+        let mut column_values = empty_column_values(return_columns);
+        let mut target_primary_ids = Vec::new();
+        for result in matches {
+            let (primary_id, distance) = result?;
+            let Some(primary_key) = table.primary_key(partition.partition_id, primary_id) else {
+                debug!(
+                    "not defined primary key for partition_id {partition_id:?} \
+                    and primary_id {primary_id:?}",
+                    partition_id = partition.partition_id,
+                );
+                continue;
+            };
+            primary_keys.push(primary_key);
+            distances.push(distance);
+            if target_column.is_some() {
+                target_primary_ids.push(primary_id);
+            }
+            for (column, values) in &mut column_values {
+                if Some(column) != target_column.as_ref() {
+                    values.push(table.column_value_for(partition.partition_id, primary_id, column));
+                }
+            }
+        }
+        (
+            primary_keys,
+            distances,
+            column_values,
+            target_column,
+            target_primary_ids,
+        )
+    };
+
+    // Reconstructing a vector calls into usearch, which must not happen while
+    // holding the table's lock: filtered_ann() takes that lock from inside a
+    // usearch search, so the two locks would be taken in opposite orders.
+    if let Some(target_column) = target_column {
+        let values = column_values
+            .get_mut(&target_column)
+            .expect("target_column is one of the return_columns");
+        for primary_id in target_primary_ids {
+            values.push(reconstruct_target_vector(partition, primary_id)?);
+        }
+    }
+
+    Ok((primary_keys, distances, column_values))
+}
+
 #[hotpath::measure]
 fn ann<I>(
     partition: &PartitionState<I>,
@@ -1099,35 +1204,7 @@ fn ann<I>(
                 .idx
                 .search(&embedding, limit)
                 .map_err(|err| anyhow!("ann: search failed: {err}"))
-                .and_then(|matches| {
-                    let table = table.read().unwrap();
-                    let mut primary_keys = Vec::new();
-                    let mut distances = Vec::new();
-                    let mut column_values = empty_column_values(&return_columns);
-                    for result in matches {
-                        let (primary_id, distance) = result?;
-                        let Some(primary_key) =
-                            table.primary_key(partition.partition_id, primary_id)
-                        else {
-                            debug!(
-                                "not defined primary key for partition_id {partition_id:?} \
-                                and primary_id {primary_id:?}",
-                                partition_id = partition.partition_id,
-                            );
-                            continue;
-                        };
-                        primary_keys.push(primary_key);
-                        distances.push(distance);
-                        for (column, values) in &mut column_values {
-                            values.push(table.column_value_for(
-                                partition.partition_id,
-                                primary_id,
-                                column,
-                            ));
-                        }
-                    }
-                    Ok((primary_keys, distances, column_values))
-                }),
+                .and_then(|matches| collect_results(partition, table, &return_columns, matches)),
         )
         .unwrap_or_else(|_| trace!("ann: unable to send response"));
 }
@@ -1158,35 +1235,7 @@ fn filtered_ann<I>(
                 .idx
                 .filtered_search(&embedding, limit, id_ok)
                 .map_err(|err| anyhow!("ann: search failed: {err}"))
-                .and_then(|matches| {
-                    let table = table.read().unwrap();
-                    let mut primary_keys = Vec::new();
-                    let mut distances = Vec::new();
-                    let mut column_values = empty_column_values(&return_columns);
-                    for result in matches {
-                        let (primary_id, distance) = result?;
-                        let Some(primary_key) =
-                            table.primary_key(partition.partition_id, primary_id)
-                        else {
-                            debug!(
-                                "not defined primary key for partition_id {partition_id:?} \
-                                and primary_id {primary_id:?}",
-                                partition_id = partition.partition_id,
-                            );
-                            continue;
-                        };
-                        primary_keys.push(primary_key);
-                        distances.push(distance);
-                        for (column, values) in &mut column_values {
-                            values.push(table.column_value_for(
-                                partition.partition_id,
-                                primary_id,
-                                column,
-                            ));
-                        }
-                    }
-                    Ok((primary_keys, distances, column_values))
-                }),
+                .and_then(|matches| collect_results(partition, table, &return_columns, matches)),
         )
         .unwrap_or_else(|_| trace!("ann: unable to send response"));
 }
@@ -1214,11 +1263,17 @@ fn check_memory_allocation(
     true
 }
 
+/// Pack a vector into one bit per dimension, for a 1-bit quantized index.
+/// The first dimension of each group of 8 becomes the byte's most significant
+/// bit, which is the order usearch itself uses when it reads such a vector
+/// back. Bit order doesn't affect a search - Hamming distance is the same
+/// under any bit permutation applied to both the stored and the query vectors
+/// - but it does decide which bit each dimension is reported as.
 fn f32_to_b1x8(f32_vec: &[f32]) -> Vec<b1x8> {
     fn chunk_to_byte(chunk: impl Iterator<Item = f32>) -> b1x8 {
         chunk.enumerate().fold(b1x8(0u8), |byte, (i, val)| {
             if val > 0.0 {
-                b1x8(byte.0 | (1 << i))
+                b1x8(byte.0 | (1 << (7 - i)))
             } else {
                 byte
             }
@@ -1499,6 +1554,191 @@ mod tests {
         assert_eq!(primary_keys.first().unwrap(), &[CqlValue::Int(2)].into());
     }
 
+    /// Build an index holding the given vector under primary id 1, then run an
+    /// ANN request which asks for the value of the index's own target column.
+    async fn ann_asking_for_target_column<I: UsearchIndex + Send + Sync + 'static>(
+        index_fn: impl FnOnce() -> anyhow::Result<Arc<I>> + Clone + Send + Sync + 'static,
+        vector: Vec<f32>,
+    ) -> AnnR {
+        let (_, config_rx) = watch::channel(Arc::new(Config::default()));
+        let (internals_tx, _rx) = mpsc::channel(100);
+
+        let table = Arc::new(RwLock::new(MockTableSearch::new()));
+        let index_key = IndexKey::new(&"vector".into(), &"store".into());
+        let (modify, search) = new(
+            index_fn,
+            index_key.clone(),
+            NonZeroUsize::new(vector.len()).unwrap().into(),
+            Arc::clone(&table),
+            worker::new(),
+            memory::new(internals_tx, config_rx),
+        )
+        .unwrap();
+
+        let index_id = IndexIdGenerator::new().next(true).unwrap();
+        let partition_id = PartitionId::global(index_id);
+        modify
+            .add_vector(
+                partition_id,
+                1.into(),
+                vector.clone().into(),
+                AsyncInProgress::None,
+            )
+            .await
+            .unwrap();
+
+        {
+            let mut table = table.write().unwrap();
+            table
+                .expect_index_id()
+                .with(eq(index_key.clone()))
+                .returning(move |_| Some(index_id));
+            table.expect_partition_id().returning({
+                let index_key = index_key.clone();
+                move |key, restrictions| {
+                    assert_eq!(key, &index_key);
+                    assert!(restrictions.is_none());
+                    Some((partition_id, None))
+                }
+            });
+            table
+                .expect_primary_key()
+                .returning(|_, _| Some([CqlValue::Int(1)].into()));
+            table
+                .expect_target_column()
+                .with(eq(index_id))
+                .returning(|_| Some("embedding".into()));
+        }
+        wait_for_count(&search, index_key.clone(), 1).await.unwrap();
+
+        search
+            .ann(
+                index_key,
+                vector.into(),
+                NonZeroUsize::new(1).unwrap().into(),
+                Arc::new(["embedding".into()]),
+            )
+            .await
+    }
+
+    /// An ANN request may ask for the value of the index's own target column -
+    /// the one holding the vector. No such value is stored in the table, so it
+    /// is reconstructed from the index itself, in whatever quantization the
+    /// index keeps it in: exactly for f32 (the default an index is created
+    /// with), rounded for f16, and one bit per dimension for b1.
+    #[rstest]
+    #[case::f32(ScalarKind::F32, MetricKind::L2sq,
+        vec![std::f32::consts::PI, std::f32::consts::E, -std::f32::consts::SQRT_2],
+        vec![std::f32::consts::PI, std::f32::consts::E, -std::f32::consts::SQRT_2])]
+    #[case::f16(ScalarKind::F16, MetricKind::L2sq,
+        vec![std::f32::consts::PI, std::f32::consts::E, -std::f32::consts::SQRT_2],
+        vec![3.140625, 2.71875, -1.4140625])]
+    // More than 8 dimensions, in an asymmetric pattern, so that a b1 vector
+    // packed in the wrong bit order - within a byte or in the partial byte at
+    // the end - comes back different.
+    #[case::b1(ScalarKind::B1, MetricKind::Hamming,
+        vec![1., 1., 0., 1., 0., 0., 0., 1., 1., 0., 0.],
+        vec![1., 1., 0., 1., 0., 0., 0., 1., 1., 0., 0.])]
+    #[tokio::test]
+    async fn ann_returns_reconstructed_target_column(
+        #[case] quantization: ScalarKind,
+        #[case] metric: MetricKind,
+        #[case] vector: Vec<f32>,
+        #[case] expected: Vec<f32>,
+    ) {
+        let options = IndexOptions {
+            dimensions: vector.len(),
+            metric,
+            quantization,
+            ..Default::default()
+        };
+        let threads = perf::num_workers().into();
+        let (_, _, column_values) = ann_asking_for_target_column(
+            move || Ok(Arc::new(ThreadedUsearchIndex::new(options, threads)?)),
+            vector,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            column_values.get(&"embedding".into()).unwrap(),
+            &vec![Some(CqlValue::Vector(
+                expected.into_iter().map(CqlValue::Float).collect()
+            ))]
+        );
+    }
+
+    /// A usearch index which fails to reconstruct a vector, but is otherwise
+    /// a normal one.
+    struct FailingGetVector(ThreadedUsearchIndex);
+
+    impl UsearchIndex for FailingGetVector {
+        fn reserve(&self, size: usize) -> anyhow::Result<()> {
+            self.0.reserve(size)
+        }
+
+        fn capacity(&self) -> usize {
+            self.0.capacity()
+        }
+
+        fn add(&self, primary_id: PrimaryId, vector: &Vector) -> anyhow::Result<()> {
+            self.0.add(primary_id, vector)
+        }
+
+        fn remove(&self, primary_id: PrimaryId) -> anyhow::Result<bool> {
+            self.0.remove(primary_id)
+        }
+
+        fn search(
+            &self,
+            vector: &Vector,
+            limit: Limit,
+        ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<(PrimaryId, Distance)>>> {
+            self.0.search(vector, limit)
+        }
+
+        fn filtered_search(
+            &self,
+            vector: &Vector,
+            limit: Limit,
+            filter: impl Fn(PrimaryId) -> bool,
+        ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<(PrimaryId, Distance)>>> {
+            self.0.filtered_search(vector, limit, filter)
+        }
+
+        fn get_vector(&self, _primary_id: PrimaryId) -> anyhow::Result<Option<Vec<f32>>> {
+            Err(anyhow!("usearch failed"))
+        }
+
+        fn stop(&self) {
+            self.0.stop();
+        }
+    }
+
+    /// A failure to reconstruct the vector must fail the whole request, not be
+    /// reported as a successful search with a missing value for the column.
+    #[tokio::test]
+    async fn ann_fails_if_target_column_cannot_be_reconstructed() {
+        let vector = vec![1., 2., 3.];
+        let options = IndexOptions {
+            dimensions: vector.len(),
+            ..Default::default()
+        };
+        let threads = perf::num_workers().into();
+        let err = ann_asking_for_target_column(
+            move || {
+                Ok(Arc::new(FailingGetVector(ThreadedUsearchIndex::new(
+                    options, threads,
+                )?)))
+            },
+            vector,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("usearch failed"), "{err}");
+    }
+
     #[tokio::test]
     async fn allocate_parameter_works() {
         let (memory_tx, mut memory_rx) = mpsc::channel(1);
@@ -1669,21 +1909,21 @@ mod tests {
 
     #[test]
     fn f32_to_b1x8_single_byte() {
-        // =< 0 clears bits and > 0 sets bits
+        // =< 0 clears bits and > 0 sets bits, first dimension first
         let b1_vec = f32_to_b1x8(&[1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0]);
         assert_eq!(b1_vec.len(), 1);
-        assert_eq!(b1x8_to_u8_vec(&b1_vec), &[0b00001111]);
+        assert_eq!(b1x8_to_u8_vec(&b1_vec), &[0b11110000]);
     }
 
     #[test]
     fn f32_to_b1x8_multiple_bytes() {
         let input = vec![
-            1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, // 0b01010101
-            -1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 1.0, // 0b11110000
+            1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, // 0b10101010
+            -1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 1.0, // 0b00001111
         ];
         let b1_vec = f32_to_b1x8(&input);
         assert_eq!(b1_vec.len(), 2);
-        assert_eq!(b1x8_to_u8_vec(&b1_vec), &[0b01010101, 0b11110000]);
+        assert_eq!(b1x8_to_u8_vec(&b1_vec), &[0b10101010, 0b00001111]);
     }
 
     #[test]
@@ -1697,11 +1937,11 @@ mod tests {
     #[test]
     fn f32_to_b1x8_remainder() {
         let input = vec![
-            1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, // 0b01010101
-            1.0, -1.0, 1.0, // 0b00000101
+            1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, // 0b10101010
+            1.0, -1.0, 1.0, // 0b10100000
         ];
         let b1_vec = f32_to_b1x8(&input);
         assert_eq!(b1_vec.len(), 2);
-        assert_eq!(b1x8_to_u8_vec(&b1_vec), &[0b01010101, 0b00000101]);
+        assert_eq!(b1x8_to_u8_vec(&b1_vec), &[0b10101010, 0b10100000]);
     }
 }

@@ -366,7 +366,7 @@ pub struct PostIndexAnnRequest {
     /// By default, the query may be routed to a different, better-matching index on the same column. Set to `false` to force the query to be served by exactly the index named in the URL.
     #[serde(default = "default_routing")]
     pub routing: bool,
-    /// Column names whose stored values should be returned alongside the primary keys. A column the index doesn't track comes back as null for every row, the same as a tracked column with no stored value for a given row. Empty (the default) means return no column values.
+    /// Column names whose stored values should be returned alongside the primary keys. A column the index doesn't track comes back as null for every row, the same as a tracked column with no stored value for a given row. Empty (the default) means return no column values. The index's own target column - the one holding the vector - may also be requested: no value for it is stored, so it is reconstructed from the index as an array of numbers, in the index's quantization (32-bit floats by default) rather than necessarily the values originally written. Only the usearch index can do this; the other index types reject a request for their target column.
     #[serde(default)]
     pub return_columns: Vec<ColumnName>,
 }
