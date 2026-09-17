@@ -5,6 +5,7 @@
 
 use crate::AsyncInProgress;
 use crate::ColumnName;
+use crate::DbDriver;
 use crate::DbIndexedOperation;
 use crate::DbIndexedRow;
 use crate::IndexKey;
@@ -12,20 +13,14 @@ use crate::IndexKind;
 use crate::IndexMetadata;
 use crate::Metrics;
 use crate::NonemptyArc;
-use crate::NonemptyIteratorExt;
 use crate::PrimaryKey;
 use crate::Timestamp;
 use crate::db_index;
-use crate::db_index_backend;
-use crate::db_value::DbRow;
-use anyhow::Context;
 use anyhow::anyhow;
 use anyhow::bail;
 use async_trait::async_trait;
-use scylla::client::session::Session;
 use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
-use scylla::statement::prepared::PreparedStatement;
 use scylla::value::CqlValue;
 use scylla_cdc::consumer::CDCRow;
 use scylla_cdc::consumer::Consumer;
@@ -33,7 +28,6 @@ use scylla_cdc::consumer::ConsumerFactory;
 use scylla_cdc::consumer::OperationType;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tap::Pipe;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tracing::debug;
@@ -45,9 +39,10 @@ enum Operation {
     Delete,
 }
 
-struct CdcConsumerData {
-    session: Arc<Session>,
-    st_select_values: PreparedStatement,
+struct CdcConsumerData<T: DbDriver> {
+    db_driver: T,
+    session: T::Session,
+    st_select_values: T::Statement,
     index_key: IndexKey,
     primary_key_columns: NonemptyArc<ColumnName>,
     nonpk_partition_key_columns: Box<[ColumnName]>,
@@ -61,18 +56,17 @@ struct CdcConsumerData {
     semaphore: Arc<Semaphore>,
 }
 
-impl CdcConsumerData {
+impl<T: DbDriver> CdcConsumerData<T> {
     async fn process_upsert(
         &self,
         primary_key: Arc<Vec<CqlValue>>,
         timestamp: Timestamp,
     ) -> anyhow::Result<()> {
-        let rows_result = self
-            .session
-            .execute_unpaged(&self.st_select_values, primary_key.as_slice())
-            .await?
-            .into_rows_result()?;
         let primary_key = PrimaryKey::from(primary_key.iter().cloned());
+        let rows_result = self
+            .db_driver
+            .execute_fetch_row(&self.session, &self.st_select_values, &primary_key)
+            .await?;
 
         let async_in_progress = AsyncInProgress::cdc(
             self.metrics.indexing_lag.with_label_values(&[
@@ -82,7 +76,7 @@ impl CdcConsumerData {
             timestamp,
         );
 
-        let Some(row) = rows_result.maybe_first_row::<DbRow>()? else {
+        let Some(row) = rows_result else {
             // If no row is found for the primary key, it is deleted
             _ = self
                 .tx
@@ -132,14 +126,14 @@ impl CdcConsumerData {
     }
 }
 
-struct CdcConsumer {
-    consumer_data: Arc<CdcConsumerData>,
+struct CdcConsumer<T: DbDriver> {
+    consumer_data: Arc<CdcConsumerData<T>>,
     primary_key: Arc<Vec<CqlValue>>,
     timestamp: Timestamp,
     operation: Operation,
 }
 
-impl CdcConsumer {
+impl<T: DbDriver> CdcConsumer<T> {
     async fn process_row(&self) {
         if matches!(self.operation, Operation::Upsert) {
             self.process_upsert().await;
@@ -186,7 +180,7 @@ impl CdcConsumer {
 }
 
 #[async_trait]
-impl Consumer for CdcConsumer {
+impl<T: DbDriver> Consumer for CdcConsumer<T> {
     async fn consume_cdc(&mut self, mut row: CDCRow<'_>) -> anyhow::Result<()> {
         if self.consumer_data.tx.is_closed() {
             // a consumer should be closed now, some concurrent tasks could stay in a pipeline
@@ -243,10 +237,10 @@ impl Consumer for CdcConsumer {
     }
 }
 
-pub(super) struct CdcConsumerFactory(Arc<CdcConsumerData>);
+pub(super) struct CdcConsumerFactory<T: DbDriver>(Arc<CdcConsumerData<T>>);
 
 #[async_trait]
-impl ConsumerFactory for CdcConsumerFactory {
+impl<T: DbDriver> ConsumerFactory for CdcConsumerFactory<T> {
     async fn new_consumer(&self) -> Box<dyn Consumer> {
         Box::new(CdcConsumer {
             consumer_data: Arc::clone(&self.0),
@@ -257,30 +251,27 @@ impl ConsumerFactory for CdcConsumerFactory {
     }
 }
 
-impl CdcConsumerFactory {
+impl<T: DbDriver> CdcConsumerFactory<T> {
     pub(super) async fn new(
-        session: Arc<Session>,
+        db_driver: T,
+        session: T::Session,
         metadata: &IndexMetadata,
         metrics: Arc<Metrics>,
         tx: mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
         semaphore: Arc<Semaphore>,
     ) -> anyhow::Result<Self> {
-        let cluster_state = session.get_cluster_state();
-        let table = cluster_state
-            .get_keyspace(metadata.keyspace_name.as_ref())
-            .ok_or_else(|| anyhow!("keyspace {} does not exist", metadata.keyspace_name))?
-            .tables
-            .get(metadata.table_name.as_ref())
-            .ok_or_else(|| anyhow!("table {} does not exist", metadata.table_name))?;
+        let cluster = db_driver.cluster(&session);
+        let table = db_driver
+            .table(&cluster, &metadata.keyspace_name, &metadata.table_name)
+            .ok_or_else(|| {
+                anyhow!(
+                    "table {}.{} does not exist",
+                    metadata.keyspace_name,
+                    metadata.table_name
+                )
+            })?;
 
-        let primary_key_columns = table
-            .partition_key
-            .iter()
-            .chain(table.clustering_key.iter())
-            .cloned()
-            .map(ColumnName::from)
-            .collect_nonempty_arc()
-            .ok_or_else(|| anyhow!("primary key must have at least one column"))?;
+        let primary_key_columns = metadata.primary_key_columns.clone();
 
         let target_columns = metadata.target_columns.clone();
         let filtering_columns: Arc<[_]> = metadata.nonpk_filtering_columns().cloned().collect();
@@ -292,12 +283,11 @@ impl CdcConsumerFactory {
             .cloned()
             .collect();
 
-        let real_columns: HashMap<ColumnName, NativeType> = table
-            .columns
-            .iter()
+        let real_columns: HashMap<ColumnName, NativeType> = db_driver
+            .columns(table)
             .filter_map(|(name, coltype)| {
                 if let ColumnType::Native(typ) = &coltype.typ {
-                    Some((ColumnName::from(name.clone()), typ.clone()))
+                    Some((name, typ.clone()))
                 } else {
                     None
                 }
@@ -311,25 +301,10 @@ impl CdcConsumerFactory {
             &real_columns,
         );
 
-        let query = db_index_backend::request_query(
-            &metadata.keyspace_name.as_ref().into(),
-            &metadata.table_name.as_ref().into(),
-            target_columns
-                .iter()
-                .chain(nonpk_partition_key_columns.iter())
-                .chain(filtering_columns.iter()),
-            primary_key_columns.iter(),
-        );
-        let st_select_values = session
-            .prepare(query.as_str())
-            .await
-            .with_context(|| format!("request_query: {}", query.replace('\n', " ").trim()))?
-            .pipe(|mut stmt| {
-                stmt.set_is_idempotent(true);
-                stmt
-            });
+        let st_select_values = db_driver.prepare_fetch_row(&session, metadata).await?;
 
         Ok(Self(Arc::new(CdcConsumerData {
+            db_driver,
             session,
             st_select_values,
             index_key: metadata.key(),

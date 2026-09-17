@@ -6,6 +6,7 @@
 use crate::AsyncInProgress;
 use crate::ColumnName;
 use crate::Config;
+use crate::DbDriver;
 use crate::DbIndexedOperation;
 use crate::DbIndexedRow;
 use crate::DbIndexedValue;
@@ -15,17 +16,13 @@ use crate::KeyspaceIdentifier;
 use crate::Metrics;
 use crate::NonemptyArc;
 use crate::NonemptyBox;
-use crate::NonemptyIteratorExt;
 use crate::Percentage;
 use crate::PrimaryKey;
 use crate::Progress;
-use crate::TableIdentifier;
 use crate::Timestamp;
 use crate::Vector;
 use crate::db_cdc;
 use crate::db_cdc::CdcReaderConfig;
-use crate::db_index_backend;
-use crate::db_value::DbRow;
 use crate::db_value::DbValue;
 use crate::internals::Internals;
 use crate::invariant_key::InvariantKey;
@@ -42,14 +39,10 @@ use futures::StreamExt;
 use futures::TryStreamExt;
 use futures::stream::BoxStream;
 use itertools::Itertools;
-use scylla::client::session::Session;
 use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
-use scylla::errors::PagerExecutionError;
 use scylla::routing::Token;
-use scylla::statement::prepared::PreparedStatement;
 use scylla::value::CqlValue;
-use scylla_cdc::CqlIdentifier;
 use std::collections::HashMap;
 use std::iter;
 use std::num::NonZeroUsize;
@@ -61,7 +54,6 @@ use tap::Pipe;
 use tokio::sync::Notify;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tracing::Instrument;
@@ -142,12 +134,97 @@ impl DbIndexExt for mpsc::Sender<DbIndex> {
     }
 }
 
-pub(crate) async fn new(
+#[derive(Debug, derive_more::Display)]
+pub(crate) struct NonRetryable;
+
+/// A wrapper around a Session watch.
+#[derive(Clone)]
+pub(crate) struct DbIndexSession<T: DbDriver> {
+    session_rx: watch::Receiver<Option<T::Session>>,
+    alive_rx: watch::Receiver<bool>,
+}
+
+impl<T: DbDriver> DbIndexSession<T> {
+    fn new(session_rx: watch::Receiver<Option<T::Session>>) -> (Self, SessionGuard) {
+        let (alive_tx, alive_rx) = watch::channel(true);
+        (
+            Self {
+                session_rx,
+                alive_rx,
+            },
+            SessionGuard(alive_tx),
+        )
+    }
+
+    pub(crate) async fn wait_for_session(&self) -> anyhow::Result<T::Session> {
+        let mut session_rx = self.session_rx.clone();
+        let mut alive_rx = self.alive_rx.clone();
+        tokio::select! {
+            biased;
+
+            _ = alive_rx.wait_for(|alive| !alive) => {
+                bail!("DbIndexSession is no longer alive");
+            }
+
+            session = session_rx.wait_for(|session| session.is_some()) => {
+                session.map(|session| session.as_ref().unwrap().clone())
+                    .map_err(|err| anyhow!("DbIndexSession: session stream is no longer alive: {err}"))
+            }
+        }
+    }
+
+    /// Waits for a session change, or returns None if the index is no longer alive.
+    pub(crate) async fn wait_for_changed(&mut self) -> Option<Option<T::Session>> {
+        tokio::select! {
+            biased;
+
+            _ = self.alive_rx.wait_for(|alive| !alive) => {
+                None
+            }
+
+            result = self.session_rx.changed() => {
+                if result.is_err() {
+                    return None;
+                }
+                Some(self.session_rx.borrow_and_update().clone())
+            }
+        }
+    }
+
+    /// Returns current session or returns None if the index is no longer alive.
+    pub(crate) fn current(&self) -> Option<Option<T::Session>> {
+        self.alive_rx
+            .borrow()
+            .then(|| self.session_rx.borrow().clone())
+    }
+
+    /// Marks the session as changed, so that wait_for_changed() will return immediately.
+    pub(crate) fn mark_changed(&mut self) {
+        self.session_rx.mark_changed();
+    }
+
+    /// Waits until index is no longer alive.
+    pub(crate) async fn wait_for_dead(&mut self) {
+        _ = self.alive_rx.wait_for(|alive| !alive).await;
+    }
+}
+
+struct SessionGuard(watch::Sender<bool>);
+
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        let _ = self.0.send(false);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn new<T: DbDriver>(
     config_rx: watch::Receiver<Arc<Config>>,
-    session_rx: watch::Receiver<Option<Arc<Session>>>,
+    db_driver: T,
+    session_rx: watch::Receiver<Option<T::Session>>,
     metadata: IndexMetadata,
-    node_state: Sender<NodeState>,
-    internals: Sender<Internals>,
+    node_state: mpsc::Sender<NodeState>,
+    internals: mpsc::Sender<Internals>,
     metrics: Arc<Metrics>,
     cdc_error_notify: Arc<Notify>,
 ) -> anyhow::Result<(
@@ -159,17 +236,10 @@ pub(crate) async fn new(
     let (tx_index, mut rx_index) = mpsc::channel(perf::channel_size().into());
     let (tx_embeddings, rx_embeddings) = mpsc::channel(perf::channel_size().into());
 
-    // Wait for initial session to create statements.
-    let mut statements_session_rx = session_rx.clone();
-    while statements_session_rx.borrow().is_none() {
-        if statements_session_rx.changed().await.is_err() {
-            return Err(anyhow::anyhow!(
-                "Session sender dropped before initialization"
-            ));
-        }
-    }
+    let (db_session, session_guard) = DbIndexSession::new(session_rx);
 
-    let statements = Arc::new(Statements::new(statements_session_rx, metadata.clone()).await?);
+    let statements =
+        Arc::new(Statements::new(db_driver.clone(), db_session.clone(), metadata.clone()).await?);
 
     let semaphore = Arc::new(Semaphore::new(concurrency_limit()));
 
@@ -178,7 +248,8 @@ pub(crate) async fn new(
     // Create wide-framed CDC actor
     let cdc_wide = db_cdc::new(
         config_rx.clone(),
-        session_rx.clone(),
+        db_driver.clone(),
+        db_session.clone(),
         metadata.clone(),
         internals.clone(),
         metrics.clone(),
@@ -190,7 +261,8 @@ pub(crate) async fn new(
     // Create fine-grained CDC actor
     let cdc_fine = db_cdc::new(
         config_rx,
-        session_rx.clone(),
+        db_driver,
+        db_session.clone(),
         metadata.clone(),
         internals,
         metrics,
@@ -199,21 +271,15 @@ pub(crate) async fn new(
         CdcReaderConfig::Fine,
     );
 
-    // Signal from the main db_index task to the CDC monitor task that
-    // this db_index is shutting down. Without it, the monitor would keep
-    // the CDC senders alive across a db_index replacement, leaving
-    // orphaned CDC actors running (VECTOR-653).
-    let db_index_stopped = Arc::new(Notify::new());
-
     // Monitor CDC actor channels for closure to notify about errors, or
     // exit when the main db_index task signals shutdown.
     tokio::spawn({
-        let db_index_stopped = Arc::clone(&db_index_stopped);
+        let mut db_session = db_session.clone();
         async move {
             tokio::select! {
                 _ = cdc_wide.closed() => cdc_error_notify.notify_one(),
                 _ = cdc_fine.closed() => cdc_error_notify.notify_one(),
-                _ = db_index_stopped.notified() => {}
+                _ = db_session.wait_for_dead() => {}
             }
         }
     });
@@ -229,47 +295,66 @@ pub(crate) async fn new(
 
             info!("starting full scan on {}", metadata.key());
 
-            let mut initial_scan = Box::pin(statements.initial_scan(
-                tx_embeddings.clone(),
-                completed_scan_length.clone(),
-            ));
+            let mut initial_scan = Box::pin(
+                statements.initial_scan(tx_embeddings.clone(), completed_scan_length.clone()),
+            );
 
             // Initial scan and message processing loop
-            loop {
+            let cancel = loop {
                 tokio::select! {
-                    _ = &mut initial_scan => {
-                        node_state
-                            .send_event(Event::FullScanFinished(metadata.clone()))
-                            .await;
-                        break;
+                    result = &mut initial_scan => {
+                        if let Err(err) = result {
+                            error!(
+                                "error during full scan of index {key}: {err}",
+                                key = metadata.key()
+                            );
+                            break true;
+                        }
+                        break false;
                     }
 
                     msg = rx_index.recv() => {
                         match msg {
                             Some(msg) => {
-                                tokio::spawn(process(Arc::clone(&statements), msg, completed_scan_length.clone(), Arc::clone(&fetch_permits)));
+                                tokio::spawn(process(
+                                        Arc::clone(&statements),
+                                        msg,
+                                        completed_scan_length.clone(),
+                                        Arc::clone(&fetch_permits)
+                                ));
                             }
                             None => {
-                                // Index was dropped, stop fullscan.
-                                break;
+                                info!(
+                                    "shutdown during full scan of index {key}",
+                                    key = metadata.key()
+                                );
+                                break true;
                             }
                         }
                     }
+                }
+            };
 
-                    else => {
-                        break;
-                    }
+            if cancel {
+                info!("cancelling full scan of index {key}", key = metadata.key());
+            } else {
+                info!("finished full scan on {key}", key = metadata.key());
+                node_state
+                    .send_event(Event::FullScanFinished(metadata.clone()))
+                    .await;
+
+                // Continue processing messages after scan completes
+                while let Some(msg) = rx_index.recv().await {
+                    tokio::spawn(process(
+                        Arc::clone(&statements),
+                        msg,
+                        completed_scan_length.clone(),
+                        Arc::clone(&fetch_permits),
+                    ));
                 }
             }
 
-            info!("finished full scan on {}", metadata.key());
-
-            // Continue processing messages after scan completes
-            while let Some(msg) = rx_index.recv().await {
-                tokio::spawn(process(Arc::clone(&statements), msg, completed_scan_length.clone(), Arc::clone(&fetch_permits)));
-            }
-
-            db_index_stopped.notify_one();
+            drop(session_guard);
             debug!("finished");
         }
         .instrument(error_span!("db_index", "{}", key)),
@@ -278,8 +363,8 @@ pub(crate) async fn new(
     Ok((tx_index, rx_embeddings))
 }
 
-async fn process(
-    statements: Arc<Statements>,
+async fn process<T: DbDriver>(
+    statements: Arc<Statements<T>>,
     msg: DbIndex,
     completed_scan_length: Arc<AtomicU64>,
     fetch_permits: Arc<Semaphore>,
@@ -308,8 +393,9 @@ async fn process(
     }
 }
 
-struct Statements {
-    session_rx: tokio::sync::watch::Receiver<Option<Arc<Session>>>,
+struct Statements<T: DbDriver> {
+    db_driver: T,
+    db_session: DbIndexSession<T>,
     primary_key_columns: NonemptyArc<ColumnName>,
     target_columns: NonemptyArc<ColumnName>,
     nonpk_partition_key_columns: Box<[ColumnName]>,
@@ -319,44 +405,33 @@ struct Statements {
     /// NativeType to decode each one's raw ":attrs" value as, or None for a
     /// real CQL column. See parse_values().
     alternator_decode_types: Box<[Option<NativeType>]>,
-    st_range_scan: PreparedStatement,
-    st_fetch_vector: PreparedStatement,
+    st_range_scan: T::Statement,
+    st_fetch_vector: T::Statement,
     kind: IndexKind,
 }
 
-impl Statements {
+impl<T: DbDriver> Statements<T> {
     async fn new(
-        session_rx: tokio::sync::watch::Receiver<Option<Arc<Session>>>,
+        db_driver: T,
+        db_session: DbIndexSession<T>,
         metadata: IndexMetadata,
     ) -> anyhow::Result<Self> {
-        let session = session_rx
-            .borrow()
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("No session available for Statements initialization"))?;
-        session.await_schema_agreement().await?;
+        let session = db_session.wait_for_session().await?;
 
-        let cluster_state = session.get_cluster_state();
-        let table = cluster_state
-            .get_keyspace(&metadata.keyspace_name)
-            .ok_or_else(|| anyhow!("keyspace {} does not exist", metadata.keyspace_name))?
-            .tables
-            .get(metadata.table_name.as_ref())
-            .ok_or_else(|| anyhow!("table {} does not exist", metadata.table_name))?;
+        db_driver.await_schema_agreement(&session).await?;
 
-        let primary_key_columns = table
-            .partition_key
-            .iter()
-            .chain(table.clustering_key.iter())
-            .cloned()
-            .map(ColumnName::from)
-            .collect_nonempty_arc()
+        let cluster = db_driver.cluster(&session);
+        let table = db_driver
+            .table(&cluster, &metadata.keyspace_name, &metadata.table_name)
             .ok_or_else(|| {
                 anyhow!(
-                    "table {}.{} has no primary key",
+                    "table {}.{} does not exist",
                     metadata.keyspace_name,
                     metadata.table_name
                 )
             })?;
+
+        let primary_key_columns = metadata.primary_key_columns.clone();
         let nonpk_partition_key_columns: Box<[_]> = metadata
             .nonpk_partition_key_columns()
             .into_iter()
@@ -377,12 +452,11 @@ impl Statements {
         let filtering_columns: Arc<[_]> = metadata.nonpk_filtering_columns().cloned().collect();
 
         let is_alternator = KeyspaceIdentifier::from(&metadata.keyspace_name).is_alternator();
-        let real_columns: HashMap<ColumnName, NativeType> = table
-            .columns
-            .iter()
+        let real_columns: HashMap<ColumnName, NativeType> = db_driver
+            .columns(table)
             .filter_map(|(name, coltype)| {
                 if let ColumnType::Native(typ) = &coltype.typ {
-                    Some((ColumnName::from(name.clone()), typ.clone()))
+                    Some((name, typ.clone()))
                 } else {
                     None
                 }
@@ -403,50 +477,9 @@ impl Statements {
             &metadata,
             &real_columns,
         );
-        let st_partition_key_list = table
-            .partition_key
-            .iter()
-            .map(|c| CqlIdentifier::new(c.as_str()))
-            .join(", ");
-        let st_primary_key_list = primary_key_columns
-            .iter()
-            .map(|c| CqlIdentifier::new(c.as_ref()))
-            .join(", ");
-        let keyspace_identifier = KeyspaceIdentifier::from(&metadata.keyspace_name);
-        let table_identifier = TableIdentifier::from(&metadata.table_name);
-        let query = db_index_backend::range_scan_query(
-            &keyspace_identifier,
-            &table_identifier,
-            target_columns
-                .iter()
-                .chain(nonpk_partition_key_columns.iter())
-                .chain(filtering_columns.iter()),
-            &st_primary_key_list,
-            &st_partition_key_list,
-        );
-        let st_range_scan = session
-            .prepare(query)
-            .await
-            .context("range_scan_query")?
-            .pipe(|mut stmt| {
-                stmt.set_is_idempotent(true);
-                stmt
-            });
+        let st_range_scan = db_driver.prepare_range_scan(&session, &metadata).await?;
 
-        let query = db_index_backend::fetch_vector_query(
-            &keyspace_identifier,
-            &table_identifier,
-            target_columns.iter(),
-            primary_key_columns.iter(),
-        );
-        let st_fetch_vector = session
-            .prepare(query)
-            .await
-            .context("fetch_vector_query")?
-            .pipe(|mut stmt| {
-                stmt.set_is_idempotent(true);
-                stmt
-            });
+        let st_fetch_vector = db_driver.prepare_fetch_vector(&session, &metadata).await?;
 
         Ok(Self {
             primary_key_columns,
@@ -457,7 +490,8 @@ impl Statements {
             alternator_decode_types,
             st_range_scan,
             st_fetch_vector,
-            session_rx,
+            db_driver,
+            db_session,
             kind: metadata.kind.clone(),
         })
     }
@@ -471,11 +505,7 @@ impl Statements {
         keys: Vec<PrimaryKey>,
         fetch_permits: Arc<Semaphore>,
     ) -> anyhow::Result<Vec<Option<Vector>>> {
-        let session = self
-            .session_rx
-            .borrow()
-            .clone()
-            .ok_or_else(|| anyhow!("fetch_vectors: no active session"))?;
+        let session = self.db_session.wait_for_session().await?;
 
         let requested = keys.len();
         let mut failures = 0;
@@ -483,7 +513,7 @@ impl Statements {
 
         let vectors: Vec<Option<Vector>> = futures::stream::iter(keys)
             .map(|key| {
-                let session = Arc::clone(&session);
+                let session = session.clone();
                 let permits = Arc::clone(&fetch_permits);
                 async move {
                     let _permit = permits
@@ -515,32 +545,23 @@ impl Statements {
 
     async fn fetch_vector(
         &self,
-        session: Arc<Session>,
+        session: T::Session,
         key: PrimaryKey,
     ) -> anyhow::Result<Option<Vector>> {
-        let rows_result = session
-            .execute_unpaged(&self.st_fetch_vector, &key)
-            .await?
-            .into_rows_result()?;
-        let row = rows_result.maybe_first_row::<(Option<Vector>,)>()?;
-        Ok(row.and_then(|(vector,)| vector))
+        self.db_driver
+            .execute_fetch_vector(&session, &self.st_fetch_vector, &key)
+            .await
     }
 
     async fn preform_range_scan(&self, begin: Token, end: Token) -> RangeScanResult {
         let mut range_scan = self.range_scan_stream(begin, end).await;
         let mut retry_timeout = START_RETRY_TIMEOUT;
         while let Err(err) = &range_scan {
-            let connection_error = err.downcast_ref::<PagerExecutionError>();
-            if connection_error.is_none()
-                || !matches!(
-                    connection_error.unwrap(),
-                    PagerExecutionError::NextPageError(_)
-                )
-            {
-                error!("Fatal error during scan of the range ({begin:?}, {end:?}): {err}");
+            if err.downcast_ref::<NonRetryable>().is_some() {
+                error!("Non-retryable error during scan of the range ({begin:?}, {end:?}): {err}");
                 break;
             }
-            warn!("Lost connection during scan of the range ({begin:?}, {end:?}), retrying");
+            warn!("Retryable error during scan of the range ({begin:?}, {end:?}): {err}, retrying");
             tokio::time::sleep(retry_timeout).await;
             range_scan = self.range_scan_stream(begin, end).await;
 
@@ -558,50 +579,53 @@ impl Statements {
     /// token ranges read from a rust driver. At first it prepares ranges, limits concurrent scans
     /// using semaphore, and runs each scan in separate concurrent task using cloned mpsc channel
     /// to send read embeddings into the pipeline.
+    ///
+    /// Returns None if the index is no longer alive.
     async fn initial_scan(
         &self,
         tx: mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
         completed_scan_length: Arc<AtomicU64>,
-    ) {
-        let semaphore_capacity = self.nr_parallel_queries().get();
+    ) -> anyhow::Result<()> {
+        let semaphore_capacity = self.nr_parallel_queries().await?.get();
         let semaphore = Arc::new(Semaphore::new(semaphore_capacity));
 
-        for (begin, end) in self.fullscan_ranges() {
+        for (begin, end) in self.fullscan_ranges().await? {
             let permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
 
-            let range_scan = self.preform_range_scan(begin, end).await;
-            if let Ok(embeddings) = range_scan {
-                let tx = tx.clone();
-                let scan_length = completed_scan_length.clone();
-                tokio::spawn(async move {
-                    let (tx_in_progress, mut rx_in_progress) = mpsc::channel(1);
-                    embeddings
-                        .for_each(move |embedding| {
-                            let tx = tx.clone();
-                            let tx_in_progress = tx_in_progress.clone();
-                            async move {
-                                _ = tx
-                                    .send((embedding, AsyncInProgress::Fullscan(tx_in_progress)))
-                                    .await;
-                            }
-                        })
-                        .await;
+            let embeddings = self
+                .preform_range_scan(begin, end)
+                .await
+                .inspect_err(|err| {
+                    error!("Error during scan of the range ({begin:?}, {end:?}): {err}",);
+                })?;
+            let tx = tx.clone();
+            let scan_length = completed_scan_length.clone();
+            tokio::spawn(async move {
+                let (tx_in_progress, mut rx_in_progress) = mpsc::channel(1);
+                embeddings
+                    .for_each(move |embedding| {
+                        let tx = tx.clone();
+                        let tx_in_progress = tx_in_progress.clone();
+                        async move {
+                            _ = tx
+                                .send((embedding, AsyncInProgress::Fullscan(tx_in_progress)))
+                                .await;
+                        }
+                    })
+                    .await;
 
-                    // wait until all in-progress markers are dropped
-                    while rx_in_progress.recv().await.is_some() {
-                        rx_in_progress.len();
-                    }
+                // wait until all in-progress markers are dropped
+                while rx_in_progress.recv().await.is_some() {
+                    rx_in_progress.len();
+                }
 
-                    //Safety: end > begin, and the range fits into u64
-                    scan_length.fetch_add(
-                        end.value().abs_diff(begin.value() - 1),
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
-                    drop(permit);
-                });
-            } else {
+                //Safety: end > begin, and the range fits into u64
+                scan_length.fetch_add(
+                    end.value().abs_diff(begin.value() - 1),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 drop(permit);
-            }
+            });
         }
 
         // Acquire all permits to wait until all spawned tasks have finished and released their permits.
@@ -609,33 +633,27 @@ impl Statements {
             .acquire_many(semaphore_capacity as u32)
             .await
             .unwrap();
+
+        Ok(())
     }
 
-    fn nr_shards_in_cluster(&self) -> NonZeroUsize {
-        self.session_rx
-            .borrow()
-            .as_ref()
-            .and_then(|session| {
-                NonZeroUsize::try_from(
-                    session
-                        .get_cluster_state()
-                        .get_nodes_info()
-                        .iter()
-                        .filter_map(|node| node.sharder())
-                        .map(|sharder| sharder.nr_shards.get() as usize)
-                        .sum::<usize>(),
-                )
-                .ok()
-            })
-            .unwrap_or(NonZeroUsize::new(1).unwrap())
+    async fn nr_shards_in_cluster(&self) -> anyhow::Result<NonZeroUsize> {
+        Ok(self
+            .db_session
+            .wait_for_session()
+            .await?
+            .pipe(|session| self.db_driver.cluster(&session))
+            .pipe(|cluster| self.db_driver.nr_shards(&cluster)))
     }
 
     // Parallel queries = (cores in cluster) * (smuge factor)
-    fn nr_parallel_queries(&self) -> NonZeroUsize {
+    async fn nr_parallel_queries(&self) -> anyhow::Result<NonZeroUsize> {
         const SMUGE_FACTOR: NonZeroUsize = NonZeroUsize::new(3).unwrap();
-        self.nr_shards_in_cluster()
+        Ok(self
+            .nr_shards_in_cluster()
+            .await?
             .checked_mul(SMUGE_FACTOR)
-            .unwrap()
+            .unwrap())
     }
 
     /// Creates an iterator over all tokens ranges available in a cluster. A token ring is taken
@@ -646,29 +664,20 @@ impl Statements {
     /// highest possible token - for support the specific token range after the highest token to
     /// the lowest token. The highest possible token value is not decremented, because it doesn't
     /// start a new range.
-    fn fullscan_ranges(&self) -> impl Iterator<Item = (Token, Token)> {
+    async fn fullscan_ranges(&self) -> anyhow::Result<impl Iterator<Item = (Token, Token)>> {
+        let cluster = self
+            .db_session
+            .wait_for_session()
+            .await?
+            .pipe(|session| self.db_driver.cluster(&session));
+
         const TOKEN_MAX: i64 = i64::MAX; // the highest possible token value in the ScyllaDB
         const TOKEN_MIN: i64 = -TOKEN_MAX; // the lowest possible token value in the ScyllaDB
 
         let tokens = iter::once(Token::new(TOKEN_MIN))
-            .chain(
-                self.session_rx
-                    .borrow()
-                    .as_ref()
-                    .map(|session| {
-                        session
-                            .get_cluster_state()
-                            .replica_locator()
-                            .ring()
-                            .iter()
-                            .map(|(token, _)| token)
-                            .copied()
-                            .collect_vec()
-                    })
-                    .unwrap_or_default(),
-            )
+            .chain(self.db_driver.token_ring(&cluster))
             .collect_vec();
-        tokens
+        Ok(tokens
             .into_iter()
             .circular_tuple_windows()
             .map(|(begin, end)| {
@@ -679,7 +688,7 @@ impl Statements {
                     // prepare a range without the last token
                     (begin, Token::new(end.value() - 1))
                 }
-            })
+            }))
     }
 
     async fn range_scan_stream(
@@ -698,25 +707,16 @@ impl Statements {
         let kind = self.kind.clone();
         let alternator_decode_types = self.alternator_decode_types.clone();
 
-        // wait for an active session
-        let session = {
-            let mut session_rx = self.session_rx.clone();
-            loop {
-                if let Some(session) = session_rx.borrow_and_update().clone() {
-                    break session;
-                }
-                session_rx
-                    .changed()
-                    .await
-                    .map_err(|err| anyhow::anyhow!("No active session for range scan: {err}"))?;
-            }
-        };
+        let session = self
+            .db_session
+            .wait_for_session()
+            .await
+            .context(NonRetryable)?;
 
-        Ok(session
-            .execute_iter(self.st_range_scan.clone(), (begin.value(), end.value()))
+        Ok(self
+            .db_driver
+            .execute_range_scan(&session, &self.st_range_scan, begin, end)
             .await?
-            .rows_stream::<DbRow>()?
-            .map_err(anyhow::Error::from)
             .map_ok(move |mut row| {
                 if row.columns.len() != columns_len_expected {
                     debug!(

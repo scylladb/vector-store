@@ -453,7 +453,7 @@ fn process_db(db: &DbBasic, msg: Db, node_state: Sender<NodeState>) {
             .map_err(|_| anyhow!("Db::GetIndexVersion: unable to send response"))
             .unwrap(),
 
-        Db::GetIndexTargetType {
+        Db::GetIndexTargetDimensions {
             keyspace,
             table,
             target_column,
