@@ -646,6 +646,25 @@ mod operation {
     }
 }
 
+/// How much room a partition keeps free ahead of the vectors it already holds.
+///
+/// `needs_more_capacity` runs in the index actor, but `size` is bumped by a worker
+/// only once an add has finished. In between, an add is either waiting on the
+/// worker channel (`channel_size` slots) or running on a worker (`num_workers` of
+/// them), so that many adds can be missing from `size` when the check runs. The
+/// `+ 1` is the add the check is about to let through.
+///
+/// Reserving before fewer than that many slots are left keeps every dispatched add
+/// inside the reservation. usearch rejects an insert past `capacity` with "Reserve
+/// capacity ahead of insertions!" and `add` can then only drop the vector with a
+/// warning, so the threshold has to cover the worst case, not the common one.
+///
+/// Takes the runtime shape as arguments so that a test can pin it instead of
+/// picking up whatever runtime it happens to be spawned on.
+fn free_threshold(channel_size: usize, num_workers: usize) -> usize {
+    channel_size + num_workers + 1
+}
+
 struct PartitionState<I: UsearchIndex + Send + Sync + 'static> {
     partition_id: PartitionId,
     size: Arc<AtomicUsize>,
@@ -670,7 +689,7 @@ where
             size: Arc::new(AtomicUsize::new(0)),
             capacity: Arc::new(AtomicUsize::new(0)),
             capacity_increment,
-            free_threshold: perf::channel_size().into(),
+            free_threshold: free_threshold(perf::channel_size().into(), perf::num_workers().into()),
             idx,
         }
     }
@@ -678,7 +697,11 @@ where
     fn needs_more_capacity(&self) -> Option<usize> {
         let capacity = self.capacity.load(Ordering::Relaxed);
         let size = self.size.load(Ordering::Relaxed);
-        let free_space = capacity - size;
+        // `saturating_sub` so that an overshoot degrades into "reserve now" instead
+        // of wrapping to `usize::MAX` and never reserving again: release builds do
+        // not check overflow, so a bare subtraction turned one lost vector into a
+        // partition that failed every later add.
+        let free_space = capacity.saturating_sub(size);
 
         if free_space < self.free_threshold {
             Some(capacity + self.capacity_increment)
@@ -1943,5 +1966,84 @@ mod tests {
         let b1_vec = f32_to_b1x8(&input);
         assert_eq!(b1_vec.len(), 2);
         assert_eq!(b1x8_to_u8_vec(&b1_vec), &[0b10101010, 0b10100000]);
+    }
+
+    fn partition_with_capacity(capacity: usize) -> PartitionState<RwLock<Simulator>> {
+        let config = Arc::new(Config::default());
+        let (_tx, rx) = watch::channel(Arc::clone(&config));
+        let idx = Simulator::new(
+            config,
+            rx,
+            IndexKey::new(&"ks".to_string().into(), &"idx".to_string().into()),
+        );
+        let partition = PartitionState::new(PartitionId::from(0u64), idx);
+        // Stand in for a reserve: whatever usearch hands back, we track it exactly,
+        // so this holds for 2.22 (which over-reserves to a power of two) and for
+        // 2.26 (which reserves exactly what was asked for) alike.
+        partition.capacity.store(capacity, Ordering::Relaxed);
+        partition
+    }
+
+    /// The capacity check runs in the actor while adds are still queued on the
+    /// worker channel or running on a worker, and `size` only counts the ones that
+    /// have finished. `free_threshold` has to cover that whole lag: when it was
+    /// just `perf::channel_size()` the actor kept dispatching past `capacity`,
+    /// usearch rejected the overflow with "Reserve capacity ahead of insertions!"
+    /// and `add` dropped those vectors with a warning.
+    #[rstest]
+    #[case::single_worker(3, 1)]
+    #[case::many_workers(24, 8)]
+    #[tokio::test]
+    async fn capacity_check_leaves_room_for_every_add_in_flight(
+        #[case] channel_size: usize,
+        #[case] num_workers: usize,
+    ) {
+        let capacity = 4096;
+        let mut partition = partition_with_capacity(capacity);
+        partition.free_threshold = free_threshold(channel_size, num_workers);
+
+        // The worst case the workers can produce: the channel is full and every
+        // worker is mid-add, so that many adds are missing from `size`.
+        let in_flight = channel_size + num_workers;
+
+        let mut dispatched = 0;
+        let mut completed = 0;
+        while partition.needs_more_capacity().is_none() {
+            dispatched += 1;
+            assert!(
+                dispatched <= capacity,
+                "dispatched {dispatched} adds against a capacity of {capacity}"
+            );
+            if dispatched - completed > in_flight {
+                completed += 1;
+                partition.size.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        assert!(
+            dispatched > 0,
+            "expected to dispatch before asking for more room"
+        );
+        assert!(
+            completed < dispatched,
+            "expected adds to still be in flight when the check fired"
+        );
+    }
+
+    /// `capacity - size` used to be a bare subtraction: one overshoot wrapped it to
+    /// `usize::MAX`, `needs_more_capacity` returned `None` forever and every later
+    /// add failed.
+    #[tokio::test]
+    async fn overshooting_capacity_asks_for_more_instead_of_wrapping() {
+        let partition = partition_with_capacity(100);
+        partition.size.store(150, Ordering::Relaxed);
+
+        let requested = partition
+            .needs_more_capacity()
+            .expect("must ask for more room");
+        assert!(
+            requested > 150,
+            "requested {requested} has to cover the 150 vectors already there"
+        );
     }
 }
