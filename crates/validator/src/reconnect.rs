@@ -284,12 +284,20 @@ async fn restarting_one_node_doesnt_break_fullscan(actors: Arc<TestActors>) {
         .first()
         .unwrap()
         .proxy_addr;
-    let total_connections = *client
-        .internals_session_counters()
-        .await
-        .unwrap()
-        .get("total-connections")
-        .unwrap();
+
+    let total_connections = wait_for_value(
+        || async {
+            client
+                .internals_session_counters()
+                .await
+                .unwrap()
+                .get("total-connections")
+                .copied()
+        },
+        "Waiting for total-connections counter",
+        DEFAULT_OPERATION_TIMEOUT,
+    )
+    .await;
 
     info!("Disconnect scylla-proxy {proxy_addr}");
     actors.firewall.drop_traffic(vec![proxy_addr]).await;
@@ -406,12 +414,19 @@ async fn restarting_all_nodes_doesnt_break_fullscan(actors: Arc<TestActors>) {
     )
     .await;
 
-    let total_connections = *client
-        .internals_session_counters()
-        .await
-        .unwrap()
-        .get("total-connections")
-        .unwrap();
+    let total_connections = wait_for_value(
+        || async {
+            client
+                .internals_session_counters()
+                .await
+                .unwrap()
+                .get("total-connections")
+                .copied()
+        },
+        "Waiting for total-connections counter",
+        DEFAULT_OPERATION_TIMEOUT,
+    )
+    .await;
     info!("Base number of total connections: {total_connections}");
 
     info!("Restart each node one by one");
