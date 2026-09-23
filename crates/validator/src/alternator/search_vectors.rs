@@ -89,8 +89,8 @@ impl SearchVectorsOutputExt for SearchVectorsOutput {
 }
 
 /// Verifies basic SearchVectors: results returned, TopK respected, nearest item first.
-#[e2etest::test(group = query)]
-async fn query_with_vector_search(actors: Arc<TestActors>) {
+#[e2etest::test(group = search_vectors)]
+async fn search_returns_nearest_items(actors: Arc<TestActors>) {
     info!("started");
 
     let shapes = [
@@ -171,8 +171,8 @@ async fn query_with_vector_search(actors: Arc<TestActors>) {
     info!("finished");
 }
 
-#[e2etest::test(group = query)]
-async fn query_uses_selected_vector_index(actors: Arc<TestActors>) {
+#[e2etest::test(group = search_vectors)]
+async fn search_uses_selected_vector_index(actors: Arc<TestActors>) {
     info!("started");
 
     let (client, vs_clients) = alternator::make_clients(&actors).await;
@@ -295,8 +295,8 @@ async fn query_uses_selected_vector_index(actors: Arc<TestActors>) {
 }
 
 /// Verifies ANN results are ordered by ascending cosine distance.
-#[e2etest::test(group = query)]
-async fn query_with_vector_search_multiple_results_ordering(actors: Arc<TestActors>) {
+#[e2etest::test(group = search_vectors)]
+async fn search_results_ordering(actors: Arc<TestActors>) {
     info!("started");
 
     let dataset = [
@@ -356,8 +356,8 @@ async fn query_with_vector_search_multiple_results_ordering(actors: Arc<TestActo
 }
 
 /// Verifies ProjectionExpression returns only requested key attributes across name_patterns.
-#[e2etest::test(group = query)]
-async fn query_with_projection_special_names(actors: Arc<TestActors>) {
+#[e2etest::test(group = search_vectors)]
+async fn search_with_projection_special_names(actors: Arc<TestActors>) {
     info!("started");
 
     for shape in &alternator::name_patterns() {
@@ -425,8 +425,8 @@ async fn query_with_projection_special_names(actors: Arc<TestActors>) {
 
 /// Verifies `BaseRead=true` returns all base table attributes, including ones
 /// not projected into the index.
-#[e2etest::test(group = query)]
-async fn query_with_select_all_attributes(actors: Arc<TestActors>) {
+#[e2etest::test(group = search_vectors)]
+async fn search_with_base_read(actors: Arc<TestActors>) {
     info!("started");
 
     let shape = TableShape {
@@ -483,8 +483,8 @@ async fn query_with_select_all_attributes(actors: Arc<TestActors>) {
 }
 
 /// Verifies TopK larger than dataset returns all items without error.
-#[e2etest::test(group = query)]
-async fn query_with_limit_larger_than_dataset(actors: Arc<TestActors>) {
+#[e2etest::test(group = search_vectors)]
+async fn search_with_top_k_larger_than_dataset(actors: Arc<TestActors>) {
     info!("started");
 
     let dataset = [
@@ -543,8 +543,8 @@ async fn query_with_limit_larger_than_dataset(actors: Arc<TestActors>) {
 }
 
 /// Verifies SearchVectors works with 1536-dimensional vectors.
-#[e2etest::test(group = query)]
-async fn query_with_large_dimensions(actors: Arc<TestActors>) {
+#[e2etest::test(group = search_vectors)]
+async fn search_with_large_dimensions(actors: Arc<TestActors>) {
     info!("started");
 
     let (client, vs_clients) = alternator::make_clients(&actors).await;
@@ -621,8 +621,8 @@ async fn query_with_large_dimensions(actors: Arc<TestActors>) {
 }
 
 /// Verifies FilterExpression excludes non-matching items while preserving ANN ordering.
-#[e2etest::test(group = query)]
-async fn query_with_filter_expression(actors: Arc<TestActors>) {
+#[e2etest::test(group = search_vectors)]
+async fn search_with_filter_expression(actors: Arc<TestActors>) {
     info!("started");
 
     let pk_name = "Pk-Flt";
@@ -711,7 +711,7 @@ async fn query_with_filter_expression(actors: Arc<TestActors>) {
 }
 
 e2etest::group!(
-    name = query,
+    name = search_vectors,
     fixtures = (Fixture),
     parent = alternator::alternator
 );

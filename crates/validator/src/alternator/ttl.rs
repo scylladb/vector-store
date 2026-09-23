@@ -14,8 +14,8 @@ use crate::alternator;
 use crate::alternator::Item;
 use crate::alternator::TableContext;
 use crate::alternator::TableShape;
-use crate::alternator::query::SearchVectorsBuilderExt;
-use crate::alternator::query::SearchVectorsOutputExt;
+use crate::alternator::search_vectors::SearchVectorsBuilderExt;
+use crate::alternator::search_vectors::SearchVectorsOutputExt;
 use crate::common;
 use aws_sdk_dynamodb::types::AttributeValue;
 use aws_sdk_dynamodb::types::ScalarAttributeType;
@@ -121,7 +121,7 @@ async fn ttl_expiration_removes_vector(actors: Arc<TestActors>) {
 /// with the default `BaseRead=false` - an index-only read that skips the base
 /// table.
 #[e2etest::test(group = ttl)]
-async fn ttl_expiration_verified_via_query_with_all_projected(actors: Arc<TestActors>) {
+async fn ttl_expiration_verified_via_search_vectors(actors: Arc<TestActors>) {
     info!("started");
 
     let shape = TableShape {

@@ -9,7 +9,7 @@ mod create_table;
 mod delete_item;
 mod lwt;
 mod put_item;
-mod query;
+mod search_vectors;
 mod ttl;
 mod types;
 mod update_item;
