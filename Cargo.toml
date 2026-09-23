@@ -15,7 +15,7 @@ license = "LicenseRef-ScyllaDB-Source-Available-1.1"
 anyhow = "1.0.97"
 aws-config = "1.8.14"
 aws-credential-types = "1.2.12"
-aws-sdk-dynamodb = { version = "1.105.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sdk-dynamodb = { version = "1.127.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
 aws-smithy-runtime-api = "1.11.4"
 aws-smithy-types = "1.4.4"
 arrow-array = "56.0.0"

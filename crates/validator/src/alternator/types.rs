@@ -8,7 +8,8 @@ use crate::alternator;
 use crate::alternator::Item;
 use crate::alternator::TableContext;
 use crate::alternator::TableShape;
-use crate::alternator::query::QueryBuilderExt;
+use crate::alternator::query::SearchVectorsBuilderExt;
+use crate::alternator::query::SearchVectorsOutputExt;
 use crate::common;
 use aws_sdk_dynamodb::primitives::Blob;
 use aws_sdk_dynamodb::types::AttributeValue;
@@ -18,7 +19,7 @@ use std::sync::Arc;
 use tracing::info;
 
 /// Shared logic for all key-type tests: creates a table with initial items,
-/// adds extra items via PutItem, then queries with both L-type and FLOAT32VECTOR
+/// adds extra items via PutItem, then queries with both list-of-numbers and FLOAT32VECTOR
 /// encodings and asserts that all expected pk values are returned with correct
 /// projection.
 async fn query_with_key_type(
@@ -42,10 +43,10 @@ async fn query_with_key_type(
 
     let base_query = || {
         ctx.client
-            .query()
+            .search_vectors()
             .table_name(&ctx.table_name)
             .index_name(ctx.index.index.as_ref())
-            .limit((initial.len() + extra.len()) as i32)
+            .top_k((initial.len() + extra.len()) as i32)
             .projection_expression("#pk")
             .expression_attribute_names("#pk", shape.pk())
     };
@@ -64,21 +65,19 @@ async fn query_with_key_type(
     };
 
     let items = base_query()
-        .vector_search([1.0, 1.0, 1.0])
+        .search_vector_list([1.0, 1.0, 1.0])
         .send()
         .await
-        .expect("Query with `L-type vector` should succeed")
-        .items()
-        .to_vec();
-    assert_results(&items, "L-type");
+        .expect("SearchVectors with a list of numbers should succeed")
+        .items();
+    assert_results(&items, "list-of-numbers");
 
     let items = base_query()
-        .vector_search_optimized([1.0, 1.0, 1.0])
+        .search_vector_optimized([1.0, 1.0, 1.0])
         .send()
         .await
-        .expect("Query with `FLOAT32VECTOR` should succeed")
-        .items()
-        .to_vec();
+        .expect("SearchVectors with `FLOAT32VECTOR` should succeed")
+        .items();
     assert_results(&items, "FLOAT32VECTOR");
 
     ctx.done().await;

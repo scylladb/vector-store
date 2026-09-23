@@ -31,9 +31,17 @@ use aws_sdk_dynamodb::primitives::Blob;
 use aws_sdk_dynamodb::types::AttributeDefinition;
 use aws_sdk_dynamodb::types::AttributeValue;
 use aws_sdk_dynamodb::types::BillingMode;
+use aws_sdk_dynamodb::types::CreateVectorIndexAction;
+use aws_sdk_dynamodb::types::DeleteVectorIndexAction;
 use aws_sdk_dynamodb::types::KeySchemaElement;
 use aws_sdk_dynamodb::types::KeyType;
+use aws_sdk_dynamodb::types::Projection;
+use aws_sdk_dynamodb::types::ProjectionType;
 use aws_sdk_dynamodb::types::ScalarAttributeType;
+use aws_sdk_dynamodb::types::VectorAttributeDefinition;
+use aws_sdk_dynamodb::types::VectorDistanceFunction;
+use aws_sdk_dynamodb::types::VectorIndex;
+use aws_sdk_dynamodb::types::VectorIndexUpdate;
 use aws_smithy_runtime_api::box_error::BoxError;
 use aws_smithy_runtime_api::client::interceptors::Intercept;
 use aws_smithy_runtime_api::client::interceptors::context::BeforeTransmitInterceptorContextMut;
@@ -113,7 +121,8 @@ fn keyspace(table_name: &str) -> KeyspaceName {
 /// JSON request body before SigV4 signing.
 ///
 /// The standard `aws-sdk-dynamodb` crate serialises requests without knowledge
-/// of ScyllaDB Alternator extension fields such as `VectorIndexes`. This
+/// of ScyllaDB Alternator extension fields such as `SearchVectors`'s
+/// `BaseRead`. This
 /// interceptor fires in [`modify_before_signing`], reads the already-serialised
 /// JSON body, merges the provided fields, re-serialises, replaces the body, and
 /// updates the `Content-Length` header so the SigV4 signature and HTTP transport
@@ -122,11 +131,11 @@ fn keyspace(table_name: &str) -> KeyspaceName {
 /// # Example
 /// ```ignore
 /// client
-///     .create_table()
+///     .search_vectors()
 ///     // ...
 ///     .customize()
 ///     .interceptor(JsonBodyInjectInterceptor::new([
-///         ("VectorIndexes", vector_indexes_json),
+///         ("BaseRead", serde_json::json!(true)),
 ///     ]))
 ///     .send()
 ///     .await?;
@@ -557,47 +566,74 @@ async fn create_table(
             );
     }
 
-    if vector_indexes.is_empty() {
-        builder.send().await
-    } else {
-        let indexes_json = serde_json::json!(
-            vector_indexes
-                .iter()
-                .map(|(index_name, vec_attr, dims)| {
-                    serde_json::json!({
-                        "IndexName": index_name,
-                        "VectorAttribute": {
-                            "AttributeName": vec_attr,
-                            "Dimensions": dims
-                        }
-                    })
-                })
-                .collect::<Vec<_>>()
-        );
-        builder
-            .customize()
-            .interceptor(JsonBodyInjectInterceptor::new([(
-                "VectorIndexes",
-                indexes_json,
-            )]))
-            .send()
-            .await
+    for (index_name, vec_attr, dims) in vector_indexes {
+        builder = builder.vector_indexes(vector_index(index_name, vec_attr, *dims));
     }
+    builder.send().await
+}
+
+fn vector_attribute(vec_attr: &str) -> VectorAttributeDefinition {
+    VectorAttributeDefinition::builder()
+        .attribute_name(vec_attr)
+        .build()
+        .expect("failed to build VectorAttributeDefinition")
+}
+
+fn keys_only_projection() -> Projection {
+    Projection::builder()
+        .projection_type(ProjectionType::KeysOnly)
+        .build()
+}
+
+/// Builds a `CreateTable` vector index definition with the `COSINE` distance
+/// function and a `KEYS_ONLY` projection.
+fn vector_index(index_name: &str, vec_attr: &str, dims: usize) -> VectorIndex {
+    VectorIndex::builder()
+        .index_name(index_name)
+        .vector_attribute(vector_attribute(vec_attr))
+        .dimensions(dims as i64)
+        .distance_function(VectorDistanceFunction::Cosine)
+        .projection(keys_only_projection())
+        .build()
+        .expect("failed to build VectorIndex")
+}
+
+/// Like [`vector_index`], but as an `UpdateTable` `Create` action.
+fn create_vector_index_update(index_name: &str, vec_attr: &str, dims: usize) -> VectorIndexUpdate {
+    VectorIndexUpdate::builder()
+        .create(
+            CreateVectorIndexAction::builder()
+                .index_name(index_name)
+                .vector_attribute(vector_attribute(vec_attr))
+                .dimensions(dims as i64)
+                .distance_function(VectorDistanceFunction::Cosine)
+                .projection(keys_only_projection())
+                .build()
+                .expect("failed to build CreateVectorIndexAction"),
+        )
+        .build()
+}
+
+fn delete_vector_index_update(index_name: &str) -> VectorIndexUpdate {
+    VectorIndexUpdate::builder()
+        .delete(
+            DeleteVectorIndexAction::builder()
+                .index_name(index_name)
+                .build()
+                .expect("failed to build DeleteVectorIndexAction"),
+        )
+        .build()
 }
 
 async fn update_table_vector_indexes(
     client: &Client,
     table_name: &str,
-    vector_index_updates: Value,
+    vector_index_update: VectorIndexUpdate,
 ) {
     client
         .update_table()
         .table_name(table_name)
-        .customize()
-        .interceptor(JsonBodyInjectInterceptor::new([(
-            "VectorIndexUpdates",
-            vector_index_updates,
-        )]))
+        .vector_index_updates(vector_index_update)
         .send()
         .await
         .expect("UpdateTable with VectorIndexUpdates should succeed");
@@ -934,15 +970,7 @@ impl TableContext {
         update_table_vector_indexes(
             &ctx.client,
             &ctx.table_name,
-            serde_json::json!([{
-                "Create": {
-                    "IndexName": ctx.index.index.as_ref(),
-                    "VectorAttribute": {
-                        "AttributeName": vec_attr,
-                        "Dimensions": Item::VEC_DIMS
-                    }
-                }
-            }]),
+            create_vector_index_update(ctx.index.index.as_ref(), vec_attr, Item::VEC_DIMS),
         )
         .await;
 

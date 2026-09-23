@@ -11,62 +11,84 @@ use crate::alternator::TableContext;
 use crate::alternator::TableShape;
 use crate::common;
 use aws_sdk_dynamodb::client::customize::CustomizableOperation;
-use aws_sdk_dynamodb::operation::query::QueryError;
-use aws_sdk_dynamodb::operation::query::QueryOutput;
-use aws_sdk_dynamodb::operation::query::builders::QueryFluentBuilder;
+use aws_sdk_dynamodb::operation::search_vectors::SearchVectorsError;
+use aws_sdk_dynamodb::operation::search_vectors::SearchVectorsOutput;
+use aws_sdk_dynamodb::operation::search_vectors::builders::SearchVectorsFluentBuilder;
 use aws_sdk_dynamodb::types::AttributeValue;
 use aws_sdk_dynamodb::types::ScalarAttributeType;
-use aws_sdk_dynamodb::types::Select;
 use httpapi::IndexName;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::info;
 
-/// Extension trait that adds Alternator `VectorSearch` to [`QueryFluentBuilder`].
-pub(super) trait QueryBuilderExt {
-    fn vector_search(
-        self,
-        vector: impl IntoIterator<Item = f32>,
-    ) -> CustomizableOperation<QueryOutput, QueryError, QueryFluentBuilder>;
+/// Extension trait with helpers for building a `SearchVectors` request.
+pub(super) trait SearchVectorsBuilderExt {
+    /// Sets `SearchVector` as a list of numbers (`N`), as DynamoDB expects.
+    fn search_vector_list(self, vector: impl IntoIterator<Item = f32>) -> Self;
 
-    fn vector_search_optimized(
+    /// Sets `SearchVector` as a ScyllaDB `FLOAT32VECTOR`, which the SDK does
+    /// not model.
+    fn search_vector_optimized(
         self,
         vector: impl IntoIterator<Item = f32>,
-    ) -> CustomizableOperation<QueryOutput, QueryError, QueryFluentBuilder>;
+    ) -> CustomizableOperation<SearchVectorsOutput, SearchVectorsError, SearchVectorsFluentBuilder>;
+
+    /// Adds ScyllaDB extension fields (e.g. `BaseRead`, `FilterExpression`),
+    /// which the SDK does not model.
+    fn with_extensions(
+        self,
+        fields: impl IntoIterator<Item = (&'static str, Value)>,
+    ) -> CustomizableOperation<SearchVectorsOutput, SearchVectorsError, SearchVectorsFluentBuilder>;
 }
 
-impl QueryBuilderExt for QueryFluentBuilder {
-    fn vector_search(
-        self,
-        vector: impl IntoIterator<Item = f32>,
-    ) -> CustomizableOperation<QueryOutput, QueryError, QueryFluentBuilder> {
-        let json = serde_json::json!({
-            "QueryVector": {
-                "L": vector
-                    .into_iter()
-                    .map(|v| serde_json::json!({ "N": v.to_string() }))
-                    .collect::<Vec<_>>()
-            }
-        });
-        self.customize()
-            .interceptor(JsonBodyInjectInterceptor::new([("VectorSearch", json)]))
+impl SearchVectorsBuilderExt for SearchVectorsFluentBuilder {
+    fn search_vector_list(self, vector: impl IntoIterator<Item = f32>) -> Self {
+        self.set_search_vector(Some(
+            vector
+                .into_iter()
+                .map(|v| AttributeValue::N(v.to_string()))
+                .collect(),
+        ))
     }
 
-    fn vector_search_optimized(
+    fn search_vector_optimized(
         self,
         vector: impl IntoIterator<Item = f32>,
-    ) -> CustomizableOperation<QueryOutput, QueryError, QueryFluentBuilder> {
-        let json = serde_json::json!({
-            "QueryVector": {
-                "FLOAT32VECTOR": vector.into_iter().collect::<Vec<_>>()
-            }
-        });
+    ) -> CustomizableOperation<SearchVectorsOutput, SearchVectorsError, SearchVectorsFluentBuilder>
+    {
+        self.with_extensions([(
+            "SearchVector",
+            serde_json::json!({ "FLOAT32VECTOR": vector.into_iter().collect::<Vec<_>>() }),
+        )])
+    }
+
+    fn with_extensions(
+        self,
+        fields: impl IntoIterator<Item = (&'static str, Value)>,
+    ) -> CustomizableOperation<SearchVectorsOutput, SearchVectorsError, SearchVectorsFluentBuilder>
+    {
         self.customize()
-            .interceptor(JsonBodyInjectInterceptor::new([("VectorSearch", json)]))
+            .interceptor(JsonBodyInjectInterceptor::new(fields))
     }
 }
 
-/// Verifies basic VectorSearch query: results returned, limit respected, nearest item first.
+/// Extension trait for reading a `SearchVectors` response.
+pub(super) trait SearchVectorsOutputExt {
+    /// Returns the found items, nearest match first.
+    fn items(&self) -> Vec<HashMap<String, AttributeValue>>;
+}
+
+impl SearchVectorsOutputExt for SearchVectorsOutput {
+    fn items(&self) -> Vec<HashMap<String, AttributeValue>> {
+        self.search_results()
+            .iter()
+            .map(|result| result.item().cloned().unwrap_or_default())
+            .collect()
+    }
+}
+
+/// Verifies basic SearchVectors: results returned, TopK respected, nearest item first.
 #[e2etest::test(group = query)]
 async fn query_with_vector_search(actors: Arc<TestActors>) {
     info!("started");
@@ -107,30 +129,26 @@ async fn query_with_vector_search(actors: Arc<TestActors>) {
 
         let ctx = TableContext::create_with_data(&actors, shape, &dataset).await;
 
-        info!(
-            "Issuing Query with VectorSearch Limit=2 on '{}'",
-            ctx.table_name
-        );
+        info!("Issuing SearchVectors TopK=2 on '{}'", ctx.table_name);
         let items = ctx
             .client
-            .query()
+            .search_vectors()
             .table_name(&ctx.table_name)
             .index_name(ctx.index.index.as_ref())
-            .limit(2)
-            .vector_search([1.0, 1.0, 1.0])
+            .top_k(2)
+            .search_vector_list([1.0, 1.0, 1.0])
             .send()
             .await
-            .expect("Query with VectorSearch should succeed")
-            .items()
-            .to_vec();
+            .expect("SearchVectors should succeed")
+            .items();
 
         assert!(
             !items.is_empty(),
-            "Query with VectorSearch should return at least one item"
+            "SearchVectors should return at least one item"
         );
         assert!(
             items.len() <= 2,
-            "Query with VectorSearch Limit=2 should return at most 2 items, got {}",
+            "SearchVectors TopK=2 should return at most 2 items, got {}",
             items.len()
         );
         assert_eq!(
@@ -232,20 +250,19 @@ async fn query_uses_selected_vector_index(actors: Arc<TestActors>) {
     common::wait_for_index_count(&vs_clients, &upper_index, dataset.len()).await;
 
     info!(
-        "Querying lower-case index '{}' on '{table_name}'",
+        "Searching lower-case index '{}' on '{table_name}'",
         lower_index.index
     );
     let lower_items = client
-        .query()
+        .search_vectors()
         .table_name(&table_name)
         .index_name(lower_index.index.as_ref())
-        .limit(1)
-        .vector_search([1.0, 1.0, 1.0])
+        .top_k(1)
+        .search_vector_list([1.0, 1.0, 1.0])
         .send()
         .await
-        .expect("Query with VectorSearch should succeed")
-        .items()
-        .to_vec();
+        .expect("SearchVectors should succeed")
+        .items();
     assert_eq!(
         lower_items[0].get(partition_key_name),
         Some(&AttributeValue::S("pk-a".into())),
@@ -253,20 +270,19 @@ async fn query_uses_selected_vector_index(actors: Arc<TestActors>) {
     );
 
     info!(
-        "Querying upper-case index '{}' on '{table_name}'",
+        "Searching upper-case index '{}' on '{table_name}'",
         upper_index.index
     );
     let upper_items = client
-        .query()
+        .search_vectors()
         .table_name(&table_name)
         .index_name(upper_index.index.as_ref())
-        .limit(1)
-        .vector_search([1.0, 1.0, 1.0])
+        .top_k(1)
+        .search_vector_list([1.0, 1.0, 1.0])
         .send()
         .await
-        .expect("Query with VectorSearch should succeed")
-        .items()
-        .to_vec();
+        .expect("SearchVectors should succeed")
+        .items();
     assert_eq!(
         upper_items[0].get(partition_key_name),
         Some(&AttributeValue::S("pk-c".into())),
@@ -311,22 +327,18 @@ async fn query_with_vector_search_multiple_results_ordering(actors: Arc<TestActo
         .map(|i| i.0.get("Pk-Ord").expect("item has no Pk-Ord").clone())
         .collect();
 
-    info!(
-        "Issuing Query with VectorSearch Limit=5 on '{}'",
-        ctx.table_name
-    );
+    info!("Issuing SearchVectors TopK=5 on '{}'", ctx.table_name);
     let raw = ctx
         .client
-        .query()
+        .search_vectors()
         .table_name(&ctx.table_name)
         .index_name(ctx.index.index.as_ref())
-        .limit(5)
-        .vector_search([1.0, 0.0, 0.0])
+        .top_k(5)
+        .search_vector_list([1.0, 0.0, 0.0])
         .send()
         .await
-        .expect("Query with VectorSearch should succeed")
-        .items()
-        .to_vec();
+        .expect("SearchVectors should succeed")
+        .items();
     let actual_order: Vec<AttributeValue> = raw
         .iter()
         .filter_map(|item| item.get("Pk-Ord"))
@@ -374,25 +386,24 @@ async fn query_with_projection_special_names(actors: Arc<TestActors>) {
             "#pk"
         };
 
-        info!("Querying with ProjectionExpression = '{proj_expr}'");
+        info!("Searching with ProjectionExpression = '{proj_expr}'");
         let mut builder = ctx
             .client
-            .query()
+            .search_vectors()
             .table_name(&ctx.table_name)
             .index_name(ctx.index.index.as_ref())
-            .limit(1)
+            .top_k(1)
             .projection_expression(proj_expr)
             .expression_attribute_names("#pk", pk_name);
         if let Some(sk_name) = shape.sk() {
             builder = builder.expression_attribute_names("#sk", sk_name);
         }
         let items = builder
-            .vector_search([1.0, 1.0, 1.0])
+            .search_vector_list([1.0, 1.0, 1.0])
             .send()
             .await
-            .expect("Query with VectorSearch should succeed")
-            .items()
-            .to_vec();
+            .expect("SearchVectors should succeed")
+            .items();
 
         let mut expected_item: HashMap<String, AttributeValue> = HashMap::new();
         expected_item.insert(pk_name.to_string(), AttributeValue::S("pk-1".into()));
@@ -412,7 +423,8 @@ async fn query_with_projection_special_names(actors: Arc<TestActors>) {
     info!("finished");
 }
 
-/// Verifies Select::AllAttributes returns all item attributes.
+/// Verifies `BaseRead=true` returns all base table attributes, including ones
+/// not projected into the index.
 #[e2etest::test(group = query)]
 async fn query_with_select_all_attributes(actors: Arc<TestActors>) {
     info!("started");
@@ -436,34 +448,33 @@ async fn query_with_select_all_attributes(actors: Arc<TestActors>) {
 
     let ctx = TableContext::create_with_data(&actors, &shape, &dataset).await;
 
-    info!("Querying with Select::AllAttributes");
+    info!("Searching with BaseRead=true");
     let items = ctx
         .client
-        .query()
+        .search_vectors()
         .table_name(&ctx.table_name)
         .index_name(ctx.index.index.as_ref())
-        .limit(1)
-        .select(Select::AllAttributes)
-        .vector_search([1.0, 1.0, 1.0])
+        .top_k(1)
+        .search_vector_list([1.0, 1.0, 1.0])
+        .with_extensions([("BaseRead", serde_json::json!(true))])
         .send()
         .await
-        .expect("Query with VectorSearch should succeed")
-        .items()
-        .to_vec();
+        .expect("SearchVectors should succeed")
+        .items();
 
     assert_eq!(items.len(), 1, "should return 1 item");
     let item = &items[0];
     assert!(
         item.contains_key("Pk-SelAll"),
-        "AllAttributes should return partition key"
-    );
-    assert!(
-        item.contains_key("Vec-SelAll"),
-        "AllAttributes should return vector attribute"
+        "BaseRead should return partition key"
     );
     assert!(
         item.contains_key(data_attribute_name),
-        "AllAttributes should return data attribute"
+        "BaseRead should return data attribute"
+    );
+    assert!(
+        !item.contains_key("Vec-SelAll"),
+        "vector attribute should be excluded from the default result"
     );
 
     ctx.done().await;
@@ -471,60 +482,7 @@ async fn query_with_select_all_attributes(actors: Arc<TestActors>) {
     info!("finished");
 }
 
-/// Verifies Select::Count returns count > 0 with empty items list.
-#[e2etest::test(group = query)]
-async fn query_with_select_count(actors: Arc<TestActors>) {
-    info!("started");
-
-    let dataset = [
-        Item::new("Pk-SelCnt", AttributeValue::S("pk-a".into())).vec("Vec-SelCnt", [1.0, 1.0, 1.0]),
-        Item::new("Pk-SelCnt", AttributeValue::S("pk-b".into())).vec("Vec-SelCnt", [1.0, 2.0, 4.0]),
-    ];
-
-    let ctx = TableContext::create_with_data(
-        &actors,
-        &TableShape {
-            table_prefix: None,
-            index_prefix: None,
-            pk_name: "Pk-SelCnt".into(),
-            sk_name: None,
-            vec_name: Some("Vec-SelCnt".into()),
-            pk_type: ScalarAttributeType::S,
-        },
-        &dataset,
-    )
-    .await;
-
-    info!("Querying with Select::Count");
-    let resp = ctx
-        .client
-        .query()
-        .table_name(&ctx.table_name)
-        .index_name(ctx.index.index.as_ref())
-        .limit(5)
-        .select(Select::Count)
-        .vector_search([1.0_f32, 1.0, 1.0])
-        .send()
-        .await
-        .expect("Query with Select::Count should succeed");
-
-    assert!(
-        resp.count() > 0,
-        "Select::Count should report count > 0, got {}",
-        resp.count()
-    );
-    assert!(
-        resp.items().is_empty(),
-        "Select::Count should return empty items list, got {} items",
-        resp.items().len()
-    );
-
-    ctx.done().await;
-
-    info!("finished");
-}
-
-/// Verifies Limit larger than dataset returns all items without error.
+/// Verifies TopK larger than dataset returns all items without error.
 #[e2etest::test(group = query)]
 async fn query_with_limit_larger_than_dataset(actors: Arc<TestActors>) {
     info!("started");
@@ -550,32 +508,31 @@ async fn query_with_limit_larger_than_dataset(actors: Arc<TestActors>) {
     .await;
 
     info!(
-        "Issuing Query with VectorSearch Limit=1000 on '{}' (dataset has {} items)",
+        "Issuing SearchVectors TopK=1000 on '{}' (dataset has {} items)",
         ctx.table_name,
         dataset.len()
     );
     let items = ctx
         .client
-        .query()
+        .search_vectors()
         .table_name(&ctx.table_name)
         .index_name(ctx.index.index.as_ref())
-        .limit(1000)
-        .vector_search([1.0, 1.0, 1.0])
+        .top_k(1000)
+        .search_vector_list([1.0, 1.0, 1.0])
         .send()
         .await
-        .expect("Query with VectorSearch should succeed")
-        .items()
-        .to_vec();
+        .expect("SearchVectors should succeed")
+        .items();
 
     assert_eq!(
         items.len(),
         dataset.len(),
-        "Query with Limit=1000 should return all {} items, got {}",
+        "SearchVectors TopK=1000 should return all {} items, got {}",
         dataset.len(),
         items.len()
     );
     info!(
-        "Query returned {} item(s) with Limit=1000 (dataset has {})",
+        "SearchVectors returned {} item(s) with TopK=1000 (dataset has {})",
         items.len(),
         dataset.len()
     );
@@ -585,7 +542,7 @@ async fn query_with_limit_larger_than_dataset(actors: Arc<TestActors>) {
     info!("finished");
 }
 
-/// Verifies VectorSearch works with 1536-dimensional vectors.
+/// Verifies SearchVectors works with 1536-dimensional vectors.
 #[e2etest::test(group = query)]
 async fn query_with_large_dimensions(actors: Arc<TestActors>) {
     info!("started");
@@ -639,24 +596,23 @@ async fn query_with_large_dimensions(actors: Arc<TestActors>) {
     info!("Waiting for VS to index the item");
     common::wait_for_index_count(&vs_clients, &index, 1).await;
 
-    info!("Querying with VectorSearch on {dimensions}-dim index");
+    info!("Searching on {dimensions}-dim index");
     let items = client
-        .query()
+        .search_vectors()
         .table_name(&table_name)
         .index_name(index.index.as_ref())
-        .limit(1)
-        .vector_search(vector_data)
+        .top_k(1)
+        .search_vector_list(vector_data)
         .send()
         .await
-        .expect("Query with VectorSearch should succeed")
-        .items()
-        .to_vec();
+        .expect("SearchVectors should succeed")
+        .items();
 
     assert_eq!(items.len(), 1, "should return 1 item");
     assert_eq!(
         items[0].get(partition_key_name),
         Some(&AttributeValue::S("pk-1".into())),
-        "VectorSearch should return the inserted item"
+        "SearchVectors should return the inserted item"
     );
 
     alternator::delete_table(&client, &table_name).await;
@@ -701,29 +657,34 @@ async fn query_with_filter_expression(actors: Arc<TestActors>) {
     )
     .await;
 
-    // Use Limit larger than the dataset so all items are read from the index
-    // before FilterExpression is applied (DynamoDB applies Limit first, then
-    // FilterExpression - a Limit smaller than the dataset could exclude items
+    // Use TopK larger than the dataset so all items are read from the index
+    // before FilterExpression is applied (TopK is applied first, then
+    // FilterExpression - a TopK smaller than the dataset could exclude items
     // before the filter ever sees them).
     info!(
-        "Issuing Query with FilterExpression '#cat = :cat' on '{}'",
+        "Issuing SearchVectors with FilterExpression '#cat = :cat' on '{}'",
         ctx.table_name
     );
     let resp = ctx
         .client
-        .query()
+        .search_vectors()
         .table_name(&ctx.table_name)
         .index_name(ctx.index.index.as_ref())
-        .limit(100)
-        .filter_expression("#cat = :cat")
+        .top_k(100)
         .projection_expression("#pk, #cat")
         .expression_attribute_names("#pk", pk_name)
         .expression_attribute_names("#cat", cat_name)
         .expression_attribute_values(":cat", AttributeValue::S("keep".into()))
-        .vector_search([1.0_f32, 1.0, 1.0])
+        .search_vector_list([1.0_f32, 1.0, 1.0])
+        // `Category` is not projected into the index, so the filter needs
+        // `BaseRead` to see it.
+        .with_extensions([
+            ("FilterExpression", serde_json::json!("#cat = :cat")),
+            ("BaseRead", serde_json::json!(true)),
+        ])
         .send()
         .await
-        .expect("Query with FilterExpression should succeed");
+        .expect("SearchVectors with FilterExpression should succeed");
 
     // ANN ordering is preserved after filtering: pk-keep-1 is nearest to
     // [1,1,1] (exact match), pk-keep-2 is slightly farther.  "pk-drop" must
