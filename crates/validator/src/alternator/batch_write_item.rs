@@ -4,10 +4,10 @@
  */
 
 use crate::TestActors;
-use crate::alternator;
-use crate::alternator::Item;
-use crate::alternator::TableContext;
 use crate::common;
+use crate::common::alternator;
+use crate::common::alternator::Item;
+use crate::common::alternator::TableContext;
 use aws_sdk_dynamodb::error::SdkError;
 use aws_sdk_dynamodb::operation::batch_write_item::BatchWriteItemError;
 use aws_sdk_dynamodb::operation::batch_write_item::BatchWriteItemOutput;
@@ -239,7 +239,7 @@ async fn batch_write_item_with_invalid_vector(actors: Arc<TestActors>) {
 e2etest::group!(
     name = batch_write_item,
     fixtures = (Fixture),
-    parent = alternator::alternator
+    parent = super::alternator
 );
 
 struct Fixture {
