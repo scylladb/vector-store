@@ -1,0 +1,83 @@
+general:
+  region: us-east-1
+  key_name: AmnonEc2
+  # (optional but recommended) scope SG lookups & validation
+  vpc_id: vpc-0c598dfd0669073f1
+
+  # Security groups can be IDs or names (IDs preferred). Can be overridden per type/entry.
+  security_groups:
+    - "sg-0a0e4c8ee3014091a"
+
+  # Per-AZ subnet mapping: subnet ID or the literal "default"
+  use_default_subnet: true
+  subnets:
+    us-east-1a: subnet-0a0e80275db924478
+    us-east-1b: subnet-08e2a631f05426546
+    us-east-1c: subnet-0643b27267d4def8b
+  labels:
+    Owner: vector-test
+
+  # Networking default
+  associate_public_ip: true
+
+  # Optional cluster tag (auto-generated if omitted)
+  cluster_id: scylla-lab-01
+
+types:
+  scylla:
+    ami: ami-02a35bd020554f400
+    instance_type: i3.xlarge
+    name_template: scylla-{az}-{index}
+    # --- Optional per-type overrides (inherit from general if omitted) ---
+    # vpc_id: vpc-override-here
+    # security_groups: [ "sg-...", "web-sg-name" ]
+    # subnet_id: subnet-override-here
+    # user_data: |
+    #   #!/bin/bash
+    #   echo hello
+    # volume_size_gb: 50
+    # volume_type: gp3
+    # metadata_options: { HttpTokens: required }
+    # iam_instance_profile_arn: arn:aws:iam::123456789012:instance-profile/role-name
+    # --- Advanced networking (choose ONE path if needed) ---
+    # network_interface:
+    #   network_interface_id: eni-0123456789abcdef0    # attach existing ENI as device 0
+    # network_interfaces:
+    #   - device_index: 0
+    #     subnet_id: subnet-xxxxxxxxxxxxxxxxx
+    #     groups: [ "sg-0123...", "custom-sg-name" ]
+    #     associate_public_ip_address: true
+    #     private_ip_address: 10.0.1.100
+    #     secondary_private_ip_address_count: 2
+
+  vector:
+    ami: ami-02a35bd020554f400
+    instance_type: i3.xlarge
+    name_template: vector-{az}-{index}
+
+  client:
+    ami: ami-02a35bd020554f400
+    instance_type: i3.xlarge
+    name_template: client-{az}-{index}
+
+  monitor:
+    ami: ami-02a35bd020554f400
+    instance_type: t3.large
+    name_template: monitor-{az}
+    # Example: place monitor in a specific subnet (overrides general.subnets)
+    # subnet_id: subnet-zzzzzzzzzzzzzzzzz
+
+# Cluster: per-AZ desired counts by type
+cluster:
+  - az: us-east-1a
+    type: scylla
+    count: 1
+  - az: us-east-1a
+    type: vector
+    count: 1
+  - az: us-east-1a
+    type: client
+    count: 1
+  - az: us-east-1a
+    type: monitor
+    count: 1
