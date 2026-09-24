@@ -3,7 +3,6 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
-mod auth;
 mod batch_write_item;
 mod create_table;
 mod delete_item;

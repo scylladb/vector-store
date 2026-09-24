@@ -5,6 +5,7 @@
 
 //! Groups that cannot share a cluster and start one of their own.
 
+mod alternator_auth;
 mod auth;
 mod connection_timeout;
 mod high_availability;
