@@ -56,3 +56,8 @@ impl Cluster for ProxyCluster {
         actors.firewall.turn_off_rules().await;
     }
 }
+
+/// WARNING: name it in test arguments only, never in a group's
+/// `fixtures = (...)`, so the proxy rules are reset after every test, even a
+/// failed one.
+type ProxyTestContext = TestEnv<ProxyCluster>;

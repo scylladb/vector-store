@@ -536,6 +536,15 @@ impl<C: Cluster> e2etest::Fixture for TestEnv<C> {
 }
 
 impl<C: Cluster> TestEnv<C> {
+    pub fn actors(&self) -> &TestActors {
+        self.cluster.actors()
+    }
+
+    /// A Vector Store client, for clusters with a single Vector Store node.
+    pub fn client(&self) -> &HttpClient {
+        &self.clients[0]
+    }
+
     pub async fn create_table(&self, columns: &str, options: Option<&str>) -> TableName {
         create_table(&self.session, columns, options).await
     }
