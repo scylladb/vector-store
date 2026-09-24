@@ -57,6 +57,7 @@ humantime = "2.2.0"
 itertools = "0.14.0"
 linkme = "0.3.36"
 macros = { path = "crates/macros" }
+memmap2 = "0.9.11"
 mimalloc = "0.1.48"
 mockall = "0.13.1"
 num-bigint = "0.4"

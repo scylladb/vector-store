@@ -70,6 +70,7 @@ use tracing::error;
 use tracing::trace;
 use tracing::warn;
 
+mod disk;
 mod inmem;
 mod scylla;
 
