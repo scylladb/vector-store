@@ -4,16 +4,12 @@
  */
 
 use crate::TestActors;
-use crate::alternator;
-use crate::alternator::Item;
-use crate::alternator::JsonBodyInjectInterceptor;
-use crate::alternator::TableContext;
-use crate::alternator::TableShape;
 use crate::common;
-use aws_sdk_dynamodb::client::customize::CustomizableOperation;
-use aws_sdk_dynamodb::operation::query::QueryError;
-use aws_sdk_dynamodb::operation::query::QueryOutput;
-use aws_sdk_dynamodb::operation::query::builders::QueryFluentBuilder;
+use crate::common::alternator;
+use crate::common::alternator::Item;
+use crate::common::alternator::QueryBuilderExt;
+use crate::common::alternator::TableContext;
+use crate::common::alternator::TableShape;
 use aws_sdk_dynamodb::types::AttributeValue;
 use aws_sdk_dynamodb::types::ScalarAttributeType;
 use aws_sdk_dynamodb::types::Select;
@@ -21,50 +17,6 @@ use httpapi::IndexName;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::info;
-
-/// Extension trait that adds Alternator `VectorSearch` to [`QueryFluentBuilder`].
-pub(super) trait QueryBuilderExt {
-    fn vector_search(
-        self,
-        vector: impl IntoIterator<Item = f32>,
-    ) -> CustomizableOperation<QueryOutput, QueryError, QueryFluentBuilder>;
-
-    fn vector_search_optimized(
-        self,
-        vector: impl IntoIterator<Item = f32>,
-    ) -> CustomizableOperation<QueryOutput, QueryError, QueryFluentBuilder>;
-}
-
-impl QueryBuilderExt for QueryFluentBuilder {
-    fn vector_search(
-        self,
-        vector: impl IntoIterator<Item = f32>,
-    ) -> CustomizableOperation<QueryOutput, QueryError, QueryFluentBuilder> {
-        let json = serde_json::json!({
-            "QueryVector": {
-                "L": vector
-                    .into_iter()
-                    .map(|v| serde_json::json!({ "N": v.to_string() }))
-                    .collect::<Vec<_>>()
-            }
-        });
-        self.customize()
-            .interceptor(JsonBodyInjectInterceptor::new([("VectorSearch", json)]))
-    }
-
-    fn vector_search_optimized(
-        self,
-        vector: impl IntoIterator<Item = f32>,
-    ) -> CustomizableOperation<QueryOutput, QueryError, QueryFluentBuilder> {
-        let json = serde_json::json!({
-            "QueryVector": {
-                "FLOAT32VECTOR": vector.into_iter().collect::<Vec<_>>()
-            }
-        });
-        self.customize()
-            .interceptor(JsonBodyInjectInterceptor::new([("VectorSearch", json)]))
-    }
-}
 
 /// Verifies basic VectorSearch query: results returned, limit respected, nearest item first.
 #[e2etest::test(group = query)]
@@ -752,7 +704,7 @@ async fn query_with_filter_expression(actors: Arc<TestActors>) {
 e2etest::group!(
     name = query,
     fixtures = (Fixture),
-    parent = alternator::alternator
+    parent = super::alternator
 );
 
 struct Fixture {
