@@ -56,6 +56,7 @@ use diskann_vector::distance::Metric;
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 use std::num::NonZeroUsize;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicUsize;
@@ -109,6 +110,7 @@ pub struct DiskannIndexFactory {
     alpha: DiskannAlpha,
     max_points: NonZeroUsize,
     backend: DiskannBackendKind,
+    data_dir: Option<PathBuf>,
 }
 
 impl VsIndexFactory for DiskannIndexFactory {
@@ -151,6 +153,27 @@ impl VsIndexFactory for DiskannIndexFactory {
                     params,
                 )
             }
+            DiskannBackendKind::Disk => {
+                let data_dir = self
+                    .data_dir
+                    .as_deref()
+                    .context("the disk DiskANN backend needs a data directory")?;
+                let store = Arc::new(disk::DiskNodeStore::open(
+                    data_dir,
+                    &index.key,
+                    usize::from(params.dim.0),
+                    params.config.max_degree().get(),
+                    params.max_points.get(),
+                )?);
+                new(
+                    scylla::ScyllaBackend::new(Arc::clone(&store) as _, store),
+                    index.key,
+                    self.worker.clone(),
+                    self.memory.clone(),
+                    table,
+                    params,
+                )
+            }
         }
     }
 
@@ -176,6 +199,7 @@ pub fn new_diskann(
             .diskann_max_points
             .unwrap_or(DISKANN_DEFAULT_MAX_POINTS),
         backend: config.diskann_backend.unwrap_or_default(),
+        data_dir: config.diskann_data_dir.clone(),
     })
 }
 

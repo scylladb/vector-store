@@ -172,6 +172,8 @@ pub enum DiskannBackendKind {
     /// Vectors read back from the base table, node liveness in RAM and the
     /// adjacency lists in ScyllaDB.
     ScyllaGraph,
+    /// Vectors and adjacency lists in a local file, node liveness in RAM.
+    Disk,
 }
 
 impl FromStr for DiskannBackendKind {
@@ -182,6 +184,7 @@ impl FromStr for DiskannBackendKind {
             "inmem" => Ok(Self::Inmem),
             "scylla" => Ok(Self::Scylla),
             "scylla-graph" | "scylla_graph" => Ok(Self::ScyllaGraph),
+            "disk" => Ok(Self::Disk),
             _ => Err(anyhow::anyhow!("Unknown DiskANN backend: {s}")),
         }
     }
@@ -219,6 +222,7 @@ pub struct Config {
     pub diskann_alpha: Option<DiskannAlpha>,
     pub diskann_max_points: Option<NonZeroUsize>,
     pub diskann_backend: Option<DiskannBackendKind>,
+    pub diskann_data_dir: Option<std::path::PathBuf>,
     pub alter_index_simulator: bool,
     pub fulltext_indexes: bool,
     pub cql_connection_timeout: Option<Duration>,
@@ -255,6 +259,7 @@ impl Default for Config {
             diskann_alpha: None,
             diskann_max_points: None,
             diskann_backend: None,
+            diskann_data_dir: None,
             alter_index_simulator: false,
             fulltext_indexes: true,
             disable_colors: false,

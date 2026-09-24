@@ -6,6 +6,7 @@
 use crate::Config;
 use crate::Credentials;
 use crate::DiskannAlpha;
+use crate::DiskannBackendKind;
 use crate::file_monitor::TlsFilesMonitor;
 use crate::tls;
 use crate::tls::TlsServerConfig;
@@ -16,6 +17,8 @@ use secrecy::ExposeSecret;
 use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::num::NonZeroUsize;
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
@@ -222,6 +225,14 @@ impl ConfigManager {
             changes.push(format!(
                 "Thread count: {:?} -> {:?}",
                 old_config.threads, new_config.threads
+            ));
+        }
+
+        // Check diskann_data_dir
+        if old_config.diskann_data_dir != new_config.diskann_data_dir {
+            changes.push(format!(
+                "DiskANN data directory: {:?} -> {:?}",
+                old_config.diskann_data_dir, new_config.diskann_data_dir
             ));
         }
 
@@ -461,8 +472,20 @@ pub async fn load_config(env: impl Fn(&str) -> anyhow::Result<String>) -> anyhow
 
     if let Ok(diskann_backend) = env("VECTOR_STORE_DISKANN_BACKEND") {
         config.diskann_backend = Some(diskann_backend.trim().parse().map_err(|_| {
-            anyhow!("Unable to parse VECTOR_STORE_DISKANN_BACKEND env (inmem/scylla)")
+            anyhow!(
+                "Unable to parse VECTOR_STORE_DISKANN_BACKEND env (inmem/scylla/scylla-graph/disk)"
+            )
         })?);
+    }
+
+    config.diskann_data_dir = env("VECTOR_STORE_DISKANN_DATA_DIR")
+        .ok()
+        .map(|dir| std::path::PathBuf::from(dir.trim()));
+    if config.diskann_backend == Some(DiskannBackendKind::Disk) {
+        let Some(dir) = &config.diskann_data_dir else {
+            bail!("VECTOR_STORE_DISKANN_BACKEND=disk requires VECTOR_STORE_DISKANN_DATA_DIR");
+        };
+        config.diskann_data_dir = Some(diskann_data_dir(dir)?);
     }
 
     config.alter_index_simulator = env("VECTOR_STORE_ALTER_INDEX_SIMULATOR")
@@ -601,6 +624,29 @@ pub async fn load_config(env: impl Fn(&str) -> anyhow::Result<String>) -> anyhow
     }
 
     Ok(config)
+}
+
+/// Resolve `dir` against the working directory and check that files can be made in it.
+fn diskann_data_dir(dir: &Path) -> anyhow::Result<PathBuf> {
+    const DATA_DIR_ENV: &str = "VECTOR_STORE_DISKANN_DATA_DIR";
+    if dir.as_os_str().is_empty() {
+        bail!("{DATA_DIR_ENV} must not be empty");
+    }
+    let dir = std::path::absolute(dir)
+        .map_err(|e| anyhow!("{DATA_DIR_ENV}: failed to resolve {}: {e}", dir.display()))?;
+    let metadata = std::fs::metadata(&dir)
+        .map_err(|e| anyhow!("{DATA_DIR_ENV}: cannot access {}: {e}", dir.display()))?;
+    if !metadata.is_dir() {
+        bail!("{DATA_DIR_ENV}: {} is not a directory", dir.display());
+    }
+    tempfile::tempfile_in(&dir).map_err(|e| {
+        anyhow!(
+            "{DATA_DIR_ENV}: cannot create files in {}: {e}",
+            dir.display()
+        )
+    })?;
+    tracing::info!("DiskANN node files go in {}", dir.display());
+    Ok(dir)
 }
 
 #[cfg(test)]
@@ -978,6 +1024,49 @@ mod tests {
             Some(NonZeroUsize::new(500_000).unwrap())
         );
         assert_eq!(config.diskann_backend, Some(DiskannBackendKind::Scylla));
+        assert_eq!(config.diskann_data_dir, None);
+    }
+
+    #[tokio::test]
+    async fn load_config_diskann_disk_needs_a_data_dir() {
+        let env = mock_env(HashMap::from([(
+            "VECTOR_STORE_DISKANN_BACKEND",
+            "disk".into(),
+        )]));
+        let err = load_config(env).await.unwrap_err().to_string();
+        assert!(err.contains("VECTOR_STORE_DISKANN_DATA_DIR"), "{err}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let env = mock_env(HashMap::from([
+            ("VECTOR_STORE_DISKANN_BACKEND", "disk".into()),
+            (
+                "VECTOR_STORE_DISKANN_DATA_DIR",
+                dir.path().display().to_string(),
+            ),
+        ]));
+        let config = load_config(env).await.unwrap();
+        assert_eq!(config.diskann_backend, Some(DiskannBackendKind::Disk));
+        assert_eq!(config.diskann_data_dir.as_deref(), Some(dir.path()));
+    }
+
+    #[tokio::test]
+    async fn load_config_diskann_data_dir_must_be_a_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let file = NamedTempFile::new_in(root.path()).unwrap();
+        let missing = root.path().join("missing");
+        for (dir, expected) in [
+            ("  ".to_string(), "must not be empty"),
+            (missing.display().to_string(), "cannot access"),
+            (file.path().display().to_string(), "is not a directory"),
+        ] {
+            let env = mock_env(HashMap::from([
+                ("VECTOR_STORE_DISKANN_BACKEND", "disk".into()),
+                ("VECTOR_STORE_DISKANN_DATA_DIR", dir.clone()),
+            ]));
+            let err = load_config(env).await.unwrap_err().to_string();
+            assert!(err.contains(expected), "{dir:?}: {err}");
+        }
+        assert!(!missing.exists());
     }
 
     #[tokio::test]
