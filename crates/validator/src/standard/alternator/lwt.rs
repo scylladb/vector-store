@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
-//! Integration test: Alternator with `--alternator-write-isolation=always_use_lwt`.
+//! Integration test: Alternator with the `always_use_lwt` write isolation.
 //!
 //! Under `always_use_lwt` every write is routed through the LWT/Paxos path.
 //! The test verifies that Vector Store correctly indexes items written through
@@ -15,6 +15,7 @@ use crate::common;
 use crate::common::alternator;
 use crate::common::alternator::Item;
 use aws_sdk_dynamodb::types::AttributeValue;
+use aws_sdk_dynamodb::types::Tag;
 use httpapi::IndexInfo;
 use std::sync::Arc;
 use tracing::info;
@@ -46,7 +47,7 @@ fn delete_write_request(
 }
 
 /// Verifies that VS correctly indexes writes made through the LWT path when
-/// `--alternator-write-isolation=always_use_lwt` is active.
+/// the table is tagged with the `always_use_lwt` write isolation.
 #[e2etest::test(group = lwt)]
 async fn alternator_with_always_use_lwt(actors: Arc<TestActors>) {
     info!("started");
@@ -69,6 +70,26 @@ async fn alternator_with_always_use_lwt(actors: Arc<TestActors>) {
     )
     .await
     .expect("CreateTable with vector index should succeed");
+
+    let table = client
+        .describe_table()
+        .table_name(&table_name)
+        .send()
+        .await
+        .unwrap();
+    let arn = table.table.unwrap().table_arn.unwrap();
+    let tag = Tag::builder()
+        .key("system:write_isolation")
+        .value("always_use_lwt")
+        .build()
+        .unwrap();
+    client
+        .tag_resource()
+        .resource_arn(arn)
+        .tags(tag)
+        .send()
+        .await
+        .unwrap();
 
     let index = IndexInfo::new(
         alternator::keyspace(&table_name).as_ref(),
@@ -219,13 +240,7 @@ struct Fixture {
 impl e2etest::Fixture for Fixture {
     async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
         let actors = setup.setup::<TestActors>().await?;
-
-        alternator::init_with_args(
-            &actors,
-            [("--alternator-write-isolation", "always_use_lwt")],
-        )
-        .await;
-
+        alternator::init(&actors).await;
         Some(Self { actors })
     }
 
