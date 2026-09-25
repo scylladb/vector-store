@@ -124,11 +124,15 @@ TARGETARCH=arm64 ./scripts/run-with-release-toolchain cargo build --release --bi
 - `<scylla-image>` is a ScyllaDB docker tag, e.g. `scylladb/scylla-nightly:latest`.
   CI runs against `scylla-nightly`; some tests exercise features that are only
   available there.
-- Filters select test cases using `<group>::<test>` syntax. Partial matches work,
-  and wrapping either side in double quotes forces an exact match. Omit filters to
-  run everything. For example, `cdc_direct::` runs every group whose name contains
-  `cdc_direct`; to match that group exactly, keep the double quotes intact through
-  the shell with single quotes: `'"cdc_direct"::'`.
+- Filters select test cases using `<group>::<test>` syntax. Omit them to run
+  everything.
+  - A partial match runs every group whose name contains it: `auth::` runs both
+    `owned::auth` and `owned::alternator_auth`.
+  - Double quotes force an exact match against the group's full path, as printed
+    by `list`. Wrap them in single quotes so the shell keeps them:
+    `'"owned::auth"::'`. Quoting the test side matches the test name exactly
+    too.
+  - A filter that matches nothing runs the whole suite, not nothing.
 
 **List available test cases:**
 ```sh
