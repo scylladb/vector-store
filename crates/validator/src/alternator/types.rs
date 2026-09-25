@@ -8,7 +8,8 @@ use crate::alternator;
 use crate::alternator::Item;
 use crate::alternator::TableContext;
 use crate::alternator::TableShape;
-use crate::alternator::query::QueryBuilderExt;
+use crate::alternator::search_vectors::SearchVectorsBuilderExt;
+use crate::alternator::search_vectors::SearchVectorsOutputExt;
 use crate::common;
 use aws_sdk_dynamodb::primitives::Blob;
 use aws_sdk_dynamodb::types::AttributeValue;
@@ -18,10 +19,10 @@ use std::sync::Arc;
 use tracing::info;
 
 /// Shared logic for all key-type tests: creates a table with initial items,
-/// adds extra items via PutItem, then queries with both L-type and FLOAT32VECTOR
+/// adds extra items via PutItem, then searches with both list-of-numbers and FLOAT32VECTOR
 /// encodings and asserts that all expected pk values are returned with correct
 /// projection.
-async fn query_with_key_type(
+async fn search_with_key_type(
     actors: &TestActors,
     shape: &TableShape,
     initial: &[Item],
@@ -42,10 +43,10 @@ async fn query_with_key_type(
 
     let base_query = || {
         ctx.client
-            .query()
+            .search_vectors()
             .table_name(&ctx.table_name)
             .index_name(ctx.index.index.as_ref())
-            .limit((initial.len() + extra.len()) as i32)
+            .top_k((initial.len() + extra.len()) as i32)
             .projection_expression("#pk")
             .expression_attribute_names("#pk", shape.pk())
     };
@@ -60,32 +61,30 @@ async fn query_with_key_type(
         got.sort_by_key(|m| format!("{:?}", m.get(shape.pk())));
         expected.sort_by_key(|m| format!("{:?}", m.get(shape.pk())));
 
-        assert_eq!(got, expected, "{label} query returned unexpected results");
+        assert_eq!(got, expected, "{label} search returned unexpected results");
     };
 
     let items = base_query()
-        .vector_search([1.0, 1.0, 1.0])
+        .search_vector_list([1.0, 1.0, 1.0])
         .send()
         .await
-        .expect("Query with `L-type vector` should succeed")
-        .items()
-        .to_vec();
-    assert_results(&items, "L-type");
+        .expect("SearchVectors with a list of numbers should succeed")
+        .items();
+    assert_results(&items, "list-of-numbers");
 
     let items = base_query()
-        .vector_search_optimized([1.0, 1.0, 1.0])
+        .search_vector_optimized([1.0, 1.0, 1.0])
         .send()
         .await
-        .expect("Query with `FLOAT32VECTOR` should succeed")
-        .items()
-        .to_vec();
+        .expect("SearchVectors with `FLOAT32VECTOR` should succeed")
+        .items();
     assert_results(&items, "FLOAT32VECTOR");
 
     ctx.done().await;
 }
 
 #[e2etest::test(group = types)]
-async fn query_with_string_key(actors: Arc<TestActors>) {
+async fn search_with_string_key(actors: Arc<TestActors>) {
     info!("started");
     let shape = TableShape {
         table_prefix: None,
@@ -101,12 +100,12 @@ async fn query_with_string_key(actors: Arc<TestActors>) {
         Item::new(shape.pk(), AttributeValue::S("str-b".into())).vec(v, [1.0, 2.0, 4.0]),
     ];
     let extra = [Item::new(shape.pk(), AttributeValue::S("str-c".into())).vec(v, [1.0, 4.0, 8.0])];
-    query_with_key_type(&actors, &shape, &initial, &extra).await;
+    search_with_key_type(&actors, &shape, &initial, &extra).await;
     info!("finished");
 }
 
 #[e2etest::test(group = types)]
-async fn query_with_number_key(actors: Arc<TestActors>) {
+async fn search_with_number_key(actors: Arc<TestActors>) {
     info!("started");
     let shape = TableShape {
         table_prefix: None,
@@ -122,12 +121,12 @@ async fn query_with_number_key(actors: Arc<TestActors>) {
         Item::new(shape.pk(), AttributeValue::N("2".into())).vec(v, [1.0, 2.0, 4.0]),
     ];
     let extra = [Item::new(shape.pk(), AttributeValue::N("3".into())).vec(v, [1.0, 4.0, 8.0])];
-    query_with_key_type(&actors, &shape, &initial, &extra).await;
+    search_with_key_type(&actors, &shape, &initial, &extra).await;
     info!("finished");
 }
 
 #[e2etest::test(group = types)]
-async fn query_with_binary_key(actors: Arc<TestActors>) {
+async fn search_with_binary_key(actors: Arc<TestActors>) {
     info!("started");
     let shape = TableShape {
         table_prefix: None,
@@ -145,13 +144,13 @@ async fn query_with_binary_key(actors: Arc<TestActors>) {
     let extra = [
         Item::new(shape.pk(), AttributeValue::B(Blob::new(vec![0x03u8]))).vec(v, [1.0, 4.0, 8.0]),
     ];
-    query_with_key_type(&actors, &shape, &initial, &extra).await;
+    search_with_key_type(&actors, &shape, &initial, &extra).await;
     info!("finished");
 }
 
-/// Verifies queries work with both FLOAT32VECTOR-encoded items and query vectors.
+/// Verifies searches work with both FLOAT32VECTOR-encoded items and search vectors.
 #[e2etest::test(group = types)]
-async fn query_with_optimized_vector_type(actors: Arc<TestActors>) {
+async fn search_with_optimized_vector_type(actors: Arc<TestActors>) {
     info!("started");
 
     let shape = TableShape {
@@ -174,7 +173,7 @@ async fn query_with_optimized_vector_type(actors: Arc<TestActors>) {
         Item::new(shape.pk(), AttributeValue::S("pk-v-live".into()))
             .vec_optimized(v, [1.0, 1.0, 1.0]),
     ];
-    query_with_key_type(&actors, &shape, &initial, &extra).await;
+    search_with_key_type(&actors, &shape, &initial, &extra).await;
 
     info!("finished");
 }

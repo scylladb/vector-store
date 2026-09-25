@@ -23,7 +23,6 @@ use uuid::Uuid;
 
 use crate::alternator;
 use crate::alternator::ALTERNATOR_PORT;
-use crate::alternator::JsonBodyInjectInterceptor;
 use aws_sdk_dynamodb::error::ProvideErrorMetadata as _;
 
 /// Polls the Alternator endpoint with the given credentials until it responds
@@ -187,28 +186,16 @@ async fn alternator_with_auth_enabled(actors: Arc<TestActors>) {
         let mut try_delete = true;
         loop {
             let update = if try_delete {
-                serde_json::json!([{"Delete": {"IndexName": index_name.as_ref()}}])
+                alternator::delete_vector_index_update(index_name.as_ref())
             } else {
-                serde_json::json!([{
-                    "Create": {
-                        "IndexName": index_name.as_ref(),
-                        "VectorAttribute": {
-                                "AttributeName": vec_attr,
-                            "Dimensions": 3
-                        }
-                    }
-                }])
+                alternator::create_vector_index_update(index_name.as_ref(), vec_attr, 3)
             };
             try_delete = !try_delete;
 
             let result = limited_client
                 .update_table()
                 .table_name(&table_name)
-                .customize()
-                .interceptor(JsonBodyInjectInterceptor::new([(
-                    "VectorIndexUpdates",
-                    update,
-                )]))
+                .vector_index_updates(update)
                 .send()
                 .await;
 

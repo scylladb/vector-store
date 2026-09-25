@@ -14,11 +14,11 @@ use crate::alternator;
 use crate::alternator::Item;
 use crate::alternator::TableContext;
 use crate::alternator::TableShape;
-use crate::alternator::query::QueryBuilderExt;
+use crate::alternator::search_vectors::SearchVectorsBuilderExt;
+use crate::alternator::search_vectors::SearchVectorsOutputExt;
 use crate::common;
 use aws_sdk_dynamodb::types::AttributeValue;
 use aws_sdk_dynamodb::types::ScalarAttributeType;
-use aws_sdk_dynamodb::types::Select;
 use aws_sdk_dynamodb::types::TimeToLiveSpecification;
 use std::sync::Arc;
 use tracing::info;
@@ -117,10 +117,11 @@ async fn ttl_expiration_removes_vector(actors: Arc<TestActors>) {
     info!("finished");
 }
 
-/// Like [`ttl_expiration_removes_vector`] but uses `Select::AllProjectedAttributes`
-/// - an index-only read that skips the base table.
+/// Like [`ttl_expiration_removes_vector`] but verifies via `SearchVectors`
+/// with the default `BaseRead=false` - an index-only read that skips the base
+/// table.
 #[e2etest::test(group = ttl)]
-async fn ttl_expiration_verified_via_query_with_all_projected(actors: Arc<TestActors>) {
+async fn ttl_expiration_verified_via_search_vectors(actors: Arc<TestActors>) {
     info!("started");
 
     let shape = TableShape {
@@ -154,24 +155,22 @@ async fn ttl_expiration_verified_via_query_with_all_projected(actors: Arc<TestAc
     info!("Waiting for TTL to expire the item and for VS to remove it");
     ctx.wait_for_count(2).await;
 
-    info!("Querying via Alternator with Select::AllProjectedAttributes after TTL expiration");
+    info!("Searching via Alternator after TTL expiration");
     common::wait_for(
         || {
             let ctx = &ctx;
             async move {
                 let items = ctx
                     .client
-                    .query()
+                    .search_vectors()
                     .table_name(&ctx.table_name)
                     .index_name(ctx.index.index.as_ref())
-                    .limit(5)
-                    .select(Select::AllProjectedAttributes)
-                    .vector_search([1.0, 1.0, 1.0])
+                    .top_k(5)
+                    .search_vector_list([1.0, 1.0, 1.0])
                     .send()
                     .await
-                    .expect("Query with VectorSearch should succeed")
-                    .items()
-                    .to_vec();
+                    .expect("SearchVectors should succeed")
+                    .items();
 
                 items.len() == 2
                     && items.iter().all(|item| {
@@ -179,7 +178,7 @@ async fn ttl_expiration_verified_via_query_with_all_projected(actors: Arc<TestAc
                     })
             }
         },
-        "AllProjectedAttributes query to return only 2 permanent items after TTL expiration",
+        "SearchVectors to return only 2 permanent items after TTL expiration",
         common::DEFAULT_TEST_TIMEOUT,
     )
     .await;
