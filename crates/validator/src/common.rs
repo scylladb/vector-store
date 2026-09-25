@@ -6,6 +6,7 @@
 use crate::TestActors;
 use async_backtrace::framed;
 use e2etest_dns::DnsExt;
+use e2etest_firewall::FirewallExt;
 use e2etest_scylla_cluster::ScyllaClusterExt;
 use e2etest_scylla_cluster::ScyllaNodeConfig;
 use e2etest_scylla_proxy_cluster::ScyllaProxyClusterExt;
@@ -47,6 +48,7 @@ pub const VS_NAMES: [&str; 3] = ["vs1", "vs2", "vs3"];
 
 pub const VS_PORT: u16 = 6080;
 pub const DB_PORT: u16 = 9042;
+pub const ALTERNATOR_PORT: u16 = 8000;
 
 pub const DB_OCTET_1: u8 = 1;
 pub const DB_OCTET_2: u8 = 2;
@@ -215,6 +217,19 @@ pub fn get_default_db_proxy_ips(actors: &TestActors) -> Vec<Ipv4Addr> {
     ]
 }
 
+/// Arguments enabling the Alternator (DynamoDB-compatible) endpoint on a node.
+///
+/// NOTE: `--alternator-ttl-period-in-seconds` is already set in the default
+/// scylla args (0.5s). ScyllaDB rejects duplicate flags.
+pub fn default_alternator_args(node_ip: Ipv4Addr) -> Vec<String> {
+    vec![
+        format!("--alternator-port={ALTERNATOR_PORT}"),
+        format!("--alternator-address={node_ip}"),
+        "--alternator-write-isolation=only_rmw_uses_lwt".to_string(),
+        "--alternator-enforce-authorization=false".to_string(),
+    ]
+}
+
 #[framed]
 pub async fn get_default_scylla_node_configs(actors: &TestActors) -> Vec<ScyllaNodeConfig> {
     let default_vs_urls = get_default_vs_urls(actors).await;
@@ -225,11 +240,13 @@ pub async fn get_default_scylla_node_configs(actors: &TestActors) -> Vec<ScyllaN
         .enumerate()
         .map(|(i, &ip)| {
             let mut vs_urls = default_vs_urls.clone();
+            let mut args = e2etest_scylla_cluster::default_scylla_args();
+            args.extend(default_alternator_args(ip));
             ScyllaNodeConfig {
                 db_ip: ip,
                 primary_vs_uris: vec![vs_urls.remove(i)],
                 secondary_vs_uris: vs_urls,
-                args: e2etest_scylla_cluster::default_scylla_args(),
+                args,
                 cert_path: Some(cert_path.clone()),
                 key_path: Some(key_path.clone()),
                 extra_config: Some(scylla_auth_config()),
@@ -461,6 +478,7 @@ pub async fn init_with_config(
 #[framed]
 pub async fn cleanup(actors: &TestActors) {
     info!("started");
+    actors.firewall.turn_off_rules().await;
     for name in VS_NAMES.iter() {
         actors.dns.remove(name.to_string()).await;
     }
@@ -758,15 +776,47 @@ pub fn unique_index_name() -> IndexName {
     unique_name("idx", &INDEX_COUNTER).into()
 }
 
+/// Runs a schema-changing statement, retrying while ScyllaDB rejects it with
+/// "concurrent modification" because another schema change is in flight.
+///
+/// The statement must be idempotent, because a rejected attempt may still have applied.
+#[framed]
+pub async fn apply_schema_change(session: &Session, query: impl Into<String>) {
+    let query = query.into();
+    wait_for(
+        || async {
+            match session.query_unpaged(query.clone(), ()).await {
+                Ok(_) => true,
+                Err(err) if is_concurrent_schema_change(&err) => {
+                    info!("Retrying schema change rejected by a concurrent one: {query}");
+                    false
+                }
+                Err(err) => panic!("failed to apply schema change '{query}': {err}"),
+            }
+        },
+        format!("schema change to be applied: {query}"),
+        DEFAULT_OPERATION_TIMEOUT,
+    )
+    .await;
+}
+
+fn is_concurrent_schema_change(err: &impl std::fmt::Display) -> bool {
+    err.to_string().contains("concurrent modification")
+}
+
 #[framed]
 pub async fn create_keyspace(session: &Session) -> KeyspaceName {
     let keyspace = unique_keyspace_name();
 
     // Create keyspace with replication factor of 3 for the 3-node cluster
-    session.query_unpaged(
-        format!("CREATE KEYSPACE {keyspace} WITH replication = {{'class': 'NetworkTopologyStrategy', 'replication_factor': 3}}"),
-        (),
-    ).await.expect("failed to create a keyspace");
+    apply_schema_change(
+        session,
+        format!(
+            "CREATE KEYSPACE IF NOT EXISTS {keyspace} WITH replication = \
+             {{'class': 'NetworkTopologyStrategy', 'replication_factor': 3}}"
+        ),
+    )
+    .await;
 
     // Use keyspace
     session
@@ -788,10 +838,11 @@ pub async fn create_table(session: &Session, columns: &str, options: Option<&str
     };
 
     // Create table
-    session
-        .query_unpaged(format!("CREATE TABLE {table} ({columns}) {extra}"), ())
-        .await
-        .expect("failed to create a table");
+    apply_schema_change(
+        session,
+        format!("CREATE TABLE IF NOT EXISTS {table} ({columns}) {extra}"),
+    )
+    .await;
 
     table
 }
@@ -804,7 +855,7 @@ pub async fn create_index(query: CreateIndexQuery<'_>) -> IndexInfo {
         format!(" WITH OPTIONS = {{{}}}", query.options)
     };
     let cql_query = format!(
-        "CREATE CUSTOM INDEX {index} ON {table}({partition_columns}{target_column}{filter_columns}) USING '{index_type}'{options_clause}",
+        "CREATE CUSTOM INDEX IF NOT EXISTS {index} ON {table}({partition_columns}{target_column}{filter_columns}) USING '{index_type}'{options_clause}",
         index = query.index,
         table = query.table,
         partition_columns = query.partition_columns,
@@ -813,11 +864,7 @@ pub async fn create_index(query: CreateIndexQuery<'_>) -> IndexInfo {
         index_type = query.index_type,
     );
     info!("Create index: '{cql_query}'");
-    query
-        .session
-        .query_unpaged(cql_query, ())
-        .await
-        .expect("failed to create an index");
+    apply_schema_change(query.session, cql_query).await;
 
     for client in query.clients {
         wait_for(
