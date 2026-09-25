@@ -353,47 +353,6 @@ pub async fn init(actors: &TestActors) {
 }
 
 #[framed]
-pub async fn init_with_proxy(actors: &TestActors) {
-    info!("started");
-
-    init_dns(actors).await;
-
-    // Proxy operates at CQL frame level and cannot handle TLS, so ScyllaDB
-    // must be started without TLS when using the proxy.
-    let scylla_configs: Vec<ScyllaNodeConfig> = get_default_scylla_node_configs(actors)
-        .await
-        .into_iter()
-        .map(|mut c| {
-            c.cert_path = None;
-            c.key_path = None;
-            c
-        })
-        .collect();
-    let scylla_proxy_configs = get_default_scylla_proxy_node_configs(actors).await;
-    let mut vs_configs = get_proxy_vs_node_configs(actors);
-
-    actors.db.start(scylla_configs).await;
-    assert!(actors.db.wait_for_ready().await);
-    let translation_map = actors.db_proxy.start(scylla_proxy_configs).await;
-    let envs: HashMap<_, _> = [(
-        "VECTOR_STORE_CQL_URI_TRANSLATION_MAP".to_string(),
-        serde_json::to_string(&translation_map).unwrap(),
-    )]
-    .into_iter()
-    .collect();
-    vs_configs.iter_mut().for_each(|cfg| {
-        cfg.envs.extend(envs.clone());
-    });
-
-    setup_default_role(actors, false).await;
-
-    actors.vs.start(vs_configs).await;
-    assert!(actors.vs.wait_for_ready().await);
-
-    info!("finished");
-}
-
-#[framed]
 pub async fn init_with_proxy_single_vs(actors: &TestActors) {
     info!("started");
 
@@ -634,14 +593,6 @@ pub async fn prepare_connection_with_auth_no_tls(
 #[framed]
 pub async fn prepare_connection(actors: &TestActors) -> (Arc<Session>, Vec<HttpClient>) {
     prepare_connection_with_custom_vs_ips(actors, get_default_vs_ips(actors)).await
-}
-
-/// Creates a CQL session and VS HTTP clients without TLS.
-/// Use this variant for tests that go through the scylla-proxy, which
-/// operates at the CQL frame level and cannot handle TLS traffic.
-#[framed]
-pub async fn prepare_connection_no_tls(actors: &TestActors) -> (Arc<Session>, Vec<HttpClient>) {
-    prepare_connection_with_custom_vs_ips_no_tls(actors, get_default_vs_ips(actors)).await
 }
 
 /// Creates a CQL session (without TLS) and VS HTTP clients for a single VS.
