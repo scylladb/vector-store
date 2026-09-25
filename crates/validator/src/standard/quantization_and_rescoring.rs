@@ -1,0 +1,310 @@
+/*
+ * Copyright 2026-present ScyllaDB
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
+ */
+
+use super::TestContext;
+use crate::common;
+use crate::common::*;
+use async_backtrace::framed;
+use httpapi::IndexInfo;
+use scylla::client::session::Session;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tracing::info;
+
+/// Generate test vectors for quantization precision testing
+/// Creates a query vector and embeddings with small directional differences
+/// that will be lost during quantization when using the cosine metric.
+fn generate_test_vectors(num_vectors: usize) -> (Vec<f32>, HashMap<i32, Vec<f32>>) {
+    let query_vector = vec![0.5, 0.3, 0.7];
+
+    let embeddings: HashMap<i32, Vec<f32>> = (0..num_vectors)
+        .map(|i| {
+            let offset = (i as f32) * 0.001; // Small offset to test quantization precision loss
+            let embedding = vec![
+                query_vector[0] + offset * 2.0, // Different weights to rotate in space
+                query_vector[1] + offset * 4.0,
+                query_vector[2] + offset * 8.0,
+            ];
+            (i as i32, embedding)
+        })
+        .collect();
+
+    (query_vector, embeddings)
+}
+
+#[framed]
+async fn create_index(
+    ctx: &TestContext,
+    table: &TableName,
+    options: impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>,
+) -> IndexInfo {
+    let index = common::create_index(ctx.index_query(table, "v").options(options)).await;
+    for client in &ctx.clients {
+        wait_for_index(client, &index).await;
+    }
+    index
+}
+
+#[framed]
+async fn insert_vectors(session: &Session, table: &TableName, embeddings: &HashMap<i32, Vec<f32>>) {
+    let stmt = session
+        .prepare(format!("INSERT INTO {table} (pk, v) VALUES (?, ?)"))
+        .await
+        .expect("failed to prepare insert statement");
+    for (pk, embedding) in embeddings {
+        session
+            .execute_unpaged(&stmt, (pk, embedding))
+            .await
+            .expect("failed to insert data");
+    }
+}
+
+e2etest::group!(
+    name = quantization_and_rescoring,
+    fixtures = (TestContext),
+    parent = super::standard
+);
+
+#[e2etest::test(group = quantization_and_rescoring)]
+// This test confirms that with full f32 precision, the vector search can distinguish
+// between very similar vectors and rank them correctly. The test vectors are generated
+// with small, incremental differences. A correct implementation should order them by their
+// primary key (pk), which corresponds to their increasing distance from the query vector.
+// The success of this test depends on the underlying floating-point precision (f32) being
+// sufficient to handle the small differences in the test data.
+async fn non_quantized_index_returns_correctly_ranked_vectors(ctx: Arc<TestContext>) {
+    info!("started");
+
+    let table = ctx
+        .create_table("pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None)
+        .await;
+    let (query_vector, embeddings) = generate_test_vectors(500);
+
+    insert_vectors(&ctx.session, &table, &embeddings).await;
+    info!("inserted vectors into table");
+
+    // Set oversampling to search the entire dataset for more predictable results (5.0 * LIMIT 100 = 500 embeddings)
+    create_index(
+        &ctx,
+        &table,
+        [
+            ("quantization", "f32"),
+            ("oversampling", "5.0"),
+            ("rescoring", "false"),
+        ],
+    )
+    .await;
+    info!("created index with f32 quantization");
+
+    let results = get_query_results(
+        format!(
+            "SELECT pk, v FROM {table} ORDER BY v ANN OF [{}, {}, {}] LIMIT 100",
+            query_vector[0], query_vector[1], query_vector[2]
+        ),
+        &ctx.session,
+    )
+    .await;
+
+    let rows = results
+        .rows::<(i32, Vec<f32>)>()
+        .expect("failed to get rows");
+
+    info!("retrieved {} rows from query", rows.rows_remaining());
+
+    assert!(rows.rows_remaining() > 0, "Should return some results");
+    assert!(
+        rows.into_iter().is_sorted_by_key(|row| {
+            let (pk, _) = row.expect("failed to get row");
+            pk
+        }),
+        "Results should be sorted by pk. With f32 quantization (full precision), \
+        vectors are distinct enough to be ranked correctly"
+    );
+
+    info!("finished");
+}
+
+#[e2etest::test(group = quantization_and_rescoring)]
+// This test verifies that i8 quantization leads to a loss of precision.
+// Test vectors are generated such that their distance from the query vector increases
+// with their primary key (pk). The differences are small and are lost when vectors
+// are converted to i8.
+//
+// As a result, the vector search algorithm treats many distinct vectors as identical.
+// When multiple vectors have the same similarity score, their relative order in the
+// result set is not guaranteed. This is a general characteristic of ANN algorithms like HNSW.
+//
+// We assert that the results are NOT sorted by pk, which would be the correct order
+// if full precision were maintained. This demonstrates the effect of precision loss.
+async fn quantized_index_returns_incorrectly_ranked_vectors_due_to_precision_loss(
+    ctx: Arc<TestContext>,
+) {
+    info!("started");
+
+    let table = ctx
+        .create_table("pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None)
+        .await;
+    let (query_vector, embeddings) = generate_test_vectors(500);
+
+    insert_vectors(&ctx.session, &table, &embeddings).await;
+    info!("inserted vectors into table");
+
+    // Set oversampling to search the entire dataset for more predictable results (5.0 * LIMIT 100 = 500 embeddings)
+    create_index(
+        &ctx,
+        &table,
+        [
+            ("quantization", "i8"),
+            ("oversampling", "5.0"),
+            ("rescoring", "false"),
+        ],
+    )
+    .await;
+    info!("created index with i8 quantization");
+
+    let results = get_query_results(
+        format!(
+            "SELECT pk, v FROM {table} ORDER BY v ANN OF [{}, {}, {}] LIMIT 100",
+            query_vector[0], query_vector[1], query_vector[2]
+        ),
+        &ctx.session,
+    )
+    .await;
+
+    let rows = results
+        .rows::<(i32, Vec<f32>)>()
+        .expect("failed to get rows");
+
+    info!("retrieved {} rows from query", rows.rows_remaining());
+
+    assert!(rows.rows_remaining() > 0, "Should return some results");
+    assert!(
+        !rows.into_iter().is_sorted_by_key(|row| {
+            let (pk, _) = row.expect("failed to get row");
+            pk
+        }),
+        "Results should not be sorted by pk. \
+        Due to quantization and precision loss, many vectors become identical after quantization, leading to incorrect ranking"
+    );
+
+    info!("finished");
+}
+
+#[e2etest::test(group = quantization_and_rescoring)]
+// This test demonstrates that rescoring can correct the ranking inaccuracies introduced by quantization.
+//
+// The initial search is performed on the quantized (i8) index. As shown in the previous test,
+// this leads to incorrectly ordered results for vectors with tied similarity scores due to precision loss.
+//
+// By enabling rescoring, the system recalculates the exact distances using the original, full-precision
+// vectors for a set of top candidates. This corrects the ranking. The test asserts that the final
+// results are sorted by primary key (pk), confirming that rescoring successfully restored the correct order.
+async fn rescoring_ranks_results_correctly_for_quantized_index(ctx: Arc<TestContext>) {
+    info!("started");
+
+    let table = ctx
+        .create_table("pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None)
+        .await;
+    let (query_vector, embeddings) = generate_test_vectors(500);
+
+    insert_vectors(&ctx.session, &table, &embeddings).await;
+    info!("inserted vectors into table");
+
+    // Set oversampling to search the entire dataset for more predictable results (5.0 * LIMIT 100 = 500 embeddings)
+    create_index(
+        &ctx,
+        &table,
+        [
+            ("quantization", "i8"),
+            ("oversampling", "5.0"),
+            ("rescoring", "true"),
+        ],
+    )
+    .await;
+    info!("created index with i8 quantization and rescoring enabled");
+
+    let results = get_query_results(
+        format!(
+            "SELECT pk, v FROM {table} ORDER BY v ANN OF [{}, {}, {}] LIMIT 100",
+            query_vector[0], query_vector[1], query_vector[2],
+        ),
+        &ctx.session,
+    )
+    .await;
+
+    let rows = results
+        .rows::<(i32, Vec<f32>)>()
+        .expect("failed to get rows");
+
+    info!("retrieved {} rows from query", rows.rows_remaining());
+
+    assert!(rows.rows_remaining() > 0, "Should return some results");
+    assert!(
+        rows.into_iter().is_sorted_by_key(|row| {
+            let (pk, _) = row.expect("failed to get row");
+            pk
+        }),
+        "Results should be sorted by pk. The index is quantized, so the initial search returns incorrectly ranked results. \
+        However, rescoring corrects the ranking despite the precision loss"
+    );
+
+    info!("finished");
+}
+
+#[e2etest::test(group = quantization_and_rescoring)]
+// Binary quantization has a special implementation in vector-store.
+// Hence we need to verify that search and rescoring also work correctly with it.
+async fn searching_and_rescoring_works_for_binary_quantization(ctx: Arc<TestContext>) {
+    info!("started");
+
+    let table = ctx
+        .create_table("pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None)
+        .await;
+    let (query_vector, embeddings) = generate_test_vectors(500);
+
+    insert_vectors(&ctx.session, &table, &embeddings).await;
+    info!("inserted vectors into table");
+
+    // Set oversampling to search the entire dataset for more predictable results (5.0 * LIMIT 100 = 500 embeddings)
+    create_index(
+        &ctx,
+        &table,
+        [
+            ("quantization", "b1"),
+            ("oversampling", "5.0"),
+            ("rescoring", "true"),
+        ],
+    )
+    .await;
+    info!("created index with b1 (binary) quantization and rescoring enabled");
+
+    let results = get_query_results(
+        format!(
+            "SELECT pk, v FROM {table} ORDER BY v ANN OF [{}, {}, {}] LIMIT 100",
+            query_vector[0], query_vector[1], query_vector[2],
+        ),
+        &ctx.session,
+    )
+    .await;
+
+    let rows = results
+        .rows::<(i32, Vec<f32>)>()
+        .expect("failed to get rows");
+
+    info!("retrieved {} rows from query", rows.rows_remaining());
+
+    assert!(rows.rows_remaining() > 0, "Should return some results");
+
+    assert!(
+        rows.into_iter().is_sorted_by_key(|row| {
+            let (pk, _) = row.expect("failed to get row");
+            pk
+        }),
+        "Results should be sorted by pk. The index is quantized, so the initial search returns incorrectly ranked results. \
+        However, rescoring corrects the ranking despite the precision loss"
+    );
+
+    info!("finished");
+}
