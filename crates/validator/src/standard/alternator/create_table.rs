@@ -4,8 +4,8 @@
  */
 
 use crate::TestActors;
-use crate::alternator;
 use crate::common;
+use crate::common::alternator;
 use aws_smithy_runtime_api::box_error::BoxError;
 use aws_smithy_runtime_api::client::interceptors::Intercept;
 use aws_smithy_runtime_api::client::interceptors::context::AfterDeserializationInterceptorContextRef;
@@ -467,7 +467,7 @@ async fn create_table_with_boundary_dimensions(actors: Arc<TestActors>) {
 e2etest::group!(
     name = create_table,
     fixtures = (Fixture),
-    parent = alternator::alternator
+    parent = super::alternator
 );
 
 struct Fixture {

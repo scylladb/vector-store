@@ -3,31 +3,22 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
-mod auth;
-mod batch_write_item;
-mod create_table;
-mod delete_item;
-mod lwt;
-mod put_item;
-mod query;
-mod ttl;
-mod types;
-mod update_item;
-mod update_table;
-
+use super::ALTERNATOR_PORT;
 use crate::TestActors;
-use crate::common;
-use crate::common::ALTERNATOR_PORT;
 use async_backtrace::framed;
 use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
 use aws_sdk_dynamodb::Client;
+use aws_sdk_dynamodb::client::customize::CustomizableOperation;
 use aws_sdk_dynamodb::config::Region;
 use aws_sdk_dynamodb::error::SdkError;
 use aws_sdk_dynamodb::operation::create_table::CreateTableError;
 use aws_sdk_dynamodb::operation::create_table::CreateTableOutput;
 use aws_sdk_dynamodb::operation::delete_table::DeleteTableError;
 use aws_sdk_dynamodb::operation::put_item::builders::PutItemFluentBuilder;
+use aws_sdk_dynamodb::operation::query::QueryError;
+use aws_sdk_dynamodb::operation::query::QueryOutput;
+use aws_sdk_dynamodb::operation::query::builders::QueryFluentBuilder;
 use aws_sdk_dynamodb::primitives::Blob;
 use aws_sdk_dynamodb::types::AttributeDefinition;
 use aws_sdk_dynamodb::types::AttributeValue;
@@ -66,12 +57,12 @@ use tracing::warn;
 static TABLE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static INDEX_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-fn unique_table_name() -> String {
-    common::unique_name("Alt-Tbl", &TABLE_COUNTER)
+pub(crate) fn unique_table_name() -> String {
+    super::unique_name("Alt-Tbl", &TABLE_COUNTER)
 }
 
-fn unique_index_name() -> IndexName {
-    common::unique_name("Alt-Idx", &INDEX_COUNTER).into()
+pub(crate) fn unique_index_name() -> IndexName {
+    super::unique_name("Alt-Idx", &INDEX_COUNTER).into()
 }
 
 /// Maximum DynamoDB table name length accepted by ScyllaDB Alternator.
@@ -82,29 +73,27 @@ fn unique_index_name() -> IndexName {
 /// at 222. Alternator then lowers it further to 192 to leave room for the
 /// `_scylla_cdc_log` suffix (15 chars) added when CDC/streams are enabled.
 /// See ScyllaDB `alternator/executor_util.hh`: `max_table_name_length = 192`.
-const MAX_ALTERNATOR_TABLE_NAME_LEN: usize = 192;
+pub(crate) const MAX_ALTERNATOR_TABLE_NAME_LEN: usize = 192;
 
 /// Maximum DynamoDB vector index name length accepted by ScyllaDB Alternator.
 ///
 /// Alternator validates index names with the same function and limit as table
 /// names. Documented in ScyllaDB `docs/alternator/vector-search.md`:
 /// "`IndexName`: 3–192 characters, matching the regex `[a-zA-Z0-9._-]+`".
-const MAX_ALTERNATOR_INDEX_NAME_LEN: usize = MAX_ALTERNATOR_TABLE_NAME_LEN;
+pub(crate) const MAX_ALTERNATOR_INDEX_NAME_LEN: usize = MAX_ALTERNATOR_TABLE_NAME_LEN;
 
 /// Maximum DynamoDB attribute name length in bytes.
 ///
 /// Per AWS DynamoDB naming rules: attribute names must be between 1 and 255
 /// bytes long (UTF-8 encoded).
 /// See <https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/HowItWorks.NamingRulesDataTypes.html>.
-const MAX_ALTERNATOR_ATTRIBUTE_NAME_LEN: usize = 255;
-
-e2etest::group!(name = alternator, fixtures = (), parent = crate::validator);
+pub(crate) const MAX_ALTERNATOR_ATTRIBUTE_NAME_LEN: usize = 255;
 
 /// In ScyllaDB Alternator, a DynamoDB table named `T` is stored under the CQL
 /// keyspace `alternator_T`. Vector Store discovers indexes by scanning
 /// `system_schema.indexes`, so the keyspace name is what VS uses to identify
 /// an Alternator-backed index.
-fn keyspace(table_name: &str) -> KeyspaceName {
+pub(crate) fn keyspace(table_name: &str) -> KeyspaceName {
     format!("alternator_{table_name}").into()
 }
 
@@ -133,14 +122,14 @@ fn keyspace(table_name: &str) -> KeyspaceName {
 ///
 /// [`modify_before_signing`]: Intercept::modify_before_signing
 #[derive(Debug, Clone)]
-struct JsonBodyInjectInterceptor {
+pub(crate) struct JsonBodyInjectInterceptor {
     fields: Map<String, Value>,
 }
 
 impl JsonBodyInjectInterceptor {
     /// Creates a new interceptor that will inject the given `fields` into every
     /// outgoing request body.
-    fn new(fields: impl IntoIterator<Item = (impl Into<String>, Value)>) -> Self {
+    pub(crate) fn new(fields: impl IntoIterator<Item = (impl Into<String>, Value)>) -> Self {
         Self {
             fields: fields.into_iter().map(|(k, v)| (k.into(), v)).collect(),
         }
@@ -189,6 +178,50 @@ impl Intercept for JsonBodyInjectInterceptor {
     }
 }
 
+/// Extension trait that adds Alternator `VectorSearch` to [`QueryFluentBuilder`].
+pub(crate) trait QueryBuilderExt {
+    fn vector_search(
+        self,
+        vector: impl IntoIterator<Item = f32>,
+    ) -> CustomizableOperation<QueryOutput, QueryError, QueryFluentBuilder>;
+
+    fn vector_search_optimized(
+        self,
+        vector: impl IntoIterator<Item = f32>,
+    ) -> CustomizableOperation<QueryOutput, QueryError, QueryFluentBuilder>;
+}
+
+impl QueryBuilderExt for QueryFluentBuilder {
+    fn vector_search(
+        self,
+        vector: impl IntoIterator<Item = f32>,
+    ) -> CustomizableOperation<QueryOutput, QueryError, QueryFluentBuilder> {
+        let json = serde_json::json!({
+            "QueryVector": {
+                "L": vector
+                    .into_iter()
+                    .map(|v| serde_json::json!({ "N": v.to_string() }))
+                    .collect::<Vec<_>>()
+            }
+        });
+        self.customize()
+            .interceptor(JsonBodyInjectInterceptor::new([("VectorSearch", json)]))
+    }
+
+    fn vector_search_optimized(
+        self,
+        vector: impl IntoIterator<Item = f32>,
+    ) -> CustomizableOperation<QueryOutput, QueryError, QueryFluentBuilder> {
+        let json = serde_json::json!({
+            "QueryVector": {
+                "FLOAT32VECTOR": vector.into_iter().collect::<Vec<_>>()
+            }
+        });
+        self.customize()
+            .interceptor(JsonBodyInjectInterceptor::new([("VectorSearch", json)]))
+    }
+}
+
 /// Magic prefix for FLOAT32VECTOR-encoded binary attribute values.
 /// Same prefix as used by the Java Alternator client (`alternator-client-java`).
 /// When the interceptor detects this prefix in a Base64-encoded `B` attribute,
@@ -201,7 +234,7 @@ const F32VEC_BASE64_PREFIX: &str = "8vMv7Ep7";
 
 /// Encodes a float vector as a `B` [`AttributeValue`] with a magic prefix.
 /// The [`Float32VectorInterceptor`] will transcode it to `{"FLOAT32VECTOR": [...]}`.
-fn float32_vector(v: impl IntoIterator<Item = f32>) -> AttributeValue {
+pub(crate) fn float32_vector(v: impl IntoIterator<Item = f32>) -> AttributeValue {
     let v: Vec<f32> = v.into_iter().collect();
     let mut bytes = Vec::with_capacity(F32VEC_MAGIC.len() + v.len() * 4);
     bytes.extend_from_slice(F32VEC_MAGIC);
@@ -211,7 +244,7 @@ fn float32_vector(v: impl IntoIterator<Item = f32>) -> AttributeValue {
     AttributeValue::B(Blob::new(bytes))
 }
 
-fn decode_float32_vector(bytes: &[u8]) -> Vec<f32> {
+pub(crate) fn decode_float32_vector(bytes: &[u8]) -> Vec<f32> {
     bytes[F32VEC_MAGIC.len()..]
         .chunks(4)
         .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
@@ -221,7 +254,7 @@ fn decode_float32_vector(bytes: &[u8]) -> Vec<f32> {
 /// Rewrites any `B`-attribute with the magic prefix into the `FLOAT32VECTOR` wire
 /// format that Alternator expects. This is a no-op for requests without such attributes.
 #[derive(Debug, Clone)]
-struct Float32VectorInterceptor;
+pub(crate) struct Float32VectorInterceptor;
 
 impl Intercept for Float32VectorInterceptor {
     fn name(&self) -> &'static str {
@@ -276,7 +309,7 @@ impl Intercept for Float32VectorInterceptor {
 
 /// Builds a DynamoDB client pointing at the ScyllaDB Alternator endpoint on
 /// `db_ip` using explicit SigV4 credentials.
-async fn make_dynamodb_client_with_creds(
+pub(crate) async fn make_dynamodb_client_with_creds(
     db_ip: Ipv4Addr,
     access_key_id: &str,
     secret_access_key: &str,
@@ -311,28 +344,28 @@ async fn make_dynamodb_client(db_ip: Ipv4Addr) -> Client {
 /// the cluster has started before any tests run.
 async fn wait_for_alternator(db_ip: Ipv4Addr) {
     let client = make_dynamodb_client(db_ip).await;
-    common::wait_for(
+    super::wait_for(
         || {
             let c = client.clone();
             async move { c.list_tables().limit(1).send().await.is_ok() }
         },
         format!("Alternator endpoint at http://{db_ip}:{ALTERNATOR_PORT} to be ready"),
-        common::DEFAULT_TEST_TIMEOUT,
+        super::DEFAULT_TEST_TIMEOUT,
     )
     .await;
 }
 
-async fn make_clients(actors: &TestActors) -> (Client, Vec<HttpClient>) {
-    let db_ip = actors.services_subnet.ip(common::DB_OCTET_1);
+pub(crate) async fn make_clients(actors: &TestActors) -> (Client, Vec<HttpClient>) {
+    let db_ip = actors.services_subnet.ip(super::DB_OCTET_1);
     let dynamodb_client = make_dynamodb_client(db_ip).await;
-    let vs_clients = common::get_default_vs_ips(actors)
+    let vs_clients = super::get_default_vs_ips(actors)
         .into_iter()
-        .map(|ip| HttpClient::new((ip, common::VS_PORT).into()))
+        .map(|ip| HttpClient::new((ip, super::VS_PORT).into()))
         .collect();
     (dynamodb_client, vs_clients)
 }
 
-fn float_list(values: impl IntoIterator<Item = f32>) -> AttributeValue {
+pub(crate) fn float_list(values: impl IntoIterator<Item = f32>) -> AttributeValue {
     AttributeValue::L(
         values
             .into_iter()
@@ -343,12 +376,12 @@ fn float_list(values: impl IntoIterator<Item = f32>) -> AttributeValue {
 
 /// Builder for a single DynamoDB test item.
 #[derive(Debug, Clone)]
-struct Item(pub HashMap<String, AttributeValue>);
+pub(crate) struct Item(pub HashMap<String, AttributeValue>);
 
 impl Item {
-    const VEC_DIMS: usize = 3;
+    pub(crate) const VEC_DIMS: usize = 3;
 
-    fn new(pk_attr: &str, pk_val: AttributeValue) -> Self {
+    pub(crate) fn new(pk_attr: &str, pk_val: AttributeValue) -> Self {
         let mut map = HashMap::new();
         map.insert(pk_attr.to_string(), pk_val);
         Self(map)
@@ -357,7 +390,7 @@ impl Item {
     /// Constructs key attributes depending on whether sort key exists.
     /// HASH-only -> `pk="{prefix}-{suffix}"`,
     /// HASH+RANGE -> `pk=prefix, sk=suffix`.
-    fn key(pk_attr: &str, sk_attr: Option<&str>, pk_prefix: &str, suffix: &str) -> Self {
+    pub(crate) fn key(pk_attr: &str, sk_attr: Option<&str>, pk_prefix: &str, suffix: &str) -> Self {
         if let Some(sk) = sk_attr {
             Self::new(pk_attr, AttributeValue::S(pk_prefix.to_string()))
                 .sk(sk, AttributeValue::S(suffix.to_string()))
@@ -366,12 +399,12 @@ impl Item {
         }
     }
 
-    fn sk(mut self, sk_attr: &str, sk_val: AttributeValue) -> Self {
+    pub(crate) fn sk(mut self, sk_attr: &str, sk_val: AttributeValue) -> Self {
         self.0.insert(sk_attr.to_string(), sk_val);
         self
     }
 
-    fn maybe_sk(self, sk_attr: Option<&str>, sk_val: AttributeValue) -> Self {
+    pub(crate) fn maybe_sk(self, sk_attr: Option<&str>, sk_val: AttributeValue) -> Self {
         if let Some(sk) = sk_attr {
             self.sk(sk, sk_val)
         } else {
@@ -379,36 +412,36 @@ impl Item {
         }
     }
 
-    fn vec(mut self, vec_attr: &str, v: [f32; Self::VEC_DIMS]) -> Self {
+    pub(crate) fn vec(mut self, vec_attr: &str, v: [f32; Self::VEC_DIMS]) -> Self {
         self.0.insert(vec_attr.to_string(), float_list(v));
         self
     }
 
-    fn vec_optimized(mut self, vec_attr: &str, v: [f32; Self::VEC_DIMS]) -> Self {
+    pub(crate) fn vec_optimized(mut self, vec_attr: &str, v: [f32; Self::VEC_DIMS]) -> Self {
         self.0.insert(vec_attr.to_string(), float32_vector(v));
         self
     }
 
-    fn attr(mut self, name: &str, val: AttributeValue) -> Self {
+    pub(crate) fn attr(mut self, name: &str, val: AttributeValue) -> Self {
         self.0.insert(name.to_string(), val);
         self
     }
 }
 
-async fn wait_for_index(clients: &[HttpClient], index: &IndexInfo) {
+pub(crate) async fn wait_for_index(clients: &[HttpClient], index: &IndexInfo) {
     for client in clients {
-        common::wait_for_index(client, index).await;
+        super::wait_for_index(client, index).await;
     }
 }
 
-async fn wait_for_no_index(clients: &[HttpClient], index: &IndexInfo) {
+pub(crate) async fn wait_for_no_index(clients: &[HttpClient], index: &IndexInfo) {
     for client in clients {
-        common::wait_for_no_index(client, index).await;
+        super::wait_for_no_index(client, index).await;
     }
 }
 
 /// Polls ANN until the returned keys match `expected` position-by-position.
-async fn wait_for_ann(
+pub(crate) async fn wait_for_ann(
     clients: &[HttpClient],
     index: &IndexInfo,
     pk_name: &str,
@@ -431,7 +464,7 @@ async fn wait_for_ann(
         .collect();
 
     for client in clients {
-        common::wait_for(
+        super::wait_for(
             || async {
                 let (primary_keys, _distances, _scores) = client
                     .ann(
@@ -488,7 +521,7 @@ async fn wait_for_ann(
     }
 }
 
-fn av_to_key_string(av: &AttributeValue) -> String {
+pub(crate) fn av_to_key_string(av: &AttributeValue) -> String {
     match av {
         AttributeValue::S(s) => s.clone(),
         AttributeValue::N(n) => n.clone(),
@@ -501,7 +534,7 @@ fn av_to_key_string(av: &AttributeValue) -> String {
 }
 
 /// Strips `0x` prefix from blob hex values.
-fn json_value_to_key_string(v: &serde_json::Value) -> String {
+pub(crate) fn json_value_to_key_string(v: &serde_json::Value) -> String {
     match v {
         serde_json::Value::String(s) => s.strip_prefix("0x").unwrap_or(s).to_string(),
         serde_json::Value::Number(n) => n.to_string(),
@@ -511,7 +544,7 @@ fn json_value_to_key_string(v: &serde_json::Value) -> String {
 
 /// Creates an Alternator table with the given key schema and optional vector
 /// indexes. Pass `&[]` for `vector_indexes` to create a plain table.
-async fn create_table(
+pub(crate) async fn create_table(
     client: &Client,
     table_name: &str,
     partition_key_name: &str,
@@ -584,7 +617,7 @@ async fn create_table(
     }
 }
 
-async fn update_table_vector_indexes(
+pub(crate) async fn update_table_vector_indexes(
     client: &Client,
     table_name: &str,
     vector_index_updates: Value,
@@ -602,7 +635,7 @@ async fn update_table_vector_indexes(
         .expect("UpdateTable with VectorIndexUpdates should succeed");
 }
 
-async fn delete_table(client: &Client, table_name: &str) {
+pub(crate) async fn delete_table(client: &Client, table_name: &str) {
     client
         .delete_table()
         .table_name(table_name)
@@ -612,7 +645,7 @@ async fn delete_table(client: &Client, table_name: &str) {
 }
 
 /// Asserts that an SDK result is a service error containing `expected_err`.
-fn assert_service_error<O, E>(result: Result<O, SdkError<E>>, expected_err: &str)
+pub(crate) fn assert_service_error<O, E>(result: Result<O, SdkError<E>>, expected_err: &str)
 where
     O: std::fmt::Debug,
     E: aws_smithy_types::error::metadata::ProvideErrorMetadata,
@@ -628,14 +661,14 @@ where
 }
 
 /// Applies `extra_args` overrides to default scylla node configs.
-async fn get_scylla_configs(
+pub(crate) async fn get_scylla_configs(
     actors: &TestActors,
     extra_args: impl IntoIterator<Item = (&str, &str)>,
     extra_config: Option<Vec<u8>>,
 ) -> Vec<ScyllaNodeConfig> {
     let args: Vec<(&str, &str)> = extra_args.into_iter().collect();
 
-    let mut scylla_configs = common::get_default_scylla_node_configs(actors).await;
+    let mut scylla_configs = super::get_default_scylla_node_configs(actors).await;
 
     for config in &mut scylla_configs {
         for (name, value) in &args {
@@ -652,14 +685,17 @@ async fn get_scylla_configs(
 /// Starts ScyllaDB with the Alternator endpoint enabled alongside the Vector
 /// Store. `extra_args` is a list of `(name, value)` pairs that override or
 /// extend the default alternator arguments.
-async fn init_with_args(actors: &TestActors, extra_args: impl IntoIterator<Item = (&str, &str)>) {
+pub(crate) async fn init_with_args(
+    actors: &TestActors,
+    extra_args: impl IntoIterator<Item = (&str, &str)>,
+) {
     info!("started");
     let scylla_configs = get_scylla_configs(actors, extra_args, None).await;
-    let vs_configs = common::get_default_vs_node_configs(actors).await;
+    let vs_configs = super::get_default_vs_node_configs(actors).await;
 
     // Capture db_ip before actors is moved into init_with_config.
-    let db_ip = actors.services_subnet.ip(common::DB_OCTET_1);
-    common::init_with_config(actors, scylla_configs, vs_configs, true).await;
+    let db_ip = actors.services_subnet.ip(super::DB_OCTET_1);
+    super::init_with_config(actors, scylla_configs, vs_configs, true).await;
 
     wait_for_alternator(db_ip).await;
     info!("finished");
@@ -676,7 +712,7 @@ pub async fn init(actors: &TestActors) {
 /// table. Controls what [`TableContext::create`] builds. See
 /// [`name_patterns`] for the standard 2x2 test matrix.
 #[derive(Debug, Clone)]
-struct TableShape {
+pub(crate) struct TableShape {
     /// When `Some`, the table name base is padded and composed with a unique
     /// suffix so that the total equals [`MAX_ALTERNATOR_TABLE_NAME_LEN`].
     /// When `None`, a plain unique name is used.
@@ -713,7 +749,7 @@ impl TableShape {
 ///
 /// # Panics
 /// Panics if `base` is already longer than `len`.
-fn pad_to_len(base: &str, len: usize, pad: char) -> String {
+pub(crate) fn pad_to_len(base: &str, len: usize, pad: char) -> String {
     assert!(
         base.len() <= len,
         "base ({} bytes) exceeds target length ({len})",
@@ -752,7 +788,7 @@ const SPECIAL_ATTR_BASE_VEC: &str = "1:vec'.\".\\@#$ кириллица 中文 �
 /// | 1 | plain | HASH+RANGE |
 /// | 2 | special (max-length + special chars) | HASH-only |
 /// | 3 | special (max-length + special chars) | HASH+RANGE |
-fn name_patterns() -> Vec<TableShape> {
+pub(crate) fn name_patterns() -> Vec<TableShape> {
     vec![
         // 0: plain, HASH-only
         TableShape {
@@ -812,7 +848,7 @@ fn name_patterns() -> Vec<TableShape> {
 ///
 /// This is the single source of truth for name construction - used by both
 /// [`TableContext::create`] and tests that manage the table lifecycle directly.
-fn resolve_table_names(shape: &TableShape) -> (String, IndexInfo) {
+pub(crate) fn resolve_table_names(shape: &TableShape) -> (String, IndexInfo) {
     let table_name = match shape.table_prefix {
         None => unique_table_name(),
         Some(base) => {
@@ -835,7 +871,7 @@ fn resolve_table_names(shape: &TableShape) -> (String, IndexInfo) {
 
 /// Test fixture that encapsulates the create-table -> wait -> operate -> cleanup
 /// cycle. `done()` is idempotent (swallows `ResourceNotFoundException`).
-struct TableContext {
+pub(crate) struct TableContext {
     pub client: Client,
     pub vs_clients: Vec<HttpClient>,
     pub table_name: String,
@@ -845,7 +881,7 @@ struct TableContext {
 
 impl TableContext {
     /// Creates a new Alternator table and (optionally) a vector index.
-    async fn create(actors: &TestActors, shape: &TableShape) -> Self {
+    pub(crate) async fn create(actors: &TestActors, shape: &TableShape) -> Self {
         let (client, vs_clients) = make_clients(actors).await;
 
         let (table_name, index) = resolve_table_names(shape);
@@ -877,7 +913,7 @@ impl TableContext {
         }
     }
 
-    fn put(&self, item: &Item) -> PutItemFluentBuilder {
+    pub(crate) fn put(&self, item: &Item) -> PutItemFluentBuilder {
         let mut req = self.client.put_item().table_name(&self.table_name);
         for (attr_name, attr_val) in &item.0 {
             req = req.item(attr_name, attr_val.clone());
@@ -890,14 +926,18 @@ impl TableContext {
     /// All `items` must carry a valid vector. Use
     /// [`Self::create_with_invalid_data`] when the dataset includes items VS
     /// should skip.
-    async fn create_with_data(actors: &TestActors, shape: &TableShape, items: &[Item]) -> Self {
+    pub(crate) async fn create_with_data(
+        actors: &TestActors,
+        shape: &TableShape,
+        items: &[Item],
+    ) -> Self {
         Self::create_with_invalid_data(actors, shape, items, &[]).await
     }
 
     /// Like [`Self::create_with_data`] but also pre-inserts `invalid_items`
     /// (wrong type, missing vector, wrong dimensions) that VS should skip.
     /// Only `items` count toward the expected index count.
-    async fn create_with_invalid_data(
+    pub(crate) async fn create_with_invalid_data(
         actors: &TestActors,
         shape: &TableShape,
         items: &[Item],
@@ -945,12 +985,12 @@ impl TableContext {
         }
     }
 
-    async fn wait_for_count(&self, n: usize) {
-        common::wait_for_index_count(&self.vs_clients, &self.index, n).await;
+    pub(crate) async fn wait_for_count(&self, n: usize) {
+        super::wait_for_index_count(&self.vs_clients, &self.index, n).await;
     }
 
     /// Waits until ANN returns exactly the expected items in the expected order.
-    async fn wait_for_ann(&self, qvec: [f32; Item::VEC_DIMS], expected: &[Item]) {
+    pub(crate) async fn wait_for_ann(&self, qvec: [f32; Item::VEC_DIMS], expected: &[Item]) {
         wait_for_ann(
             &self.vs_clients,
             &self.index,
@@ -963,7 +1003,7 @@ impl TableContext {
     }
 
     /// Idempotent.
-    async fn done(&self) {
+    pub(crate) async fn done(&self) {
         match self
             .client
             .delete_table()
