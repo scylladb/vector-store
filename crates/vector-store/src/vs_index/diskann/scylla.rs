@@ -27,7 +27,11 @@
 //!
 //! # What lives in RAM
 //!
-//! * The graph: one [`Node`] per vector, holding its adjacency list.
+//! * Node liveness: whether the [`GraphStore`] holds each vector as live or
+//!   dead — a [`Node`] in [`InmemGraphStore`], a [`Liveness`] in
+//!   [`ScyllaGraphStore`]. The edges are in RAM only for as long as the store is
+//!   an [`InmemGraphStore`]; liveness always is, because `DataProvider`'s id
+//!   translation is synchronous.
 //! * Start points, vectors included. Their ids are [`PrimaryId::RESERVED`], not
 //!   backed by a row, so they can never be read back from ScyllaDB.
 //! * Vectors of in-flight inserts. Back-edge pruning asks for the new vector
@@ -77,13 +81,17 @@ use diskann_vector::PreprocessedDistanceFunction;
 use diskann_vector::contains::ContainsSimd;
 use diskann_vector::distance::Metric;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::btree_map::Entry;
+use std::collections::hash_map::RandomState;
 use std::fmt;
 use std::fmt::Debug;
 use std::future::Future;
+use std::hash::BuildHasher as _;
 use std::sync::Arc;
 use std::sync::RwLock;
+use tokio::sync::MutexGuard;
 use tokio::sync::mpsc;
 use tracing::warn;
 
@@ -203,14 +211,16 @@ pub(super) struct ScyllaBackend {
     strategy: ScyllaStrategy,
     context: DefaultContext,
     source: Arc<dyn VectorSource>,
+    graph: Arc<dyn GraphStore>,
 }
 
 impl ScyllaBackend {
-    pub(super) fn new(source: Arc<dyn VectorSource>) -> Self {
+    pub(super) fn new(source: Arc<dyn VectorSource>, graph: Arc<dyn GraphStore>) -> Self {
         Self {
             strategy: ScyllaStrategy::default(),
             context: DefaultContext,
             source,
+            graph,
         }
     }
 }
@@ -232,6 +242,7 @@ impl DiskannBackend for ScyllaBackend {
             params.config.max_degree().get(),
             partition_id,
             Arc::clone(&self.source),
+            Arc::clone(&self.graph),
         )
         .context("failed to create ScyllaProvider")?;
 
@@ -245,6 +256,129 @@ impl DiskannBackend for ScyllaBackend {
     fn context(&self) -> &DefaultContext {
         &self.context
     }
+}
+
+/// Why a [`GraphStore`] transition did not happen.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum StoreError {
+    #[error("the node is not in the state this transition requires")]
+    Conflict,
+    /// The store could not be reached, or refused the write.
+    #[error(transparent)]
+    Backend(#[from] anyhow::Error),
+}
+
+/// Per-node locks for a [`GraphStore`] whose edges are remote.
+///
+/// [`GraphStore::append`] and [`GraphStore::clear`] each have to be atomic on
+/// their node, and neither can be: one is a read-modify-write and the other a
+/// liveness test followed by an edge write, with a round trip in between.
+///
+/// Both the striping and the per-call discipline are what the upstream provider
+/// does. `diskann-inmem` keeps one `RwLock` per 16 adjacency lists and takes it
+/// inside each `get`, `set` and `append_vector`.
+#[derive(Debug)]
+pub(super) struct NodeLocks {
+    stripes: Box<[tokio::sync::Mutex<()>]>,
+    hasher: RandomState,
+}
+
+impl NodeLocks {
+    /// Enough that unrelated nodes rarely collide, small enough to stay cheap
+    const STRIPES: usize = 1024;
+
+    pub(super) fn new() -> Self {
+        Self {
+            stripes: std::iter::repeat_with(|| tokio::sync::Mutex::new(()))
+                .take(Self::STRIPES)
+                .collect(),
+            hasher: RandomState::new(),
+        }
+    }
+
+    fn stripe(&self, partition_id: PartitionId, id: PrimaryId) -> usize {
+        (self.hasher.hash_one((partition_id, id)) % Self::STRIPES as u64) as usize
+    }
+
+    /// Exclusive access to `id`'s stripe.
+    pub(super) async fn lock(
+        &self,
+        partition_id: PartitionId,
+        id: PrimaryId,
+    ) -> MutexGuard<'_, ()> {
+        self.stripes[self.stripe(partition_id, id)].lock().await
+    }
+}
+
+/// The DiskANN graph of one index: which nodes exist, whether they are still
+/// reachable, and what each one's out-edges are.
+///
+/// # States
+///
+/// A node is in exactly one of three states:
+///
+/// * *absent* — never created, or reaped. It has no edges, every write to it is
+///   dropped and every read of it is empty.
+/// * *live* — [`GraphStore::create`] put it there. It has an adjacency list,
+///   possibly empty, and search may return it.
+/// * *dead* — [`GraphStore::mark_dead`] put it there. It keeps its adjacency
+///   list, because `inplace_delete` marks a node deleted and only then reads its
+///   out-edges to repair the graph around it. Search must not return it.
+#[async_trait]
+pub(super) trait GraphStore: Debug + Send + Sync + 'static {
+    /// Whether `id` is a live node.
+    fn is_live(&self, partition_id: PartitionId, id: PrimaryId) -> bool;
+
+    /// Make `id` a live node with an empty adjacency list, dropping whatever a
+    /// tombstone or a rolled-back insert left behind.
+    async fn create(&self, partition_id: PartitionId, id: PrimaryId) -> Result<(), StoreError>;
+
+    /// Mark `id` unreachable, keeping its adjacency list for the repair pass.
+    fn mark_dead(&self, partition_id: PartitionId, id: PrimaryId) -> Result<(), StoreError>;
+
+    /// One node's adjacency list.
+    ///
+    /// `None` is an id the store does not have — this is also how a caller asks
+    /// whether a node is there at all — and a present node with no out-edges is
+    /// `Some` of an empty list.
+    async fn get(
+        &self,
+        partition_id: PartitionId,
+        id: PrimaryId,
+    ) -> anyhow::Result<Option<AdjacencyList<PrimaryId>>>;
+
+    /// Replace `id`'s adjacency list with `edges`, deduplicated and then capped
+    /// at the store's max degree.
+    async fn set(
+        &self,
+        partition_id: PartitionId,
+        id: PrimaryId,
+        edges: &[PrimaryId],
+    ) -> anyhow::Result<()>;
+
+    /// Add `edges` to `id`'s list, deduplicated against what is stored, then
+    /// capped at the store's max degree.
+    ///
+    /// A read-modify-write, so it has to be atomic on `id`: an implementation
+    /// whose edges are remote should hold make sure of the atomicity.
+    async fn append(
+        &self,
+        partition_id: PartitionId,
+        id: PrimaryId,
+        edges: &[PrimaryId],
+    ) -> anyhow::Result<()>;
+
+    /// Empty `id`'s adjacency list — and if `id` is dead, reap it instead,
+    /// dropping the node and its edges together.
+    async fn clear(&self, partition_id: PartitionId, id: PrimaryId) -> anyhow::Result<()>;
+
+    /// Undo a [`GraphStore::create`] whose insert never completed.
+    ///
+    /// Synchronous, because the only caller is [`InflightGuard`]'s `Drop`.
+    /// Making the node absent is mandatory, since liveness is in RAM for every
+    /// implementation. Dropping its edges is best effort: a store whose edges
+    /// are remote may leave them, which costs storage and not correctness.
+    fn abandon(&self, partition_id: PartitionId, id: PrimaryId);
 }
 
 #[derive(Debug)]
@@ -279,16 +413,326 @@ impl Node {
     }
 }
 
+/// A [`GraphStore`] holding the whole graph in RAM.
+#[derive(Debug)]
+pub(super) struct InmemGraphStore {
+    nodes: RwLock<BTreeMap<(PartitionId, PrimaryId), Node>>,
+    max_degree: usize,
+}
+
+impl InmemGraphStore {
+    pub(super) fn new(max_degree: usize) -> Self {
+        Self {
+            nodes: RwLock::default(),
+            max_degree,
+        }
+    }
+}
+
+#[async_trait]
+impl GraphStore for InmemGraphStore {
+    fn is_live(&self, partition_id: PartitionId, id: PrimaryId) -> bool {
+        self.nodes
+            .read()
+            .unwrap()
+            .get(&(partition_id, id))
+            .is_some_and(|node| node.is_live())
+    }
+
+    async fn create(&self, partition_id: PartitionId, id: PrimaryId) -> Result<(), StoreError> {
+        match self.nodes.write().unwrap().entry((partition_id, id)) {
+            // A tombstone the graph never finished reaping, or a rolled-back
+            // insert a remote store could not clean up. Either way the id is
+            // free, and it comes back with no edges.
+            Entry::Occupied(mut occupied) if !occupied.get().is_live() => {
+                *occupied.get_mut() = Node::new(self.max_degree);
+                Ok(())
+            }
+            Entry::Occupied(_) => Err(StoreError::Conflict),
+            Entry::Vacant(vacant) => {
+                vacant.insert(Node::new(self.max_degree));
+                Ok(())
+            }
+        }
+    }
+
+    fn mark_dead(&self, partition_id: PartitionId, id: PrimaryId) -> Result<(), StoreError> {
+        match self.nodes.write().unwrap().get_mut(&(partition_id, id)) {
+            Some(node) if node.is_live() => {
+                node.mark_deleted();
+                Ok(())
+            }
+            _ => Err(StoreError::Conflict),
+        }
+    }
+
+    async fn get(
+        &self,
+        partition_id: PartitionId,
+        id: PrimaryId,
+    ) -> anyhow::Result<Option<AdjacencyList<PrimaryId>>> {
+        Ok(self
+            .nodes
+            .read()
+            .unwrap()
+            .get(&(partition_id, id))
+            .map(|node| node.neighbors().clone()))
+    }
+
+    async fn set(
+        &self,
+        partition_id: PartitionId,
+        id: PrimaryId,
+        edges: &[PrimaryId],
+    ) -> anyhow::Result<()> {
+        let mut nodes = self.nodes.write().unwrap();
+        let Some(node) = nodes.get_mut(&(partition_id, id)) else {
+            return Ok(());
+        };
+        let list = node.neighbors_mut();
+        list.clear();
+        list.extend_from_slice(edges);
+        list.truncate(self.max_degree);
+        Ok(())
+    }
+
+    async fn append(
+        &self,
+        partition_id: PartitionId,
+        id: PrimaryId,
+        edges: &[PrimaryId],
+    ) -> anyhow::Result<()> {
+        let mut nodes = self.nodes.write().unwrap();
+        let Some(node) = nodes.get_mut(&(partition_id, id)) else {
+            return Ok(());
+        };
+        let list = node.neighbors_mut();
+        list.extend_from_slice(edges);
+        list.truncate(self.max_degree);
+        Ok(())
+    }
+
+    async fn clear(&self, partition_id: PartitionId, id: PrimaryId) -> anyhow::Result<()> {
+        let mut nodes = self.nodes.write().unwrap();
+        match nodes.entry((partition_id, id)) {
+            Entry::Occupied(occupied) if !occupied.get().is_live() => {
+                occupied.remove();
+            }
+            Entry::Occupied(mut occupied) => occupied.get_mut().neighbors_mut().clear(),
+            Entry::Vacant(_) => {}
+        }
+        Ok(())
+    }
+
+    fn abandon(&self, partition_id: PartitionId, id: PrimaryId) {
+        self.nodes.write().unwrap().remove(&(partition_id, id));
+    }
+}
+
+/// Whether the graph still treats a node as reachable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Liveness {
+    Live,
+    Dead,
+}
+
+impl Liveness {
+    fn is_live(self) -> bool {
+        self == Self::Live
+    }
+}
+
+/// A [`GraphStore`] that keeps liveness in RAM and edges in ScyllaDB.
+#[derive(Debug)]
+pub(super) struct ScyllaGraphStore {
+    nodes: RwLock<BTreeMap<(PartitionId, PrimaryId), Liveness>>,
+    orphaned: RwLock<BTreeSet<(PartitionId, PrimaryId)>>,
+    locks: NodeLocks,
+    db_index: mpsc::Sender<DbIndex>,
+    max_degree: usize,
+}
+
+impl ScyllaGraphStore {
+    pub(super) fn new(db_index: mpsc::Sender<DbIndex>, max_degree: usize) -> Self {
+        Self {
+            nodes: RwLock::default(),
+            orphaned: RwLock::default(),
+            locks: NodeLocks::new(),
+            db_index,
+            max_degree,
+        }
+    }
+
+    fn state(&self, partition_id: PartitionId, id: PrimaryId) -> Option<Liveness> {
+        self.nodes.read().unwrap().get(&(partition_id, id)).copied()
+    }
+
+    fn capped(&self, edges: &[PrimaryId]) -> Vec<PrimaryId> {
+        let mut list = AdjacencyList::with_capacity(self.max_degree);
+        list.extend_from_slice(edges);
+        list.truncate(self.max_degree);
+        list.to_vec()
+    }
+}
+
+#[async_trait]
+impl GraphStore for ScyllaGraphStore {
+    fn is_live(&self, partition_id: PartitionId, id: PrimaryId) -> bool {
+        self.state(partition_id, id).is_some_and(Liveness::is_live)
+    }
+
+    async fn create(&self, partition_id: PartitionId, id: PrimaryId) -> Result<(), StoreError> {
+        let _guard = self.locks.lock(partition_id, id).await;
+
+        // The node is live from here, so it must start with no edges.
+        let stale = match self.nodes.write().unwrap().entry((partition_id, id)) {
+            Entry::Occupied(occupied) if occupied.get().is_live() => {
+                return Err(StoreError::Conflict);
+            }
+            // A tombstone this store never finished reaping. It still holds the
+            // previous edges, and they must not come back.
+            Entry::Occupied(mut occupied) => {
+                *occupied.get_mut() = Liveness::Live;
+                true
+            }
+            // An id the store has never had has no row, so there is nothing to
+            // drop — unless a rolled-back insert used it.
+            Entry::Vacant(vacant) => {
+                vacant.insert(Liveness::Live);
+                self.orphaned.read().unwrap().contains(&(partition_id, id))
+            }
+        };
+
+        if stale {
+            if let Err(err) = self.db_index.delete_edges(partition_id, id).await {
+                // Undo, or the id is live with someone else's adjacency list.
+                // The mark stays on, so the retry drops the row instead of
+                // inheriting it.
+                self.orphaned.write().unwrap().insert((partition_id, id));
+                self.nodes.write().unwrap().remove(&(partition_id, id));
+                return Err(StoreError::Backend(err));
+            }
+            self.orphaned.write().unwrap().remove(&(partition_id, id));
+        }
+
+        Ok(())
+    }
+
+    fn mark_dead(&self, partition_id: PartitionId, id: PrimaryId) -> Result<(), StoreError> {
+        match self.nodes.write().unwrap().get_mut(&(partition_id, id)) {
+            Some(liveness) if liveness.is_live() => {
+                *liveness = Liveness::Dead;
+                Ok(())
+            }
+            _ => Err(StoreError::Conflict),
+        }
+    }
+
+    async fn get(
+        &self,
+        partition_id: PartitionId,
+        id: PrimaryId,
+    ) -> anyhow::Result<Option<AdjacencyList<PrimaryId>>> {
+        // The RAM map decides existence, not the edge table: a live node that
+        // has never been written has no row, and that is an empty list rather
+        // than an absent node.
+        if self.state(partition_id, id).is_none() {
+            return Ok(None);
+        }
+
+        let edges = self
+            .db_index
+            .get_edges(partition_id, id)
+            .await?
+            .unwrap_or_default();
+
+        let mut list = AdjacencyList::with_capacity(edges.len());
+        list.overwrite_trusted(&edges);
+        Ok(Some(list))
+    }
+
+    async fn set(
+        &self,
+        partition_id: PartitionId,
+        id: PrimaryId,
+        edges: &[PrimaryId],
+    ) -> anyhow::Result<()> {
+        let _guard = self.locks.lock(partition_id, id).await;
+
+        if self.state(partition_id, id).is_none() {
+            return Ok(());
+        }
+
+        self.db_index
+            .set_edges(partition_id, id, self.capped(edges))
+            .await
+    }
+
+    async fn append(
+        &self,
+        partition_id: PartitionId,
+        id: PrimaryId,
+        edges: &[PrimaryId],
+    ) -> anyhow::Result<()> {
+        // Read and write under one guard, or two concurrent back-edge
+        // insertions lose one of the edges.
+        let _guard = self.locks.lock(partition_id, id).await;
+
+        if self.state(partition_id, id).is_none() {
+            return Ok(());
+        }
+
+        let mut merged = self
+            .db_index
+            .get_edges(partition_id, id)
+            .await?
+            .unwrap_or_default();
+        merged.extend_from_slice(edges);
+
+        self.db_index
+            .set_edges(partition_id, id, self.capped(&merged))
+            .await
+    }
+
+    async fn clear(&self, partition_id: PartitionId, id: PrimaryId) -> anyhow::Result<()> {
+        let _guard = self.locks.lock(partition_id, id).await;
+
+        match self.state(partition_id, id) {
+            // Reap: drop the node and its edges together.
+            Some(Liveness::Dead) => {
+                self.db_index.delete_edges(partition_id, id).await?;
+                self.nodes.write().unwrap().remove(&(partition_id, id));
+            }
+            // Empty the list but keep the node. No row reads back as no edges,
+            // so deleting the row is how an empty list is stored.
+            Some(Liveness::Live) => self.db_index.delete_edges(partition_id, id).await?,
+            None => {}
+        }
+
+        Ok(())
+    }
+
+    fn abandon(&self, partition_id: PartitionId, id: PrimaryId) {
+        // Marked before the node goes absent, so a `create` reusing this id
+        // never finds it vacant and unmarked.
+        self.orphaned.write().unwrap().insert((partition_id, id));
+
+        // Making the node absent is what matters and is synchronous, because
+        // liveness is in RAM.
+        self.nodes.write().unwrap().remove(&(partition_id, id));
+
+        // `Drop` cannot await, so the row stays until `create` reuses the id and deletes it.
+        warn!("abandon: leaving the edges of {id} behind until the id is reused");
+    }
+}
+
 /// Vectors held in RAM only for the duration of an insert.
 type Inflight = Arc<RwLock<BTreeMap<PrimaryId, Vector>>>;
-
-/// The graph, keyed by internal id.
-type Nodes = Arc<RwLock<BTreeMap<PrimaryId, Node>>>;
 
 /// A DiskANN provider whose vector reads go to a [`VectorSource`].
 #[derive(Debug)]
 pub(super) struct ScyllaProvider {
-    nodes: Nodes,
+    graph: Arc<dyn GraphStore>,
     inflight: Inflight,
     start: Vector,
     start_neighbors: RwLock<AdjacencyList<PrimaryId>>,
@@ -307,6 +751,7 @@ impl ScyllaProvider {
         max_degree: usize,
         partition_id: PartitionId,
         source: Arc<dyn VectorSource>,
+        graph: Arc<dyn GraphStore>,
     ) -> anyhow::Result<Self> {
         if start_point.len() != dim {
             bail!(
@@ -316,7 +761,7 @@ impl ScyllaProvider {
         }
 
         Ok(Self {
-            nodes: Nodes::default(),
+            graph,
             inflight: Inflight::default(),
             start: Vector::from(start_point.to_vec()),
             start_neighbors: RwLock::new(AdjacencyList::with_capacity(max_degree)),
@@ -403,17 +848,14 @@ impl ScyllaProvider {
     }
 
     fn is_live(&self, id: PrimaryId) -> bool {
-        self.nodes
-            .read()
-            .unwrap()
-            .get(&id)
-            .is_some_and(|node| node.is_live())
+        self.graph.is_live(self.partition_id, id)
     }
 
     fn adjacency(&self) -> NodeAccessor<'_> {
         NodeAccessor {
-            nodes: &self.nodes,
+            graph: self.graph.as_ref(),
             start_neighbors: &self.start_neighbors,
+            partition_id: self.partition_id,
             max_degree: self.max_degree,
         }
     }
@@ -473,20 +915,15 @@ impl SetElement<&[f32]> for ScyllaProvider {
             )));
         }
 
-        match self.nodes.write().unwrap().entry(internal) {
-            Entry::Occupied(mut occupied) => {
-                if occupied.get().is_live() {
-                    return Err(ANNError::message("id already exists"));
-                }
-                // A tombstone the graph has not finished reaping. Only reachable
-                // once this id has been re-issued, which needs the `PrimaryId`
-                // epoch to have wrapped, so treat it as a fresh node.
-                *occupied.get_mut() = Node::new(self.max_degree);
-            }
-            Entry::Vacant(vacant) => {
-                vacant.insert(Node::new(self.max_degree));
-            }
-        }
+        self.graph
+            .create(self.partition_id, internal)
+            .await
+            .map_err(|err| match err {
+                StoreError::Conflict => ANNError::message("id already exists"),
+                StoreError::Backend(err) => ANNError::message(format!(
+                    "failed to create the graph node for {internal}: {err:#}"
+                )),
+            })?;
 
         // Back-edge pruning asks `fill` for this vector before the insert is
         // done. The row is already in ScyllaDB, since that is where it came
@@ -498,8 +935,9 @@ impl SetElement<&[f32]> for ScyllaProvider {
 
         Ok(InflightGuard(Some(InflightState {
             inflight: Arc::clone(&self.inflight),
+            graph: Arc::clone(&self.graph),
+            partition_id: self.partition_id,
             id: internal,
-            nodes: Arc::clone(&self.nodes),
         })))
     }
 }
@@ -510,24 +948,18 @@ impl Delete for ScyllaProvider {
     /// `inplace_delete` calls this *first* and only then reads the deleted
     /// node's neighbors to repair the graph around it; the list is dropped at
     /// the end, by `drop_adj_list` calling `set_neighbors(id, &[])`. Clearing it
-    /// here would break the repair, so [`NodeAccessor::set_neighbors`] is what
-    /// finally removes the entry.
-    fn delete(
+    /// here would break the repair, so [`GraphStore::clear`] is what finally
+    /// removes the node.
+    async fn delete(
         &self,
         _context: &Self::Context,
         gid: &Self::ExternalId,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+    ) -> Result<(), Self::Error> {
         let id = *gid;
 
-        let result = match self.nodes.write().unwrap().get_mut(&id) {
-            Some(node) if node.is_live() => {
-                node.mark_deleted();
-                Ok(())
-            }
-            _ => Err(ANNError::message("id already deleted")),
-        };
-
-        std::future::ready(result)
+        self.graph
+            .mark_dead(self.partition_id, id)
+            .map_err(|_| ANNError::message("id already deleted"))
     }
 
     fn release(
@@ -569,8 +1001,9 @@ impl ScyllaProvider {
 /// What an [`InflightGuard`] needs to undo the insert it guards.
 struct InflightState {
     inflight: Inflight,
+    graph: Arc<dyn GraphStore>,
+    partition_id: PartitionId,
     id: PrimaryId,
-    nodes: Nodes,
 }
 
 /// Cleans up after an insert: the in-flight vector copy always, and the node
@@ -594,15 +1027,16 @@ impl Drop for InflightGuard {
     fn drop(&mut self) {
         if let Some(state) = self.0.take() {
             state.inflight.write().unwrap().remove(&state.id);
-            state.nodes.write().unwrap().remove(&state.id);
+            state.graph.abandon(state.partition_id, state.id);
         }
     }
 }
 
 /// Read/write access to the graph's adjacency lists.
 pub(super) struct NodeAccessor<'a> {
-    nodes: &'a RwLock<BTreeMap<PrimaryId, Node>>,
+    graph: &'a dyn GraphStore,
     start_neighbors: &'a RwLock<AdjacencyList<PrimaryId>>,
+    partition_id: PartitionId,
     max_degree: usize,
 }
 
@@ -620,74 +1054,67 @@ impl HasId for NodeAccessor<'_> {
 }
 
 impl NeighborAccessor for NodeAccessor<'_> {
-    fn get_neighbors(
+    async fn get_neighbors(
         &mut self,
         id: Self::Id,
         neighbors: &mut AdjacencyList<Self::Id>,
-    ) -> impl Future<Output = ANNResult<()>> + Send {
+    ) -> ANNResult<()> {
         neighbors.clear();
         if id == START_ID {
             neighbors.overwrite_trusted(&self.start_neighbors.read().unwrap());
-        } else if let Some(node) = self.nodes.read().unwrap().get(&id) {
-            neighbors.overwrite_trusted(node.neighbors());
+            return Ok(());
         }
-        std::future::ready(Ok(()))
+
+        if let Some(edges) = self
+            .graph
+            .get(self.partition_id, id)
+            .await
+            .map_err(|err| ANNError::message(format!("graph store failed: {err:#}")))?
+        {
+            neighbors.overwrite_trusted(&edges);
+        }
+
+        Ok(())
     }
 }
 
 impl NeighborAccessorMut for NodeAccessor<'_> {
-    fn set_neighbors(
-        &mut self,
-        id: Self::Id,
-        neighbors: &[Self::Id],
-    ) -> impl Future<Output = ANNResult<()>> + Send {
+    async fn set_neighbors(&mut self, id: Self::Id, neighbors: &[Self::Id]) -> ANNResult<()> {
         if id == START_ID {
             Self::overwrite(
                 &mut self.start_neighbors.write().unwrap(),
                 neighbors,
                 self.max_degree,
             );
-            return std::future::ready(Ok(()));
+            return Ok(());
         }
 
-        let mut nodes = self.nodes.write().unwrap();
-        if let Entry::Occupied(mut occupied) = nodes.entry(id) {
-            if neighbors.is_empty() && !occupied.get().is_live() {
-                // `drop_adj_list` at the end of an in-place delete. This is
-                // the only place a completed delete removes its node; one that
-                // never gets here is a tombstone, and nothing else clears it.
-                occupied.remove();
-            } else {
-                Self::overwrite(
-                    occupied.get_mut().neighbors_mut(),
-                    neighbors,
-                    self.max_degree,
-                );
-            }
+        if neighbors.is_empty() {
+            return self
+                .graph
+                .clear(self.partition_id, id)
+                .await
+                .map_err(|err| ANNError::message(format!("graph store failed: {err:#}")));
         }
 
-        // A missing node is not an error: a delete racing this insert may have
-        // reaped it already. Dropping the write leaves in-edges pointing at an
-        // absent id, which `load` skips without a ScyllaDB read.
-        std::future::ready(Ok(()))
+        self.graph
+            .set(self.partition_id, id, neighbors)
+            .await
+            .map_err(|err| ANNError::message(format!("graph store failed: {err:#}")))
     }
 
-    fn append_vector(
-        &mut self,
-        id: Self::Id,
-        neighbors: &[Self::Id],
-    ) -> impl Future<Output = ANNResult<()>> + Send {
+    async fn append_vector(&mut self, id: Self::Id, neighbors: &[Self::Id]) -> ANNResult<()> {
         if id == START_ID {
             let mut start = self.start_neighbors.write().unwrap();
             start.extend_from_slice(neighbors);
             start.truncate(self.max_degree);
-        } else if let Some(node) = self.nodes.write().unwrap().get_mut(&id) {
-            let list = node.neighbors_mut();
-            list.extend_from_slice(neighbors);
-            list.truncate(self.max_degree);
+            return Ok(());
         }
 
-        std::future::ready(Ok(()))
+        self.graph
+            .append(self.partition_id, id, neighbors)
+            .await
+            .map_err(|err| ANNError::message(format!("graph store failed: {err:#}")))
     }
 }
 
@@ -1138,5 +1565,227 @@ mod tests {
             result.expect_err("a short answer is a broken contract")
         );
         assert!(err.contains("expected 2 vectors, got 1"), "{err}");
+    }
+
+    fn part() -> PartitionId {
+        PartitionId::from(1u64)
+    }
+
+    fn node(id: u64) -> PrimaryId {
+        PrimaryId::from(id)
+    }
+
+    /// One node's stored edges, or `None` if the store does not have the node.
+    async fn edges(store: &InmemGraphStore, id: PrimaryId) -> Option<Vec<PrimaryId>> {
+        store
+            .get(part(), id)
+            .await
+            .unwrap()
+            .map(|list| list.to_vec())
+    }
+
+    #[tokio::test]
+    async fn create_rejects_a_live_id() {
+        let store = InmemGraphStore::new(8);
+
+        store.create(part(), node(1)).await.unwrap();
+        store.set(part(), node(1), &[node(2)]).await.unwrap();
+
+        assert!(matches!(
+            store.create(part(), node(1)).await,
+            Err(StoreError::Conflict)
+        ));
+        assert_eq!(edges(&store, node(1)).await, Some(vec![node(2)]));
+    }
+
+    #[tokio::test]
+    async fn create_revives_a_tombstone_with_no_edges() {
+        let store = InmemGraphStore::new(8);
+
+        store.create(part(), node(1)).await.unwrap();
+        store.set(part(), node(1), &[node(2)]).await.unwrap();
+        store.mark_dead(part(), node(1)).unwrap();
+        assert!(!store.is_live(part(), node(1)));
+
+        store.create(part(), node(1)).await.unwrap();
+        assert!(store.is_live(part(), node(1)));
+        assert_eq!(edges(&store, node(1)).await, Some(vec![]));
+    }
+
+    #[tokio::test]
+    async fn set_deduplicates_before_capping() {
+        let store = InmemGraphStore::new(2);
+
+        store.create(part(), node(1)).await.unwrap();
+        store
+            .set(part(), node(1), &[node(2), node(2), node(3), node(4)])
+            .await
+            .unwrap();
+
+        assert_eq!(edges(&store, node(1)).await, Some(vec![node(2), node(3)]));
+    }
+
+    #[tokio::test]
+    async fn append_deduplicates_against_the_stored_list_and_caps() {
+        let store = InmemGraphStore::new(3);
+
+        store.create(part(), node(1)).await.unwrap();
+        store.set(part(), node(1), &[node(2)]).await.unwrap();
+        store
+            .append(part(), node(1), &[node(2), node(3), node(4), node(5)])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            edges(&store, node(1)).await,
+            Some(vec![node(2), node(3), node(4)])
+        );
+    }
+
+    #[tokio::test]
+    async fn get_tells_an_absent_node_from_an_empty_one() {
+        let store = InmemGraphStore::new(8);
+
+        store.create(part(), node(1)).await.unwrap();
+
+        assert_eq!(edges(&store, node(1)).await, Some(vec![]));
+        assert_eq!(edges(&store, node(2)).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_partition_does_not_see_another_partitions_nodes() {
+        let store = InmemGraphStore::new(8);
+        let other = PartitionId::from(2u64);
+
+        store.create(part(), node(1)).await.unwrap();
+        store.set(part(), node(1), &[node(2)]).await.unwrap();
+
+        assert!(!store.is_live(other, node(1)));
+        assert!(store.get(other, node(1)).await.unwrap().is_none());
+    }
+
+    /// A `DbIndex` actor holding the edge table in a map, so the store can be
+    /// exercised without ScyllaDB.
+    fn edge_actor() -> mpsc::Sender<DbIndex> {
+        let (tx, mut rx) = mpsc::channel(16);
+        tokio::spawn(async move {
+            let mut rows: HashMap<(PartitionId, PrimaryId), Vec<PrimaryId>> = HashMap::new();
+            while let Some(msg) = rx.recv().await {
+                match msg {
+                    DbIndex::GetEdges {
+                        partition_id,
+                        id,
+                        tx,
+                    } => _ = tx.send(Ok(rows.get(&(partition_id, id)).cloned())),
+                    DbIndex::SetEdges {
+                        partition_id,
+                        id,
+                        edges,
+                        tx,
+                    } => {
+                        rows.insert((partition_id, id), edges);
+                        _ = tx.send(Ok(()));
+                    }
+                    DbIndex::DeleteEdges {
+                        partition_id,
+                        id,
+                        tx,
+                    } => {
+                        rows.remove(&(partition_id, id));
+                        _ = tx.send(Ok(()));
+                    }
+                    _ => panic!("the graph store sends no other DbIndex message"),
+                }
+            }
+        });
+        tx
+    }
+
+    async fn remote_edges(store: &ScyllaGraphStore, id: PrimaryId) -> Option<Vec<PrimaryId>> {
+        store
+            .get(part(), id)
+            .await
+            .unwrap()
+            .map(|list| list.to_vec())
+    }
+
+    /// The same states and transitions [`InmemGraphStore`] is held to, with the
+    /// edges a message round trip away instead of in the map.
+    #[tokio::test]
+    async fn the_scylla_graph_store_keeps_the_contract() {
+        let store = ScyllaGraphStore::new(edge_actor(), 3);
+
+        // Absent: no edges, and every write to it is dropped.
+        assert_eq!(remote_edges(&store, node(1)).await, None);
+        store.set(part(), node(1), &[node(2)]).await.unwrap();
+        store.append(part(), node(1), &[node(2)]).await.unwrap();
+        assert_eq!(remote_edges(&store, node(1)).await, None);
+
+        // Created: live, and an empty list rather than an absent node.
+        store.create(part(), node(1)).await.unwrap();
+        assert!(store.is_live(part(), node(1)));
+        assert_eq!(remote_edges(&store, node(1)).await, Some(vec![]));
+
+        // Deduplicated, then capped at the max degree.
+        store
+            .set(
+                part(),
+                node(1),
+                &[node(2), node(2), node(3), node(4), node(5)],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            remote_edges(&store, node(1)).await,
+            Some(vec![node(2), node(3), node(4)])
+        );
+
+        // A duplicate insert is rejected without touching the winner's edges.
+        assert!(matches!(
+            store.create(part(), node(1)).await,
+            Err(StoreError::Conflict)
+        ));
+        assert_eq!(
+            remote_edges(&store, node(1)).await,
+            Some(vec![node(2), node(3), node(4)])
+        );
+
+        // Append merges against what is stored, then caps.
+        store.set(part(), node(1), &[node(2)]).await.unwrap();
+        store
+            .append(part(), node(1), &[node(2), node(6), node(7), node(8)])
+            .await
+            .unwrap();
+        assert_eq!(
+            remote_edges(&store, node(1)).await,
+            Some(vec![node(2), node(6), node(7)])
+        );
+
+        // Tombstoned: invisible, but the repair pass can still read the edges.
+        store.mark_dead(part(), node(1)).unwrap();
+        assert!(!store.is_live(part(), node(1)));
+        assert_eq!(
+            remote_edges(&store, node(1)).await,
+            Some(vec![node(2), node(6), node(7)])
+        );
+        assert!(matches!(
+            store.mark_dead(part(), node(1)),
+            Err(StoreError::Conflict)
+        ));
+
+        // Revived: the id is free again, without the old incarnation's edges.
+        store.create(part(), node(1)).await.unwrap();
+        assert_eq!(remote_edges(&store, node(1)).await, Some(vec![]));
+
+        // An empty set_neighbors on a live node empties it and leaves it alone.
+        store.set(part(), node(1), &[node(2)]).await.unwrap();
+        store.clear(part(), node(1)).await.unwrap();
+        assert!(store.is_live(part(), node(1)));
+        assert_eq!(remote_edges(&store, node(1)).await, Some(vec![]));
+
+        // The same call on a dead node reaps it.
+        store.mark_dead(part(), node(1)).unwrap();
+        store.clear(part(), node(1)).await.unwrap();
+        assert_eq!(remote_edges(&store, node(1)).await, None);
     }
 }

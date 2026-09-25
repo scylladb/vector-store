@@ -5,9 +5,16 @@
 
 use crate::table::Idx;
 use anyhow::bail;
+use scylla::cluster::metadata::ColumnType;
+use scylla::serialize::SerializationError;
+use scylla::serialize::value::SerializeValue;
+use scylla::serialize::writers::CellWriter;
+use scylla::serialize::writers::WrittenCellProof;
 use std::mem;
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
+#[derive(
+    Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, derive_more::From, derive_more::Into,
+)]
 pub struct PartitionId(u64);
 
 const _: () = assert!(
@@ -34,6 +41,16 @@ impl PartitionId {
 
     pub(crate) fn index_id(&self) -> IndexId {
         IndexId((self.0 >> Self::INDEX_ID_SHIFT) as u16)
+    }
+}
+
+impl SerializeValue for PartitionId {
+    fn serialize<'b>(
+        &self,
+        typ: &ColumnType,
+        writer: CellWriter<'b>,
+    ) -> Result<WrittenCellProof<'b>, SerializationError> {
+        (self.0 as i64).serialize(typ, writer)
     }
 }
 

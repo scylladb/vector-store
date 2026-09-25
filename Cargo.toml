@@ -95,7 +95,7 @@ usearch = "2.22.0"
 utoipa = { version = "5.3.1", features = ["axum_extras"] }
 utoipa-axum = "0.2.0"
 utoipa-swagger-ui = { version = "9.0.0", features = ["axum", "vendored"] }
-uuid = "1.16.0"
+uuid = { version = "1.16.0", features = ["v4"] }
 vector-store = { path = "crates/vector-store" }
 secrecy = "0.10.3"
 

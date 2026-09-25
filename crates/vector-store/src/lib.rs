@@ -167,7 +167,11 @@ impl std::fmt::Display for TableIdentifier {
 pub enum DiskannBackendKind {
     #[default]
     Inmem,
+    /// Vectors read back from the base table, the graph in RAM.
     Scylla,
+    /// Vectors read back from the base table, node liveness in RAM and the
+    /// adjacency lists in ScyllaDB.
+    ScyllaGraph,
 }
 
 impl FromStr for DiskannBackendKind {
@@ -177,6 +181,7 @@ impl FromStr for DiskannBackendKind {
         match s.to_ascii_lowercase().as_str() {
             "inmem" => Ok(Self::Inmem),
             "scylla" => Ok(Self::Scylla),
+            "scylla-graph" | "scylla_graph" => Ok(Self::ScyllaGraph),
             _ => Err(anyhow::anyhow!("Unknown DiskANN backend: {s}")),
         }
     }
