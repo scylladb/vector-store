@@ -34,7 +34,9 @@ use vector_store::IndexVersion;
 use vector_store::KeyspaceName;
 use vector_store::NonemptyArc;
 use vector_store::NonemptyBox;
+use vector_store::PartitionId;
 use vector_store::Percentage;
+use vector_store::PrimaryId;
 use vector_store::PrimaryKey;
 use vector_store::Progress;
 use vector_store::TableName;
@@ -87,6 +89,30 @@ impl StoreVectors {
 }
 
 impl From<bool> for StoreVectors {
+    fn from(enabled: bool) -> Self {
+        if enabled {
+            Self::Enabled
+        } else {
+            Self::Disabled
+        }
+    }
+}
+
+/// Whether the mock keeps the DiskANN adjacency lists.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum StoreEdges {
+    #[default]
+    Disabled,
+    Enabled,
+}
+
+impl StoreEdges {
+    fn is_enabled(self) -> bool {
+        self == Self::Enabled
+    }
+}
+
+impl From<bool> for StoreEdges {
     fn from(enabled: bool) -> Self {
         if enabled {
             Self::Enabled
@@ -157,16 +183,18 @@ where
 pub(crate) struct DbBasic(#[debug(skip)] Arc<RwLock<DbMock>>);
 
 pub(crate) fn new(node_state: Sender<NodeState>) -> (mpsc::Sender<Db>, DbBasic) {
-    new_with(node_state, StoreVectors::default())
+    new_with(node_state, StoreVectors::default(), StoreEdges::default())
 }
 
-/// [`new`], for a test that needs a non-default [`StoreVectors`].
+/// [`new`], for a test that needs a non-default [`StoreVectors`] or
+/// [`StoreEdges`].
 pub(crate) fn new_with(
     node_state: Sender<NodeState>,
     store_vectors: StoreVectors,
+    store_edges: StoreEdges,
 ) -> (mpsc::Sender<Db>, DbBasic) {
     let (tx, mut rx) = mpsc::channel(10);
-    let db = DbBasic::new(store_vectors);
+    let db = DbBasic::new(store_vectors, store_edges);
     tokio::spawn({
         let db = db.clone();
         async move {
@@ -214,6 +242,11 @@ struct DbMock {
     simulate_endless_get_indexes_processing: bool,
     store_vectors: StoreVectors,
     vectors: HashMap<PrimaryKey, Vector>,
+    store_edges: StoreEdges,
+    /// Stands in for the DiskANN edge table that `DiskannBackendKind::ScyllaGraph`
+    /// keeps in ScyllaDB. Absent key means no row, which the graph store reads
+    /// as "no edges". Empty unless [`StoreEdges::Enabled`].
+    edges: HashMap<(PartitionId, PrimaryId), Vec<PrimaryId>>,
 }
 
 impl DbMock {
@@ -223,7 +256,7 @@ impl DbMock {
 }
 
 impl DbBasic {
-    fn new(store_vectors: StoreVectors) -> Self {
+    fn new(store_vectors: StoreVectors, store_edges: StoreEdges) -> Self {
         Self(Arc::new(RwLock::new(DbMock {
             schema_version: Uuid::new_v4(),
             keyspaces: HashMap::new(),
@@ -232,7 +265,29 @@ impl DbBasic {
             simulate_endless_get_indexes_processing: false,
             store_vectors,
             vectors: HashMap::new(),
+            store_edges,
+            edges: HashMap::new(),
         })))
+    }
+
+    fn get_edges(&self, partition_id: PartitionId, id: PrimaryId) -> Option<Vec<PrimaryId>> {
+        self.0
+            .read()
+            .unwrap()
+            .edges
+            .get(&(partition_id, id))
+            .cloned()
+    }
+
+    fn set_edges(&self, partition_id: PartitionId, id: PrimaryId, edges: Vec<PrimaryId>) {
+        let mut db = self.0.write().unwrap();
+        if db.store_edges.is_enabled() {
+            db.edges.insert((partition_id, id), edges);
+        }
+    }
+
+    fn delete_edges(&self, partition_id: PartitionId, id: PrimaryId) {
+        self.0.write().unwrap().edges.remove(&(partition_id, id));
     }
 
     fn record_row(&self, row: &DbIndexedRow) {
@@ -703,6 +758,38 @@ async fn spawn_process_db_index(
                 .send(Ok(db.get_vectors(&keys)))
                 .map_err(|_| anyhow!("DbIndex::GetVectors: unable to send response"))
                 .unwrap(),
+
+            DbIndex::GetEdges {
+                partition_id,
+                id,
+                tx,
+            } => tx
+                .send(Ok(db.get_edges(partition_id, id)))
+                .map_err(|_| anyhow!("DbIndex::GetEdges: unable to send response"))
+                .unwrap(),
+
+            DbIndex::SetEdges {
+                partition_id,
+                id,
+                edges,
+                tx,
+            } => {
+                db.set_edges(partition_id, id, edges);
+                tx.send(Ok(()))
+                    .map_err(|_| anyhow!("DbIndex::SetEdges: unable to send response"))
+                    .unwrap();
+            }
+
+            DbIndex::DeleteEdges {
+                partition_id,
+                id,
+                tx,
+            } => {
+                db.delete_edges(partition_id, id);
+                tx.send(Ok(()))
+                    .map_err(|_| anyhow!("DbIndex::DeleteEdges: unable to send response"))
+                    .unwrap();
+            }
         }
     });
 }

@@ -8,6 +8,7 @@ use crate::create_config_channels;
 use crate::db_basic;
 use crate::db_basic::DbBasic;
 use crate::db_basic::ScanFn;
+use crate::db_basic::StoreEdges;
 use crate::db_basic::StoreVectors;
 use crate::db_basic::Table;
 use crate::wait_for;
@@ -70,16 +71,41 @@ fn diskann_test_config() -> Config {
     }
 }
 
-/// The DiskANN Scylla backend re-reads the vectors it indexed from the base
+/// Both DiskANN Scylla backends re-read the vectors they indexed from the base
 /// table, so the db mock has to keep them.
 fn store_vectors(config: &Config) -> StoreVectors {
-    (config.diskann_backend == Some(DiskannBackendKind::Scylla)).into()
+    matches!(
+        config.diskann_backend,
+        Some(DiskannBackendKind::Scylla | DiskannBackendKind::ScyllaGraph)
+    )
+    .into()
+}
+
+/// Only the scylla-graph backend keeps its adjacency lists out of RAM, so it is
+/// the only one whose edges the mock has to hold.
+fn store_edges(config: &Config) -> StoreEdges {
+    matches!(
+        config.diskann_backend,
+        Some(DiskannBackendKind::ScyllaGraph)
+    )
+    .into()
 }
 
 fn diskann_scylla_test_config() -> Config {
     Config {
         vector_store_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
         diskann_backend: Some(DiskannBackendKind::Scylla),
+        ..Default::default()
+    }
+}
+
+/// The same, with the DiskANN adjacency lists kept out of RAM. Against the db
+/// mock they land in its edge map rather than in ScyllaDB, which exercises every
+/// path the real store takes except the CQL itself.
+fn diskann_scylla_graph_test_config() -> Config {
+    Config {
+        vector_store_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+        diskann_backend: Some(DiskannBackendKind::ScyllaGraph),
         ..Default::default()
     }
 }
@@ -131,7 +157,11 @@ pub(crate) async fn setup_store_with_quantization(
 ) {
     let node_state = vector_store::new_node_state().await;
 
-    let (db_actor, db) = db_basic::new_with(node_state.clone(), store_vectors(&config));
+    let (db_actor, db) = db_basic::new_with(
+        node_state.clone(),
+        store_vectors(&config),
+        store_edges(&config),
+    );
 
     let primary_keys = primary_keys.into_iter().collect_nonempty_arc().unwrap();
     let columns: Arc<HashMap<_, _>> = Arc::new(columns.into_iter().collect());
@@ -250,6 +280,7 @@ pub(crate) async fn setup_store_and_wait_for_index(
 #[case::usearch(usearch_test_config())]
 #[case::diskann(diskann_test_config())]
 #[case::diskann_scylla(diskann_scylla_test_config())]
+#[case::diskann_scylla_graph(diskann_scylla_graph_test_config())]
 #[tokio::test]
 async fn simple_create_search_delete_index(#[case] config: Config) {
     crate::enable_tracing();
@@ -339,12 +370,17 @@ async fn simple_create_search_delete_index(#[case] config: Config) {
 #[case::usearch(usearch_test_config())]
 #[case::diskann(diskann_test_config())]
 #[case::diskann_scylla(diskann_scylla_test_config())]
+#[case::diskann_scylla_graph(diskann_scylla_graph_test_config())]
 #[tokio::test]
 async fn failed_db_index_create(#[case] config: Config) {
     crate::enable_tracing();
 
     let node_state = vector_store::new_node_state().await;
-    let (db_actor, db) = db_basic::new_with(node_state.clone(), store_vectors(&config));
+    let (db_actor, db) = db_basic::new_with(
+        node_state.clone(),
+        store_vectors(&config),
+        store_edges(&config),
+    );
 
     let index = IndexMetadata {
         keyspace_name: "vector".into(),
@@ -472,6 +508,7 @@ async fn failed_db_index_create(#[case] config: Config) {
 #[case::usearch(usearch_test_config())]
 #[case::diskann(diskann_test_config())]
 #[case::diskann_scylla(diskann_scylla_test_config())]
+#[case::diskann_scylla_graph(diskann_scylla_graph_test_config())]
 #[tokio::test]
 async fn ann_returns_requested_column_values(#[case] config: Config) {
     crate::enable_tracing();
@@ -921,6 +958,7 @@ async fn ann_returns_bad_request_when_filtering_required_but_not_allowed() {
 #[case::usearch(usearch_test_config())]
 #[case::diskann(diskann_test_config())]
 #[case::diskann_scylla(diskann_scylla_test_config())]
+#[case::diskann_scylla_graph(diskann_scylla_graph_test_config())]
 #[tokio::test]
 async fn ann_fail_while_building_when_node_is_bootstrapping(#[case] config: Config) {
     crate::enable_tracing();
@@ -975,6 +1013,7 @@ async fn ann_fail_while_building_when_node_is_bootstrapping(#[case] config: Conf
 #[case::usearch(usearch_test_config())]
 #[case::diskann(diskann_test_config())]
 #[case::diskann_scylla(diskann_scylla_test_config())]
+#[case::diskann_scylla_graph(diskann_scylla_graph_test_config())]
 #[tokio::test]
 async fn ann_fail_while_building_when_node_is_serving(#[case] config: Config) {
     crate::enable_tracing();
@@ -1062,6 +1101,7 @@ async fn ann_fail_while_building_when_node_is_serving(#[case] config: Config) {
 #[case::usearch(usearch_test_config())]
 #[case::diskann(diskann_test_config())]
 #[case::diskann_scylla(diskann_scylla_test_config())]
+#[case::diskann_scylla_graph(diskann_scylla_graph_test_config())]
 #[tokio::test]
 async fn ann_failed_when_wrong_number_of_primary_keys(#[case] config: Config) {
     crate::enable_tracing();
@@ -2251,6 +2291,7 @@ async fn http_server_is_responsive_when_index_add_hangs() {
 #[case::usearch(usearch_test_config())]
 #[case::diskann(diskann_test_config())]
 #[case::diskann_scylla(diskann_scylla_test_config())]
+#[case::diskann_scylla_graph(diskann_scylla_graph_test_config())]
 #[timeout(Duration::from_secs(10))]
 #[tokio::test]
 async fn null_vector_is_not_indexed(#[case] config: Config) {
@@ -2309,13 +2350,18 @@ async fn null_vector_is_not_indexed(#[case] config: Config) {
 #[case::usearch(usearch_test_config())]
 #[case::diskann(diskann_test_config())]
 #[case::diskann_scylla(diskann_scylla_test_config())]
+#[case::diskann_scylla_graph(diskann_scylla_graph_test_config())]
 #[timeout(Duration::from_secs(10))]
 #[tokio::test]
 async fn similarity_scores_are_decreasing_and_correctly_converted(#[case] config: Config) {
     crate::enable_tracing();
 
     let node_state = vector_store::new_node_state().await;
-    let (db_actor, db) = db_basic::new_with(node_state.clone(), store_vectors(&config));
+    let (db_actor, db) = db_basic::new_with(
+        node_state.clone(),
+        store_vectors(&config),
+        store_edges(&config),
+    );
 
     // Use a 1-D Euclidean index so distances are easy to predict.
     let index = IndexMetadata {
@@ -2454,6 +2500,7 @@ async fn similarity_scores_are_decreasing_and_correctly_converted(#[case] config
 #[case::usearch(usearch_test_config())]
 #[case::diskann(diskann_test_config())]
 #[case::diskann_scylla(diskann_scylla_test_config())]
+#[case::diskann_scylla_graph(diskann_scylla_graph_test_config())]
 #[tokio::test]
 async fn empty_index_has_zero_count(#[case] config: Config) {
     crate::enable_tracing();
@@ -2485,6 +2532,7 @@ async fn empty_index_has_zero_count(#[case] config: Config) {
 #[case::usearch(usearch_test_config())]
 #[case::diskann(diskann_test_config())]
 #[case::diskann_scylla(diskann_scylla_test_config())]
+#[case::diskann_scylla_graph(diskann_scylla_graph_test_config())]
 #[tokio::test]
 async fn empty_index_returns_empty_ann_results(#[case] config: Config) {
     crate::enable_tracing();
