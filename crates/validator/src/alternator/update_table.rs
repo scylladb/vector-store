@@ -10,23 +10,8 @@ use crate::alternator::TableContext;
 use crate::alternator::TableShape;
 use crate::common;
 use aws_sdk_dynamodb::types::AttributeValue;
-use serde_json::Value;
 use std::sync::Arc;
 use tracing::info;
-
-fn vector_index_create_update(index_name: &str, vec_attr: &str) -> Value {
-    serde_json::json!([
-        {
-            "Create": {
-                "IndexName": index_name,
-                "VectorAttribute": {
-                    "AttributeName": vec_attr,
-                    "Dimensions": Item::VEC_DIMS
-                }
-            }
-        }
-    ])
-}
 
 #[e2etest::test(group = update_table)]
 async fn create_vector_index_via_update_table(actors: Arc<TestActors>) {
@@ -52,7 +37,11 @@ async fn create_vector_index_via_update_table(actors: Arc<TestActors>) {
         alternator::update_table_vector_indexes(
             &ctx.client,
             &ctx.table_name,
-            vector_index_create_update(ctx.index.index.as_ref(), vec_attr),
+            alternator::create_vector_index_update(
+                ctx.index.index.as_ref(),
+                vec_attr,
+                Item::VEC_DIMS,
+            ),
         )
         .await;
 
@@ -101,7 +90,11 @@ async fn create_vector_index_via_update_table_with_preexisting_data(actors: Arc<
         alternator::update_table_vector_indexes(
             &ctx.client,
             &ctx.table_name,
-            vector_index_create_update(ctx.index.index.as_ref(), vec_attr),
+            alternator::create_vector_index_update(
+                ctx.index.index.as_ref(),
+                vec_attr,
+                Item::VEC_DIMS,
+            ),
         )
         .await;
 
@@ -203,11 +196,7 @@ async fn delete_vector_index_via_update_table(actors: Arc<TestActors>) {
         alternator::update_table_vector_indexes(
             &ctx.client,
             &ctx.table_name,
-            serde_json::json!([{
-                "Delete": {
-                    "IndexName": ctx.index.index.as_ref()
-                }
-            }]),
+            alternator::delete_vector_index_update(ctx.index.index.as_ref()),
         )
         .await;
 
