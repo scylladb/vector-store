@@ -940,6 +940,14 @@ fn parse_indexed_value(value: DbValue, kind: &IndexKind) -> anyhow::Result<DbInd
                 bail!("parse_indexed_value: expected text column, got {:?}", other);
             }
         },
+        IndexKind::Pattern(_) => match value {
+            DbValue::Value(CqlValue::Text(s) | CqlValue::Ascii(s)) => {
+                Ok(DbIndexedValue::Document(s))
+            }
+            other => {
+                bail!("parse_indexed_value: expected text column, got {:?}", other);
+            }
+        },
     }
 }
 

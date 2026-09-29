@@ -428,6 +428,7 @@ fn process_db(db: &DbBasic, msg: Db, node_state: Sender<NodeState>) {
                                 kind: match index.metadata.kind {
                                     IndexKind::Vs(_) => DbIndexKind::VectorSearch,
                                     IndexKind::Fts(_) => DbIndexKind::FullTextSearch,
+                                    IndexKind::Pattern(_) => DbIndexKind::Pattern,
                                 },
                             })
                     })
@@ -514,6 +515,23 @@ fn process_db(db: &DbBasic, msg: Db, node_state: Sender<NodeState>) {
                 .and_then(|keyspace| keyspace.indexes.get(&index))
                 .and_then(|index| index.metadata.fts().copied())))
             .map_err(|_| anyhow!("Db::GetFtsIndexParams: unable to send response"))
+            .unwrap(),
+
+        Db::GetPatternIndexParams {
+            keyspace,
+            table: _,
+            index,
+            tx,
+        } => tx
+            .send(Ok(db
+                .0
+                .read()
+                .unwrap()
+                .keyspaces
+                .get(&keyspace)
+                .and_then(|keyspace| keyspace.indexes.get(&index))
+                .and_then(|index| index.metadata.pattern().copied())))
+            .map_err(|_| anyhow!("Db::GetPatternIndexParams: unable to send response"))
             .unwrap(),
 
         Db::IsValidIndex { tx, .. } => tx

@@ -12,6 +12,7 @@ use crate::ExpansionSearch;
 use crate::IndexKind;
 use crate::IndexMetadata;
 use crate::IndexOptionsFts;
+use crate::IndexOptionsPattern;
 use crate::IndexOptionsVs;
 use crate::Quantization;
 use crate::SpaceType;
@@ -207,6 +208,7 @@ async fn get_indexes(
                 kind
             }
             DbIndexKind::FullTextSearch => build_fts_index_kind(db, &idx).await?,
+            DbIndexKind::Pattern => build_pattern_index_kind(db, &idx).await?,
         };
 
         let metadata = IndexMetadata {
@@ -295,6 +297,21 @@ async fn build_fts_index_kind(db: &Sender<Db>, idx: &DbCustomIndex) -> anyhow::R
             IndexOptionsFts::default()
         });
     Ok(IndexKind::Fts(options))
+}
+
+async fn build_pattern_index_kind(
+    db: &Sender<Db>,
+    idx: &DbCustomIndex,
+) -> anyhow::Result<IndexKind> {
+    let options = db
+        .get_pattern_index_params(idx.keyspace.clone(), idx.table.clone(), idx.index.clone())
+        .await
+        .inspect_err(|err| warn!("unable to get pattern index params: {err}"))?
+        .unwrap_or_else(|| {
+            debug!("get_indexes: no pattern index params for index {idx:?}");
+            IndexOptionsPattern::default()
+        });
+    Ok(IndexKind::Pattern(options))
 }
 
 struct AddIndexesR {
