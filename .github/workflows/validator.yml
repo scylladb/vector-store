@@ -13,6 +13,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -20,38 +21,79 @@ env:
   RUST_BACKTRACE: full
 
 jobs:
+  validator-config:
+    runs-on: ubuntu-latest
+    outputs:
+      config: ${{ steps.prepare-output.outputs.config }}
+    steps:
+    - name: Set default map
+      run: echo 'CONFIG={"latest-scylla-nightly":false,"os":"ubuntu-24.04-arm","arch":"arm64"}' >> $GITHUB_ENV
+
+    - name: Check if PR has label "ci-use-latest-scylla-nightly"
+      if: ${{ contains(github.event.pull_request.labels.*.name, 'ci-use-latest-scylla-nightly') }}
+      run: echo "CONFIG=$(echo $CONFIG | jq -c '."latest-scylla-nightly" = true')" >> $GITHUB_ENV
+
+    - name: Check if PR has label "ci-use-amd64"
+      if: ${{ contains(github.event.pull_request.labels.*.name, 'ci-use-amd64') }}
+      run: echo "CONFIG=$(echo $CONFIG | jq -c '.os = "ubuntu-latest" | .arch = "amd64"')" >> $GITHUB_ENV
+
+    - name: Get labels for merge group
+      id: merge-labels
+      if: github.event_name == 'merge_group'
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        pr=$(echo "${{ github.event.merge_group.head_ref }}" | sed -E 's|.*/pr-([0-9]+)-.*|\1|')
+        merge_labels=$(gh pr view $pr --repo ${{ github.repository }} --json labels --jq '[.labels[].name]')
+        echo "merge_labels=$merge_labels" >> $GITHUB_OUTPUT
+
+    - name: Check if PR has label "ci-use-latest-scylla-nightly" for merge group
+      if: github.event_name == 'merge_group' && contains(fromJSON(steps.merge-labels.outputs.merge_labels), 'ci-use-latest-scylla-nightly')
+      run: echo "CONFIG=$(echo $CONFIG | jq -c '."latest-scylla-nightly" = true')" >> $GITHUB_ENV
+
+    - name: Check if PR has label "ci-use-amd64" for merge group
+      if: github.event_name == 'merge_group' && contains(fromJSON(steps.merge-labels.outputs.merge_labels), 'ci-use-amd64')
+      run: echo "CONFIG=$(echo $CONFIG | jq -c '.os = "ubuntu-latest" | .arch = "amd64"')" >> $GITHUB_ENV
+
+    - name: Prepare output
+      id: prepare-output
+      run: echo "config=$CONFIG" >> $GITHUB_OUTPUT
+
   validator-get-scylla-nightly-digest:
+    needs: ["validator-config"]
     uses: $/.github/workflows/get-scylla-nightly-digest.yml
     with:
-      use-latest-scylla-nightly: ${{ contains(github.event.pull_request.labels.*.name, 'ci-use-latest-scylla-nightly') }}
+      use-latest-scylla-nightly: ${{ fromJSON(needs.validator-config.outputs.config).latest-scylla-nightly }}
 
   validator-build-validator:
+    needs: ["validator-config"]
     uses: $/.github/workflows/build-validator.yml
     with:
-      os: ${{ contains(github.event.pull_request.labels.*.name, 'ci-use-amd64') && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
-      arch: ${{ contains(github.event.pull_request.labels.*.name, 'ci-use-amd64') && 'amd64' || 'arm64' }}
+      os: ${{ fromJSON(needs.validator-config.outputs.config).os }}
+      arch: ${{ fromJSON(needs.validator-config.outputs.config).arch }}
       ref: ${{ github.sha }}
 
   validator-build-vector-store:
+    needs: ["validator-config"]
     uses: $/.github/workflows/build-vector-store.yml
     with:
-      os: ${{ contains(github.event.pull_request.labels.*.name, 'ci-use-amd64') && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
-      arch: ${{ contains(github.event.pull_request.labels.*.name, 'ci-use-amd64') && 'amd64' || 'arm64' }}
+      os: ${{ fromJSON(needs.validator-config.outputs.config).os }}
+      arch: ${{ fromJSON(needs.validator-config.outputs.config).arch }}
       ref: ${{ github.sha }}
 
   validator-get-validator-test-list:
-    needs: ["validator-build-validator"]
+    needs: ["validator-config", "validator-build-validator"]
     uses: $/.github/workflows/get-validator-test-list.yml
     with:
-      os: ${{ contains(github.event.pull_request.labels.*.name, 'ci-use-amd64') && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
-      arch: ${{ contains(github.event.pull_request.labels.*.name, 'ci-use-amd64') && 'amd64' || 'arm64' }}
+      os: ${{ fromJSON(needs.validator-config.outputs.config).os }}
+      arch: ${{ fromJSON(needs.validator-config.outputs.config).arch }}
 
   validator-run-validator-tests:
-    needs: ["validator-get-scylla-nightly-digest", "validator-build-vector-store", "validator-get-validator-test-list"]
+    needs: ["validator-config", "validator-get-scylla-nightly-digest", "validator-build-vector-store", "validator-get-validator-test-list"]
     uses: $/.github/workflows/run-validator-tests.yml
     with:
-      os: ${{ contains(github.event.pull_request.labels.*.name, 'ci-use-amd64') && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
-      arch: ${{ contains(github.event.pull_request.labels.*.name, 'ci-use-amd64') && 'amd64' || 'arm64' }}
+      os: ${{ fromJSON(needs.validator-config.outputs.config).os }}
+      arch: ${{ fromJSON(needs.validator-config.outputs.config).arch }}
       testcase: ${{ matrix.testcase }}
       ref: ${{ github.sha }}
     strategy:
@@ -60,13 +102,18 @@ jobs:
         testcase: ${{fromJSON(needs.validator-get-validator-test-list.outputs.testcases)}}
 
   validator-workflow-status:
-    needs: ["validator-get-scylla-nightly-digest", "validator-build-validator", "validator-build-vector-store", "validator-get-validator-test-list", "validator-run-validator-tests"]
+    needs: ["validator-config", "validator-get-scylla-nightly-digest", "validator-build-validator", "validator-build-vector-store", "validator-get-validator-test-list", "validator-run-validator-tests"]
     runs-on: ubuntu-latest
     if: always()
     steps:
     - name: Check workflow status
       run: |
         return_code=0
+
+        if [[ "${{ needs.validator-config.result }}" == "failure" ]]; then
+          echo "validator-config job failed"
+          return_code=1
+        fi
 
         if [[ "${{ needs.validator-get-scylla-nightly-digest.result }}" == "failure" ]]; then
           echo "validator-get-scylla-nightly-digest job failed"
