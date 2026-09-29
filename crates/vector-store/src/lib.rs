@@ -711,25 +711,37 @@ pub struct IndexOptionsFts {
     pub positions: Positions,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+/// Pattern-specific index configuration.
+pub struct IndexOptionsPattern {}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-/// Discriminates between vector-search and full-text-search index.
+/// Discriminates between index types.
 pub enum IndexKind {
     Vs(IndexOptionsVs),
     Fts(IndexOptionsFts),
+    Pattern(IndexOptionsPattern),
 }
 
 impl IndexKind {
     pub fn as_vs(&self) -> Option<&IndexOptionsVs> {
         match self {
             IndexKind::Vs(vs) => Some(vs),
-            IndexKind::Fts(_) => None,
+            IndexKind::Fts(_) | IndexKind::Pattern(_) => None,
         }
     }
 
     pub fn as_fts(&self) -> Option<&IndexOptionsFts> {
         match self {
             IndexKind::Fts(fts) => Some(fts),
-            IndexKind::Vs(_) => None,
+            IndexKind::Vs(_) | IndexKind::Pattern(_) => None,
+        }
+    }
+
+    pub fn as_pattern(&self) -> Option<&IndexOptionsPattern> {
+        match self {
+            IndexKind::Pattern(pattern) => Some(pattern),
+            IndexKind::Vs(_) | IndexKind::Fts(_) => None,
         }
     }
 }
@@ -791,6 +803,10 @@ impl IndexMetadata {
         self.kind.as_fts()
     }
 
+    pub fn pattern(&self) -> Option<&IndexOptionsPattern> {
+        self.kind.as_pattern()
+    }
+
     /// The NativeType to treat `column` as, if it's a virtual Alternator
     /// attribute (see alternator_attribute_types) - None otherwise.
     pub fn alternator_native_type(&self, column: &ColumnName) -> Option<NativeType> {
@@ -835,6 +851,7 @@ pub enum DbIndexPartitioning {
 pub enum DbIndexKind {
     VectorSearch,
     FullTextSearch,
+    Pattern,
 }
 
 #[derive(Debug)]
