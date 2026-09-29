@@ -30,6 +30,7 @@ mod monitor_items;
 pub mod node_state;
 mod nonempty;
 mod partition_key;
+mod pattern_index;
 mod perf;
 mod primary_key;
 mod similarity;
