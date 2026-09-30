@@ -749,22 +749,21 @@ where
         let permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
 
         let length = range_length(&range);
-        let embeddings = open(range).await?;
+        let rows = open(range).await?;
         let tx = tx.clone();
         let scan_length = completed_scan_length.clone();
         tokio::spawn(async move {
             let (tx_in_progress, mut rx_in_progress) = mpsc::channel(1);
-            embeddings
-                .for_each(move |embedding| {
-                    let tx = tx.clone();
-                    let tx_in_progress = tx_in_progress.clone();
-                    async move {
-                        _ = tx
-                            .send((embedding, AsyncInProgress::Fullscan(tx_in_progress)))
-                            .await;
-                    }
-                })
-                .await;
+            rows.for_each(move |row| {
+                let tx = tx.clone();
+                let tx_in_progress = tx_in_progress.clone();
+                async move {
+                    _ = tx
+                        .send((row, AsyncInProgress::Fullscan(tx_in_progress)))
+                        .await;
+                }
+            })
+            .await;
 
             // wait until all in-progress markers are dropped
             while rx_in_progress.recv().await.is_some() {
