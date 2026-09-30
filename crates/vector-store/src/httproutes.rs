@@ -90,7 +90,7 @@ use utoipa_swagger_ui::SwaggerUi;
             name = "LicenseRef-ScyllaDB-Source-Available-1.1"
         ),
         // version should be updated manually when there are changes in API
-        version = "3.1.0"
+        version = "3.2.0"
     ),
     tags(
         (

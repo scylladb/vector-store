@@ -6,7 +6,7 @@
     "license": {
       "name": "LicenseRef-ScyllaDB-Source-Available-1.1"
     },
-    "version": "3.1.0"
+    "version": "3.2.0"
   },
   "paths": {
     "/api/v1/indexes": {
@@ -422,6 +422,100 @@
         }
       }
     },
+    "/api/v1/indexes/{keyspace}/{index}/like": {
+      "post": {
+        "tags": [
+          "scylla-vector-store-index"
+        ],
+        "description": "Performs a LIKE 'pattern' search query against the specified index. Returns primary keys of the documents matched to the provided pattern. The pattern rules are the same as the LIKE operator in ScyllaDB: '%' and '_' are wildcards, '\\' is the escape character, and matching is case-sensitive. The maximum number of results is controlled by the optional 'limit' parameter in the payload. If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
+        "operationId": "post_index_like",
+        "parameters": [
+          {
+            "name": "keyspace",
+            "in": "path",
+            "description": "The name of the ScyllaDB keyspace containing the index.",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/KeyspaceName"
+            }
+          },
+          {
+            "name": "index",
+            "in": "path",
+            "description": "The name of the pattern index within the specified keyspace to search.",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/IndexName"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PostIndexLikeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful pattern search. Returns a list of primary keys for the relevant documents found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PostIndexLikeResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request. Possible causes: malformed input, invalid pattern, or missing required fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden. TLS is enabled in the configuration, but the client connected over plain HTTP.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Index not found. Possible causes: index does not exist, or is not discovered yet.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error while searching. Possible causes: internal error, or search engine issues.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/IndexNotReadyResponse"
+          }
+        }
+      }
+    },
     "/api/v1/indexes/{keyspace}/{index}/status": {
       "get": {
         "tags": [
@@ -711,6 +805,29 @@
               }
             ],
             "description": "Full-text search index options."
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PatternIndexOptions",
+                "description": "Pattern index options."
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "pattern"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "Pattern index options."
           }
         ],
         "description": "Options an index was created with, tagged with the index's type."
@@ -774,6 +891,10 @@
           "The node is discovering available vector indexes in ScyllaDB.",
           "The node has completed the initial database scan and built the indexes defined at that time. It is now monitoring the database for changes."
         ]
+      },
+      "PatternIndexOptions": {
+        "type": "object",
+        "description": "Options a pattern index was created with."
       },
       "PostIndexAnnFilter": {
         "type": "object",
@@ -1243,6 +1364,42 @@
               ]
             },
             "description": "The highlighted documents. Each document is a string of text with the query terms marked."
+          }
+        }
+      },
+      "PostIndexLikeRequest": {
+        "type": "object",
+        "description": "Request body for LIKE search.",
+        "required": [
+          "pattern"
+        ],
+        "properties": {
+          "limit": {
+            "$ref": "#/components/schemas/Limit"
+          },
+          "pattern": {
+            "type": "string",
+            "description": "The text pattern to search for."
+          }
+        }
+      },
+      "PostIndexLikeResponse": {
+        "type": "object",
+        "description": "Response for LIKE search.",
+        "required": [
+          "primary_keys"
+        ],
+        "properties": {
+          "primary_keys": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {}
+            },
+            "propertyNames": {
+              "type": "string",
+              "description": "Name of the column in a db table."
+            }
           }
         }
       },
