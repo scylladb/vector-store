@@ -748,18 +748,18 @@ async fn scan_ranges(
         let permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
 
         let length = range_length(begin, end);
-        let embeddings = rows(begin, end).await?;
+        let range_rows = rows(begin, end).await?;
         let tx = tx.clone();
         let scan_length = completed_scan_length.clone();
         tokio::spawn(async move {
             let (tx_in_progress, mut rx_in_progress) = mpsc::channel(1);
-            embeddings
-                .for_each(move |embedding| {
+            range_rows
+                .for_each(move |row| {
                     let tx = tx.clone();
                     let tx_in_progress = tx_in_progress.clone();
                     async move {
                         _ = tx
-                            .send((embedding, AsyncInProgress::Fullscan(tx_in_progress)))
+                            .send((row, AsyncInProgress::Fullscan(tx_in_progress)))
                             .await;
                     }
                 })
