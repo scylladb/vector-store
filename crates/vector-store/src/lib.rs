@@ -900,6 +900,12 @@ pub struct DbIndexedRow {
 #[derive(Debug, derive_more::Display)]
 struct NonRetryable;
 
+/// A query-related failure caused by the caller's input (an unparsable query, or a query
+/// construct that this endpoint cannot process) rather than an internal/actor failure.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct QueryError(pub(crate) String);
+
 pub fn block_on<Output>(threads: Option<usize>, f: impl AsyncFnOnce() -> Output) -> Output {
     let mut builder = match threads {
         Some(0) | None => Builder::new_multi_thread(),
