@@ -768,13 +768,16 @@ async fn scan_ranges(
                 })
                 .await;
 
+            // All rows of this range have been sent. Let the next range start now by dropping
+            // the permit, then wait for their acknowledgements.
+            drop(permit);
+
             // wait until all in-progress markers are dropped
             while rx_in_progress.recv().await.is_some() {
                 rx_in_progress.len();
             }
 
             scan_length.fetch_add(length, Ordering::Relaxed);
-            drop(permit);
         });
     }
 
@@ -1462,6 +1465,36 @@ mod tests {
             }
             received
         })
+    }
+
+    /// Keeps every row unacknowledged: the next ranges must still be scanned, since a range
+    /// releases its permit once its rows are sent, not once they are acknowledged. If a range held
+    /// its permit until the acknowledgement, the `AsyncInProgress` guards of the next ranges would
+    /// never arrive and the test would fail on the timeout.
+    #[rstest]
+    #[timeout(Duration::from_secs(5))]
+    #[tokio::test]
+    async fn opens_next_ranges_while_rows_of_open_ranges_are_unacknowledged() {
+        const RANGES: usize = 8;
+        let (tx, mut rx) = mpsc::channel(1);
+        let completed = Arc::new(AtomicU64::new(0));
+        tokio::spawn(scan_ranges(
+            single_token_ranges(RANGES),
+            concurrency(2),
+            async |begin, _| single_row_range(begin),
+            tx,
+            Arc::clone(&completed),
+        ));
+
+        let mut unacknowledged = Vec::new();
+        for _ in 0..RANGES {
+            let (_row, in_progress) = rx.recv().await.unwrap();
+            unacknowledged.push(in_progress);
+        }
+
+        assert_eq!(unacknowledged.len(), RANGES);
+        // No row has been acknowledged yet, so no range contributes to the progress.
+        assert_eq!(completed.load(Ordering::Relaxed), 0);
     }
 
     #[rstest]
