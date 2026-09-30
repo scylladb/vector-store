@@ -7,6 +7,7 @@ use crate::Filter;
 use crate::IndexKey;
 use crate::IndexName;
 use crate::IndexOptionsFts;
+use crate::IndexOptionsPattern;
 use crate::IndexOptionsVs;
 use crate::KeyspaceName;
 use crate::Progress;
@@ -29,6 +30,8 @@ use crate::internals::InternalsExt;
 use crate::metrics::Metrics;
 use crate::node_state::NodeState;
 use crate::node_state::NodeStateExt;
+use crate::pattern_index::PatternIndex;
+use crate::pattern_index::PatternIndexExt;
 use crate::perf;
 use crate::vector;
 use crate::vs_index;
@@ -55,6 +58,7 @@ use httpapi::DataType;
 use httpapi::FulltextIndexOptions;
 use httpapi::IndexInfo;
 use httpapi::IndexOptions;
+use httpapi::PatternIndexOptions;
 use httpapi::SimilarityFunction;
 use httpapi::VectorIndexOptions;
 use itertools::Itertools;
@@ -254,6 +258,12 @@ impl From<&IndexOptionsFts> for FulltextIndexOptions {
     }
 }
 
+impl From<&IndexOptionsPattern> for PatternIndexOptions {
+    fn from(_options: &IndexOptionsPattern) -> Self {
+        PatternIndexOptions {}
+    }
+}
+
 impl From<httpapi::Limit> for crate::Limit {
     fn from(limit: httpapi::Limit) -> Self {
         Self::from(<httpapi::Limit as Into<NonZeroUsize>>::into(limit))
@@ -344,6 +354,15 @@ async fn get_indexes(State(state): State<RoutesInnerState>) -> Response {
                     entry.progress(),
                 )
             }))
+            .chain(indexes.iter_pattern().map(|(key, entry)| {
+                (
+                    key.clone(),
+                    IndexOptions::Pattern(entry.options().into()),
+                    IndexSender::Pattern(entry.index().clone()),
+                    entry.status(),
+                    entry.progress(),
+                )
+            }))
             .collect()
     };
 
@@ -380,6 +399,7 @@ struct ErrorMessage(#[allow(dead_code)] String);
 enum IndexSender {
     Vs(Sender<VsIndexSearch>),
     Fts(Sender<FtsIndex>),
+    Pattern(Sender<PatternIndex>),
 }
 
 impl IndexSender {
@@ -387,6 +407,7 @@ impl IndexSender {
         match self {
             IndexSender::Vs(index) => index.count(index_key).await,
             IndexSender::Fts(index) => index.count(index_key).await,
+            IndexSender::Pattern(index) => index.count(index_key).await,
         }
     }
 }
@@ -528,6 +549,13 @@ async fn get_index_info(
                 entry.status(),
                 entry.progress(),
             )
+        } else if let Some(entry) = indexes.get_pattern(&index_key) {
+            (
+                IndexOptions::Pattern(entry.options().into()),
+                IndexSender::Pattern(entry.index().clone()),
+                entry.status(),
+                entry.progress(),
+            )
         } else {
             let msg = format!("missing index: {keyspace_name}.{index_name}");
             debug!("get_index_info: {msg}");
@@ -576,7 +604,7 @@ async fn refresh_index_metrics(
     }
 
     if let Some((index, _)) = state.engine.get_fts_index(key.clone()).await
-        && let Ok(stats) = index.stats(key).await
+        && let Ok(stats) = index.stats(key.clone()).await
     {
         state
             .metrics
@@ -593,6 +621,17 @@ async fn refresh_index_metrics(
             .fts_segment_count
             .with_label_values(&labels)
             .set(stats.segment_count as f64);
+        return;
+    }
+
+    if let Some((index, _)) = state.engine.get_pattern_index(key.clone()).await
+        && let Ok(count) = index.count(key).await
+    {
+        state
+            .metrics
+            .size
+            .with_label_values(&labels)
+            .set(count as f64);
     }
 }
 
