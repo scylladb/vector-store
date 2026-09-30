@@ -18,6 +18,8 @@ use httpapi::PostIndexBm25Request;
 use httpapi::PostIndexBm25Response;
 use httpapi::PostIndexHighlightRequest;
 use httpapi::PostIndexHighlightResponse;
+use httpapi::PostIndexLikeRequest;
+use httpapi::PostIndexLikeResponse;
 use httpapi::SimilarityScore;
 use httpapi::Vector;
 use reqwest::Client;
@@ -176,6 +178,41 @@ impl HttpClient {
         self.client
             .post(format!(
                 "{}/indexes/{}/{}/highlight",
+                self.url_api, keyspace_name, index_name
+            ))
+            .json(&request)
+            .send()
+            .await
+            .unwrap()
+    }
+
+    pub async fn like(
+        &self,
+        keyspace_name: &KeyspaceName,
+        index_name: &IndexName,
+        pattern: String,
+        limit: Limit,
+    ) -> HashMap<ColumnName, Vec<Value>> {
+        let resp = self
+            .post_like(keyspace_name, index_name, pattern, limit)
+            .await
+            .json::<PostIndexLikeResponse>()
+            .await
+            .unwrap();
+        resp.primary_keys
+    }
+
+    pub async fn post_like(
+        &self,
+        keyspace_name: &KeyspaceName,
+        index_name: &IndexName,
+        pattern: String,
+        limit: Limit,
+    ) -> reqwest::Response {
+        let request = PostIndexLikeRequest { pattern, limit };
+        self.client
+            .post(format!(
+                "{}/indexes/{}/{}/like",
                 self.url_api, keyspace_name, index_name
             ))
             .json(&request)
