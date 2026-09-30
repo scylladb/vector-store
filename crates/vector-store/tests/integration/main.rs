@@ -16,6 +16,7 @@ mod mock_opensearch;
 mod mtls;
 mod openapi;
 mod opensearch;
+mod pattern;
 mod quantization;
 mod routing;
 mod status;
