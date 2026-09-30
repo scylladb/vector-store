@@ -519,3 +519,18 @@ pub struct PostIndexHighlightResponse {
     /// The highlighted documents. Each document is a string of text with the query terms marked.
     pub highlights: Vec<Option<String>>,
 }
+
+#[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
+/// Request body for LIKE search.
+pub struct PostIndexLikeRequest {
+    /// The text pattern to search for.
+    pub pattern: String,
+    #[serde(default)]
+    pub limit: Limit,
+}
+
+#[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
+/// Response for LIKE search.
+pub struct PostIndexLikeResponse {
+    pub primary_keys: HashMap<ColumnName, Vec<Value>>,
+}
