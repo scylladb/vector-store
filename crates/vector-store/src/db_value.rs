@@ -31,7 +31,7 @@ use scylla::value::CqlValue;
 
 /// A single value of a [`DbRow`].
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum DbValue {
+pub enum DbValue {
     /// A value of a native CQL `vector<float, N>` column.
     Vector(Vector),
     /// Any other value, in the dynamic representation its runtime-only CQL
@@ -74,8 +74,8 @@ impl<'frame, 'metadata> DeserializeValue<'frame, 'metadata> for DbValue {
 /// A row of an indexed base table: all selected columns, in the order the
 /// query selected them, with a `None` for a null column.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct DbRow {
-    pub(crate) columns: Vec<Option<DbValue>>,
+pub struct DbRow {
+    pub columns: Vec<Option<DbValue>>,
 }
 
 /// Deserializes the row eagerly, column by column.

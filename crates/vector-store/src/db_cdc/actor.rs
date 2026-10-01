@@ -5,6 +5,7 @@
 
 use crate::AsyncInProgress;
 use crate::Config;
+use crate::DbDriver;
 use crate::DbIndexedRow;
 use crate::IndexMetadata;
 use crate::IndexName;
@@ -14,14 +15,14 @@ use crate::db_cdc::READER_FINE;
 use crate::db_cdc::READER_WIDE;
 use crate::db_cdc::checkpoint_saver::MetricsCheckpointSaver;
 use crate::db_cdc::consumer::CdcConsumerFactory;
+use crate::db_driver::CdcLogReaderConfig;
+use crate::db_index::DbIndexSession;
 use crate::internals::Internals;
 use crate::internals::InternalsExt;
 use crate::perf;
 use ::time::OffsetDateTime;
 use anyhow::Context;
 use futures::FutureExt;
-use scylla::client::session::Session;
-use scylla_cdc::log_reader::CDCLogReaderBuilder;
 use std::future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,7 +30,6 @@ use std::time::SystemTime;
 use tokio::sync::Notify;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::Sender;
 use tokio::sync::watch;
 use tokio::time;
 use tracing::Instrument;
@@ -106,11 +106,12 @@ impl CdcReaderConfig {
 
 /// Spawns a CDC actor that watches for session changes and manages a CDC reader.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn new(
+pub(crate) fn new<T: DbDriver>(
     config_rx: watch::Receiver<Arc<Config>>,
-    mut session_rx: watch::Receiver<Option<Arc<Session>>>,
+    db_driver: T,
+    mut db_session: DbIndexSession<T>,
     metadata: IndexMetadata,
-    internals: Sender<Internals>,
+    internals: mpsc::Sender<Internals>,
     metrics: Arc<Metrics>,
     tx_embeddings: mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
     semaphore: Arc<Semaphore>,
@@ -118,11 +119,12 @@ pub(crate) fn new(
 ) -> mpsc::Sender<DbCdc> {
     let (tx, mut rx) = mpsc::channel::<DbCdc>(perf::channel_size().into());
 
-    // Mark the receiver to ensure first session update is visible
-    session_rx.mark_changed();
+    // Mark the db_session to ensure first session update is visible
+    db_session.mark_changed();
 
     let (name, params_fn) = config.name_and_params_fn();
     let mut reader = CdcReaderState::new(
+        db_driver.clone(),
         name,
         params_fn,
         Arc::clone(&metrics),
@@ -149,14 +151,14 @@ pub(crate) fn new(
                     _ = rx.recv() => { break; }
 
                     // Wait for session changes
-                    result = session_rx.changed() => {
-                        if result.is_err() {
+                    session = db_session.wait_for_changed() => {
+                        let Some(session) = session else {
+                            // Db index dropped
                             break;
-                        }
+                        };
 
-                        let session_opt = session_rx.borrow_and_update().clone();
                         reader.handle_session_change(
-                            session_opt, &config_rx, &metadata,
+                            session, &config_rx, &metadata,
                             &tx_embeddings, &internals,
                         ).await;
                         err_counter = 0;
@@ -175,8 +177,12 @@ pub(crate) fn new(
                     }
 
                     _ = sleep_for_retry(backoff_duration.take()) => {
+                        let Some(session) = db_session.current() else {
+                            // Db index dropped
+                            break;
+                        };
                         reader.restart_after_backoff(
-                            &session_rx, &config_rx, &metadata,
+                            session, &config_rx, &metadata,
                             &tx_embeddings, &internals,
                         ).await;
                     }
@@ -199,8 +205,9 @@ pub(crate) fn new(
 }
 
 /// State for managing a CDC reader's lifecycle.
-struct CdcReaderState {
-    reader: Option<scylla_cdc::log_reader::CDCLogReader>,
+struct CdcReaderState<T: DbDriver> {
+    db_driver: T,
+    reader: Option<T::CdcLogReader>,
     handler_task: Option<tokio::task::JoinHandle<Duration>>,
     shutdown_notify: Arc<Notify>,
     error_notify: Arc<Notify>,
@@ -213,8 +220,9 @@ struct CdcReaderState {
     index_name: IndexName,
 }
 
-impl CdcReaderState {
+impl<T: DbDriver> CdcReaderState<T> {
     fn new(
+        db_driver: T,
         name: &'static str,
         params_fn: fn(&Config) -> CdcReaderParams,
         metrics: Arc<Metrics>,
@@ -223,6 +231,7 @@ impl CdcReaderState {
         semaphore: Arc<Semaphore>,
     ) -> Self {
         let state = Self {
+            db_driver,
             reader: None,
             handler_task: None,
             shutdown_notify: Arc::new(Notify::new()),
@@ -268,8 +277,8 @@ impl CdcReaderState {
 
     /// Stops the current CDC reader and handler task, preserving the last checkpoint.
     async fn stop(&mut self) {
-        if let Some(mut reader) = self.reader.take() {
-            reader.stop();
+        if let Some(reader) = self.reader.take() {
+            self.db_driver.stop_cdc_log_reader(reader);
         }
         if let Some(task) = self.handler_task.take() {
             self.shutdown_notify.notify_one();
@@ -282,10 +291,10 @@ impl CdcReaderState {
     async fn restart(
         &mut self,
         params: CdcReaderParams,
-        session: &Arc<Session>,
+        session: &T::Session,
         metadata: &IndexMetadata,
         tx_embeddings: &mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
-        internals: &Sender<Internals>,
+        internals: &mpsc::Sender<Internals>,
     ) {
         self.stop().await;
         drain_pending_notifications(&self.shutdown_notify);
@@ -293,7 +302,8 @@ impl CdcReaderState {
         match create_cdc_reader(
             self.start,
             params.clone(),
-            Arc::clone(session),
+            self.db_driver.clone(),
+            session.clone(),
             metadata.clone(),
             tx_embeddings.clone(),
             Arc::clone(&self.semaphore),
@@ -335,11 +345,11 @@ impl CdcReaderState {
     /// Handles a session change by restarting or stopping the CDC reader.
     async fn handle_session_change(
         &mut self,
-        session: Option<Arc<Session>>,
+        session: Option<T::Session>,
         config_rx: &watch::Receiver<Arc<Config>>,
         metadata: &IndexMetadata,
         tx_embeddings: &mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
-        internals: &Sender<Internals>,
+        internals: &mpsc::Sender<Internals>,
     ) {
         match session {
             Some(session) => {
@@ -371,13 +381,12 @@ impl CdcReaderState {
     /// Completes a pending backoff by restarting the CDC reader.
     async fn restart_after_backoff(
         &mut self,
-        session_rx: &watch::Receiver<Option<Arc<Session>>>,
+        session: Option<T::Session>,
         config_rx: &watch::Receiver<Arc<Config>>,
         metadata: &IndexMetadata,
         tx_embeddings: &mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
-        internals: &Sender<Internals>,
+        internals: &mpsc::Sender<Internals>,
     ) {
-        let session = session_rx.borrow().clone();
         if let Some(session) = session {
             record_reader_restart(&self.metrics, &self.keyspace, &self.index_name, self.name);
             let config = config_rx.borrow().clone();
@@ -436,21 +445,23 @@ fn drain_pending_notifications(notify: &Notify) {
 
 /// Creates a CDC log reader with the given parameters.
 #[allow(clippy::too_many_arguments)]
-async fn create_cdc_reader(
+async fn create_cdc_reader<T: DbDriver>(
     start: Duration,
     params: CdcReaderParams,
-    session: Arc<Session>,
+    db_driver: T,
+    session: T::Session,
     metadata: IndexMetadata,
     tx_embeddings: mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
     semaphore: Arc<Semaphore>,
     metrics: Arc<Metrics>,
     reader_name: &str,
 ) -> anyhow::Result<(
-    scylla_cdc::log_reader::CDCLogReader,
+    T::CdcLogReader,
     impl std::future::Future<Output = anyhow::Result<()>>,
 )> {
     let consumer_factory = CdcConsumerFactory::new(
-        Arc::clone(&session),
+        db_driver.clone(),
+        session.clone(),
         &metadata,
         Arc::clone(&metrics),
         tx_embeddings,
@@ -472,17 +483,19 @@ async fn create_cdc_reader(
         reader_name.to_string(),
     ));
 
-    CDCLogReaderBuilder::new()
-        .session(session)
-        .keyspace(metadata.keyspace_name.as_ref())
-        .table_name(metadata.table_name.as_ref())
-        .consumer_factory(Arc::new(consumer_factory))
-        .start_timestamp(cdc_start)
-        .safety_interval(params.safety_interval)
-        .sleep_interval(params.sleep_interval)
-        .should_save_progress(true)
-        .checkpoint_saver(checkpoint_saver)
-        .build()
+    db_driver
+        .cdc_log_reader(
+            session,
+            CdcLogReaderConfig::default()
+                .keyspace(metadata.keyspace_name)
+                .table_name(metadata.table_name)
+                .consumer_factory(Arc::new(consumer_factory))
+                .start_timestamp(cdc_start)
+                .safety_interval(params.safety_interval)
+                .sleep_interval(params.sleep_interval)
+                .should_save_progress(true)
+                .checkpoint_saver(checkpoint_saver),
+        )
         .await
         .context(format!("Failed to build {reader_name} CDC log reader"))
 }
@@ -492,7 +505,7 @@ fn spawn_handler_task(
     handler: impl std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
     shutdown_notify: Arc<Notify>,
     cdc_error_notify: Arc<Notify>,
-    internals: Sender<Internals>,
+    internals: mpsc::Sender<Internals>,
     metrics: Arc<Metrics>,
     metadata: &IndexMetadata,
     reader_name: &str,
@@ -533,6 +546,7 @@ fn spawn_handler_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db_driver::tests::UnimplementedDbDriver;
     use prometheus::Encoder;
     use prometheus::TextEncoder;
 
@@ -544,8 +558,9 @@ mod tests {
         String::from_utf8(buf).unwrap()
     }
 
-    fn new_state(metrics: Arc<Metrics>) -> CdcReaderState {
+    fn new_state<T: DbDriver>(db_driver: T, metrics: Arc<Metrics>) -> CdcReaderState<T> {
         CdcReaderState::new(
+            db_driver,
             READER_WIDE,
             CdcReaderParams::wide,
             metrics,
@@ -560,7 +575,7 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
 
         // The gauge must be present immediately, even for a reader that never starts.
-        let _state = new_state(Arc::clone(&metrics));
+        let _state = new_state(UnimplementedDbDriver, Arc::clone(&metrics));
 
         let output = metric_families_text(&metrics);
         assert!(
@@ -572,7 +587,7 @@ mod tests {
     #[tokio::test]
     async fn stop_on_freshly_created_state_sets_reader_up_to_zero() {
         let metrics = Arc::new(Metrics::new());
-        let mut state = new_state(Arc::clone(&metrics));
+        let mut state = new_state(UnimplementedDbDriver, Arc::clone(&metrics));
 
         // Never started: `stop()` should be a no-op but must still report the reader as down.
         state.stop().await;
