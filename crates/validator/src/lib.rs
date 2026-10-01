@@ -16,6 +16,7 @@ mod filtering;
 mod fts;
 mod full_scan;
 mod high_availability;
+mod hybrid;
 mod index_create;
 mod index_modify;
 mod index_status;
