@@ -415,6 +415,23 @@ jobs:
             echo "${var}=${!var}" >> "$GITHUB_OUTPUT"
           done
 
+      - name: Check the siren token is set
+        if: steps.ga.outputs.ga == 'true'
+        env:
+          SIREN_REPO_TOKEN: ${{ secrets.SIREN_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          # An unset secret expands to the empty string, and gh then asks for
+          # GH_TOKEN to be set to `github.token` — advice about this workflow,
+          # when it is the secret that is missing. The usual cause is the
+          # value having been added under Settings > Secrets and variables >
+          # Actions on the *Variables* tab: `secrets.` cannot see repository
+          # variables.
+          if [[ -z "${SIREN_REPO_TOKEN:-}" ]] ; then
+            echo "::error::SIREN_REPO_TOKEN is empty — it must be an Actions secret (not a repository variable) in scylladb/vector-store; see docs/releasing.md"
+            exit 1
+          fi
+
       - name: Trigger the siren add-vectorstore-ver workflow
         if: steps.ga.outputs.ga == 'true'
         env:
@@ -435,8 +452,28 @@ jobs:
           # Unlike repository_dispatch, workflow_dispatch names the ref to
           # run on. Ask siren which one that is instead of hardcoding a
           # branch name that only siren gets to change.
-          ref=$(gh api /repos/scylladb/siren --jq .default_branch)
-          jq -n \
+          #
+          # The token must therefore be a fine-grained PAT owned by scylladb,
+          # listing scylladb/siren among its repositories, approved by the
+          # organization and granting `Actions: read and write`. Provisioned
+          # in VECTOR-854.
+          #
+          # GitHub refuses a token short of that with a message naming
+          # neither the repository nor what the token lacks. Say which call
+          # failed; docs/releasing.md maps GitHub's message, which gh logs
+          # just above, to its cause.
+          fail() {
+            echo "::error::$1 — see GitHub's error above and docs/releasing.md"
+            exit 1
+          }
+
+          if ! ref=$(gh api /repos/scylladb/siren --jq .default_branch) ; then
+            fail "Reading scylladb/siren with SIREN_REPO_TOKEN failed"
+          fi
+          # gh prints a failed call's response body to stdout without a final
+          # newline, which would keep the annotation from starting a line of
+          # its own; its message is in gh's error anyway.
+          if ! jq -n \
             --arg ref "${ref}" \
             --arg version "${VECTOR_VERSION}" \
             --arg aws_amd64_ami "${AWS_AMD64_AMI}" \
@@ -449,7 +486,10 @@ jobs:
                gcp_amd64_image: $gcp_amd64_image
              }}' \
             | gh api --method POST --input - \
-              /repos/scylladb/siren/actions/workflows/add-vectorstore-ver.yml/dispatches
+              /repos/scylladb/siren/actions/workflows/add-vectorstore-ver.yml/dispatches \
+              > /dev/null ; then
+            fail "Starting add-vectorstore-ver in scylladb/siren with SIREN_REPO_TOKEN failed"
+          fi
 
       - name: Log the siren workflow link
         if: steps.ga.outputs.ga == 'true'
