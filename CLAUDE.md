@@ -26,3 +26,15 @@ Before making changes, follow the project's contributor and coding guidelines:
 - Organize commits and PRs per the Commit and PR Organization section of
   [CONTRIBUTING.md](CONTRIBUTING.md) (subject format `module: changes`, small
   self-contained patches, and `Fixes:`/`Refs: VECTOR-<n>` references).
+
+## Skills
+
+Repository skills live in `.claude/skills/`:
+
+- `daily-ci-triage` — triage failed runs of the Daily workflow (`daily.yml`):
+  group failures by cause, run an initial investigation (history, bisect over
+  vector-store commits and scylla-nightly builds, fixes in flight), check the
+  VECTOR Jira project for duplicates, then comment on the existing issue or file
+  a new one. Built to run unattended as a daily routine; `dry-run` writes
+  nothing to Jira. `SKILL.md` holds the procedure; `reference.md` holds the
+  reasoning and worked examples from past Daily failures.
