@@ -50,6 +50,7 @@ use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tap::Pipe;
 use tokio::sync::Notify;
@@ -57,6 +58,7 @@ use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
+use tokio::task::JoinSet;
 use tracing::Instrument;
 use tracing::debug;
 use tracing::error;
@@ -591,55 +593,22 @@ impl<T: DbDriver> Statements<T> {
         tx: mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
         completed_scan_length: Arc<AtomicU64>,
     ) -> anyhow::Result<()> {
-        let semaphore_capacity = self.nr_parallel_queries().await?.get();
-        let semaphore = Arc::new(Semaphore::new(semaphore_capacity));
-
-        for (begin, end) in self.fullscan_ranges().await? {
-            let permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
-
-            let embeddings = self
-                .preform_range_scan(begin, end)
-                .await
-                .inspect_err(|err| {
-                    error!("Error during scan of the range ({begin:?}, {end:?}): {err}",);
-                })?;
-            let tx = tx.clone();
-            let scan_length = completed_scan_length.clone();
-            tokio::spawn(async move {
-                let (tx_in_progress, mut rx_in_progress) = mpsc::channel(1);
-                embeddings
-                    .for_each(move |embedding| {
-                        let tx = tx.clone();
-                        let tx_in_progress = tx_in_progress.clone();
-                        async move {
-                            _ = tx
-                                .send((embedding, AsyncInProgress::Fullscan(tx_in_progress)))
-                                .await;
-                        }
+        scan_ranges(
+            self.fullscan_ranges().await?,
+            self.nr_parallel_queries().await?,
+            |(begin, end)| async move {
+                self.preform_range_scan(begin, end)
+                    .await
+                    .inspect_err(|err| {
+                        error!("Error during scan of the range ({begin:?}, {end:?}): {err}",);
                     })
-                    .await;
-
-                // wait until all in-progress markers are dropped
-                while rx_in_progress.recv().await.is_some() {
-                    rx_in_progress.len();
-                }
-
-                //Safety: end > begin, and the range fits into u64
-                scan_length.fetch_add(
-                    end.value().abs_diff(begin.value() - 1),
-                    std::sync::atomic::Ordering::Relaxed,
-                );
-                drop(permit);
-            });
-        }
-
-        // Acquire all permits to wait until all spawned tasks have finished and released their permits.
-        let _permits = semaphore
-            .acquire_many(semaphore_capacity as u32)
-            .await
-            .unwrap();
-
-        Ok(())
+            },
+            //Safety: end > begin, and the range fits into u64
+            |&(begin, end)| end.value().abs_diff(begin.value() - 1),
+            tx,
+            completed_scan_length,
+        )
+        .await
     }
 
     async fn nr_shards_in_cluster(&self) -> anyhow::Result<NonZeroUsize> {
@@ -757,6 +726,68 @@ impl<T: DbDriver> Statements<T> {
             })
             .boxed())
     }
+}
+
+/// Streams the rows of every range into `tx`, limiting the number of concurrently scanned ranges
+/// to `concurrency`. Each row is tagged with an `AsyncInProgress::Fullscan` guard; a range
+/// contributes `range_length(&range)` to `completed_scan_length` once the pipeline has dropped all
+/// of its guards. The future resolves only after every range has been acknowledged this way.
+/// Dropping the returned future aborts in-flight range tasks.
+async fn scan_ranges<R, Fut>(
+    ranges: impl IntoIterator<Item = R>,
+    concurrency: NonZeroUsize,
+    open: impl Fn(R) -> Fut,
+    range_length: impl Fn(&R) -> u64,
+    tx: mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
+    completed_scan_length: Arc<AtomicU64>,
+) -> anyhow::Result<()>
+where
+    Fut: Future<Output = RangeScanResult>,
+{
+    let semaphore_capacity = concurrency.get();
+    let semaphore = Arc::new(Semaphore::new(semaphore_capacity));
+    let mut range_tasks = JoinSet::new();
+
+    for range in ranges {
+        let permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
+
+        let length = range_length(&range);
+        let rows = open(range).await?;
+        let tx = tx.clone();
+        let scan_length = completed_scan_length.clone();
+        range_tasks.spawn(async move {
+            let (tx_in_progress, mut rx_in_progress) = mpsc::channel(1);
+            rows.for_each(move |row| {
+                let tx = tx.clone();
+                let tx_in_progress = tx_in_progress.clone();
+                async move {
+                    _ = tx
+                        .send((row, AsyncInProgress::Fullscan(tx_in_progress)))
+                        .await;
+                }
+            })
+            .await;
+
+            // All rows of this range have been sent. Let the next range start now by dropping
+            // the permit, then wait for their acknowledgements.
+            drop(permit);
+
+            // wait until all in-progress markers are dropped
+            while rx_in_progress.recv().await.is_some() {
+                rx_in_progress.len();
+            }
+
+            scan_length.fetch_add(length, Ordering::Relaxed);
+        });
+    }
+
+    while let Some(result) = range_tasks.join_next().await {
+        if let Err(err) = result {
+            error!("full scan range task failed: {err}");
+        }
+    }
+
+    Ok(())
 }
 
 /// Builds the `table_columns` lookup Table::new() uses to size and type
@@ -961,7 +992,11 @@ mod tests {
     use crate::IndexOptionsVs;
     use crate::Quantization;
     use crate::SpaceType;
+    use futures::future;
+    use futures::stream;
+    use rstest::rstest;
     use std::assert_matches;
+    use tokio::task;
     use uuid::Uuid;
 
     fn vs_kind() -> IndexKind {
@@ -1390,5 +1425,115 @@ mod tests {
             &real_columns,
         );
         assert_eq!(&*decode_types, &[None, Some(NativeType::Decimal)]);
+    }
+
+    type Rx = mpsc::Receiver<(DbIndexedRow, AsyncInProgress)>;
+
+    fn row(i: usize) -> DbIndexedRow {
+        DbIndexedRow {
+            primary_key: PrimaryKey::from(vec![CqlValue::Int(i as i32)]),
+            operation: DbIndexedOperation::Delete(Timestamp::from_millis(0)),
+        }
+    }
+
+    fn single_row_range(i: usize) -> RangeScanResult {
+        Ok(stream::iter([row(i)]).boxed())
+    }
+
+    fn concurrency(n: usize) -> NonZeroUsize {
+        NonZeroUsize::new(n).unwrap()
+    }
+
+    fn spawn_consumer_acking_immediately(mut rx: Rx) -> task::JoinHandle<usize> {
+        tokio::spawn(async move {
+            let mut received = 0;
+            while let Some((_row, guard)) = rx.recv().await {
+                drop(guard);
+                received += 1;
+            }
+            received
+        })
+    }
+
+    /// Keeps every row unacknowledged: the next ranges must still be scanned, since a range
+    /// releases its permit once its rows are sent, not once they are acknowledged. If a range held
+    /// its permit until the acknowledgement, the `AsyncInProgress` guards of the next ranges would
+    /// never arrive and the test would fail on the timeout.
+    #[rstest]
+    #[timeout(Duration::from_secs(5))]
+    #[tokio::test]
+    async fn opens_next_ranges_while_rows_of_open_ranges_are_unacknowledged() {
+        const RANGES: usize = 8;
+        let (tx, mut rx) = mpsc::channel(1);
+        let completed = Arc::new(AtomicU64::new(0));
+        tokio::spawn(scan_ranges(
+            0..RANGES,
+            concurrency(2),
+            |i| future::ready(single_row_range(i)),
+            |_| 1,
+            tx,
+            Arc::clone(&completed),
+        ));
+
+        let mut notified = Vec::new();
+        for _ in 0..RANGES {
+            let (_row, in_progress) = rx.recv().await.unwrap();
+            notified.push(in_progress);
+        }
+
+        assert_eq!(notified.len(), RANGES);
+        // No row has been acknowledged yet, so no range contributes to the progress.
+        assert_eq!(completed.load(Ordering::Relaxed), 0);
+    }
+
+    #[rstest]
+    #[timeout(Duration::from_secs(5))]
+    #[tokio::test]
+    async fn progress_reaches_sum_of_range_lengths_once_rows_are_acknowledged() {
+        const RANGES: usize = 5;
+        let (tx, rx) = mpsc::channel(1);
+        let completed = Arc::new(AtomicU64::new(0));
+        let consumer = spawn_consumer_acking_immediately(rx);
+
+        scan_ranges(
+            1..=RANGES,
+            concurrency(2),
+            |i| future::ready(single_row_range(i)),
+            |i| *i as u64 * 10,
+            tx,
+            Arc::clone(&completed),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(consumer.await.unwrap(), RANGES);
+        assert_eq!(completed.load(Ordering::Relaxed), 10 + 20 + 30 + 40 + 50);
+    }
+
+    #[rstest]
+    #[timeout(Duration::from_secs(5))]
+    #[tokio::test]
+    async fn range_failing_to_open_fails_the_scan() {
+        let (tx, rx) = mpsc::channel(1);
+        let consumer = spawn_consumer_acking_immediately(rx);
+
+        let result = scan_ranges(
+            0..3,
+            concurrency(1),
+            |i| {
+                future::ready(if i == 1 {
+                    Err(anyhow!("range unavailable"))
+                } else {
+                    single_row_range(i)
+                })
+            },
+            |_| 1,
+            tx,
+            Arc::new(AtomicU64::new(0)),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(consumer.await.unwrap(), 1);
     }
 }
