@@ -191,6 +191,11 @@ We use GitHub Actions for CI, configured in `rust.yml`.
 
 **All checks must pass before a pull request can be merged.**
 
+When a test or job fails in CI, file or update a VECTOR issue and set its
+**Problem Symptom** field to `ci stability`. Use the field rather than a
+label: its values are a fixed list, so every open CI failure can be found
+with `"Problem Symptom" = "ci stability"`.
+
 ## OpenAPI Specification
 
 Vector Store exposes an HTTP REST API, documented in the OpenAPI specification file at `api/openapi.json`.
