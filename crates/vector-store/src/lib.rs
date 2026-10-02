@@ -30,6 +30,7 @@ mod monitor_items;
 pub mod node_state;
 mod nonempty;
 mod partition_key;
+mod pattern_index;
 mod perf;
 mod primary_key;
 mod similarity;
@@ -710,25 +711,37 @@ pub struct IndexOptionsFts {
     pub positions: Positions,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+/// Pattern-specific index configuration.
+pub struct IndexOptionsPattern {}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-/// Discriminates between vector-search and full-text-search index.
+/// Discriminates between index types.
 pub enum IndexKind {
     Vs(IndexOptionsVs),
     Fts(IndexOptionsFts),
+    Pattern(IndexOptionsPattern),
 }
 
 impl IndexKind {
     pub fn as_vs(&self) -> Option<&IndexOptionsVs> {
         match self {
             IndexKind::Vs(vs) => Some(vs),
-            IndexKind::Fts(_) => None,
+            IndexKind::Fts(_) | IndexKind::Pattern(_) => None,
         }
     }
 
     pub fn as_fts(&self) -> Option<&IndexOptionsFts> {
         match self {
             IndexKind::Fts(fts) => Some(fts),
-            IndexKind::Vs(_) => None,
+            IndexKind::Vs(_) | IndexKind::Pattern(_) => None,
+        }
+    }
+
+    pub fn as_pattern(&self) -> Option<&IndexOptionsPattern> {
+        match self {
+            IndexKind::Pattern(pattern) => Some(pattern),
+            IndexKind::Vs(_) | IndexKind::Fts(_) => None,
         }
     }
 }
@@ -790,6 +803,10 @@ impl IndexMetadata {
         self.kind.as_fts()
     }
 
+    pub fn pattern(&self) -> Option<&IndexOptionsPattern> {
+        self.kind.as_pattern()
+    }
+
     /// The NativeType to treat `column` as, if it's a virtual Alternator
     /// attribute (see alternator_attribute_types) - None otherwise.
     pub fn alternator_native_type(&self, column: &ColumnName) -> Option<NativeType> {
@@ -834,6 +851,7 @@ pub enum DbIndexPartitioning {
 pub enum DbIndexKind {
     VectorSearch,
     FullTextSearch,
+    Pattern,
 }
 
 #[derive(Debug)]
@@ -881,6 +899,12 @@ pub struct DbIndexedRow {
 
 #[derive(Debug, derive_more::Display)]
 struct NonRetryable;
+
+/// A query-related failure caused by the caller's input (an unparsable query, or a query
+/// construct that this endpoint cannot process) rather than an internal/actor failure.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct QueryError(pub(crate) String);
 
 pub fn block_on<Output>(threads: Option<usize>, f: impl AsyncFnOnce() -> Output) -> Output {
     let mut builder = match threads {
@@ -946,12 +970,15 @@ pub async fn run(
 
     let index_engine_version = vs_index_factory.index_engine_version();
     let indexes = Arc::new(RwLock::new(Indexes::new()));
-    let fts_index_factory = fts_index::new_fts_index_factory_tantivy(worker, memory);
+    let fts_index_factory =
+        fts_index::new_fts_index_factory_tantivy(worker.clone(), memory.clone());
+    let pattern_index_factory = pattern_index::new_factory_tantivy(worker, memory);
     let engine = engine::new(
         db_actor,
         engine::IndexFactories {
             vs: vs_index_factory,
             fts: fts_index_factory,
+            pattern: pattern_index_factory,
         },
         node_state.clone(),
         metrics.clone(),

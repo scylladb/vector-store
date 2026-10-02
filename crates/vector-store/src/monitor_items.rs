@@ -19,6 +19,8 @@ use crate::fts_index::FtsIndexExt;
 use crate::metrics::OP_INSERT;
 use crate::metrics::OP_REMOVE;
 use crate::metrics::OP_UPDATE;
+use crate::pattern_index::PatternIndex;
+use crate::pattern_index::PatternIndexExt;
 use crate::perf;
 use crate::table::Operation;
 use crate::table::PartitionId;
@@ -137,6 +139,33 @@ impl IndexDispatch for mpsc::Sender<FtsIndex> {
         in_progress: AsyncInProgress,
     ) -> IndexStatus {
         FtsIndexExt::add_document(self, primary_id, document, in_progress)
+            .await
+            .into()
+    }
+
+    async fn remove_value(
+        &self,
+        _partition_id: PartitionId,
+        primary_id: PrimaryId,
+        in_progress: AsyncInProgress,
+    ) -> IndexStatus {
+        self.remove_document(primary_id, in_progress).await.into()
+    }
+
+    async fn remove_partition(&self, _partition_id: PartitionId) -> IndexStatus {
+        IndexStatus::Live
+    }
+}
+
+impl IndexDispatch for mpsc::Sender<PatternIndex> {
+    async fn add_document(
+        &self,
+        _partition_id: PartitionId,
+        primary_id: PrimaryId,
+        document: String,
+        in_progress: AsyncInProgress,
+    ) -> IndexStatus {
+        PatternIndexExt::add_document(self, primary_id, document, in_progress)
             .await
             .into()
     }

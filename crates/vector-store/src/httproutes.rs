@@ -7,10 +7,12 @@ use crate::Filter;
 use crate::IndexKey;
 use crate::IndexName;
 use crate::IndexOptionsFts;
+use crate::IndexOptionsPattern;
 use crate::IndexOptionsVs;
 use crate::KeyspaceName;
 use crate::Progress;
 use crate::Quantization;
+use crate::QueryError;
 use crate::Restriction;
 use crate::SimilarityScore;
 use crate::SpaceType;
@@ -20,7 +22,6 @@ use crate::engine::Engine;
 use crate::engine::EngineExt;
 use crate::fts_index::FtsIndex;
 use crate::fts_index::FtsIndexExt;
-use crate::fts_index::QueryError;
 use crate::indexes;
 use crate::indexes::Indexes;
 use crate::info::Info;
@@ -29,6 +30,8 @@ use crate::internals::InternalsExt;
 use crate::metrics::Metrics;
 use crate::node_state::NodeState;
 use crate::node_state::NodeStateExt;
+use crate::pattern_index::PatternIndex;
+use crate::pattern_index::PatternIndexExt;
 use crate::perf;
 use crate::vector;
 use crate::vs_index;
@@ -55,6 +58,7 @@ use httpapi::DataType;
 use httpapi::FulltextIndexOptions;
 use httpapi::IndexInfo;
 use httpapi::IndexOptions;
+use httpapi::PatternIndexOptions;
 use httpapi::SimilarityFunction;
 use httpapi::VectorIndexOptions;
 use itertools::Itertools;
@@ -86,7 +90,7 @@ use utoipa_swagger_ui::SwaggerUi;
             name = "LicenseRef-ScyllaDB-Source-Available-1.1"
         ),
         // version should be updated manually when there are changes in API
-        version = "3.1.0"
+        version = "3.2.0"
     ),
     tags(
         (
@@ -167,6 +171,7 @@ fn new_open_api_router() -> (Router<RoutesInnerState>, utoipa::openapi::OpenApi)
                 .routes(routes!(post_index_ann))
                 .routes(routes!(post_index_bm25))
                 .routes(routes!(post_index_highlight))
+                .routes(routes!(post_index_like))
                 .routes(routes!(get_info))
                 .routes(routes!(get_status)),
         )
@@ -251,6 +256,12 @@ impl From<&IndexOptionsFts> for FulltextIndexOptions {
             analyzer: options.analyzer.to_string(),
             positions: *options.positions.as_ref(),
         }
+    }
+}
+
+impl From<&IndexOptionsPattern> for PatternIndexOptions {
+    fn from(_options: &IndexOptionsPattern) -> Self {
+        PatternIndexOptions {}
     }
 }
 
@@ -344,6 +355,15 @@ async fn get_indexes(State(state): State<RoutesInnerState>) -> Response {
                     entry.progress(),
                 )
             }))
+            .chain(indexes.iter_pattern().map(|(key, entry)| {
+                (
+                    key.clone(),
+                    IndexOptions::Pattern(entry.options().into()),
+                    IndexSender::Pattern(entry.index().clone()),
+                    entry.status(),
+                    entry.progress(),
+                )
+            }))
             .collect()
     };
 
@@ -380,6 +400,7 @@ struct ErrorMessage(#[allow(dead_code)] String);
 enum IndexSender {
     Vs(Sender<VsIndexSearch>),
     Fts(Sender<FtsIndex>),
+    Pattern(Sender<PatternIndex>),
 }
 
 impl IndexSender {
@@ -387,6 +408,7 @@ impl IndexSender {
         match self {
             IndexSender::Vs(index) => index.count(index_key).await,
             IndexSender::Fts(index) => index.count(index_key).await,
+            IndexSender::Pattern(index) => index.count(index_key).await,
         }
     }
 }
@@ -528,6 +550,13 @@ async fn get_index_info(
                 entry.status(),
                 entry.progress(),
             )
+        } else if let Some(entry) = indexes.get_pattern(&index_key) {
+            (
+                IndexOptions::Pattern(entry.options().into()),
+                IndexSender::Pattern(entry.index().clone()),
+                entry.status(),
+                entry.progress(),
+            )
         } else {
             let msg = format!("missing index: {keyspace_name}.{index_name}");
             debug!("get_index_info: {msg}");
@@ -576,7 +605,7 @@ async fn refresh_index_metrics(
     }
 
     if let Some((index, _)) = state.engine.get_fts_index(key.clone()).await
-        && let Ok(stats) = index.stats(key).await
+        && let Ok(stats) = index.stats(key.clone()).await
     {
         state
             .metrics
@@ -593,6 +622,17 @@ async fn refresh_index_metrics(
             .fts_segment_count
             .with_label_values(&labels)
             .set(stats.segment_count as f64);
+        return;
+    }
+
+    if let Some((index, _)) = state.engine.get_pattern_index(key.clone()).await
+        && let Ok(count) = index.count(key).await
+    {
+        state
+            .metrics
+            .size
+            .with_label_values(&labels)
+            .set(count as f64);
     }
 }
 
@@ -965,7 +1005,7 @@ async fn post_index_ann(
     .await
 }
 
-async fn check_fts_serving<T>(
+async fn check_index_serving<T>(
     serving_or_progress: Result<T, Progress>,
     node_state: &Sender<NodeState>,
     keyspace: &crate::KeyspaceName,
@@ -1073,7 +1113,7 @@ async fn post_index_bm25(
         }
     };
 
-    let (fts_sender, primary_key_columns) = match check_fts_serving(
+    let (fts_sender, primary_key_columns) = match check_index_serving(
         serving_or_progress,
         &state.node_state,
         &keyspace,
@@ -1226,7 +1266,7 @@ async fn post_index_highlight(
         }
     };
 
-    let fts_sender = match check_fts_serving(
+    let fts_sender = match check_index_serving(
         serving_or_progress,
         &state.node_state,
         &keyspace,
@@ -1264,6 +1304,143 @@ async fn post_index_highlight(
             response::Json(httpapi::PostIndexHighlightResponse { highlights }),
         )
             .into_response(),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/indexes/{keyspace}/{index}/like",
+    tag = "scylla-vector-store-index",
+    description = "Performs a LIKE 'pattern' search query against the specified index. \
+Returns primary keys of the documents matched to the provided pattern. \
+The maximum number of results is controlled by the optional 'limit' parameter in the payload. \
+If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
+    params(
+        ("keyspace" = httpapi::KeyspaceName, Path, description = "The name of the ScyllaDB keyspace containing the index."),
+        ("index" = httpapi::IndexName, Path, description = "The name of the pattern index within the specified keyspace to search.")
+    ),
+    request_body = httpapi::PostIndexLikeRequest,
+    responses(
+        (
+            status = 200,
+            description = "Successful pattern search. Returns a list of primary keys for the relevant documents found.",
+            body = httpapi::PostIndexLikeResponse
+        ),
+        (
+            status = 400,
+            description = "Bad request. Possible causes: malformed input, invalid pattern, or missing required fields.",
+            content_type = "application/json",
+            body = ErrorMessage
+        ),
+        (
+            status = 403,
+            description = "Forbidden. TLS is enabled in the configuration, but the client connected over plain HTTP.",
+            content_type = "application/json",
+            body = ErrorMessage
+        ),
+        (
+            status = 404,
+            description = "Index not found. Possible causes: index does not exist, or is not discovered yet.",
+            content_type = "application/json",
+            body = ErrorMessage
+        ),
+        (
+            status = 500,
+            description = "Error while searching. Possible causes: internal error, or search engine issues.",
+            content_type = "application/json",
+            body = ErrorMessage
+        ),
+        (
+            status = 503,
+            response = httpapi::IndexNotReadyResponse
+        )
+    )
+)]
+async fn post_index_like(
+    State(state): State<RoutesInnerState>,
+    extensions: Extensions,
+    Path((keyspace, index_name)): Path<(httpapi::KeyspaceName, httpapi::IndexName)>,
+    extract::Json(request): extract::Json<httpapi::PostIndexLikeRequest>,
+) -> Response {
+    let keyspace: crate::KeyspaceName = keyspace.into();
+    let index_name: crate::IndexName = index_name.into();
+    if let Some(resp) = check_insecure_tls(state.use_tls, &extensions, "post_index_like") {
+        return resp;
+    }
+
+    let timer = state
+        .metrics
+        .latency
+        .with_label_values(&[keyspace.as_ref(), index_name.as_ref()])
+        .start_timer();
+
+    let index_key = IndexKey::new(&keyspace, &index_name);
+
+    let serving_or_progress = {
+        let indexes = state.indexes.read().unwrap();
+        let Some(entry) = indexes.get_pattern(&index_key) else {
+            timer.observe_duration();
+
+            let msg = format!("missing index: {keyspace}.{index_name}");
+            debug!("post_index_like: {msg}");
+            return (StatusCode::NOT_FOUND, msg).into_response();
+        };
+        if entry.status() == crate::node_state::IndexStatus::Serving {
+            Ok((entry.index().clone(), entry.primary_key_columns().clone()))
+        } else {
+            Err(entry.progress())
+        }
+    };
+
+    let (pattern_sender, primary_key_columns) = match check_index_serving(
+        serving_or_progress,
+        &state.node_state,
+        &keyspace,
+        &index_name,
+        "post_index_like",
+    )
+    .await
+    {
+        Ok(sender) => sender,
+        Err(resp) => {
+            timer.observe_duration();
+            return resp;
+        }
+    };
+
+    let search_result = pattern_sender
+        .like(index_key, request.pattern, request.limit.into())
+        .await;
+
+    timer.observe_duration();
+
+    match search_result {
+        Err(err) => {
+            let msg = format!("index.like request error: {err}");
+            debug!("post_index_like: {msg}");
+            let status = if err.downcast_ref::<QueryError>().is_some() {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (status, msg).into_response()
+        }
+        Ok(primary_keys) => {
+            let primary_keys =
+                try_collect_primary_keys(primary_key_columns.as_slice(), &primary_keys);
+
+            match primary_keys {
+                Err(err) => {
+                    debug!("post_index_like: {err}");
+                    (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
+                }
+                Ok(primary_keys) => (
+                    StatusCode::OK,
+                    response::Json(httpapi::PostIndexLikeResponse { primary_keys }),
+                )
+                    .into_response(),
+            }
+        }
     }
 }
 

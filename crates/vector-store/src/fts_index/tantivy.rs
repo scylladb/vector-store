@@ -45,6 +45,7 @@ use crate::AsyncInProgress;
 use crate::IndexKey;
 use crate::Limit;
 use crate::Positions;
+use crate::QueryError;
 use crate::fts_index::factory::FtsIndexConfiguration;
 use crate::fts_index::factory::FtsIndexFactory;
 use crate::memory::Allocate;
@@ -289,12 +290,6 @@ fn handle_remove_document(
     let term = create_term(&state.schema, primary_id);
     state.writer.write().unwrap().rm_document(term, in_progress)
 }
-
-/// A query-related failure caused by the caller's input (an unparsable query, or a query
-/// construct that this endpoint cannot process) rather than an internal/actor failure.
-#[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-pub(crate) struct QueryError(pub(crate) String);
 
 fn make_query(
     index: &tantivy::Index,
