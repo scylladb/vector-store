@@ -112,7 +112,12 @@ impl Fixture {
 
     #[framed]
     async fn create_fts_index(&self) {
-        let index = create_fts_index(&self.session, &self.clients, &self.table).await;
+        self.create_fts_index_on(&self.table).await;
+    }
+
+    #[framed]
+    async fn create_fts_index_on(&self, table: &TableName) {
+        let index = create_fts_index(&self.session, &self.clients, table).await;
         self.wait_for_index_on_all_nodes(index).await;
     }
 
@@ -153,11 +158,7 @@ impl Fixture {
     }
 
     fn bm25_select_query(&self, query: &str, limit: usize) -> String {
-        format!(
-            "SELECT pk FROM {} WHERE BM25(content, '{query}') > 0 \
-             ORDER BY BM25(content, '{query}') LIMIT {limit}",
-            self.table
-        )
+        bm25_ordered_query(&self.table, "pk", &format!("'{query}'"), limit)
     }
 
     fn extract_pks(result: &QueryRowsResult) -> Vec<i32> {
@@ -179,6 +180,15 @@ impl Fixture {
 
         (session, clients, keyspace, table)
     }
+}
+
+/// A query of `columns` of the rows of `table` matching `term`, in BM25 order.
+/// `term` is as written in CQL, a quoted literal or a bind marker.
+fn bm25_ordered_query(table: &TableName, columns: &str, term: &str, limit: usize) -> String {
+    format!(
+        "SELECT {columns} FROM {table} WHERE BM25(content, {term}) > 0 \
+         ORDER BY BM25(content, {term}) LIMIT {limit}"
+    )
 }
 
 async fn create_fts_index(
