@@ -62,8 +62,9 @@ checked with shellcheck.
   writes the profile `797456418907-DeveloperAccessRole`. `--roles` skips the
   role picker; `--profile` selects a section of the Okta config, not an AWS
   profile.
-- **MFA is interactive**, so the agent asks the user to run the command with
-  the `!` prefix.
+- **MFA is interactive.** `vsbench login` runs the device flow without a
+  terminal or a browser (`BROWSER=true`), prints only the activation URL and
+  waits up to 10 minutes; the agent relays the URL and the user approves it.
 - Credentials last 6 hours (`aws_default_duration = 21600`). `vsbench` reads
   `x_security_token_expires` from `~/.aws/credentials` offline to warn early.
   `up` and `down` refuse to start with less than 30 minutes left, because a

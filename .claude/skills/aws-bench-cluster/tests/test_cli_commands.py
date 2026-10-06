@@ -361,6 +361,21 @@ class LifecycleTest(Case):
         fake.doctor.return_value = {"checks": checks + [{"check": "host", "status": "fail", "detail": "x"}]}
         self.assertEqual(self.run_cli("doctor")[0], 1)
 
+    def test_login_prints_only_the_url_and_maps_auth_errors(self) -> None:
+        from vsbenchlib.awsapi import AuthError
+
+        def fake_login(username: str | None, timeout_s: int, on_url: Any = None) -> dict[str, Any]:
+            on_url("https://scylladb.okta.com/activate?user_code=ABCD1234")
+            return {"username": username, "url": "u", "profile": "p", "expires_at": "2026-10-07T01:00:00Z"}
+
+        fake = self.fake("login", login=mock.Mock(side_effect=fake_login))
+        code, out, err = self.run_cli("login", "--username", "a@scylladb.com", "--timeout", "5m")
+        self.assertEqual((code, out), (0, "https://scylladb.okta.com/activate?user_code=ABCD1234\n"))
+        self.assertIn("expire at 2026-10-07T01:00:00Z", err)
+        self.assertEqual(fake.login.call_args.args[:2], ("a@scylladb.com", 300))
+        fake.login.side_effect = AuthError("not approved", None, "again")
+        self.assertEqual(self.run_cli("login")[0], proc.EXIT_AUTH)
+
     def test_build_and_builds(self) -> None:
         from vsbenchlib import build as real
 

@@ -224,6 +224,10 @@ def _up_command(sub: Any, common: argparse.ArgumentParser) -> None:
 def _lifecycle_commands(sub: Any, common: argparse.ArgumentParser) -> None:
     p = _add(sub, common, "doctor", "cmd_doctor", "check local tools, AWS identity and credentials", warn=False)
     p.add_argument("--json", action="store_true")
+    text = "get AWS credentials through the Okta device flow: prints the URL to approve, waits, reports the expiry"
+    p = _add(sub, common, "login", "cmd_login", text, warn=False)
+    p.add_argument("--username", help="Okta user e-mail (default: $OKTA_USERNAME, then git user.email)")
+    p.add_argument("--timeout", dest="timeout_s", type=_duration, default=600, help="how long to wait for the approval")
     _up_command(sub, common)
     p = _add(sub, common, "down", "cmd_down", "terminate the cluster and delete its AWS resources", lock=True)
     p.add_argument("--yes", action="store_true", help="do not ask (only after the user agreed)")

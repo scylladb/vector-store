@@ -34,8 +34,8 @@ DEFAULT_REGION = "us-east-1"
 EXPECTED_ACCOUNT = "797456418907"
 GIMME_ROLE_ARN = "arn:aws:iam::797456418907:role/DeveloperAccessRole"
 LOGIN_HINT = (
-    f"run in the background: gimme-aws-creds --username <user e-mail> --roles {GIMME_ROLE_ARN} </dev/null "
-    "and give the user the okta.com/activate URL it prints (see SKILL.md rule 6)"
+    "run `vsbench login` in the background and give the user the okta.com/activate URL it prints "
+    "(see SKILL.md rule 6)"
 )
 INSTALL_HINT = (
     "install the AWS CLI v2 (curl -fsSL https://awscli.amazonaws.com/v2/install.sh | bash) and "

@@ -54,12 +54,14 @@ Below, `vsbench` means `.claude/skills/aws-bench-cluster/vsbench`.
    prints. It blocks until Ctrl-C, so the user runs it in their own terminal.
 6. **Credentials are the user's.** When `vsbench` exits with code 3, you
    cannot log in for the user, but you can start the Okta device flow for them:
-   1. Run `gimme-aws-creds --username <user e-mail> --roles arn:aws:iam::797456418907:role/DeveloperAccessRole </dev/null`
-      with `run_in_background: true`.
-   2. A few seconds later, read its output and give the user the
-      `https://scylladb.okta.com/activate?user_code=…` URL to approve in a
-      browser.
-   3. It exits 0 once the user approves.
+   1. Run `vsbench login` with `run_in_background: true` (`--username` if the
+      git `user.email` of the checkout is not the user's Okta login).
+   2. Within seconds its stdout holds one line, the
+      `https://scylladb.okta.com/activate?user_code=…` URL. Read the output
+      file and give the user that URL to approve in a browser. Do nothing else
+      first: the code expires after a few minutes.
+   3. It exits 0 once the user approves and reports the new expiry; exit 3
+      means the approval did not come in time, so run it again.
 
    The `!` prefix does not run commands in every Claude Code front end (the VS
    Code extension sends it as a message), so do not rely on it.
