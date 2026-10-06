@@ -23,8 +23,10 @@ use itertools::Itertools;
 use scylla::client::session::Session;
 use scylla::client::session::TlsContext;
 use scylla::client::session_builder::SessionBuilder;
+use scylla::deserialize::row::DeserializeRow;
 use scylla::policies::host_filter::AllowListHostFilter;
 use scylla::response::query_result::QueryRowsResult;
+use scylla::serialize::row::SerializeRow;
 use scylla::statement::Statement;
 use std::collections::HashMap;
 use std::iter;
@@ -736,6 +738,29 @@ pub async fn get_query_results(query: impl Into<String>, session: &Session) -> Q
         .expect("failed to run query")
         .into_rows_result()
         .expect("failed to get rows")
+}
+
+#[framed]
+pub async fn get_query_rows<R>(
+    query: impl Into<String>,
+    values: impl SerializeRow,
+    session: &Session,
+) -> Vec<R>
+where
+    R: for<'frame, 'metadata> DeserializeRow<'frame, 'metadata>,
+{
+    let mut stmt = Statement::new(query);
+    stmt.set_is_idempotent(true);
+    session
+        .query_unpaged(stmt, values)
+        .await
+        .expect("failed to run query")
+        .into_rows_result()
+        .expect("failed to get rows")
+        .rows::<R>()
+        .expect("failed to get rows")
+        .map(|row| row.expect("failed to get row"))
+        .collect()
 }
 
 #[framed]

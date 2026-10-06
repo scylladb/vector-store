@@ -12,7 +12,10 @@ use httpapi::IndexOptions;
 use httpapi::KeyspaceName;
 use httpclient::HttpClient;
 use scylla::client::session::Session;
+use scylla::response::PagingState;
 use scylla::response::query_result::QueryRowsResult;
+use scylla::statement::Statement;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock;
 use tracing::info;
@@ -112,7 +115,12 @@ impl Fixture {
 
     #[framed]
     async fn create_fts_index(&self) {
-        let index = create_fts_index(&self.session, &self.clients, &self.table).await;
+        self.create_fts_index_on(&self.table).await;
+    }
+
+    #[framed]
+    async fn create_fts_index_on(&self, table: &TableName) {
+        let index = create_fts_index(&self.session, &self.clients, table).await;
         self.wait_for_index_on_all_nodes(index).await;
     }
 
@@ -153,11 +161,7 @@ impl Fixture {
     }
 
     fn bm25_select_query(&self, query: &str, limit: usize) -> String {
-        format!(
-            "SELECT pk FROM {} WHERE BM25(content, '{query}') > 0 \
-             ORDER BY BM25(content, '{query}') LIMIT {limit}",
-            self.table
-        )
+        bm25_ordered_query(&self.table, "pk", &format!("'{query}'"), limit)
     }
 
     fn extract_pks(result: &QueryRowsResult) -> Vec<i32> {
@@ -166,6 +170,40 @@ impl Fixture {
             .expect("failed to get rows")
             .map(|row| row.expect("failed to get row").0)
             .collect()
+    }
+
+    fn highlight_select_query(&self, query: &str, limit: usize) -> String {
+        bm25_ordered_query(
+            &self.table,
+            &format!("pk, BM25_HIGHLIGHT(content, '{query}') AS excerpt"),
+            &format!("'{query}'"),
+            limit,
+        )
+    }
+
+    async fn highlight_search(&self, query: &str, limit: usize) -> Vec<(i32, String)> {
+        get_query_rows(self.highlight_select_query(query, limit), (), &self.session).await
+    }
+
+    #[framed]
+    async fn highlight_search_error(&self, query: &str) -> String {
+        self.session
+            .query_unpaged(self.highlight_select_query(query, 100), ())
+            .await
+            .expect_err(&format!("BM25_HIGHLIGHT() query '{query}' should fail"))
+            .to_string()
+    }
+
+    #[framed]
+    async fn highlight_excerpts(&self, query: &str) -> HashMap<i32, String> {
+        let mut excerpts = HashMap::new();
+        for (pk, excerpt) in self.highlight_search(query, 100).await {
+            assert!(
+                excerpts.insert(pk, excerpt).is_none(),
+                "pk {pk} returned more than once for '{query}'"
+            );
+        }
+        excerpts
     }
 
     #[framed]
@@ -179,6 +217,48 @@ impl Fixture {
 
         (session, clients, keyspace, table)
     }
+}
+
+/// A query of `columns` of the rows of `table` matching `term`, in BM25 order.
+/// `term` is as written in CQL, a quoted literal or a bind marker.
+fn bm25_ordered_query(table: &TableName, columns: &str, term: &str, limit: usize) -> String {
+    format!(
+        "SELECT {columns} FROM {table} WHERE BM25(content, {term}) > 0 \
+         ORDER BY BM25(content, {term}) LIMIT {limit}"
+    )
+}
+
+/// The Vector Store keeps axum's default request body limit, and the coordinator ships
+/// the text of every matched row in a single request, so the limit also caps how much
+/// content one `BM25_HIGHLIGHT()` query can carry.
+const REQUEST_BODY_LIMIT: usize = 2 * 1024 * 1024;
+
+/// Content of `len` bytes, together with the term it is searched by.
+fn content_of_len(len: usize) -> (&'static str, String) {
+    const TERM: &str = "needle";
+    const FILLER: &str = "haystack ";
+
+    let mut content = format!("{TERM} ");
+    while content.len() < len {
+        content.push_str(FILLER);
+    }
+    content.truncate(len);
+    (TERM, content)
+}
+
+/// Content whose text makes the coordinator's request body `overshoot` bytes past
+/// the Vector Store's request body limit, together with the term it is searched by.
+fn content_past_request_body_limit(overshoot: usize) -> (&'static str, String) {
+    const ENVELOPE: &str = r#"{"query":"","documents":[""]}"#;
+
+    let (term, mut content) = content_of_len(REQUEST_BODY_LIMIT + overshoot - ENVELOPE.len());
+    content.truncate(content.len() - term.len());
+    (term, content)
+}
+
+/// The excerpt's text without the marks around matched terms.
+fn unmarked(excerpt: &str) -> String {
+    excerpt.replace("<b>", "").replace("</b>", "")
 }
 
 async fn create_fts_index(
@@ -880,6 +960,526 @@ async fn fts_index_with_unsupported_options_returns_error(fixture: Arc<Fixture>)
             .await
             .expect_err(&format!("'{option}': '{value}' should be rejected"));
     }
+
+    info!("finished");
+}
+
+#[e2etest::test(group = fts)]
+async fn highlight_aligns_with_correct_row(fixture: Arc<Fixture>) {
+    info!("started");
+
+    fixture
+        .insert_documents([
+            (1, "the quick brown fox jumps over the lazy dog"),
+            (3, "the fox runs across the meadow"),
+        ])
+        .await;
+    fixture.create_fts_index().await;
+
+    let excerpts = fixture.highlight_excerpts("fox").await;
+
+    let excerpt_1 = &excerpts[&1];
+    assert!(
+        excerpt_1.contains("quick brown <b>fox</b> jumps"),
+        "excerpt for pk 1 doesn't match its own content: {excerpt_1}"
+    );
+
+    let excerpt_3 = &excerpts[&3];
+    assert!(
+        excerpt_3.contains("<b>fox</b> runs across"),
+        "excerpt for pk 3 doesn't match its own content: {excerpt_3}"
+    );
+
+    info!("finished");
+}
+
+#[e2etest::test(group = fts)]
+async fn highlight_marks_the_term_matched_by_each_or_branch(fixture: Arc<Fixture>) {
+    info!("started");
+
+    fixture
+        .insert_documents([
+            (1, "the quick brown fox jumps over the lazy turtle"),
+            (2, "a slow turtle walks through the garden"),
+            (3, "the fox runs across the meadow"),
+        ])
+        .await;
+    fixture.create_fts_index().await;
+
+    let excerpts = fixture.highlight_excerpts("fox OR turtle").await;
+
+    let excerpt_1 = &excerpts[&1];
+    assert!(
+        excerpt_1.contains("<b>fox</b>"),
+        "expected '<b>fox</b>' in excerpt for pk 1, got: {excerpt_1}"
+    );
+    assert!(
+        excerpt_1.contains("<b>turtle</b>"),
+        "expected '<b>turtle</b>' in excerpt for pk 1, got: {excerpt_1}"
+    );
+
+    let excerpt_2 = &excerpts[&2];
+    assert!(
+        !excerpt_2.contains("<b>fox</b>"),
+        "pk 2 has no 'fox' and must not have it marked, got: {excerpt_2}"
+    );
+    assert!(
+        excerpt_2.contains("<b>turtle</b>"),
+        "expected '<b>turtle</b>' in excerpt for pk 2, got: {excerpt_2}"
+    );
+
+    let excerpt_3 = &excerpts[&3];
+    assert!(
+        excerpt_3.contains("<b>fox</b>"),
+        "expected '<b>fox</b>' in excerpt for pk 3, got: {excerpt_3}"
+    );
+    assert!(
+        !excerpt_3.contains("<b>turtle</b>"),
+        "pk 3 has no 'turtle' and must not have it marked, got: {excerpt_3}"
+    );
+
+    info!("finished");
+}
+
+#[e2etest::test(group = fts)]
+async fn highlight_row_order_follows_bm25_ranking(fixture: Arc<Fixture>) {
+    info!("started");
+
+    fixture
+        .insert_documents([
+            (1, "fox fox jumps over"),
+            (2, "fox runs across the wide meadow"),
+            (3, "fox fox fox"),
+            (4, "a slow turtle walks through the garden"),
+        ])
+        .await;
+    fixture.create_fts_index().await;
+
+    let rows = fixture.highlight_search("fox", 100).await;
+    let pks: Vec<_> = rows.iter().map(|(pk, _)| *pk).collect();
+
+    assert_eq!(pks, vec![3, 1, 2], "rows must come in BM25 relevance order");
+    assert_eq!(
+        pks,
+        fixture.bm25_search_pks("fox").await,
+        "BM25_HIGHLIGHT() must not disturb the BM25 relevance order"
+    );
+
+    info!("finished");
+}
+
+#[e2etest::test(group = fts)]
+async fn highlight_respects_limit(fixture: Arc<Fixture>) {
+    info!("started");
+
+    fixture
+        .insert_documents(
+            (1..=10).map(|pk| (pk, format!("searchable document about databases - {pk}"))),
+        )
+        .await;
+    fixture.create_fts_index().await;
+
+    let rows = fixture.highlight_search("databases", 3).await;
+
+    assert_eq!(rows.len(), 3, "LIMIT 3 should restrict results to 3 rows");
+    for (pk, excerpt) in &rows {
+        assert!(
+            excerpt.contains("<b>databases</b>"),
+            "expected '<b>databases</b>' in excerpt for pk {pk}, got: {excerpt}"
+        );
+    }
+
+    info!("finished");
+}
+
+#[e2etest::test(group = fts)]
+async fn highlight_skips_deleted_documents(fixture: Arc<Fixture>) {
+    info!("started");
+
+    fixture
+        .insert_documents([
+            (1, "the quick brown fox jumps over the lazy dog"),
+            (3, "the fox runs across the meadow"),
+        ])
+        .await;
+    fixture.create_fts_index().await;
+
+    fixture.delete_document(1).await;
+
+    wait_for(
+        || async { fixture.bm25_search_pks("fox").await == vec![3] },
+        "index to reflect deletion of pk 1",
+        DEFAULT_OPERATION_TIMEOUT,
+    )
+    .await;
+
+    let excerpts = fixture.highlight_excerpts("fox").await;
+    assert_eq!(excerpts.len(), 1);
+
+    let excerpt = &excerpts[&3];
+    assert!(
+        excerpt.contains("<b>fox</b> runs across"),
+        "expected only pk 3 to survive the delete, got: {excerpt}"
+    );
+
+    info!("finished");
+}
+
+#[e2etest::test(group = fts)]
+async fn highlight_marks_terms_in_unicode_content(fixture: Arc<Fixture>) {
+    info!("started");
+
+    fixture.insert_documents([(1, "zażółć gęślą jaźń")]).await;
+    fixture.create_fts_index().await;
+
+    let excerpts = fixture.highlight_excerpts("zażółć").await;
+
+    let excerpt = &excerpts[&1];
+    assert!(
+        excerpt.contains("<b>zażółć</b>"),
+        "expected the accented term marked for pk 1, got: {excerpt}"
+    );
+
+    info!("finished");
+}
+
+#[e2etest::test(group = fts)]
+async fn highlight_handles_queries_needing_json_escaping(fixture: Arc<Fixture>) {
+    info!("started");
+
+    fixture
+        .insert_documents([
+            (1, r"the quick brown fox jumps over a back\slash"),
+            (2, "a brown dog chases a fox"),
+        ])
+        .await;
+    fixture.create_fts_index().await;
+
+    // A phrase query sends double quotes.
+    let excerpts = fixture.highlight_excerpts(r#""brown fox""#).await;
+    assert_eq!(
+        excerpts.len(),
+        1,
+        "only pk 1 has the phrase, got: {excerpts:?}"
+    );
+    let excerpt = &excerpts[&1];
+    assert!(
+        excerpt.contains("<b>brown</b> <b>fox</b>"),
+        "expected the phrase marked for pk 1, got: {excerpt}"
+    );
+
+    // An escaped backslash sends a backslash.
+    let excerpts = fixture.highlight_excerpts(r"back\\slash").await;
+    assert_eq!(
+        excerpts.len(),
+        1,
+        "only pk 1 has the term, got: {excerpts:?}"
+    );
+    let excerpt = &excerpts[&1];
+    assert!(
+        excerpt.contains(r"<b>back</b>\<b>slash</b>"),
+        "expected the term marked for pk 1, got: {excerpt}"
+    );
+
+    info!("finished");
+}
+
+#[e2etest::test(group = fts)]
+async fn highlight_escapes_content_for_json_and_html(fixture: Arc<Fixture>) {
+    info!("started");
+
+    fixture
+        .insert_documents([(1, "<i>fox</i> & \"friends\"\n\tend")])
+        .await;
+    fixture.create_fts_index().await;
+
+    let excerpts = fixture.highlight_excerpts("fox").await;
+
+    assert_eq!(
+        excerpts[&1],
+        "&lt;i&gt;<b>fox</b>&lt;/i&gt; &amp; &quot;friends&quot;\n\tend"
+    );
+
+    info!("finished");
+}
+
+#[e2etest::test(group = fts)]
+async fn highlight_of_boosted_query_returns_error(fixture: Arc<Fixture>) {
+    info!("started");
+
+    fixture.insert_documents([(1, "the quick brown fox")]).await;
+    fixture.create_fts_index().await;
+
+    assert_eq!(
+        fixture.bm25_search_pks("fox^2").await,
+        vec![1],
+        "BM25() must accept a boosted query"
+    );
+
+    let err = fixture.highlight_search_error("fox^2").await;
+
+    assert!(
+        err.contains("boosted queries are not supported for highlighting"),
+        "unexpected error message: {err}"
+    );
+
+    info!("finished");
+}
+
+#[e2etest::test(group = fts)]
+async fn highlight_aligns_with_clustering_rows(fixture: Arc<Fixture>) {
+    info!("started");
+
+    let session = &fixture.session;
+    let table = create_table(
+        session,
+        "pk INT, ck INT, content TEXT, PRIMARY KEY (pk, ck)",
+        None,
+    )
+    .await;
+    let keys: Vec<_> = (1..=3)
+        .flat_map(|pk| (1..=3).map(move |ck| (pk, ck)))
+        .collect();
+    for &(pk, ck) in &keys {
+        session
+            .query_unpaged(
+                format!("INSERT INTO {table} (pk, ck, content) VALUES (?, ?, ?)"),
+                (pk, ck, format!("fox in partition {pk} row {ck}")),
+            )
+            .await
+            .expect("failed to insert data");
+    }
+    fixture.create_fts_index_on(&table).await;
+
+    let columns = "pk, ck, BM25_HIGHLIGHT(content, 'fox')";
+    let mut rows: Vec<(i32, i32, String)> = get_query_rows(
+        bm25_ordered_query(&table, columns, "'fox'", 100),
+        (),
+        session,
+    )
+    .await;
+    rows.sort();
+
+    let expected: Vec<_> = keys
+        .into_iter()
+        .map(|(pk, ck)| (pk, ck, format!("<b>fox</b> in partition {pk} row {ck}")))
+        .collect();
+    assert_eq!(
+        rows, expected,
+        "every row once, with an excerpt of its own content"
+    );
+
+    info!("finished");
+}
+
+#[e2etest::test(group = fts)]
+async fn highlight_matches_selected_content_and_score(fixture: Arc<Fixture>) {
+    info!("started");
+
+    fixture
+        .insert_documents([
+            (1, "the quick brown fox jumps over the lazy dog"),
+            (2, "fox fox"),
+            (3, "the fox runs across the meadow"),
+        ])
+        .await;
+    fixture.create_fts_index().await;
+
+    let query = |columns| bm25_ordered_query(&fixture.table, columns, "'fox'", 100);
+    let scores: Vec<(i32, f32)> = get_query_rows(
+        query("pk, BM25_SCORE(content, 'fox')"),
+        (),
+        &fixture.session,
+    )
+    .await;
+    let rows: Vec<(i32, String, f32, String)> = get_query_rows(
+        query("pk, content, BM25_SCORE(content, 'fox'), BM25_HIGHLIGHT(content, 'fox')"),
+        (),
+        &fixture.session,
+    )
+    .await;
+
+    assert_eq!(
+        rows.len(),
+        scores.len(),
+        "BM25_HIGHLIGHT() must not change the rows"
+    );
+    for ((pk, content, score, excerpt), expected) in rows.iter().zip(&scores) {
+        assert_eq!(
+            (*pk, *score),
+            *expected,
+            "BM25_HIGHLIGHT() must not change the scores"
+        );
+        assert_eq!(
+            unmarked(excerpt),
+            *content,
+            "excerpt for pk {pk} doesn't come from its returned content"
+        );
+    }
+
+    info!("finished");
+}
+
+#[e2etest::test(group = fts)]
+async fn highlight_applies_index_analyzer(fixture: Arc<Fixture>) {
+    info!("started");
+
+    fixture
+        .insert_documents([(1, "she keeps running every morning")])
+        .await;
+    fixture
+        .create_fts_index_with_options(&[("analyzer", "english")])
+        .await;
+
+    let excerpts = fixture.highlight_excerpts("run").await;
+
+    let excerpt = &excerpts[&1];
+    assert!(
+        excerpt.contains("<b>running</b>"),
+        "expected the stemmed term marked for pk 1, got: {excerpt}"
+    );
+
+    info!("finished");
+}
+
+#[e2etest::test(group = fts)]
+async fn highlight_accepts_bound_search_term(fixture: Arc<Fixture>) {
+    info!("started");
+
+    fixture
+        .insert_documents([
+            (1, "the quick brown fox"),
+            (2, "a slow turtle walks through the garden"),
+        ])
+        .await;
+    fixture.create_fts_index().await;
+
+    let columns = "pk, BM25_HIGHLIGHT(content, ?)";
+    let rows: Vec<(i32, String)> = get_query_rows(
+        bm25_ordered_query(&fixture.table, columns, "?", 100),
+        ("fox", "fox", "fox"),
+        &fixture.session,
+    )
+    .await;
+
+    assert_eq!(rows, vec![(1, "the quick brown <b>fox</b>".to_string())]);
+
+    info!("finished");
+}
+
+#[e2etest::test(group = fts)]
+async fn highlight_returns_whole_result_in_one_page(fixture: Arc<Fixture>) {
+    info!("started");
+
+    fixture
+        .insert_documents((1..=5).map(|pk| (pk, "fox")))
+        .await;
+    fixture.create_fts_index().await;
+
+    let mut stmt = Statement::new(fixture.highlight_select_query("fox", 10));
+    stmt.set_page_size(2);
+    let (result, paging) = fixture
+        .session
+        .query_single_page(stmt, (), PagingState::start())
+        .await
+        .expect("failed to run paged BM25_HIGHLIGHT() query");
+
+    assert!(paging.finished(), "expected a single page");
+    assert!(
+        result
+            .warnings()
+            .any(|warning| warning.contains("Paging is not supported")),
+        "expected a paging warning"
+    );
+    assert_eq!(
+        result
+            .into_rows_result()
+            .expect("failed to get rows")
+            .rows_num(),
+        5,
+        "expected every match in the one page"
+    );
+
+    info!("finished");
+}
+
+#[e2etest::test(group = fts)]
+async fn highlight_handles_content_at_the_request_body_limit(fixture: Arc<Fixture>) {
+    info!("started");
+
+    // The largest request the Vector Store accepts.
+    let (term, content) = content_past_request_body_limit(0);
+    fixture.insert_documents([(1, content)]).await;
+    fixture.create_fts_index().await;
+
+    let excerpts = fixture.highlight_excerpts(term).await;
+
+    let excerpt = &excerpts[&1];
+    assert!(
+        excerpt.contains(&format!("<b>{term}</b>")),
+        "expected the term marked in a document filling the request body, got: {excerpt}"
+    );
+
+    info!("finished");
+}
+
+#[e2etest::test(group = fts)]
+async fn highlight_of_content_over_the_request_body_limit_returns_error(fixture: Arc<Fixture>) {
+    info!("started");
+
+    // One byte past the limit. The smallest request the Vector Store rejects.
+    // Splitting the request across rows (SCYLLADB-4871) can't help a single row,
+    // so this should keep failing once that lands.
+    let (term, content) = content_past_request_body_limit(1);
+    fixture.insert_documents([(1, content)]).await;
+    fixture.create_fts_index().await;
+
+    // BM25() alone ships primary keys only, so the oversized row still ranks.
+    assert_eq!(
+        fixture.bm25_search_pks(term).await,
+        vec![1],
+        "BM25() must still match a document too large to highlight"
+    );
+
+    // BM25_HIGHLIGHT() has to ship the row's whole text, which the Vector Store
+    // rejects, and the coordinator turns that into a query error.
+    let err = fixture.highlight_search_error(term).await;
+
+    assert!(
+        err.contains("HTTP status 413"),
+        "unexpected error message: {err}"
+    );
+
+    info!("finished");
+}
+
+#[e2etest::test(group = fts)]
+async fn highlight_of_rows_over_the_request_body_limit_together_returns_error(
+    fixture: Arc<Fixture>,
+) {
+    info!("started");
+
+    // Each row is well within the limit, only together do they go past it.
+    let (term, content) = content_of_len(REQUEST_BODY_LIMIT / 2);
+    fixture
+        .insert_documents((1..=3).map(|pk| (pk, content.clone())))
+        .await;
+    fixture.create_fts_index().await;
+
+    assert_eq!(
+        fixture.bm25_search_pks(term).await.len(),
+        3,
+        "BM25() must still match every row"
+    );
+
+    // The coordinator sends every row in one request. Splitting it (SCYLLADB-4871)
+    // should make this pass, and then this test has to change.
+    let err = fixture.highlight_search_error(term).await;
+
+    assert!(
+        err.contains("HTTP status 413"),
+        "unexpected error message: {err}"
+    );
 
     info!("finished");
 }
