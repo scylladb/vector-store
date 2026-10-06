@@ -241,6 +241,12 @@ Check with `vsbench status`. It shows:
 - **cql vs http.** `cql` goes through Scylla and measures recall. `http` hits
   Vector Store directly and has **no recall**, so pair HTTP comparisons with a
   CQL run.
+- **The client's network comes first.** CQL searches of 768-d vectors exceed
+  the `r8g.2xlarge` client's ENA allowance at about 8–12K QPS
+  (`net_allowance_exceeded`), while the Vector Store is at 55–65% CPU. For
+  search-pressure experiments (saturating Vector Store on purpose) use
+  `http`, a bigger `--client-type`, or a second client; a flagged run
+  measures the client.
 
 The summary has one row per run:
 - `run_id`, `conc`, client `qps`;
