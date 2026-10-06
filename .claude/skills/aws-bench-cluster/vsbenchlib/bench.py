@@ -18,7 +18,7 @@ import re
 import shlex
 import statistics
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from types import ModuleType
 from typing import Any
@@ -107,6 +107,7 @@ class SearchOptions:
     label: str | None = None
     timeout_s: int = config.DEFAULT_FOREGROUND_SECONDS
     extra_args: tuple[str, ...] = ()
+    perf: tuple[str, ...] = ()  # nodes to profile (perf, pidstat) during every measured run
     comparison_id: str | None = None  # set by ab()
     arm: str | None = None
     first_repeat: int = 1
@@ -303,6 +304,7 @@ def check_serving(
 def validate_search(state: State, opts: SearchOptions) -> dict[str, Any]:
     """PreconditionError for searches that would panic or mismeasure; returns the live {engine, options}."""
     _check_search_args(opts)
+    _check_profile(state, opts)
     load = _check_search_load(state, opts)
     _check_expiry(state, search_seconds(opts), proc.utcnow())
     if opts.duration_s < results.MIN_WINDOW_S:
@@ -360,6 +362,60 @@ def load_steps(state: State, entry: dict[str, Any], opts: LoadOptions, plan: dic
     if "index" in todo:
         steps.append(_build_index_step(state, plan["index"], plan["options"], opts.local_index, opts.index_timeout_s))
     return steps
+
+
+PROFILE_SCRIPT = "profile-step.sh"
+PROFILE_ROLES = {"vs": {"PROCESS": "vector-store"}, "scylla": {"CONTAINER": "scylla"}}
+PROFILE_DELAY_S = 4  # job start latency plus the tool's 2 s start delay
+PROFILE_MARGIN_S = 10  # the capture ends this long before the measured window does
+PROFILE_MIN_DURATION_S = 20
+
+
+def _check_profile(state: State, opts: SearchOptions) -> None:
+    for name in opts.perf:
+        if st.node(state, name)["role"] not in PROFILE_ROLES:
+            raise PreconditionError(f"--perf {name}: only Scylla and Vector Store nodes can be profiled")
+    if opts.perf and opts.duration_s < PROFILE_MIN_DURATION_S:
+        raise PreconditionError(
+            f"--perf needs --duration >= {PROFILE_MIN_DURATION_S}s (the capture is duration - {PROFILE_MARGIN_S}s)"
+        )
+
+
+def profile_trigger(
+    cluster: str, job_id: str, state: State, opts: SearchOptions, plan: Sequence[dict[str, Any]]
+) -> Callable[[str], None] | None:
+    """The on_step callback for job_wait: when a measured step begins, start a bounded perf/pidstat
+    capture (node/profile-step.sh) on every --perf node as its own detached job, and record the
+    job id under the search job so finalize can pull the reports. None without --perf."""
+    if not opts.perf:
+        return None
+    measured, record_s = {item["name"] for item in plan}, max(5, opts.duration_s - PROFILE_MARGIN_S)
+
+    def on_step(step: str) -> None:
+        if step not in measured:
+            return
+        for name in opts.perf:
+            pjob, role = remote.new_job_id("profile"), st.node(state, name)["role"]
+            env = {"OUT_DIR": f"{remote.job_dir(pjob)}/profile", "RECORD_S": str(record_s)}
+            env.update(DELAY_S=str(PROFILE_DELAY_S), **PROFILE_ROLES[role])
+            try:
+                remote.job_start(
+                    cluster, name, pjob, script=remote.ensure_script(cluster, name, PROFILE_SCRIPT), env=env
+                )
+            except VsbenchError as err:
+                proc.warn(f"{name}: profile of {step} not started: {err}")
+                continue
+            st.update(cluster, lambda s, step=step, name=name, pjob=pjob: _with_profile(s, job_id, step, name, pjob))
+            proc.log(f"{job_id}: profiling {step} on {name} for {record_s}s (job {pjob})")
+
+    return on_step
+
+
+def _with_profile(state: State, job_id: str, step: str, node: str, pjob: str) -> State:
+    job = state["jobs"][job_id]
+    profiles = {**(job["params"].get("profiles") or {})}
+    profiles[step] = {**profiles.get(step, {}), node: pjob}
+    return _with_job(state, job_id, {**job, "params": {**job["params"], "profiles": profiles}})
 
 
 def search_plan(opts: SearchOptions) -> list[dict[str, Any]]:
@@ -479,11 +535,13 @@ def search(cluster: str, opts: SearchOptions) -> list[dict[str, Any]]:
     live, load, plan = validate_search(state, opts), state["load"], search_plan(opts)
     params = {**dataclasses.asdict(opts), "steps": plan, "index": load["index"], "vs_engine": live["engine"]}
     params.update(concurrency=list(opts.concurrency), extra_args=list(opts.extra_args), index_options=live["options"])
+    params["profile"] = list(opts.perf)
     params["snapshot"] = {"deployed": state.get("deployed"), "load": load}
     job_id = remote.new_job_id("search")
     _start_job(cluster, job_id, "search", search_steps(state, opts, load, plan), params)
     proc.log(f"{len(plan)} measured run(s), about {proc.format_duration(search_seconds(opts))}")
-    return job_wait(cluster, job_id, opts.timeout_s, started=started)
+    trigger = profile_trigger(cluster, job_id, state, opts, plan)
+    return job_wait(cluster, job_id, opts.timeout_s, started=started, on_step=trigger)
 
 
 def ab_order(repeat: int) -> list[str]:

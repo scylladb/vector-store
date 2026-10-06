@@ -34,7 +34,18 @@ OPTION_CLASSES["validate"] = "SearchOptions"
 OPTION_FIELDS = {
     "load": ("dataset", "index_options", "rf", "concurrency", "local_index", "resume", "index_timeout_s", "timeout_s"),
     "index": ("index_options", "index_timeout_s", "timeout_s"),
-    "search": ("kind", "limit", "duration_s", "warmup_s", "concurrency", "repeat", "bucket", "label", "timeout_s"),
+    "search": (
+        "kind",
+        "limit",
+        "duration_s",
+        "warmup_s",
+        "concurrency",
+        "repeat",
+        "bucket",
+        "label",
+        "perf",
+        "timeout_s",
+    ),
 }
 OPTION_FIELDS["validate"] = OPTION_FIELDS["search"]
 OPTION_FIELDS["ab"] = ("a", "b", *OPTION_FIELDS["search"])  # bucket, timeout_s and extra args too

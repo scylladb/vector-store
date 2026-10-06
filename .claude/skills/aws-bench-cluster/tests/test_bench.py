@@ -441,6 +441,12 @@ class ValidationTest(HomeTestCase):
         self.check(state, bench.SearchOptions("cql"), vs_status(state, build_id=None))
         self.check(state, bench.SearchOptions("cql"), vs_status(state))
 
+    def test_profile_nodes_are_checked_before_anything_runs(self) -> None:
+        with self.assertRaises(PreconditionError) as ctx:
+            self.check(self.state, bench.SearchOptions("cql", perf=("client",)))
+        self.assertIn("only Scylla and Vector Store", str(ctx.exception))
+        self.check(self.state, bench.SearchOptions("cql", perf=("vs-0",)))
+
     def test_bad_arguments(self) -> None:
         for opts in (
             bench.SearchOptions("cql", concurrency=(64, 64)),

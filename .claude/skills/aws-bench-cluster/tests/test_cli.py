@@ -119,6 +119,7 @@ class ParseTest(unittest.TestCase):
     EVERY_COMMAND = [
         ["doctor", "--json"],
         ["login", "--username", "first.last@scylladb.com", "--timeout", "5m"],
+        ["bench", "search", "cql", "--perf", "vs-0,scylla-0", "--duration", "30s"],
         ["up", "--scylla-nodes", "3", "--vs-nodes", "2", "--scylla-type", "i8g.4xlarge", "--vs-type", "r8g.8xlarge"],
         ["up", "--client-type", "r8g.xlarge", "--az", "us-east-1b", "--subnet-id", "subnet-1", "--ttl", "6h"],
         ["up", "--billing-project", "Vector Search: DiskANN", "--node-disk-gb", "80", "--client-disk-gb", "300"],

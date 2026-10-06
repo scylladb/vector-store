@@ -433,6 +433,19 @@ Raw endpoints on the nodes:
   works because Prometheus keeps 30 days.
 - **Limits.** Jobs run with `LimitNOFILE=1048576`, because `search-http` opens
   one socket per in-flight request.
+- **Profiles (`--perf NODE`).** When the followed log shows a measured step
+  beginning, `vsbench` starts `node/profile-step.sh` on each listed node as
+  its own detached job. The script waits 4 s (job start latency plus the
+  tool's 2 s start delay), then records `perf record -g` at 199 Hz and
+  `pidstat` for the step's duration minus 10 s, so the capture stays inside
+  the measured window, and renders `perf report` by symbol and by DSO. On a
+  Scylla node the container's main process is profiled with `--namespaces`,
+  so its binaries resolve through `/proc/<pid>/root`. At finalize the three
+  text reports are pulled into `results/artifacts/profiles/<run_id>/<node>/`;
+  a capture still rendering after 45 s is recorded as an error with the job
+  id, so it can be pulled by hand. `perf` and `sysstat` come from user-data
+  on scylla and vs nodes (best effort: a kernel without a `linux-tools`
+  package only loses this feature).
 - **Foreground limit.** It exits 75 just below the agent's 10-minute Bash
   limit (the default limit is 2 minutes, hence background runs).
   - The budget covers the whole command, including builds and uploads, and

@@ -110,11 +110,14 @@ def _start_job(cluster: str, job_id: str, kind: str, steps: Sequence[str], param
     proc.log(f"started job {job_id} on {CLIENT} ({len(steps)} steps)")
 
 
-def _line_printer(job_id: str, raw_output: bool) -> Callable[[str], None]:
-    """raw: the tool's output on stdout; -v: the log on stderr; else step starts/failures, `vsbench:` lines."""
+def _line_printer(job_id: str, raw_output: bool, on_step: Callable[[str], None] | None = None) -> Callable[[str], None]:
+    """raw: the tool's output on stdout; -v: the log on stderr; else step starts/failures, `vsbench:` lines.
+    `on_step` gets the name of every step as it begins (bench.profile_trigger)."""
 
     def on_line(line: str) -> None:
         ours, begin, end = line.startswith(_OWN_LINES), _BEGIN_RE.match(line), _END_RE.match(line)
+        if begin and on_step is not None:
+            on_step(begin.group(1))
         if raw_output and not ours:
             print(line, flush=True)
         elif proc.VERBOSE and not raw_output:
@@ -129,10 +132,12 @@ def _line_printer(job_id: str, raw_output: bool) -> Callable[[str], None]:
     return on_line
 
 
-def _follow(cluster: str, job_id: str, timeout_s: int, raw_output: bool = False) -> int:
+def _follow(
+    cluster: str, job_id: str, timeout_s: int, raw_output: bool = False, on_step: Callable[[str], None] | None = None
+) -> int:
     node = _job(st.require(cluster), job_id)["node"]
     try:
-        return remote.job_follow(cluster, node, job_id, timeout_s, _line_printer(job_id, raw_output))
+        return remote.job_follow(cluster, node, job_id, timeout_s, _line_printer(job_id, raw_output, on_step))
     except (StillRunning, remote.JobNotFound):
         raise
     except VsbenchError:
@@ -194,7 +199,14 @@ def _raise_failed(cluster: str, job_id: str, job: dict[str, Any], records: list[
     raise VsbenchError(message + (" (the step reached its timeout)" if code == 124 else ""), "; ".join(hints))
 
 
-def job_wait(cluster: str, job_id: str, timeout_s: int, *, started: float | None = None) -> list[dict[str, Any]]:
+def job_wait(
+    cluster: str,
+    job_id: str,
+    timeout_s: int,
+    *,
+    started: float | None = None,
+    on_step: Callable[[str], None] | None = None,
+) -> list[dict[str, Any]]:
     """Follow a job, finalize it, return its records; raise if it failed (also when an earlier command
     finalized it). timeout_s is the foreground budget counted from `started` (time.monotonic(), default
     now), including a finalize reserve; StillRunning when the job outlives it."""
@@ -206,7 +218,7 @@ def job_wait(cluster: str, job_id: str, timeout_s: int, *, started: float | None
             _raise_failed(cluster, job_id, job, records, job.get("exit_code"))
         return records
     budget = follow_budget(timeout_s, started)
-    code = _follow(cluster, job_id, budget, raw_output=job.get("kind") == "raw")
+    code = _follow(cluster, job_id, budget, raw_output=job.get("kind") == "raw", on_step=on_step)
     records = finalize_job(cluster, job_id)
     job = _job(st.require(cluster), job_id)
     if code == 0 and not job.get("error"):
@@ -328,6 +340,8 @@ def _search_record(cluster: str, view: State, out: _Outcome, item: dict[str, Any
     extra.update({key: params.get(key) for key in ("comparison_id", "arm", "label", "index_options", "vs_engine")})
     extra.update(started_at=step["begin"], ended_at=step["end"], server_metrics_error=server_error)
     extra.update(index_name=params.get("index"), log=results.save_log(cluster, run_id, step["text"]))
+    profile = _pull_profiles(cluster, run_id, (params.get("profiles") or {}).get(item["name"]) or {})
+    extra.update({"profile": profile} if profile else {})
     if not measured:
         error = _error_of(step["text"]) or ("no measurements in the log" if code == 0 else f"exit {code}")
         extra.update(error_tail=_tail(step["text"]), error=error, failed_step=step["name"])
@@ -335,6 +349,43 @@ def _search_record(cluster: str, view: State, out: _Outcome, item: dict[str, Any
     record_params.update(concurrency=item["concurrency"], extra_args=params.get("extra_args") or [], cpuset=out.cpuset)
     kind, client, window = f"search-{params['kind']}", parsed if measured else None, window if measured else None
     return results.make_record(kind, view, record_params, client, server, window, extra)
+
+
+PROFILE_FILES = ("perf.txt", "perf-dso.txt", "pidstat.txt")
+PROFILE_WAIT_S = 45  # a capture still rendering its reports after this is recorded as an error
+
+
+def _pull_profiles(cluster: str, run_id: str, jobs: dict[str, str]) -> dict[str, Any]:
+    """{node: {job_id, dir, files | error}}: the reports of the run's profile jobs, downloaded into
+    results/artifacts/profiles/<run_id>/<node>/. A failure never loses the result."""
+    paths, profile = st.paths(cluster), {}
+    for node, pjob in jobs.items():
+        local_dir = paths.results_dir / "artifacts" / "profiles" / run_id / node
+        info: dict[str, Any] = {"job_id": pjob, "dir": str(local_dir.relative_to(paths.root))}
+        try:
+            _wait_profile(cluster, node, pjob)
+            for name in PROFILE_FILES:
+                remote.download(cluster, node, f"{remote.job_dir(pjob)}/profile/{name}", local_dir / name)
+            info["files"] = list(PROFILE_FILES)
+        except VsbenchError as err:
+            info["error"] = str(err).splitlines()[0]
+        profile[node] = info
+    return profile
+
+
+def _wait_profile(cluster: str, node: str, pjob: str) -> None:
+    deadline, where = time.monotonic() + PROFILE_WAIT_S, f"{remote.job_dir(pjob)}/profile"
+    while True:
+        progress = remote.job_poll(cluster, node, pjob, 0, max_bytes=1)
+        if progress.exit_code is not None:
+            if progress.exit_code != 0:
+                raise VsbenchError(
+                    f"profile job {pjob} failed (exit {progress.exit_code}); log: {remote.job_dir(pjob)}/log"
+                )
+            return
+        if time.monotonic() >= deadline:
+            raise VsbenchError(f"profile job {pjob} is still running; pull its reports later from {node}:{where}")
+        time.sleep(2)
 
 
 def _finalize_search(cluster: str, state: State, out: _Outcome) -> Finalized:

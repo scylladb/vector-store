@@ -377,6 +377,7 @@ def _search_options(parser: argparse.ArgumentParser, repeat: int) -> None:
     parser.add_argument("--repeat", type=_positive, default=repeat, help=f"{help_repeat}; 3+ for a noise estimate")
     parser.add_argument("--bucket", type=_count, help="filter bucket 0-8 (a --local-index load needs it)")
     parser.add_argument("--label", help="free text stored with the results")
+    parser.add_argument("--perf", type=lambda t: t.split(","), default=[], help="nodes to profile, e.g. vs-0,scylla-0")
 
 
 def _job_commands(sub: Any, common: argparse.ArgumentParser) -> None:

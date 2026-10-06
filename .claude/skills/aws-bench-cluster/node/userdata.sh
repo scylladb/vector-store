@@ -157,6 +157,12 @@ fi
 apt_get update
 apt_get install "${packages[@]}"
 usermod -aG docker ubuntu
+if [[ $ROLE != client ]]; then
+    # perf and pidstat for `vsbench bench search --perf`. Best effort: a kernel without a
+    # matching linux-tools package must not fail the bootstrap.
+    apt_get install sysstat linux-tools-common "linux-tools-$(uname -r)" ||
+        echo "vsbench: warning: perf/sysstat not installed; bench search --perf cannot profile this node"
+fi
 
 # --- 5. sysctls (scylla-kernel-conf equivalents, see research scylla-docker §3) ---
 {
