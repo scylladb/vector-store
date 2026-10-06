@@ -659,9 +659,10 @@ class ResultsTest(Case):
         self.assertEqual(code, 0)
 
     def test_compare_honours_options_given_before_it(self) -> None:
-        results = self.fake("results", load_records=mock.Mock(return_value=[{"run_id": "r1"}]), COMPARE_COLUMNS=["a"])
+        results = self.fake("results", load_records=mock.Mock(return_value=[{"run_id": "r1"}]))
         results.compare.return_value = {"groups": [], "warnings": []}
-        results.format_markdown.return_value = "| md |"
+        display = self.fake("results_format", COMPARE_COLUMNS=["a"])
+        display.format_markdown.return_value = "| md |"
         code, out, _err = self.run_cli("results", "--json", "compare", "r1")
         self.assertEqual((code, json.loads(out)), (0, {"groups": [], "warnings": []}))
         code, out, _err = self.run_cli("results", "--format", "md", "compare", "r1")

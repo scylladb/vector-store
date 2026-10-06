@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from types import ModuleType
 from typing import Any
 
-from . import build, config, proc, prom, remote, results  # noqa: F401 -- prom: tests patch bench.prom
+from . import build, config, proc, prom, remote, results, results_format  # noqa: F401 -- prom: tests patch bench.prom
 from . import state as st
 from .bench_jobs import (  # noqa: F401 -- re-exported: bench.<name> is the public API
     CLIENT,
@@ -669,7 +669,7 @@ def format_summary(records: Sequence[dict[str, Any]]) -> str:
         lines.append(f"{r.get('run_id')} {r.get('kind')} exit={r.get('exit')} {' '.join(took)}".rstrip())
         lines.append(f"  index={index.get('name')} options={json.dumps(index.get('options'))}")
         lines += [f"  error: {r['error']}"] if r.get("error") else []
-    lines += [results.format_table(searches, SEARCH_COLUMNS)] if searches else []
+    lines += [results_format.format_table(searches, SEARCH_COLUMNS)] if searches else []
     notes = {f"server metrics: {r['server_metrics_error']}" for r in searches if r.get("server_metrics_error")}
     notes |= {f"{r['run_id']} failed: {r['error']}" for r in searches if r.get("error")}
     return "\n".join(lines + [f"note: {note}" for note in sorted(notes)])

@@ -38,7 +38,7 @@ checked with shellcheck.
 | `vsbenchlib/build.py` + `cross/` | source specs, version stamping, aarch64 cross build, build cache |
 | `vsbenchlib/deploy.py`, `monitoring.py` | Scylla, Vector Store, benchmark binary, scylla-monitoring |
 | `vsbenchlib/bench.py`, `bench_jobs.py` | datasets, load/index/search/ab, detached jobs and their finalization |
-| `vsbenchlib/results.py`, `prom.py` | log parsing, result records, comparison; Prometheus queries and window math |
+| `vsbenchlib/results.py`, `results_format.py`, `prom.py` | log parsing, result records, comparison; their text/markdown tables; Prometheus queries and window math |
 | `vsbenchlib/remote.py`, `guard.py` | ssh, transfers, detached jobs; the `exec`/`ssh` power-off and TTL guard |
 | `vsbenchlib/retro.py` | history, notes, retrospective digest |
 | `vsbenchlib/state.py`, `config.py`, `proc.py`, `awsapi.py` | local state and locks, pins and defaults, process helpers, `aws` CLI wrapper |

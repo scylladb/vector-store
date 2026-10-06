@@ -537,10 +537,10 @@ def print_records(records: list[dict[str, Any]], fmt: str = "table") -> None:
     if not records:
         out("(no results)")
         return
-    results = load_module("results")
-    rows = [results.summary_row(r) for r in records]
-    render = results.format_markdown if fmt == "md" else results.format_table
-    out(render(rows, results.RESULTS_COLUMNS))
+    display = load_module("results_format")
+    rows = [display.summary_row(r) for r in records]
+    render = display.format_markdown if fmt == "md" else display.format_table
+    out(render(rows, display.RESULTS_COLUMNS))
 
 
 # --- context and warnings -------------------------------------------------------------
