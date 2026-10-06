@@ -139,6 +139,10 @@ def _count(text: str) -> int:
     return int(text)
 
 
+def _node_list(text: str) -> list[str]:  # names are checked against the state by bench
+    return [name.strip() for name in text.split(",")]
+
+
 def _int_list(text: str) -> list[int]:
     return [_positive(part.strip()) for part in text.split(",")]
 
@@ -373,6 +377,7 @@ def _search_options(parser: argparse.ArgumentParser, repeat: int) -> None:
     parser.add_argument("--repeat", type=_positive, default=repeat, help=f"{help_repeat}; 3+ for a noise estimate")
     parser.add_argument("--bucket", type=_count, help="filter bucket 0-8 (a --local-index load needs it)")
     parser.add_argument("--label", help="free text stored with the results")
+    parser.add_argument("--perf", type=_node_list, default=[], help="nodes to profile with perf, e.g. vs-0,scylla-0")
 
 
 def _job_commands(sub: Any, common: argparse.ArgumentParser) -> None:

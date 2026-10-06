@@ -345,3 +345,96 @@ if __name__ == "__main__":
     import unittest
 
     unittest.main()
+
+
+class ProfileTest(HomeTestCase):
+    """`bench search --perf NODE`: captures start when a measured step begins; finalize pulls them."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.state = make_state(scylla=1, vs=1)
+        st.save("t", self.state)
+        self.save = lambda s: st.save("t", s)
+        st.save("t", bench._with_job(st.load("t"), JOB, {"kind": "search", "node": "client", "params": {}}))
+        self.patch(remote, "ensure_script", side_effect=lambda c, n, s: f"/var/lib/vsbench/scripts/{s}")
+        self.start = self.patch(remote, "job_start")
+        self.patch(remote, "new_job_id", side_effect=[f"p-{i}" for i in range(10)])
+        self.patch(bench.proc, "log")
+        self.warn = self.patch(bench.proc, "warn")
+
+    def test_trigger_starts_captures_on_measured_steps_only(self) -> None:
+        opts = bench.SearchOptions("cql", duration_s=60, perf=("vs-0", "scylla-0"))
+        plan = bench.search_plan(opts)
+        on_step = bench.profile_trigger("t", JOB, st.load("t"), opts, plan)
+        assert on_step is not None
+        on_step("warmup-c64-r1")
+        self.start.assert_not_called()
+        on_step("search-c64-r1")
+        self.assertEqual(self.start.call_count, 2)
+        (first, second) = (c.kwargs for c in self.start.call_args_list)
+        self.assertEqual(self.start.call_args_list[0].args, ("t", "vs-0", "p-0"))
+        self.assertEqual(first["script"], "/var/lib/vsbench/scripts/profile-step.sh")
+        self.assertEqual(
+            first["env"],
+            {
+                "OUT_DIR": "/var/lib/vsbench/jobs/p-0/profile",
+                "RECORD_S": "50",
+                "DELAY_S": "4",
+                "PROCESS": "vector-store",
+            },
+        )
+        self.assertEqual(second["env"]["CONTAINER"], "scylla")
+        self.assertEqual(
+            st.load("t")["jobs"][JOB]["params"]["profiles"], {"search-c64-r1": {"vs-0": "p-0", "scylla-0": "p-1"}}
+        )
+
+    def test_trigger_is_none_without_profile_and_tolerates_a_failed_start(self) -> None:
+        opts = bench.SearchOptions("cql", duration_s=60)
+        self.assertIsNone(bench.profile_trigger("t", JOB, st.load("t"), opts, bench.search_plan(opts)))
+        opts = bench.SearchOptions("cql", duration_s=60, perf=("vs-0",))
+        self.start.side_effect = VsbenchError("ssh down")
+        on_step = bench.profile_trigger("t", JOB, st.load("t"), opts, bench.search_plan(opts))
+        assert on_step is not None
+        on_step("search-c64-r1")
+        self.warn.assert_called_once()
+        self.assertNotIn("profiles", st.load("t")["jobs"][JOB]["params"])
+
+    def test_profile_nodes_and_duration_are_validated(self) -> None:
+        for opts, text in (
+            (bench.SearchOptions("cql", perf=("client",)), "only Scylla and Vector Store"),
+            (bench.SearchOptions("cql", duration_s=10, perf=("vs-0",)), "--duration >= 20s"),
+        ):
+            with self.assertRaises(PreconditionError) as ctx:
+                bench._check_profile(self.state, opts)
+            self.assertIn(text, str(ctx.exception))
+        with self.assertRaises(VsbenchError):
+            bench._check_profile(self.state, bench.SearchOptions("cql", perf=("nope",)))
+        bench._check_profile(self.state, bench.SearchOptions("cql", perf=("vs-0", "scylla-0")))
+
+    def test_finalize_pulls_the_reports_or_records_the_error(self) -> None:
+        polls = {"p-ok": progress(0), "p-bad": progress(1), "p-slow": progress(None)}
+        self.patch(remote, "job_poll", side_effect=lambda c, n, j, o, **kw: polls[j])
+        pulled = self.patch(remote, "download")
+        self.patch(bench_jobs, "PROFILE_WAIT_S", new=0)
+        profile = bench_jobs._pull_profiles("t", "run-1", {"vs-0": "p-ok", "scylla-0": "p-bad", "vs-1": "p-slow"})
+        root = st.paths("t").root
+        self.assertEqual(
+            profile["vs-0"],
+            {
+                "job_id": "p-ok",
+                "dir": "results/artifacts/profiles/run-1/vs-0",
+                "files": ["perf.txt", "perf-dso.txt", "pidstat.txt"],
+            },
+        )
+        self.assertEqual(
+            pulled.call_args_list[0].args,
+            (
+                "t",
+                "vs-0",
+                "/var/lib/vsbench/jobs/p-ok/profile/perf.txt",
+                root / "results/artifacts/profiles/run-1/vs-0/perf.txt",
+            ),
+        )
+        self.assertIn("failed (exit 1)", profile["scylla-0"]["error"])
+        self.assertIn("still running", profile["vs-1"]["error"])
+        self.assertEqual(pulled.call_count, 3)

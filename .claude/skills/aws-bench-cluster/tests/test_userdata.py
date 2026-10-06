@@ -160,6 +160,7 @@ class UserdataOrderTest(unittest.TestCase):
             "mkfs.xfs -f -K -m rmapbt=0 -m reflink=0",
             "noatime,discard,lazytime,nofail",
             "packages+=(xfsprogs mdadm nvme-cli)",
+            'apt_get install sysstat linux-tools-common "linux-tools-$(uname -r)" ||',  # perf, best effort
         ):
             self.assertIn(needle, self.text)
 

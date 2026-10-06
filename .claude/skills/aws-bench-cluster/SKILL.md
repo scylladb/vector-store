@@ -387,6 +387,15 @@ comparison.
   - `vsbench prom api label/__name__/values 'match[]={job="vector_search"}'`
   - Write relative times as `now-15m`, never `-15m`.
   - The metric catalog and ready-made queries are in [reference.md](reference.md#metrics).
+- CPU profiles: `vsbench bench search cql --concurrency 64 --perf vs-0`
+  records `perf` (call graphs, 199 Hz) and `pidstat` on that node during
+  every measured run and pulls the reports into
+  `results/artifacts/profiles/<run_id>/<node>/` (`perf.txt`, `perf-dso.txt`,
+  `pidstat.txt`); the record's `profile` field holds the paths. Scylla nodes
+  work too (`--perf vs-0,scylla-0`), and so does `bench ab`. The capture is
+  started when the command sees the step begin, so the command must stay
+  attached to the job (runs after an exit 75 are not profiled). It needs
+  `--duration` of 20 s or more.
 - node_exporter directly: `vsbench exec vs-0 -- 'curl -s 127.0.0.1:9100/metrics | grep ^node_memory'`.
 - Logs: `vsbench logs vs-0 --service vector-store --since 10m`,
   `vsbench logs scylla-0 --service scylla -n 200`.
