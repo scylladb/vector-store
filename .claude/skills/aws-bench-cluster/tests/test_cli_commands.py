@@ -195,6 +195,8 @@ class StatusTest(Case):
         def monitoring(cluster: str) -> dict[str, Any]:
             raise PreconditionError("monitoring is not deployed", "run: vsbench deploy monitoring")
 
+        index = {"index": "i1", "index_size": 10, "base_rows": 10, "missing": 0, "verdict": "in sync"}
+        self.fake("prom", index_status=lambda c, s: {**index, "state_load": s.get("load")})
         return self.fake(
             "deploy",
             scylla_status=lambda c: {"ok": True, "un": 1, "nodes": [{"node": "scylla-0", "status": "UN"}]},
@@ -219,6 +221,9 @@ class StatusTest(Case):
         self.assertFalse(doc["overdue"])
         self.assertGreater(doc["expires_in_s"], 86000)
         self.assertEqual([n["name"] for n in doc["nodes"]], ["scylla-0", "vs-0", "client"])
+        # the index section comes from prom.index_status with the cluster state
+        self.assertEqual((doc["live"]["index"]["verdict"], doc["live"]["index"]["missing"]), ("in sync", 0))
+        self.assertEqual(doc["live"]["index"]["state_load"], self.state["load"])
 
     def test_status_text_and_overdue(self) -> None:
         self.fake_deploy()
@@ -233,7 +238,7 @@ class StatusTest(Case):
 
     def test_status_without_deploy_module(self) -> None:
         with mock.patch.object(cli_cluster, "load_module", side_effect=VsbenchError("cannot be loaded")):
-            live = cli_cluster._live_status(CLUSTER)
+            live = cli_cluster._live_status(CLUSTER, self.state)
         self.assertEqual(live["scylla"], {"error": "cannot be loaded"})
 
     def test_status_refresh_uses_aws(self) -> None:

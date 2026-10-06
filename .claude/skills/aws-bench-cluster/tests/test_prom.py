@@ -35,7 +35,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from vsbenchlib import prom  # noqa: E402
-from vsbenchlib.proc import VsbenchError  # noqa: E402
+from vsbenchlib.proc import PreconditionError, VsbenchError  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 UTC = datetime.timezone.utc
@@ -417,3 +417,58 @@ class FormatVectorTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def vector_payload(items: list[tuple[dict[str, str], str]]) -> dict[str, Any]:
+    result = [{"metric": metric, "value": [1_700_000_000, value]} for metric, value in items]
+    return {"status": "success", "data": {"resultType": "vector", "result": result}}
+
+
+class IndexStatusTest(unittest.TestCase):
+    """prom.index_status: index rows vs the rows vsbench put into the table, CDC lags vs their baselines."""
+
+    STATE = {
+        "load": {"index": "vsb_idx_1", "keyspace": "vsb_keyspace", "rows": 1_000_000, "churn_rows": 225_000},
+        "deployed": {"monitoring": {"version": "4.16.1"}},
+    }
+
+    def responder(self, size: str | None, fine: str, wide: str):
+        def respond(cluster: str, command: str, timeout: float) -> subprocess.CompletedProcess[str]:
+            _url, params = curl_request(command)
+            promql = params["query"]
+            self.assertIn('keyspace="vsb_keyspace",index_name="vsb_idx_1"', promql)
+            if promql.startswith("max(index_size"):
+                return completed(vector_payload([({}, size)] if size is not None else []))
+            if "cdc_last_processed_timestamp_seconds" in promql:
+                return completed(vector_payload([({"reader": "fine"}, fine), ({"reader": "wide"}, wide)]))
+            self.assertTrue(promql.startswith("cdc_reader_up"))
+            return completed(vector_payload([({"reader": "fine"}, "1"), ({"reader": "wide"}, "1")]))
+
+        return respond
+
+    def test_behind_names_the_missing_rows_and_the_lagging_reader(self) -> None:
+        with mock.patch.object(prom, "_run_on_client", side_effect=self.responder("1100000", "12.5", "150.2")):
+            doc = prom.index_status("c1", self.STATE)
+        self.assertEqual((doc["index_size"], doc["base_rows"], doc["missing"]), (1_100_000, 1_225_000, 125_000))
+        self.assertEqual((doc["fine_lag_s"], doc["wide_lag_s"], doc["wide_reader_up"]), (12.5, 150.2, 1.0))
+        self.assertEqual(doc["verdict"], "behind: 125000 rows not in the index, wide lag 150s (idle ~46s)")
+
+    def test_in_sync_tolerates_the_idle_lags(self) -> None:
+        state = {**self.STATE, "load": {**self.STATE["load"], "churn_rows": 0}}
+        with mock.patch.object(prom, "_run_on_client", side_effect=self.responder("1000000", "11.0", "47.0")):
+            doc = prom.index_status("c1", state)
+        self.assertEqual((doc["missing"], doc["verdict"]), (0, "in sync"))
+
+    def test_unknown_without_a_scraped_size_and_extra_rows(self) -> None:
+        with mock.patch.object(prom, "_run_on_client", side_effect=self.responder(None, "11.0", "47.0")):
+            doc = prom.index_status("c1", self.STATE)
+        self.assertIsNone(doc["index_size"])
+        self.assertTrue(doc["verdict"].startswith("unknown"))
+        with mock.patch.object(prom, "_run_on_client", side_effect=self.responder("1225002", "11.0", "47.0")):
+            doc = prom.index_status("c1", self.STATE)
+        self.assertEqual(doc["verdict"], "2 rows in the index beyond vsbench's count (rows written outside vsbench?)")
+
+    def test_no_load_and_no_monitoring(self) -> None:
+        self.assertEqual(prom.index_status("c1", {}), {"note": "no load"})
+        with self.assertRaises(PreconditionError):
+            prom.index_status("c1", {"load": self.STATE["load"]})

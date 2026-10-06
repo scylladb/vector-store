@@ -199,6 +199,12 @@ Check with `vsbench status`. It shows:
 - versions per node and the Scylla `nodetool` summary;
 - Vector Store status and indexes;
 - monitoring targets;
+- `index (live)`: `index_size` against the rows vsbench put into the base
+  table (`base_rows` = the load's rows plus churn), the rows `missing` from
+  the index, the fine and wide CDC reader lags, and a verdict. Idle lags are
+  about 10 s (fine) and 46 s (wide); `behind` means rows are missing or a
+  lag is over three times its idle value, i.e. ingest has stalled or is
+  catching up;
 - TTL left;
 - the SSH tunnel line for Grafana (`http://127.0.0.1:13000`, dashboard
   "Vector Search") and Prometheus (`http://127.0.0.1:19090`).

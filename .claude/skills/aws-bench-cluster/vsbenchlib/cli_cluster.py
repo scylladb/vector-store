@@ -205,16 +205,19 @@ def tunnel_command(cluster: str) -> str:
     return f"ssh -F {shlex.quote(str(st.paths(cluster).ssh_config))} {TUNNEL_OPTIONS} {forwards} client"
 
 
-def _live_status(cluster: str) -> dict[str, Any]:
-    """deploy.scylla_status / vs_status / monitoring_status in parallel; failures become {error, hint}."""
+def _live_status(cluster: str, state: st.State) -> dict[str, Any]:
+    """deploy.scylla_status / vs_status / monitoring_status and prom.index_status (index rows vs the
+    base table, CDC lags) in parallel; failures become {error, hint}."""
+    live: dict[str, Any] = {}
     try:
         deploy = load_module("deploy")
+        calls = {"scylla": deploy.scylla_status, "vector_store": deploy.vs_status}
+        calls["monitoring"] = deploy.monitoring_status
     except VsbenchError as err:
-        return dict.fromkeys(("scylla", "vector_store", "monitoring"), {"error": str(err)})
-    calls = {"scylla": deploy.scylla_status, "vector_store": deploy.vs_status, "monitoring": deploy.monitoring_status}
+        calls, live = {}, dict.fromkeys(("scylla", "vector_store", "monitoring"), {"error": str(err)})
+    calls["index"] = lambda c: load_module("prom").index_status(c, state)
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(calls)) as pool:
         futures = {key: pool.submit(func, cluster) for key, func in calls.items()}
-    live: dict[str, Any] = {}
     for key, future in futures.items():
         try:
             live[key] = future.result()
@@ -262,7 +265,7 @@ def cmd_status(ctx: Context, args: argparse.Namespace) -> int:
         state = load_module("provision").refresh_status(ctx.cluster, ctx.aws())
     else:
         state = st.require(ctx.cluster)
-    doc = status_doc(ctx.cluster, state, _live_status(ctx.cluster), proc.utcnow())
+    doc = status_doc(ctx.cluster, state, _live_status(ctx.cluster, state), proc.utcnow())
     if args.json:
         proc.print_json(doc)
     else:

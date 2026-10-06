@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import config
-from .proc import VsbenchError, log, tail, utcnow, warn
+from .proc import PreconditionError, VsbenchError, log, tail, utcnow, warn
 from .results import MIN_WINDOW_S, iso_ms, parse_timestamp
 
 PROM_HINT = "check monitoring with `vsbench status`; (re)deploy it with `vsbench deploy monitoring`"
@@ -154,6 +154,56 @@ def query(cluster: str, promql: str, time: str | float | datetime.datetime | Non
     if time is not None:
         params.append(("time", f"{_epoch(time, _now()):.3f}"))
     return _result_list(api(cluster, "query", params))
+
+
+# --- index vs base table (status) ---------------------------------------------------
+IDLE_LAG_S = {"fine": 10.0, "wide": 46.0}  # measured on the default shape (reference.md, CDC baselines)
+BEHIND_FACTOR = 3  # a lag this many times its idle value means the reader is behind
+
+
+def _value_of(row: dict[str, Any]) -> float | None:
+    try:
+        return float((row.get("value") or [None, None])[1])
+    except (TypeError, ValueError):
+        return None
+
+
+def _by_reader(rows: list[dict[str, Any]]) -> dict[str, float | None]:
+    return {m["reader"]: _value_of(r) for r in rows if (m := r.get("metric") or {}).get("reader")}
+
+
+def index_status(cluster: str, state: dict[str, Any]) -> dict[str, Any]:
+    """For `status`: the index size against the rows vsbench put into the base table (the load's
+    rows plus churn) and the CDC readers' lags next to their idle baselines, with a verdict.
+    {"note": ...} without a load; PreconditionError without monitoring."""
+    load = state.get("load") or {}
+    if not load.get("index"):
+        return {"note": "no load"}
+    if not (state.get("deployed") or {}).get("monitoring"):
+        raise PreconditionError("monitoring is not deployed", "run: vsbench deploy monitoring")
+    selector = f'{{keyspace="{load.get("keyspace", "vsb_keyspace")}",index_name="{load["index"]}"}}'
+    sizes = [v for v in map(_value_of, query(cluster, f"max(index_size{selector})")) if v is not None]
+    lags = _by_reader(query(cluster, f"time() - cdc_last_processed_timestamp_seconds{selector}"))
+    up = _by_reader(query(cluster, f"cdc_reader_up{selector}"))
+    base = int(load.get("rows") or 0) + int(load.get("churn_rows") or 0)
+    size = int(sizes[0]) if sizes else None
+    doc: dict[str, Any] = {"index": load["index"], "index_size": size, "base_rows": base}
+    doc["missing"] = None if size is None else base - size
+    problems = [f"{doc['missing']} rows not in the index"] if size is not None and base > size else []
+    for reader, idle in IDLE_LAG_S.items():
+        lag = lags.get(reader)
+        doc[f"{reader}_lag_s"], doc[f"{reader}_reader_up"] = (None if lag is None else round(lag, 1)), up.get(reader)
+        if lag is not None and lag > BEHIND_FACTOR * idle:
+            problems.append(f"{reader} lag {lag:.0f}s (idle ~{idle:.0f}s)")
+    if size is None:
+        doc["verdict"] = "unknown: index_size is not scraped (is the index SERVING and monitoring up?)"
+    elif problems:
+        doc["verdict"] = "behind: " + ", ".join(problems)
+    elif size > base:
+        doc["verdict"] = f"{size - base} rows in the index beyond vsbench's count (rows written outside vsbench?)"
+    else:
+        doc["verdict"] = "in sync"
+    return doc
 
 
 def query_range(
