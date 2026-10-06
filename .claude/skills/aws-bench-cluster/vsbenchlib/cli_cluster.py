@@ -77,6 +77,17 @@ def cmd_doctor(ctx: Context, args: argparse.Namespace) -> int:
     return proc.EXIT_ERROR if failed else 0
 
 
+def cmd_login(ctx: Context, args: argparse.Namespace) -> int:
+    def on_url(url: str) -> None:
+        out(url)  # stdout: the only thing printed there, so an agent can relay it as it is
+        proc.log("approve this URL in a browser (Okta, with MFA); waiting for the login to finish")
+
+    result = load_module("login").login(args.username, args.timeout_s, on_url=on_url)
+    expires = result.get("expires_at") or "unknown"
+    proc.log(f"logged in as {result['username']}: profile {result['profile']}, credentials expire at {expires}")
+    return 0
+
+
 def up_options(provision: Any, args: argparse.Namespace) -> Any:
     """provision.UpOptions from the flags; explicit_profile: --profile was given on the command line
     (then up does not insist on config.EXPECTED_ACCOUNT)."""
