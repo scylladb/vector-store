@@ -32,6 +32,7 @@ PHASES = ("fetch", "buckets", "table", "index")
 STEP_PHASES = {"fetch": "fetch", "buckets": "buckets", "clear-buckets": "buckets", "build-table": "table"}
 STEP_PHASES["build-index"] = "index"
 FINAL_STATUSES = ("finalized", "failed")
+CONCURRENT_KINDS = ("churn",)  # jobs the other bench commands may run next to (see churn.py)
 FAILURE_HINTS = {
     "ALLOW FILTERING": "--bucket needs a local index (vsbench bench load <dataset> --local-index)",
     "Global ANN query is not supported": "the index is local: search-cql needs --bucket N",
@@ -171,6 +172,8 @@ def _ensure_idle(cluster: str) -> State:  # finalize ended jobs (warn about fail
             _warn_if_failed(cluster, job_id)
             continue
         if progress.running and progress.exit_code is None:
+            if job.get("kind") in CONCURRENT_KINDS:  # a churn stream is meant to run under the other commands
+                continue
             hint = f"vsbench -c {cluster} job wait {job_id} (or stop it: vsbench -c {cluster} job cancel {job_id})"
             raise PreconditionError(f"job {job_id} ({job.get('kind')}) is still running on {job['node']}", hint)
         proc.log(f"finalizing the earlier job {job_id}")
@@ -261,7 +264,8 @@ def finalize_job(cluster: str, job_id: str) -> list[dict[str, Any]]:
         raise PreconditionError(f"job {job_id} is still running", f"wait: vsbench -c {cluster} job wait {job_id}")
     out = _outcome(job_id, job, remote.job_log(cluster, job["node"], job_id, None), progress)
     results.save_log(cluster, job_id, out.log)
-    finalizer = {"load": _finalize_build, "index": _finalize_build, "search": _finalize_search}.get(job["kind"])
+    finalizers = {"load": _finalize_build, "index": _finalize_build, "search": _finalize_search}
+    finalizer = {**finalizers, "churn": _finalize_churn}.get(job["kind"])
     records, change, problem = finalizer(cluster, st.require(cluster), out) if finalizer else ([], None, None)
     for record in records:  # records first: a crash before the state update only repeats this
         results.append(cluster, record)
@@ -321,6 +325,44 @@ def _finalize_build(cluster: str, state: State, out: _Outcome) -> Finalized:  # 
     return [record], lambda s: {**s, "load": load} if (s.get("load") or {}).get("pending_job") == mine else s, problem
 
 
+_CHURN_RE = re.compile(r"(rows issued|rows acked|rows failed|last vector_id|insert rate): (\S+)")
+
+
+def _finalize_churn(cluster: str, state: State, out: _Outcome) -> Finalized:
+    """One record of kind "churn" from insert-rows' summary lines; the acked rows are added to
+    state.load.churn_rows when the load is still the one the stream went into."""
+    params, text = out.job["params"], out.sections[0]["text"] if out.sections else out.log
+    found = dict(_CHURN_RE.findall(results.strip_ansi(text)))
+    counts = {k: int(found[v]) if found.get(v, "").isdigit() else None for k, v in _CHURN_COUNTS.items()}
+    rate = found.get("insert rate", "").split("/")[0]
+    details = {k: params.get(k) for k in ("rate", "duration_s", "concurrency", "start_id", "dimension")}
+    details.update(counts, achieved_rate=float(rate) if rate.replace(".", "", 1).isdigit() else None)
+    extra: dict[str, Any] = {"run_id": out.job_id, "series_id": out.job_id, "label": params.get("label")}
+    extra.update(started_at=out.job.get("started_at"), ended_at=out.ended_at, index_name=params["index"])
+    extra.update(exit=-1 if out.exit_code is None else out.exit_code, log=f"results/{out.job_id}.log", churn=details)
+    if out.exit_code != 0:
+        extra.update(error_tail=_tail(out.log), error=out.error, failed_step=out.failed_step)
+    elif counts["rows_acked"] is None:
+        extra.update(error="no insert-rows summary in the log", error_tail=_tail(out.log))
+    view = {**state, "load": (params.get("snapshot") or {}).get("load") or state.get("load")}
+    window = (out.job.get("started_at"), out.ended_at) if out.job.get("started_at") and out.ended_at else None
+    record_params = {k: params.get(k) for k in ("rate", "duration_s", "concurrency", "extra_args")}
+    record = results.make_record("churn", view, record_params, None, None, window, extra)
+    acked = counts["rows_acked"] or 0
+
+    def change(s: State) -> State:
+        load = s.get("load") or {}
+        if load.get("index") != params["index"]:
+            return s
+        return {**s, "load": {**load, "churn_rows": int(load.get("churn_rows") or 0) + acked}}
+
+    return [record], change if acked else None, extra.get("error") if out.exit_code == 0 else None
+
+
+_CHURN_COUNTS = {"rows_issued": "rows issued", "rows_acked": "rows acked", "rows_failed": "rows failed"}
+_CHURN_COUNTS["last_id"] = "last vector_id"
+
+
 def _search_record(cluster: str, view: State, out: _Outcome, item: dict[str, Any], step: dict[str, Any]) -> dict:
     # The record of one measured run; `step` is its log section, or its failed warmup's.
     params, run_id = out.job["params"], f"{out.job_id}-{item['name'].removeprefix('search-')}"
@@ -342,6 +384,8 @@ def _search_record(cluster: str, view: State, out: _Outcome, item: dict[str, Any
     extra.update(index_name=params.get("index"), log=results.save_log(cluster, run_id, step["text"]))
     profile = _pull_profiles(cluster, run_id, (params.get("profiles") or {}).get(item["name"]) or {})
     extra.update({"profile": profile} if profile else {})
+    if churned := (view.get("load") or {}).get("churn_rows"):  # rows bench churn added to the base table
+        extra["churn_rows"] = churned
     if not measured:
         error = _error_of(step["text"]) or ("no measurements in the log" if code == 0 else f"exit {code}")
         extra.update(error_tail=_tail(step["text"]), error=error, failed_step=step["name"])

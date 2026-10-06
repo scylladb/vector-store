@@ -487,6 +487,7 @@ class BenchTest(Case):
             ["search", "cql", "--bucket", "1"],
             ["validate", "http"],
             ["ab", "--a", "x", "--b", "y", "--bucket", "0", "--timeout", "5m"],
+            ["churn", "--rate", "1250", "--duration", "3m"],
         ):
             with self.subTest(command=words[0]):
                 extra = words[0] in cli_bench.EXTRA_ARGS_COMMANDS

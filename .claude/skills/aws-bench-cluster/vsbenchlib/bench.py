@@ -49,6 +49,7 @@ from .bench_jobs import (  # noqa: F401 -- re-exported: bench.<name> is the publ
     options_mismatch,
     step_line,
 )
+from .churn import ChurnOptions, churn, validate_churn  # noqa: F401 -- re-exported: bench.<name> is the public API
 from .proc import PreconditionError, VsbenchError
 from .state import State
 
@@ -722,8 +723,10 @@ def format_summary(records: Sequence[dict[str, Any]]) -> str:
     """Concise text: one line per load/index-build record, a table of search runs, notes."""
     searches, lines = [r for r in records if str(r.get("kind", "")).startswith("search-")], []
     for r in (r for r in records if r not in searches):
-        details, index = r.get("load") or r.get("index_build") or {}, r.get("index") or {}
-        took = [f"{k}={details[k]:.1f}" for k in ("upload_s", "build_index_s") if details.get(k) is not None]
+        details, index = r.get("load") or r.get("index_build") or r.get("churn") or {}, r.get("index") or {}
+        shown = ("upload_s", "build_index_s", "achieved_rate")
+        took = [f"{k}={details[k]:.1f}" for k in shown if details.get(k) is not None]
+        took += [f"{k}={details[k]}" for k in ("rows_acked", "rows_failed") if details.get(k) is not None]
         lines.append(f"{r.get('run_id')} {r.get('kind')} exit={r.get('exit')} {' '.join(took)}".rstrip())
         lines.append(f"  index={index.get('name')} options={json.dumps(index.get('options'))}")
         lines += [f"  error: {r['error']}"] if r.get("error") else []

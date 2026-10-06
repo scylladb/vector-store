@@ -456,6 +456,15 @@ Raw endpoints on the nodes:
   works because Prometheus keeps 30 days.
 - **Limits.** Jobs run with `LimitNOFILE=1048576`, because `search-http` opens
   one socket per in-flight request.
+- **Churn (`bench churn`).** The insert stream is a job of kind `churn` that
+  the command follows without holding the cluster lock, and `_ensure_idle`
+  skips a running churn job, so `bench search` can start meanwhile; a second
+  churn is refused while one runs (its ids continue from
+  `2^40 + load.churn_rows`, so two at once would collide). The finalizer
+  reads the tool's summary lines (rows issued/acked/failed, last id, insert
+  rate) into the record and adds the acked rows to `load.churn_rows` unless
+  the index changed under it; `status` and the `churned` search flag use
+  that count.
 - **Profiles (`--perf NODE`).** When the followed log shows a measured step
   beginning, `vsbench` starts `node/profile-step.sh` on each listed node as
   its own detached job. The script waits 4 s (job start latency plus the

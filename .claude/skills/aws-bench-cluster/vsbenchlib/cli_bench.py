@@ -49,7 +49,11 @@ OPTION_FIELDS = {
 }
 OPTION_FIELDS["validate"] = OPTION_FIELDS["search"]
 OPTION_FIELDS["ab"] = ("a", "b", *OPTION_FIELDS["search"])  # bucket, timeout_s and extra args too
-EXTRA_ARGS_COMMANDS = ("search", "validate", "ab")  # words after `--` go to the benchmark tool
+OPTION_CLASSES["churn"], OPTION_FIELDS["churn"] = (
+    "ChurnOptions",
+    ("rate", "duration_s", "concurrency", "label", "timeout_s"),
+)
+EXTRA_ARGS_COMMANDS = ("search", "validate", "ab", "churn")  # words after `--` go to the benchmark tool
 MISMATCH_HINT = "cli_bench.py and bench.py disagree on the options (design-v2 §8); fix one of them"
 CATALOG_COLUMNS = ("dataset", "rows", "dim", "similarity", "download_gb", "tags", "description")
 HISTORY_COLUMNS = ("ts", "status", "exit", "duration", "cluster", "command", "error")
@@ -145,7 +149,8 @@ def cmd_bench(ctx: Context, args: argparse.Namespace) -> int:
     if command == "validate":
         print_doc(bench.validate(ctx.cluster, bench_options(bench, command, values)))
         return 0
-    runner = {"load": bench.load, "index": bench.index, "search": bench.search, "ab": bench.ab}[command]
+    runners = {"load": bench.load, "index": bench.index, "search": bench.search, "ab": bench.ab}
+    runner = {**runners, "churn": bench.churn}[command]
     print_bench_result(bench, runner(ctx.cluster, bench_options(bench, command, values)))
     return 0
 

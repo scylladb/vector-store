@@ -374,6 +374,8 @@ def flags_for(record: dict[str, Any], previous: dict[str, Any] | None = None) ->
         flags.append("delayed")
     if record.get("profile"):
         flags.append("profiled")
+    if record.get("churn_rows"):  # the base table held rows added by bench churn
+        flags.append("churned")
     tags = {e.get("tag") for e in (client.get("latency_ms") or {}).values() if isinstance(e, dict)}
     flags += [f"latency_{tag}" for tag in ("floored", "capped") if tag in tags]
     if any(v < MIN_WINDOW_S for v in _numbers([_dig(record, "window", "seconds")])):

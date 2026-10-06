@@ -48,6 +48,9 @@ Below, `vsbench` means `.claude/skills/aws-bench-cluster/vsbench`.
    - `vsbench` takes a per-cluster lock and refuses a second mutating command.
    - `extend`, `refresh-ip`, `job cancel`, `status` and the read-only commands
      still work alongside a running command.
+   - `bench churn` is the exception: it takes no lock and the other bench
+     commands ignore its running job, so an insert stream can run under a
+     search (see the Recipes).
 4. **Use `sudo docker`** in ad-hoc commands on nodes.
 5. **Do not open ports.** Only SSH from the operator's IP is allowed. Grafana and
    Prometheus are reachable through the SSH tunnel line that `vsbench status`
@@ -380,6 +383,23 @@ are labelled by the differing option.
 `vsbench deploy vs --source local:+<label>`. Switch back with
 `--source build:<id>`, taking the ID from `vsbench builds --nodes`. Use
 `bench ab` for the actual comparison.
+
+**Measure ingest under query load (churn).**
+`vsbench bench churn --rate 1250 --duration 3m` (background) inserts random
+vectors into the loaded table at that rate (`--rate 0`: as fast as
+`--concurrency` allows) as a detached job that holds no lock; start a
+`bench search` in another background command while it runs. Then:
+- `vsbench status` shows `index (live)`: the rows `missing` from the index
+  and the CDC lags, so a stall is visible while it happens;
+- the churn record (`vsbench results --last 3`) has the acked rows and the
+  achieved rate; searches made meanwhile carry the `churned` flag;
+- the acked rows accumulate in `state.load.churn_rows`, and churn ids start
+  at 2^40, so they never collide with dataset ids.
+It needs a benchmark build with `insert-rows` (VECTOR-1030): until it is on
+master, `deploy bench --source git:<ref>` or `--source local`. On the default
+shape Scylla takes ~60K such inserts/s and Vector Store ingests ~5.1K rows/s
+with no searches running (reference.md, CDC baselines), so size runs by
+rows: `--rate 0 --duration 20s` adds over a million rows.
 
 **Change or debug the benchmark tool.**
 1. Edit `crates/benchmark`.

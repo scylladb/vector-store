@@ -303,6 +303,13 @@ def _bench_commands(sub: Any, common: argparse.ArgumentParser) -> None:
     p = _add(bench, common, "rerun", "cmd_bench", "repeat a recorded search with the current deployment", lock=True)
     p.add_argument("run_id")
     p.add_argument("--timeout", dest="timeout_s", type=_duration, default=FOREGROUND_S, help=WAIT_HELP)
+    text = "paced single-row inserts next to searches (no lock; -- EXTRA_ARGS go to the tool)"
+    p = _add(bench, common, "churn", "cmd_bench", text, lock=False, extra="optional")
+    p.add_argument("--rate", type=_count, required=True, help="rows per second; 0 = as fast as --concurrency allows")
+    p.add_argument("--duration", dest="duration_s", type=_duration, default=180, help="insert time")
+    p.add_argument("--concurrency", type=_positive, default=64, help="inserts in flight")
+    p.add_argument("--label", help="free text stored with the result")
+    p.add_argument("--timeout", dest="timeout_s", type=_duration, default=FOREGROUND_S, help=WAIT_HELP)
     text = "run the benchmark tool with ARGS after --"
     p = _add(bench, common, "raw", "cmd_bench", text, lock=True, extra="required")
     p.add_argument("--timeout", dest="timeout_s", type=_duration, default=FOREGROUND_S, help=WAIT_HELP)
