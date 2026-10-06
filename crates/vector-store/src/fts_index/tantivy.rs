@@ -140,7 +140,7 @@ struct IndexState {
     schema: Schema,
 }
 
-const COMMIT_INTERVAL: Duration = Duration::from_secs(3);
+const COMMIT_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_UNCOMMITTED_THRESHOLD: usize = 10_000;
 
 impl IndexState {
