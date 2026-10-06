@@ -1287,23 +1287,32 @@ fn validate_target_column<T: DbDriver>(
 fn validate_primary_key_columns<T: DbDriver>(
     db_driver: &T,
     table: &T::Table,
-) -> anyhow::Result<()> {
+) -> Result<(), UnsupportedPrimaryKeyType> {
     for name in db_driver
         .partition_key(table)
         .chain(db_driver.clustering_key(table))
     {
-        let column = db_driver.column(table, &name).ok_or(anyhow!(
-            "primary key column {name} does not exist in a table"
-        ))?;
+        let column = db_driver
+            .column(table, &name)
+            .expect("primary key column should be in the table columns");
         if !cql_types::is_supported(&column.typ) {
-            bail!(
-                "unsupported primary key column type: column {name} has type {:?}, \
-                which cannot be represented in an index primary key",
-                column.typ
-            );
+            return Err(UnsupportedPrimaryKeyType {
+                column: name,
+                typ: format!("{:?}", column.typ),
+            });
         }
     }
     Ok(())
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "unsupported primary key column type: column {column} has type {typ}, \
+    which cannot be represented in an index primary key"
+)]
+struct UnsupportedPrimaryKeyType {
+    column: ColumnName,
+    typ: String,
 }
 
 fn validate_column_type_for_kind(
