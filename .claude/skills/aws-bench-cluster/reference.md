@@ -407,7 +407,9 @@ Raw endpoints on the nodes:
   client node's clock, which also stamps Prometheus samples. Server metrics
   are deltas of raw samples inside the window, fetched one scrape interval
   after the end. Windows under 30 s get no server metrics.
-- **Closed-loop mean.** `mean_ms = concurrency × duration / queries` is exact
+- **Closed-loop mean.** With the tool's `--delay`, this quantity is the cycle
+  time (request plus pause) and is recorded as `cycle_ms`, never as `mean_ms`.
+  `mean_ms = concurrency × duration / queries` is exact
   and comparable across builds. Server mean is `Δsum/Δcount` of
   `request_latency_seconds`.
 - **Repeats and order.** `--repeat` plus the ABBA order of `bench ab` turn

@@ -247,8 +247,33 @@ class MakeRecordTest(unittest.TestCase):
         )
         client = record["client_metrics"]
         self.assertAlmostEqual(client["mean_ms"], 64 * 5.0 * 1000 / 34776, places=4)
+        self.assertNotIn("cycle_ms", client)
         self.assertEqual(client["latency_ms"]["p50"]["tag"], "floored")
         self.assertEqual(client["recall"]["avg"], 63.5)
+
+    def test_delayed_run_reports_cycle_time_not_mean_latency(self) -> None:
+        # With the tool's --delay, concurrency x duration / queries includes the pause between queries:
+        # 1 ms requests with a 9 ms delay would read as a 10 ms "mean". Record it as cycle time instead.
+        parsed = results.parse_bench_log(fixture("search-cql.log"))
+        window = (parsed["started_at"], parsed["gathering_at"])
+        for extra_args in (["--delay", "9ms"], ["--delay=9ms"]):
+            params = {**SEARCH_PARAMS, "duration_s": 5, "extra_args": extra_args}
+            record = results.make_record("search-cql", sample_state(), params, parsed, None, window, {"run_id": "d"})
+            client = record["client_metrics"]
+            self.assertIsNone(client["mean_ms"])
+            self.assertAlmostEqual(client["cycle_ms"], 64 * 5.0 * 1000 / 34776, places=4)
+            self.assertEqual(client["delay"], "9ms")
+            self.assertIn("delayed", record["flags"])
+            self.assertIsNone(results.metric_value(record, "client_mean_ms"))
+        self.assertIsNone(results.query_delay(["--limit", "10"]))
+        self.assertEqual(results.query_delay(["--delay"]), "")
+
+    def test_search_record_context(self) -> None:
+        parsed = results.parse_bench_log(fixture("search-cql.log"))
+        window = (parsed["started_at"], parsed["gathering_at"])
+        extra = {"run_id": "r1", "series_id": "job-1", "repeat_index": 2, "vs_engine": "usearch-2.22.0", "foo": 1}
+        params = {**SEARCH_PARAMS, "duration_s": 5}
+        record = results.make_record("search-cql", sample_state(), params, parsed, None, window, extra)
         self.assertEqual(record["dataset"], "cohere-1m")
         self.assertEqual(record["load_run_id"], "load-1")
         self.assertEqual(
