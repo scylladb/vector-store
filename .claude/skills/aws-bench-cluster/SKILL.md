@@ -412,7 +412,10 @@ comparison.
 ## Reading results
 
 - **`client_metrics.mean_ms`** is concurrency × duration / queries. It is exact
-  and the best single latency number for comparisons.
+  and the best single latency number for comparisons. It holds only when every
+  task issues queries back to back: a run with the tool's `--delay` (passed
+  after `--`) records that value as `cycle_ms` instead, with `mean_ms` empty
+  and the `delayed` flag, because the pause is part of the cycle.
 - **Percentile tags**:
   - `floored`: the tool reports everything under 1 ms as `1.0ms`.
   - `capped`: above 100 ms.

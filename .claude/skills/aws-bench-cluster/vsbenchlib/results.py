@@ -313,14 +313,31 @@ def _versions_block(cluster_state: dict[str, Any], vs_engine: str | None) -> dic
     }
 
 
+def query_delay(extra_args: Any) -> str | None:
+    """The tool's `--delay` value in the extra bench args (`--delay 9ms` or `--delay=9ms`), else None."""
+    args = [str(a) for a in (extra_args or [])]
+    for index, arg in enumerate(args):
+        if arg == "--delay":
+            return args[index + 1] if index + 1 < len(args) else ""
+        if arg.startswith("--delay="):
+            return arg.split("=", 1)[1]
+    return None
+
+
 def _client_block(parsed: dict[str, Any] | None, params: dict[str, Any]) -> dict[str, Any] | None:
     if parsed is None:
         return None
     if "latency_ms" in parsed:  # already a record block (e.g. replayed)
         return dict(parsed)
     concurrency, duration, queries = params.get("concurrency"), parsed.get("duration_s"), parsed.get("queries")
-    mean = round(concurrency * duration * 1000 / queries, 4) if concurrency and duration and queries else None
-    block = {"qps": parsed.get("qps"), "queries": queries, "duration_s": duration, "mean_ms": mean}
+    closed_loop = round(concurrency * duration * 1000 / queries, 4) if concurrency and duration and queries else None
+    # concurrency x duration / queries is the mean latency only when every task issues queries back to
+    # back; with the tool's --delay (a pause between queries) it is the cycle time, which includes the pause.
+    delay = query_delay(params.get("extra_args"))
+    block = {"qps": parsed.get("qps"), "queries": queries, "duration_s": duration}
+    block["mean_ms"] = None if delay is not None else closed_loop
+    if delay is not None:
+        block.update(cycle_ms=closed_loop, delay=delay)
     block.update(latency_ms=dict(parsed.get("latency") or {}), recall=parsed.get("recall"))
     block.update(timeouts=parsed.get("timeouts", 0), errors=list(parsed.get("errors") or []))
     return {**block, "per_node": dict(parsed.get("per_node") or {})}
@@ -353,6 +370,8 @@ def flags_for(record: dict[str, Any], previous: dict[str, Any] | None = None) ->
         flags.append("net_allowance_exceeded")
     if (client.get("timeouts") or 0) > 0:
         flags.append("timeouts")
+    if client.get("delay") is not None:
+        flags.append("delayed")
     tags = {e.get("tag") for e in (client.get("latency_ms") or {}).values() if isinstance(e, dict)}
     flags += [f"latency_{tag}" for tag in ("floored", "capped") if tag in tags]
     if any(v < MIN_WINDOW_S for v in _numbers([_dig(record, "window", "seconds")])):
