@@ -1,0 +1,26 @@
+# Copyright 2026-present ScyllaDB
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
+#
+# Vector Store on a vsbench vs node, installed by node/vs-activate.sh.
+# All configuration lives in /opt/vector-store/.env (read by the service from
+# its working directory). There are deliberately no Environment= lines: values
+# set here would win over .env and silently ignore `deploy vs --env`.
+# `current` is a symlink to builds/<build_id>, swapped atomically on deploy.
+
+[Unit]
+Description=ScyllaDB Vector Store (vsbench)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/vector-store
+ExecStart=/opt/vector-store/current/vector-store
+LimitNOFILE=1048576
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

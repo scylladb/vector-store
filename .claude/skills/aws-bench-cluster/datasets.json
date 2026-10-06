@@ -1,0 +1,94 @@
+{
+  "_about": "Copyright 2026-present ScyllaDB. SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1. Dataset catalog for `vsbench dataset` and `vsbench bench load`: VectorDBBench parquet datasets that vector-search-benchmark loads as-is. Files come from https://assets.zilliz.com/benchmark/<dir>/<name>; byte sizes verified with HTTP HEAD on 2026-10-06. Download only one train variant (train*, never shuffle_train* too): the tool loads every file whose name contains 'train'. See reference.md#datasets.",
+  "cohere-100k": {
+    "source": "vdbb",
+    "dir": "cohere_small_100k",
+    "description": "Cohere 100k x 768d (smoke test, loads in minutes)",
+    "dim": 768,
+    "similarity": "COSINE",
+    "rows": 100000,
+    "queries": 1000,
+    "gt_width": 1000,
+    "download_gb": 0.32,
+    "smoke": true,
+    "files": [
+      {"name": "train.parquet", "bytes": 312652957},
+      {"name": "test.parquet", "bytes": 3126879},
+      {"name": "neighbors.parquet", "bytes": 3163592}
+    ]
+  },
+  "cohere-1m": {
+    "source": "vdbb",
+    "dir": "cohere_medium_1m",
+    "description": "Cohere 1M x 768d (default, quick realistic benchmark)",
+    "dim": 768,
+    "similarity": "COSINE",
+    "rows": 1000000,
+    "queries": 1000,
+    "gt_width": 1000,
+    "download_gb": 3.14,
+    "default": true,
+    "files": [
+      {"name": "train.parquet", "bytes": 3131995162},
+      {"name": "test.parquet", "bytes": 3133165},
+      {"name": "neighbors.parquet", "bytes": 3704127}
+    ]
+  },
+  "cohere-10m": {
+    "source": "vdbb",
+    "dir": "cohere_large_10m",
+    "description": "Cohere 10M x 768d (the team's 10M scenario; ~31 GiB index at F32)",
+    "dim": 768,
+    "similarity": "COSINE",
+    "rows": 10000000,
+    "queries": 1000,
+    "gt_width": 10000,
+    "download_gb": 31.37,
+    "files": [
+      {"name": "train-00-of-10.parquet", "bytes": 3132712656},
+      {"name": "train-01-of-10.parquet", "bytes": 3132688995},
+      {"name": "train-02-of-10.parquet", "bytes": 3132687596},
+      {"name": "train-03-of-10.parquet", "bytes": 3132679477},
+      {"name": "train-04-of-10.parquet", "bytes": 3132702312},
+      {"name": "train-05-of-10.parquet", "bytes": 3132683521},
+      {"name": "train-06-of-10.parquet", "bytes": 3132691091},
+      {"name": "train-07-of-10.parquet", "bytes": 3132692641},
+      {"name": "train-08-of-10.parquet", "bytes": 3132694246},
+      {"name": "train-09-of-10.parquet", "bytes": 3132706678},
+      {"name": "test.parquet", "bytes": 3132648},
+      {"name": "neighbors.parquet", "bytes": 38836969}
+    ]
+  },
+  "openai-50k": {
+    "source": "vdbb",
+    "dir": "openai_small_50k",
+    "description": "OpenAI 50k x 1536d (high-dimension smoke test)",
+    "dim": 1536,
+    "similarity": "COSINE",
+    "rows": 50000,
+    "queries": 1000,
+    "gt_width": 1000,
+    "download_gb": 0.46,
+    "files": [
+      {"name": "train.parquet", "bytes": 449777548},
+      {"name": "test.parquet", "bytes": 7231371},
+      {"name": "neighbors.parquet", "bytes": 2972257}
+    ]
+  },
+  "openai-500k": {
+    "source": "vdbb",
+    "dir": "openai_medium_500k",
+    "description": "OpenAI 500k x 1536d (high-dimension benchmark)",
+    "dim": 1536,
+    "similarity": "COSINE",
+    "rows": 500000,
+    "queries": 1000,
+    "gt_width": 1000,
+    "download_gb": 4.51,
+    "files": [
+      {"name": "train.parquet", "bytes": 4494434813},
+      {"name": "test.parquet", "bytes": 7231371},
+      {"name": "neighbors.parquet", "bytes": 3596472}
+    ]
+  }
+}
