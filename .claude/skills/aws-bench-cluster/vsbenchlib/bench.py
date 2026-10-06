@@ -262,22 +262,38 @@ def _vs_view(cluster: str, state: State) -> dict[str, dict[str, Any]]:
         info = nodes.get(name) if isinstance(nodes.get(name), dict) else {}
         engine = (info.get("info") if isinstance(info.get("info"), dict) else info).get("engine")
         view[name] = {"status": info.get("status"), "indexes": info.get("indexes") or [], "engine": engine}
+        view[name]["build_id"] = info.get("build_id")
     return view
 
 
-def check_serving(view: dict[str, dict[str, Any]], load: dict[str, Any], cluster: str) -> dict[str, Any]:
-    """All VS nodes and the index SERVING, count >= 99% of rows; returns {engine, options}."""
+def check_serving(
+    view: dict[str, dict[str, Any]], load: dict[str, Any], cluster: str, expected_build: str | None = None
+) -> dict[str, Any]:
+    """All VS nodes and the index SERVING, count >= 99% of rows; returns {engine, options}.
+
+    With `expected_build`, every node must also run that build. A partial `deploy vs` (one node
+    activated, another not) leaves the recorded build unchanged, and a result taken then would
+    be attributed to it; the live build ids are the only evidence of what was measured.
+    """
     keyspace, name, rows = load.get("keyspace", KEYSPACE), load.get("index"), int(load.get("rows") or 0)
-    problems, engine, options = [], None, None
+    problems, wrong_build, engine, options = [], [], None, None
     for node, info in view.items():
         entry = next((i for i in info["indexes"] if i.get("keyspace") == keyspace and i.get("index") == name), {})
+        running = info.get("build_id")
         if info["status"] != "SERVING":
             problems.append(f"{node} is {info['status'] or 'unreachable'}")
+        elif expected_build and running and running != expected_build:
+            wrong_build.append(f"{node} runs build {running}, not the deployed {expected_build}")
         elif entry.get("status") != "SERVING" or (entry.get("count") or 0) < rows * MIN_COUNT_RATIO:
             state_text = f"{entry.get('status')}, {entry.get('count')} of {rows} rows" if entry else "missing"
             problems.append(f"{node}: index {keyspace}.{name} {state_text}")
         else:
             engine, options = engine or info["engine"], options or entry.get("options")
+    if wrong_build:
+        hint = f"redeploy it on every node: vsbench -c {cluster} deploy vs --source build:{expected_build}"
+        raise PreconditionError(
+            "Vector Store builds differ from the recorded deployment: " + "; ".join(wrong_build), hint
+        )
     if problems or not view:
         hint = f"wait: vsbench -c {cluster} wait-serving (details: vsbench -c {cluster} status)"
         raise PreconditionError("Vector Store is not ready: " + ("; ".join(problems) or "no vs nodes"), hint)
@@ -291,7 +307,8 @@ def validate_search(state: State, opts: SearchOptions) -> dict[str, Any]:
     _check_expiry(state, search_seconds(opts), proc.utcnow())
     if opts.duration_s < results.MIN_WINDOW_S:
         proc.warn(f"--duration {opts.duration_s}s < {results.MIN_WINDOW_S}s: server metrics will be null")
-    return check_serving(_vs_view(state["cluster"], state), load, state["cluster"])
+    deployed_build = ((state.get("deployed") or {}).get("vector_store") or {}).get("build_id")
+    return check_serving(_vs_view(state["cluster"], state), load, state["cluster"], expected_build=deployed_build)
 
 
 def validate(cluster: str, opts: SearchOptions) -> dict[str, Any]:

@@ -62,11 +62,18 @@ def make_state(scylla: int = 1, vs: int = 1, loaded: bool = True, **extra: Any) 
     return {**state, **extra}
 
 
-def vs_status(state: dict[str, Any], status: str = "SERVING", count: int = 100000, index: str = INDEX) -> dict:
+def vs_status(
+    state: dict[str, Any],
+    status: str = "SERVING",
+    count: int = 100000,
+    index: str = INDEX,
+    build_id: str | None = "1.11.0-1234abcd",
+) -> dict:
     entry = {"keyspace": bench.KEYSPACE, "index": index, "status": "SERVING", "count": count, "build_progress": 100}
     entry["options"] = {"similarity_function": "COSINE", "maximum_node_connections": 16}
     info = {"status": status, "info": {"engine": "usearch-2.22.0", "version": "1.11.0"}, "indexes": [entry]}
-    return {n["name"]: info for n in st.nodes(state, "vs")}
+    info["build_id"] = build_id  # what the node runs, as deploy.vs_status reports it
+    return {n["name"]: dict(info) for n in st.nodes(state, "vs")}
 
 
 def section(name: str, text: str, code: int | None = 0, begin: str = "2026-10-06T10:04:03Z") -> str:
@@ -419,6 +426,20 @@ class ValidationTest(HomeTestCase):
                 self.check(self.state, bench.SearchOptions("cql"), status)
             self.assertIn(text, str(ctx.exception))
         self.check(self.state, bench.SearchOptions("cql"), {"nodes": vs_status(self.state, count=99500)})
+
+    def test_every_node_must_run_the_recorded_build(self) -> None:
+        # A partial `deploy vs` leaves deployed.vector_store at the old build while one node already runs
+        # the new one; both are SERVING, so only the live build ids tell that the result would be mislabelled.
+        state = make_state(vs=2)
+        mixed = vs_status(state)
+        mixed["vs-1"] = {**mixed["vs-1"], "build_id": "1.12.0-feedbeef"}
+        with self.assertRaises(PreconditionError) as ctx:
+            self.check(state, bench.SearchOptions("cql"), mixed)
+        self.assertIn("vs-1 runs build 1.12.0-feedbeef, not the deployed 1.11.0-1234abcd", str(ctx.exception))
+        self.assertIn("deploy vs --source build:1.11.0-1234abcd", ctx.exception.hint or "")
+        # a probe without a build id (unknown) and a matching one are accepted
+        self.check(state, bench.SearchOptions("cql"), vs_status(state, build_id=None))
+        self.check(state, bench.SearchOptions("cql"), vs_status(state))
 
     def test_bad_arguments(self) -> None:
         for opts in (
