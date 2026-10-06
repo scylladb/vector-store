@@ -50,6 +50,7 @@ use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tap::Pipe;
 use tokio::sync::Notify;
@@ -57,6 +58,7 @@ use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
+use tokio::task::JoinSet;
 use tracing::Instrument;
 use tracing::debug;
 use tracing::error;
@@ -295,7 +297,8 @@ pub(crate) async fn new<T: DbDriver>(
             info!("starting full scan on {}", metadata.key());
 
             let mut initial_scan = Box::pin(
-                statements.initial_scan(tx_embeddings.clone(), completed_scan_length.clone()),
+                Arc::clone(&statements)
+                    .initial_scan(tx_embeddings.clone(), completed_scan_length.clone()),
             );
 
             // Initial scan and message processing loop
@@ -587,59 +590,26 @@ impl<T: DbDriver> Statements<T> {
     /// using semaphore, and runs each scan in separate concurrent task using cloned mpsc channel
     /// to send read embeddings into the pipeline.
     async fn initial_scan(
-        &self,
+        self: Arc<Self>,
         tx: mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
         completed_scan_length: Arc<AtomicU64>,
     ) -> anyhow::Result<()> {
-        let semaphore_capacity = self.nr_parallel_queries().await?.get();
-        let semaphore = Arc::new(Semaphore::new(semaphore_capacity));
-
-        for (begin, end) in self.fullscan_ranges().await? {
-            let permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
-
-            let embeddings = self
-                .preform_range_scan(begin, end)
-                .await
-                .inspect_err(|err| {
-                    error!("Error during scan of the range ({begin:?}, {end:?}): {err}",);
-                })?;
-            let tx = tx.clone();
-            let scan_length = completed_scan_length.clone();
-            tokio::spawn(async move {
-                let (tx_in_progress, mut rx_in_progress) = mpsc::channel(1);
-                embeddings
-                    .for_each(move |embedding| {
-                        let tx = tx.clone();
-                        let tx_in_progress = tx_in_progress.clone();
-                        async move {
-                            _ = tx
-                                .send((embedding, AsyncInProgress::Fullscan(tx_in_progress)))
-                                .await;
-                        }
+        let ranges = self.fullscan_ranges().await?;
+        let concurrency = self.nr_parallel_queries().await?;
+        scan_ranges(
+            ranges,
+            concurrency,
+            async move |begin, end| {
+                self.preform_range_scan(begin, end)
+                    .await
+                    .inspect_err(|err| {
+                        error!("Error during scan of the range ({begin:?}, {end:?}): {err}",);
                     })
-                    .await;
-
-                // wait until all in-progress markers are dropped
-                while rx_in_progress.recv().await.is_some() {
-                    rx_in_progress.len();
-                }
-
-                //Safety: end > begin, and the range fits into u64
-                scan_length.fetch_add(
-                    end.value().abs_diff(begin.value() - 1),
-                    std::sync::atomic::Ordering::Relaxed,
-                );
-                drop(permit);
-            });
-        }
-
-        // Acquire all permits to wait until all spawned tasks have finished and released their permits.
-        let _permits = semaphore
-            .acquire_many(semaphore_capacity as u32)
-            .await
-            .unwrap();
-
-        Ok(())
+            },
+            tx,
+            completed_scan_length,
+        )
+        .await
     }
 
     async fn nr_shards_in_cluster(&self) -> anyhow::Result<NonZeroUsize> {
@@ -669,7 +639,9 @@ impl<T: DbDriver> Statements<T> {
     /// highest possible token - for support the specific token range after the highest token to
     /// the lowest token. The highest possible token value is not decremented, because it doesn't
     /// start a new range.
-    async fn fullscan_ranges(&self) -> anyhow::Result<impl Iterator<Item = (Token, Token)>> {
+    async fn fullscan_ranges(
+        &self,
+    ) -> anyhow::Result<impl Iterator<Item = (Token, Token)> + use<T>> {
         let cluster = self
             .db_session
             .wait_for_session()
@@ -757,6 +729,70 @@ impl<T: DbDriver> Statements<T> {
             })
             .boxed())
     }
+}
+
+/// Streams the rows of every range into `tx`, limiting the number of concurrently scanned ranges
+/// to `concurrency`. Each row is tagged with an `AsyncInProgress::Fullscan` guard; a range
+/// contributes its number of tokens to `completed_scan_length` once the pipeline has dropped all
+/// of its guards. The future resolves only after every range has been acknowledged this way.
+/// Dropping the returned future aborts in-flight range tasks.
+async fn scan_ranges(
+    ranges: impl IntoIterator<Item = (Token, Token)>,
+    concurrency: NonZeroUsize,
+    rows: impl AsyncFn(Token, Token) -> RangeScanResult,
+    tx: mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
+    completed_scan_length: Arc<AtomicU64>,
+) -> anyhow::Result<()> {
+    let semaphore_capacity = concurrency.get();
+    let semaphore = Arc::new(Semaphore::new(semaphore_capacity));
+    let mut range_tasks = JoinSet::new();
+
+    for (begin, end) in ranges {
+        let permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
+
+        let length = range_length(begin, end);
+        let range_rows = rows(begin, end).await?;
+        let tx = tx.clone();
+        let scan_length = completed_scan_length.clone();
+        range_tasks.spawn(async move {
+            let (tx_in_progress, mut rx_in_progress) = mpsc::channel(1);
+            range_rows
+                .for_each(move |row| {
+                    let tx = tx.clone();
+                    let tx_in_progress = tx_in_progress.clone();
+                    async move {
+                        _ = tx
+                            .send((row, AsyncInProgress::Fullscan(tx_in_progress)))
+                            .await;
+                    }
+                })
+                .await;
+
+            // All rows of this range have been sent. Let the next range start now by dropping
+            // the permit, then wait for their acknowledgements.
+            drop(permit);
+
+            // wait until all in-progress markers are dropped
+            while rx_in_progress.recv().await.is_some() {
+                rx_in_progress.len();
+            }
+
+            scan_length.fetch_add(length, Ordering::Relaxed);
+        });
+    }
+
+    while let Some(result) = range_tasks.join_next().await {
+        if let Err(err) = result {
+            error!("full scan range task failed: {err}");
+        }
+    }
+
+    Ok(())
+}
+
+fn range_length(begin: Token, end: Token) -> u64 {
+    //Safety: end > begin, and the range fits into u64
+    end.value().abs_diff(begin.value() - 1)
 }
 
 /// Builds the `table_columns` lookup Table::new() uses to size and type
@@ -961,7 +997,10 @@ mod tests {
     use crate::IndexOptionsVs;
     use crate::Quantization;
     use crate::SpaceType;
+    use futures::stream;
+    use rstest::rstest;
     use std::assert_matches;
+    use tokio::task;
     use uuid::Uuid;
 
     fn vs_kind() -> IndexKind {
@@ -1390,5 +1429,137 @@ mod tests {
             &real_columns,
         );
         assert_eq!(&*decode_types, &[None, Some(NativeType::Decimal)]);
+    }
+
+    type Rx = mpsc::Receiver<(DbIndexedRow, AsyncInProgress)>;
+
+    fn row(i: i64) -> DbIndexedRow {
+        DbIndexedRow {
+            primary_key: PrimaryKey::from(vec![CqlValue::Int(i as i32)]),
+            operation: DbIndexedOperation::Delete(Timestamp::from_millis(0)),
+        }
+    }
+
+    fn token_range(begin: i64, end: i64) -> (Token, Token) {
+        (Token::new(begin), Token::new(end))
+    }
+
+    fn single_token_ranges(count: usize) -> impl Iterator<Item = (Token, Token)> {
+        (0..count as i64).map(|i| token_range(i, i))
+    }
+
+    fn single_row_range(begin: Token) -> RangeScanResult {
+        Ok(stream::iter([row(begin.value())]).boxed())
+    }
+
+    fn concurrency(n: usize) -> NonZeroUsize {
+        NonZeroUsize::new(n).unwrap()
+    }
+
+    fn spawn_consumer_acking_immediately(mut rx: Rx) -> task::JoinHandle<usize> {
+        tokio::spawn(async move {
+            let mut received = 0;
+            while let Some((_row, guard)) = rx.recv().await {
+                drop(guard);
+                received += 1;
+            }
+            received
+        })
+    }
+
+    /// Keeps every row unacknowledged: the next ranges must still be scanned, since a range
+    /// releases its permit once its rows are sent, not once they are acknowledged. If a range held
+    /// its permit until the acknowledgement, the `AsyncInProgress` guards of the next ranges would
+    /// never arrive and the test would fail on the timeout.
+    #[rstest]
+    #[timeout(Duration::from_secs(5))]
+    #[tokio::test]
+    async fn opens_next_ranges_while_rows_of_open_ranges_are_unacknowledged() {
+        const RANGES: usize = 8;
+        let (tx, mut rx) = mpsc::channel(1);
+        let completed = Arc::new(AtomicU64::new(0));
+        tokio::spawn(scan_ranges(
+            single_token_ranges(RANGES),
+            concurrency(2),
+            async |begin, _| single_row_range(begin),
+            tx,
+            Arc::clone(&completed),
+        ));
+
+        let mut unacknowledged = Vec::new();
+        for _ in 0..RANGES {
+            let (_row, in_progress) = rx.recv().await.unwrap();
+            unacknowledged.push(in_progress);
+        }
+
+        assert_eq!(unacknowledged.len(), RANGES);
+        // No row has been acknowledged yet, so no range contributes to the progress.
+        assert_eq!(completed.load(Ordering::Relaxed), 0);
+    }
+
+    #[rstest]
+    #[timeout(Duration::from_secs(5))]
+    #[tokio::test]
+    async fn progress_reaches_sum_of_range_lengths_once_rows_are_acknowledged() {
+        let ranges = [
+            token_range(0, 9),
+            token_range(10, 29),
+            token_range(30, 59),
+            token_range(60, 99),
+            token_range(100, 149),
+        ];
+        let (tx, rx) = mpsc::channel(1);
+        let completed = Arc::new(AtomicU64::new(0));
+        let consumer = spawn_consumer_acking_immediately(rx);
+
+        scan_ranges(
+            ranges,
+            concurrency(2),
+            async |begin, _| single_row_range(begin),
+            tx,
+            Arc::clone(&completed),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(consumer.await.unwrap(), ranges.len());
+        assert_eq!(completed.load(Ordering::Relaxed), 10 + 20 + 30 + 40 + 50);
+    }
+
+    #[rstest]
+    #[timeout(Duration::from_secs(5))]
+    #[tokio::test]
+    async fn range_failing_to_open_fails_the_scan() {
+        let (tx, rx) = mpsc::channel(1);
+        let consumer = spawn_consumer_acking_immediately(rx);
+
+        let result = scan_ranges(
+            single_token_ranges(3),
+            concurrency(1),
+            async |begin, _| {
+                if begin.value() == 1 {
+                    Err(anyhow!("range unavailable"))
+                } else {
+                    single_row_range(begin)
+                }
+            },
+            tx,
+            Arc::new(AtomicU64::new(0)),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(consumer.await.unwrap(), 1);
+    }
+    #[rstest]
+    #[case::single_token(token_range(7, 7), 1)]
+    #[case::positive(token_range(0, 9), 10)]
+    #[case::negative(token_range(-10, -1), 10)]
+    #[case::whole_ring(token_range(-i64::MAX, i64::MAX), u64::MAX)]
+    fn range_length_counts_tokens_including_both_ends(
+        #[case] (begin, end): (Token, Token),
+        #[case] expected: u64,
+    ) {
+        assert_eq!(range_length(begin, end), expected);
     }
 }
