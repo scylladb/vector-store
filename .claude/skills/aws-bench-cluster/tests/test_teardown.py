@@ -459,6 +459,20 @@ class DownTest(ProvisionTest):
         self.assertFalse(result["purged"])
         self.assertTrue(any("us-east-1" in w for w in warnings(teardown)))
 
+    def test_keeps_the_local_state_of_another_account(self) -> None:
+        # `down --profile <other account>` finds nothing there; the cluster of the local state keeps running.
+        self.up()
+        self.aws.account = "123456789012"
+        self.aws.instances.clear()
+        self.aws.groups.clear()
+        self.aws.key_pairs.clear()
+        result = self.down(purge=True)
+        self.assertEqual(result["terminated"], [])
+        self.assertIsNone(st.load("c1")["terminated_at"])
+        self.assertFalse(result["purged"])
+        self.assertTrue(st.paths("c1").root.exists())
+        self.assertTrue(any("123456789012" in w and "kept" in w for w in warnings(teardown)))
+
     def test_security_group_not_found_is_success_and_timeout_raises(self) -> None:
         teardown.delete_security_group(self.aws, "sg-missing")  # type: ignore[arg-type]
         self.aws.groups["sg-1"] = {"GroupId": "sg-1"}

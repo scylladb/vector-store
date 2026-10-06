@@ -374,7 +374,8 @@ def down(cluster: str, aws: Aws, assume_yes: bool, purge: bool) -> dict[str, Any
     by name alone (another owner's `vsbench-<owner>-<cluster>` name can collide).
     """
     require_credentials(aws)
-    owner, current = awsapi.identity(aws).owner, st.load(cluster)
+    ident, current = awsapi.identity(aws), st.load(cluster)
+    owner = ident.owner
     name, by_tags = resource_name(owner, cluster), _owner_filters(owner, cluster)
     ids = sorted(i["InstanceId"] for i in find_instances(aws, cluster, owner, LISTED_STATES))
     groups = sorted({g["GroupId"] for g in _groups(aws, "--filters", *by_tags)})
@@ -390,16 +391,30 @@ def down(cluster: str, aws: Aws, assume_yes: bool, purge: bool) -> dict[str, Any
     if key:
         _delete_key_pair(aws, key)
     now = proc.iso(proc.utcnow())
-    region = None if current is None else current.get("region")
-    ours = region in (None, aws.region)
-    if not ours:  # the local state describes a cluster of the same name in another region: leave it alone
-        warn(f"the local state of cluster '{cluster}' is in {region}, not {aws.region}; kept as it is")
+    ours = _state_matches(current, aws, ident)
+    if not ours:  # the local state describes a same-named cluster elsewhere (other region/account/owner)
+        recorded = "/".join(str(current.get(k)) for k in ("region", "account", "owner"))  # type: ignore[union-attr]
+        here = f"{aws.region}/{ident.account}/{ident.owner}"
+        warn(f"the local state of cluster '{cluster}' is for {recorded}, not {here}; kept as it is")
     elif current is not None:
         st.update(cluster, lambda s: s | {"terminated_at": now, "pending_launch": None, "expires_tag_pending": None})
     if purge and ours:
         shutil.rmtree(st.paths(cluster).root, ignore_errors=True)
     result = {"cluster": cluster, "owner": owner, "terminated": ids, "security_groups": groups, "key_pair": key}
     return result | {"purged": purge and ours, "terminated_at": now}
+
+
+def _state_matches(current: State | None, aws: Aws, ident: awsapi.Identity) -> bool:
+    """The local state describes the cluster this call tears down: same region, account and owner.
+
+    `down --profile <other-account>` on a same-named cluster finds nothing to terminate there; it
+    must not mark or purge the state of the cluster that keeps running in the original account.
+    A state without one of the fields is accepted.
+    """
+    if current is None:
+        return True
+    expected = {"region": aws.region, "account": ident.account, "owner": ident.owner}
+    return all(current.get(key) in (None, value) for key, value in expected.items())
 
 
 # --- list ---------------------------------------------------------------------------------
