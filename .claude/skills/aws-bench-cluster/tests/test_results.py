@@ -19,6 +19,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from vsbenchlib import results  # noqa: E402
+from vsbenchlib import results_format  # noqa: E402
 from vsbenchlib.proc import PreconditionError, VsbenchError  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -508,18 +509,18 @@ class AggregateCompareTest(unittest.TestCase):
 
 class FormatTest(unittest.TestCase):
     def test_format_latency(self) -> None:
-        self.assertEqual(results.format_latency({"value": 1.0, "tag": "floored"}), "<=1.00ms")
-        self.assertEqual(results.format_latency({"value": None, "tag": "capped"}), ">100ms")
-        self.assertEqual(results.format_latency({"value": 10000.0, "tag": "capped"}), ">10000ms")
+        self.assertEqual(results_format.format_latency({"value": 1.0, "tag": "floored"}), "<=1.00ms")
+        self.assertEqual(results_format.format_latency({"value": None, "tag": "capped"}), ">100ms")
+        self.assertEqual(results_format.format_latency({"value": 10000.0, "tag": "capped"}), ">10000ms")
         self.assertEqual(
-            results.format_latency({"value": 0.725, "tag": "bucket_interp", "bucket": [0.5, 1.0]}), "~0.725ms"
+            results_format.format_latency({"value": 0.725, "tag": "bucket_interp", "bucket": [0.5, 1.0]}), "~0.725ms"
         )
-        self.assertEqual(results.format_latency({"value": 3.2, "tag": "exact"}), "3.20ms")
-        self.assertEqual(results.format_latency(None), "-")
+        self.assertEqual(results_format.format_latency({"value": 3.2, "tag": "exact"}), "3.20ms")
+        self.assertEqual(results_format.format_latency(None), "-")
 
     def test_format_table(self) -> None:
         rows = [{"a": "x", "b": 1.5, "c": None}, {"a": "longer", "b": 12345.0, "c": ["f1", "f2"]}]
-        text = results.format_table(rows, ["a", ("B", "b"), "c"])
+        text = results_format.format_table(rows, ["a", ("B", "b"), "c"])
         lines = text.splitlines()
         self.assertEqual(lines[0].split(), ["a", "B", "c"])
         self.assertEqual(lines[2].split(), ["x", "1.50", "-"])
@@ -527,44 +528,44 @@ class FormatTest(unittest.TestCase):
         self.assertTrue(lines[2].index("1.50") > lines[3].index("12345") - 1)  # numbers right-aligned
 
     def test_format_table_dotted_keys(self) -> None:
-        text = results.format_table([{"m": {"qps": 2.0}}], [("qps", "m.qps")])
+        text = results_format.format_table([{"m": {"qps": 2.0}}], [("qps", "m.qps")])
         self.assertEqual(text.splitlines()[2].strip(), "2.00")
 
     def test_format_markdown(self) -> None:
-        text = results.format_markdown([{"a": "x|y", "b": 2}], ["a", "b"])
+        text = results_format.format_markdown([{"a": "x|y", "b": 2}], ["a", "b"])
         self.assertEqual(text.splitlines(), ["| a | b |", "|---|---:|", "| x\\|y | 2 |"])
 
     def test_summary_and_compare_rows(self) -> None:
         server = {"cpu_pct": {"vs-0": 61.0, "client": 40.0}, "vs_qps": 6900.0, "vs_mean_ms": 0.61}
-        row = results.summary_row(search_record(run_id="r1", server=server, arm="A"))
+        row = results_format.summary_row(search_record(run_id="r1", server=server, arm="A"))
         self.assertEqual((row["run_id"], row["label"], row["cpu"], row["build_s"]), ("r1", "A", "61/40", None))
-        table = results.format_table([row], results.RESULTS_COLUMNS)
+        table = results_format.format_table([row], results_format.RESULTS_COLUMNS)
         header, _, line = table.splitlines()
         self.assertEqual(header.split()[:4], ["run_id", "kind", "conc", "build"])
         self.assertEqual(line.split()[:6], ["r1", "search-cql", "64", "1.11.0-1-gabc-12345678", "A", "6953"])
         self.assertIn("<=1.00ms", line)
         self.assertIn("61/40", line)
         result = results.compare([variant("A", 100.0), variant("A", 104.0), variant("B", 120.0), variant("B", 126.0)])
-        rows = results.compare_rows(result)
+        rows = results_format.compare_rows(result)
         self.assertEqual(rows[0]["qps_d%"], "base")
         self.assertEqual(rows[1]["qps_d%"], "+20.6%")
         self.assertEqual(rows[1]["qps"], "123.0 [120.0-126.0]")
         self.assertEqual(rows[1]["recall_d%"], "+0.0% (noise)")
         self.assertEqual(rows[1]["vs_mean_ms_d%"], None)
-        text = results.format_table(rows, results.COMPARE_COLUMNS)
+        text = results_format.format_table(rows, results_format.COMPARE_COLUMNS)
         self.assertIn("qps_d%", text.splitlines()[0])
         self.assertIn("+20.6%", text)
-        self.assertIn("| variant |", results.format_markdown(rows, results.COMPARE_COLUMNS))
+        self.assertIn("| variant |", results_format.format_markdown(rows, results_format.COMPARE_COLUMNS))
 
     def test_single_run_delta_marker(self) -> None:
-        rows = results.compare_rows(results.compare([variant("A", 100.0), variant("B", 110.0)]))
+        rows = results_format.compare_rows(results.compare([variant("A", 100.0), variant("B", 110.0)]))
         self.assertEqual(rows[1]["qps_d%"], "+10.0% (n<2)")
 
     def test_variant_labels_show_env_differences(self) -> None:
         state = sample_state()
         state["deployed"]["vector_store"]["env"] = {"RUST_LOG": "info", "THREADS": "8"}
         records = [search_record(), search_record(state=state)]
-        rows = results.compare_rows(results.compare(records, force=True))
+        rows = results_format.compare_rows(results.compare(records, force=True))
         self.assertEqual(
             [r["variant"] for r in rows], ["1.11.0-1-gabc-12345678 THREADS=", "1.11.0-1-gabc-12345678 THREADS=8"]
         )
@@ -572,7 +573,7 @@ class FormatTest(unittest.TestCase):
     def test_unforced_labels_are_the_build(self) -> None:
         result = results.compare([variant("A", 100.0), variant("B", 120.0)])
         self.assertEqual([g["setup"] for g in result["groups"]], [{}, {}])
-        self.assertEqual([r["variant"] for r in results.compare_rows(result)], ["A", "B"])
+        self.assertEqual([r["variant"] for r in results_format.compare_rows(result)], ["A", "B"])
 
 
 def sweep_record(connections: str, qps: float) -> dict[str, Any]:
@@ -593,7 +594,7 @@ class ForcedCompareTest(unittest.TestCase):
         self.assertEqual([(g["n"], g["qps"]["median"]) for g in groups], [(2, 1005.0), (2, 1495.0)])
         self.assertEqual(groups[1]["delta"]["qps"], {"pct": round(490 / 1005 * 100, 2), "within_noise": False})
         self.assertEqual(groups[1]["setup"]["index_options"]["maximum_node_connections"], "32")
-        rows = results.compare_rows(result)
+        rows = results_format.compare_rows(result)
         self.assertEqual(
             [r["variant"] for r in rows],
             [f"{self.BUILD} maximum_node_connections=16", f"{self.BUILD} maximum_node_connections=32"],
@@ -606,7 +607,7 @@ class ForcedCompareTest(unittest.TestCase):
         for state, digest in zip(states, ("e" * 64, "f" * 64), strict=True):
             state["deployed"]["scylla"]["image"] = f"scylladb/scylla-nightly@sha256:{digest}"
         records = [search_record(state=states[0], qps=100.0), search_record(state=states[1], qps=90.0)]
-        rows = results.compare_rows(results.compare(records, force=True))
+        rows = results_format.compare_rows(results.compare(records, force=True))
         self.assertEqual(
             [r["variant"] for r in rows],
             [
@@ -621,7 +622,7 @@ class ForcedCompareTest(unittest.TestCase):
         state["deployed"]["bench"]["build_id"] = "bench-2"
         state["nodes"][1]["instance_type"] = "r8g.8xlarge"
         records = [search_record(qps=100.0), search_record(state=state, params={"limit": 100}, qps=80.0)]
-        rows = results.compare_rows(results.compare(records, force=True))
+        rows = results_format.compare_rows(results.compare(records, force=True))
         self.assertEqual(
             [r["variant"] for r in rows],
             [
@@ -634,7 +635,7 @@ class ForcedCompareTest(unittest.TestCase):
     def test_build_and_setup_differ_together(self) -> None:
         records = [variant("A", 100.0, params={"limit": 10}), variant("B", 150.0, params={"limit": 100})]
         records.append(variant("B", 120.0, params={"limit": 10}))
-        rows = results.compare_rows(results.compare(records, force=True))
+        rows = results_format.compare_rows(results.compare(records, force=True))
         self.assertEqual([r["variant"] for r in rows], ["A limit=10", "B limit=100", "B limit=10"])
         self.assertEqual([r["qps_d%"] for r in rows], ["base", "+50.0% (n<2)", "+20.0% (n<2)"])
 

@@ -272,8 +272,9 @@ def cmd_results_compare(ctx: Context, args: argparse.Namespace) -> int:
     if args.json:
         proc.print_json(result)
         return 0
-    render = results.format_markdown if args.format == "md" else results.format_table
-    out(render(results.compare_rows(result), results.COMPARE_COLUMNS))
+    display = load_module("results_format")
+    render = display.format_markdown if args.format == "md" else display.format_table
+    out(render(display.compare_rows(result), display.COMPARE_COLUMNS))
     return 0
 
 
