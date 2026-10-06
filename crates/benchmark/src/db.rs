@@ -14,18 +14,40 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tap::Pipe;
 use tokio::fs;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio::time;
+use tokio::time::Instant;
 use tracing::error;
 use tracing::info;
 
 const VECTOR_ID: &str = "vector_id";
 const VECTOR: &str = "vector";
 const BUCKET: &str = "bucket";
+const INSERT_TICK: Duration = Duration::from_millis(10);
+const INSERT_ERRORS_LOGGED: u64 = 5;
+
+pub(crate) struct InsertRows {
+    pub(crate) dimension: usize,
+    pub(crate) start_id: i64,
+    pub(crate) rate: u32,
+    pub(crate) duration: Duration,
+    pub(crate) concurrency: usize,
+    pub(crate) report: Duration,
+}
+
+pub(crate) struct InsertStats {
+    pub(crate) issued: u64,
+    pub(crate) acked: u64,
+    pub(crate) failed: u64,
+    /// `None` when no row was issued.
+    pub(crate) last_id: Option<i64>,
+}
 
 #[derive(Clone)]
 pub(crate) struct Scylla(Arc<State>);
@@ -217,6 +239,109 @@ impl Scylla {
             });
         }
         _ = semaphore.acquire_many(concurrency as u32).await.unwrap();
+    }
+
+    /// Single-row inserts of random vectors with consecutive ids, paced to `rate` rows/s
+    /// (cumulative schedule, so a hiccup is caught up rather than lost) and at most
+    /// `concurrency` in flight. Failures are counted, not fatal: the achieved rate is the
+    /// measurement. Rows go to bucket u8::MAX like dataset ids without a bucket.
+    pub(crate) async fn insert_rows(
+        &self,
+        keyspace: &str,
+        table: &str,
+        opts: InsertRows,
+    ) -> InsertStats {
+        let mut st_insert = self
+            .0
+            .session
+            .prepare(format!(
+                "INSERT INTO {keyspace}.{table} ({BUCKET}, {VECTOR_ID}, {VECTOR}) VALUES (?, ?, ?)"
+            ))
+            .await
+            .unwrap();
+        st_insert.set_consistency(Consistency::One);
+
+        let semaphore = Arc::new(Semaphore::new(opts.concurrency));
+        let acked = Arc::new(AtomicU64::new(0));
+        let failed = Arc::new(AtomicU64::new(0));
+        let bucket = u8::MAX as i64;
+        let start = Instant::now();
+        let stop = start + opts.duration;
+        let mut issued: u64 = 0;
+        let mut last_id = None;
+        let mut reported = (start, 0u64);
+        let mut ticker = time::interval(INSERT_TICK);
+
+        'run: while Instant::now() < stop {
+            ticker.tick().await;
+            let due = if opts.rate == 0 {
+                u64::MAX
+            } else {
+                (opts.rate as f64 * start.elapsed().as_secs_f64()) as u64
+            };
+            while issued < due && Instant::now() < stop {
+                let permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
+                // The wait for a permit may have outlasted the run.
+                if Instant::now() >= stop {
+                    break;
+                }
+                let Some(vector_id) = opts.start_id.checked_add_unsigned(issued) else {
+                    error!("vector_id range exhausted after {issued} rows; stopping inserts");
+                    break 'run;
+                };
+                let scylla = Arc::clone(&self.0);
+                let st_insert = st_insert.clone();
+                let acked = Arc::clone(&acked);
+                let failed = Arc::clone(&failed);
+                let vector: Box<[f32]> = (0..opts.dimension)
+                    .map(|_| rand::random::<f32>() - 0.5)
+                    .collect();
+                issued += 1;
+                last_id = Some(vector_id);
+                tokio::spawn(async move {
+                    let result = scylla
+                        .session
+                        .execute_unpaged(&st_insert, (bucket, vector_id, vector))
+                        .await;
+                    if let Err(err) = result {
+                        if failed.fetch_add(1, Ordering::Relaxed) < INSERT_ERRORS_LOGGED {
+                            error!("insert of vector_id {vector_id} failed: {err}");
+                        }
+                    } else {
+                        acked.fetch_add(1, Ordering::Relaxed);
+                    }
+                    drop(permit);
+                });
+                // An uncapped run (rate 0) is always behind schedule, so let
+                // the progress line through.
+                if reported.0.elapsed() >= opts.report {
+                    break;
+                }
+            }
+            let now = Instant::now();
+            let window = now - reported.0;
+            if window >= opts.report {
+                let acked_now = acked.load(Ordering::Relaxed);
+                info!(
+                    "t={:.0}s issued={issued} acked={acked_now} failed={} rate={:.0}/s (target {}/s)",
+                    (now - start).as_secs_f64(),
+                    failed.load(Ordering::Relaxed),
+                    (acked_now - reported.1) as f64 / window.as_secs_f64(),
+                    opts.rate,
+                );
+                reported = (now, acked_now);
+            }
+        }
+        _ = semaphore
+            .acquire_many(opts.concurrency as u32)
+            .await
+            .unwrap();
+        InsertStats {
+            issued,
+            acked: acked.load(Ordering::Relaxed),
+            failed: failed.load(Ordering::Relaxed),
+            last_id,
+        }
     }
 
     pub(crate) async fn delete_rows(

@@ -166,6 +166,47 @@ enum Command {
         concurrency: u32,
     },
 
+    /// Sustained single-row inserts of random vectors at a fixed rate (ingest/CDC tests)
+    InsertRows {
+        #[clap(long)]
+        scylla: SocketAddr,
+
+        #[clap(long)]
+        user: Option<String>,
+
+        #[clap(long)]
+        passwd_path: Option<PathBuf>,
+
+        #[clap(long, default_value = KEYSPACE)]
+        keyspace: String,
+
+        #[clap(long, default_value = TABLE)]
+        table: String,
+
+        /// Dimension of the table's vector column
+        #[clap(long, value_parser = clap::value_parser!(u32).range(1..=65_536))]
+        dimension: u32,
+
+        /// First vector_id; rows get consecutive ids from here
+        #[clap(long)]
+        start_id: i64,
+
+        /// Rows per second; 0 inserts as fast as --concurrency allows
+        #[clap(long)]
+        rate: u32,
+
+        #[clap(long)]
+        duration: humantime::Duration,
+
+        /// Inserts in flight at most
+        #[clap(long, value_parser = clap::value_parser!(u32).range(1..=1_000_000))]
+        concurrency: u32,
+
+        /// Progress line interval
+        #[clap(long, default_value = "10s")]
+        report: humantime::Duration,
+    },
+
     SearchCql {
         #[clap(long)]
         data_dir: PathBuf,
@@ -360,6 +401,46 @@ async fn main() {
             })
             .await;
             info!("Delete rows took {duration:.2?}");
+        }
+
+        Command::InsertRows {
+            scylla,
+            user,
+            passwd_path,
+            keyspace,
+            table,
+            dimension,
+            start_id,
+            rate,
+            duration,
+            concurrency,
+            report,
+        } => {
+            let scylla = Scylla::new(scylla, user, passwd_path, &keyspace, &table).await;
+            let (elapsed, stats) = measure_duration(scylla.insert_rows(
+                &keyspace,
+                &table,
+                db::InsertRows {
+                    dimension: dimension as usize,
+                    start_id,
+                    rate,
+                    duration: duration.into(),
+                    concurrency: concurrency as usize,
+                    report: report.into(),
+                },
+            ))
+            .await;
+            info!("duration: {elapsed:.1?}");
+            info!("rows issued: {}", stats.issued);
+            info!("rows acked: {}", stats.acked);
+            info!("rows failed: {}", stats.failed);
+            if let Some(last_id) = stats.last_id {
+                info!("last vector_id: {last_id}");
+            }
+            info!(
+                "insert rate: {:.1}/s (target {rate}/s)",
+                stats.acked as f64 / elapsed.as_secs_f64()
+            );
         }
 
         Command::SearchCql {
