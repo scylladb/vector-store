@@ -38,3 +38,11 @@ Repository skills live in `.claude/skills/`:
   a new one. Built to run unattended as a daily routine; `dry-run` writes
   nothing to Jira. `SKILL.md` holds the procedure; `reference.md` holds the
   reasoning and worked examples from past Daily failures.
+- `aws-bench-cluster` — provision an AWS benchmark cluster (Scylla, Vector
+  Store and a client with scylla-monitoring and `vector-search-benchmark`)
+  through the `vsbench` CLI; deploy Vector Store from a Docker Hub release, an
+  upstream git ref or the local working tree (cross-compiled for arm64), run
+  and compare benchmarks, query Prometheus/node_exporter, run commands on the
+  nodes, and tear down. Every session ends with a retrospective that proposes
+  improvements to the skill. Unit tests:
+  `python3 -m unittest discover -s .claude/skills/aws-bench-cluster/tests -t .claude/skills/aws-bench-cluster`.
