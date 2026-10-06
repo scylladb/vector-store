@@ -1072,6 +1072,12 @@ If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
             body = ErrorMessage
         ),
         (
+            status = 422,
+            description = "Index cannot be served. Possible causes: the index exists in ScyllaDB, but its table has a primary key column of a type Vector Store does not support.",
+            content_type = "application/json",
+            body = ErrorMessage
+        ),
+        (
             status = 500,
             description = "Error while searching. Possible causes: internal error, or search engine issues.",
             content_type = "application/json",
@@ -1108,6 +1114,14 @@ async fn post_index_bm25(
         let Some(entry) = indexes.get_fts(&index_key) else {
             timer.observe_duration();
 
+            if let Some(reason) = indexes.unsupported(&index_key) {
+                return unsupported_index_response(
+                    &keyspace,
+                    &index_name,
+                    reason,
+                    "post_index_bm25",
+                );
+            }
             let msg = format!("missing index: {keyspace}.{index_name}");
             debug!("post_index_bm25: {msg}");
             return (StatusCode::NOT_FOUND, msg).into_response();
@@ -1225,6 +1239,12 @@ If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
             body = ErrorMessage
         ),
         (
+            status = 422,
+            description = "Index cannot be served. Possible causes: the index exists in ScyllaDB, but its table has a primary key column of a type Vector Store does not support.",
+            content_type = "application/json",
+            body = ErrorMessage
+        ),
+        (
             status = 500,
             description = "Error while highlighting. Possible causes: internal error, or search engine issues.",
             content_type = "application/json",
@@ -1261,6 +1281,14 @@ async fn post_index_highlight(
         let Some(entry) = indexes.get_fts(&index_key) else {
             timer.observe_duration();
 
+            if let Some(reason) = indexes.unsupported(&index_key) {
+                return unsupported_index_response(
+                    &keyspace,
+                    &index_name,
+                    reason,
+                    "post_index_highlight",
+                );
+            }
             let msg = format!("missing index: {keyspace}.{index_name}");
             debug!("post_index_highlight: {msg}");
             return (StatusCode::NOT_FOUND, msg).into_response();
