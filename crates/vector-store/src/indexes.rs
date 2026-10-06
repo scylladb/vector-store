@@ -303,6 +303,8 @@ impl PatternIndexEntry {
 pub(crate) enum BestIndexState {
     /// The requested index does not exist at all.
     NotFound,
+    /// The requested index exists in the schema, but cannot be served for the given reason.
+    Unsupported(String),
     /// The requested index exists but no serving candidate was found.
     NotServing(Progress),
     /// Serving candidates exist but none can handle a global query
@@ -426,7 +428,8 @@ impl Indexes {
     /// When `routing` is `true`, ensures queries are routed to the most
     /// up-to-date and best-matching index by applying the following logic:
     ///
-    /// 1. Returns `NotFound` if the requested index key does not exist.
+    /// 1. Returns `Unsupported` if the requested index was skipped at discovery,
+    ///    or `NotFound` if it does not exist.
     /// 2. Identifies all candidate indexes within the same routing group
     ///    (i.e., sharing the same keyspace, table, and target column).
     /// 3. Filters out candidates whose `score_index` returns `None` (invalid).
@@ -446,7 +449,10 @@ impl Indexes {
         routing: bool,
     ) -> BestIndexState {
         let Some(requested_entry) = self.vs_entries.get(key) else {
-            return BestIndexState::NotFound;
+            return match self.unsupported(key) {
+                Some(reason) => BestIndexState::Unsupported(reason.to_string()),
+                None => BestIndexState::NotFound,
+            };
         };
         let candidates: &[IndexKey] = if routing {
             self.vs_routing
