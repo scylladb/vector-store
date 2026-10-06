@@ -340,6 +340,29 @@ avg by (instance)(scylla_reactor_utilization)                                   
 ```
 
 To discover names, run `vsbench prom api label/__name__/values 'match[]={job="vector_search"}'`; the single quotes keep the PromQL intact in bash.
+
+### CDC baselines and capacities (default shape)
+
+Measured on 2026-10-06 (VECTOR-951 reproduction; Scylla nightly
+`2026.4.0~dev-0.20261005`, cohere-1m, index m=16, cb=128, F32):
+
+- **Idle CDC lags are not zero.** With nothing to ingest,
+  `time() - cdc_last_processed_timestamp_seconds` reads about **10 s for the
+  fine reader and 46 s for the wide reader** (its safety 30 s plus sleep
+  10 s). A reader is behind when the lag keeps growing by 1 s/s, not when it
+  is above zero; an ingest stall shows as `index_size` not moving while rows
+  are acknowledged (compare it with the base-table row count).
+- **Insert capacity.** One `i8g.2xlarge` Scylla node takes single-row
+  inserts of 768-d vectors at **~60K rows/s** (CL=ONE, 32 in flight). A
+  20 s uncapped probe therefore added 1.2M rows, more than the 1M base:
+  size insert probes by rows, not seconds.
+- **Ingest capacity.** Vector Store on `r8g.4xlarge` ingests **~5.1K rows/s**
+  through CDC at ~80% CPU with no concurrent searches. Under a steady
+  search stream (`biased` select in `vs_index::recv`) it drops to
+  ~650–800 rows/s at concurrency 64 and ~130 rows/s at concurrency 256
+  (VECTOR-951); the backlog drains at 3–4K rows/s once the searches stop.
+- **Index rebuilds.** The initial build of cohere-1m took 93 s; a rebuild
+  after a Vector Store restart runs at ~6K rows/s (3.2M rows in 528 s).
 Raw endpoints on the nodes:
 - `127.0.0.1:9100/metrics` on every node;
 - `<ip>:9180/metrics` on Scylla nodes;
