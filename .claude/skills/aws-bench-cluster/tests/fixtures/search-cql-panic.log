@@ -1,0 +1,10 @@
+2026-10-06T11:10:00.000000Z  INFO Readings buckets from "/var/lib/vsbench/datasets/cohere-1m/buckets.bin"...
+2026-10-06T11:10:01.500000Z  INFO Node added to cluster: 3b20b851-70c6-471c-8ed0-b680afb7f82b - 10.0.1.10:9042
+2026-10-06T11:10:01.600000Z  INFO Synchronizing search cql tasks to start after 2.00s
+2026-10-06T11:10:03.600000Z  INFO Starting search cql tasks
+2026-10-06T11:10:03.650000Z ERROR Vector Store returned 400 Bad Request: ANN queries with a partition key restriction require ALLOW FILTERING
+thread 'tokio-runtime-worker' panicked at crates/benchmark/src/db.rs:294:22:
+called `Result::unwrap()` on an `Err` value: DbError(Invalid, "requires ALLOW FILTERING")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+thread 'main' panicked at crates/benchmark/src/main.rs:429:47:
+called `Result::unwrap()` on an `Err` value: JoinError::Panic(Id(17), ...)

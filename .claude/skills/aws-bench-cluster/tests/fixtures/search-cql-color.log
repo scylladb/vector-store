@@ -1,0 +1,20 @@
+[2m2026-10-06T10:04:03.960895Z[0m [32m INFO[0m Readings buckets from "ds-fbin/buckets.bin"...
+[2m2026-10-06T10:04:03.967938Z[0m [32m INFO[0m Node added to cluster: 3b20b851-70c6-471c-8ed0-b680afb7f82b - 172.26.0.2:9042
+[2m2026-10-06T10:04:03.970828Z[0m [32m INFO[0m Synchronizing search cql tasks to start after 2.00s
+[2m2026-10-06T10:04:05.970602Z[0m [32m INFO[0m Starting search cql tasks
+[2m2026-10-06T10:04:10.972073Z[0m [32m INFO[0m Gathering measurements
+[2m2026-10-06T10:04:10.972351Z[0m [32m INFO[0m duration: 5.0s
+[2m2026-10-06T10:04:10.972360Z[0m [32m INFO[0m queries: 34776
+[2m2026-10-06T10:04:10.972364Z[0m [32m INFO[0m QPS: 6953.2
+[2m2026-10-06T10:04:10.972368Z[0m [32m INFO[0m latency min: 354.4µs
+[2m2026-10-06T10:04:10.972371Z[0m [32m INFO[0m latency P1: 1.0ms
+[2m2026-10-06T10:04:10.972373Z[0m [32m INFO[0m latency P10: 1.0ms
+[2m2026-10-06T10:04:10.972375Z[0m [32m INFO[0m latency P25: 1.0ms
+[2m2026-10-06T10:04:10.972376Z[0m [32m INFO[0m latency P50: 1.0ms
+[2m2026-10-06T10:04:10.972377Z[0m [32m INFO[0m latency P75: 1.3ms
+[2m2026-10-06T10:04:10.972379Z[0m [32m INFO[0m latency P90: 1.7ms
+[2m2026-10-06T10:04:10.972381Z[0m [32m INFO[0m latency P99: 3.2ms
+[2m2026-10-06T10:04:10.972382Z[0m [32m INFO[0m latency max: 25.1ms
+[2m2026-10-06T10:04:10.972384Z[0m [32m INFO[0m recall min: 20.0
+[2m2026-10-06T10:04:10.972389Z[0m [32m INFO[0m recall avg: 63.5
+[2m2026-10-06T10:04:10.972391Z[0m [32m INFO[0m recall max: 100.0

@@ -1,0 +1,6 @@
+2026-10-06T10:03:51.767220Z  INFO Node added to cluster: 3b20b851-70c6-471c-8ed0-b680afb7f82b - 172.26.0.2:9042
+2026-10-06T10:03:51.795544Z  INFO Waiting for index vsb_index at http://172.26.0.3:6080/api/v1 to be available (index not found yet)
+2026-10-06T10:03:52.798079Z  INFO Waiting for index vsb_index at http://172.26.0.3:6080/api/v1 to be available (index not found yet)
+2026-10-06T10:03:53.798977Z  INFO Waiting for index vsb_index at http://172.26.0.3:6080/api/v1 to be ready (current status: Initializing)
+2026-10-06T10:03:54.800597Z  INFO Index vsb_index at http://172.26.0.3:6080/api/v1 is ready
+2026-10-06T10:03:54.800659Z  INFO Build Index took 3.03s

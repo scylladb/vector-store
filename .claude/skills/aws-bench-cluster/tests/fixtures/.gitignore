@@ -1,0 +1,2 @@
+# Benchmark logs are test fixtures here; the repo-wide *.log rule must not hide them.
+!*.log

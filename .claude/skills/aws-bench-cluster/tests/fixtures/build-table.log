@@ -1,0 +1,5 @@
+2026-10-06T10:03:46.344328Z  INFO Readings buckets from "ds-fbin/buckets.bin"...
+2026-10-06T10:03:46.344784Z  INFO Found dimension 16 for dataset at "ds-fbin"
+2026-10-06T10:03:46.349826Z  INFO Node added to cluster: 3b20b851-70c6-471c-8ed0-b680afb7f82b - 172.26.0.2:9042
+2026-10-06T10:03:46.360306Z  WARN Response from the database contains a warning warning="Using Replication Factor replication_factor=1 lower than the minimum_replication_factor_warn_threshold=3 is not recommended."
+2026-10-06T10:03:46.436308Z  INFO Build table took 84.42ms
