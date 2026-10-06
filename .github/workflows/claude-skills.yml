@@ -1,0 +1,38 @@
+name: Claude skills
+
+on:
+  push:
+    branches:
+    - 'master'
+    paths:
+    - '.claude/skills/**'
+    - '.github/workflows/claude-skills.yml'
+
+  pull_request:
+    branches:
+    - 'master'
+    paths:
+    - '.claude/skills/**'
+    - '.github/workflows/claude-skills.yml'
+
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  aws-bench-cluster:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+    - name: Print tool versions
+      run: |
+        python3 --version
+        shellcheck --version
+
+    - name: Run unit tests
+      run: python3 -m unittest discover -v -s .claude/skills/aws-bench-cluster/tests -t .claude/skills/aws-bench-cluster
+
+    - name: Run shellcheck
+      run: shellcheck .claude/skills/aws-bench-cluster/node/*.sh .claude/skills/aws-bench-cluster/cross/*.sh
