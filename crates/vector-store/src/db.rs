@@ -1234,14 +1234,23 @@ fn validate_primary_key_columns<T: DbDriver>(
             "primary key column {name} does not exist in a table"
         ))?;
         if !cql_types::is_supported(&column.typ) {
-            bail!(
-                "unsupported primary key column type: column {name} has type {:?}, \
-                which cannot be represented in an index primary key",
-                column.typ
-            );
+            bail!(UnsupportedPrimaryKeyType {
+                column: name,
+                typ: format!("{:?}", column.typ),
+            });
         }
     }
     Ok(())
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "unsupported primary key column type: column {column} has type {typ}, \
+    which cannot be represented in an index primary key"
+)]
+struct UnsupportedPrimaryKeyType {
+    column: ColumnName,
+    typ: String,
 }
 
 fn validate_column_type_for_kind(
