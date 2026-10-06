@@ -291,6 +291,7 @@ pub(crate) struct Indexes {
     vs_entries: HashMap<IndexKey, VsIndexEntry>,
     vs_routing: HashMap<RoutingGroupKey, Vec<IndexKey>>,
     fts_entries: HashMap<IndexKey, FtsIndexEntry>,
+    unsupported: HashMap<IndexKey, String>,
 }
 
 impl Indexes {
@@ -299,6 +300,7 @@ impl Indexes {
             vs_entries: HashMap::new(),
             vs_routing: HashMap::new(),
             fts_entries: HashMap::new(),
+            unsupported: HashMap::new(),
         }
     }
 
@@ -344,6 +346,15 @@ impl Indexes {
         } else {
             self.fts_entries.remove(key).is_some()
         }
+    }
+
+    /// Returns why the index found in the schema cannot be served, if it was skipped at discovery.
+    pub(crate) fn unsupported(&self, key: &IndexKey) -> Option<&str> {
+        self.unsupported.get(key).map(String::as_str)
+    }
+
+    pub(crate) fn set_unsupported(&mut self, unsupported: HashMap<IndexKey, String>) {
+        self.unsupported = unsupported;
     }
 
     pub(crate) fn iter_vs(&self) -> impl Iterator<Item = (&IndexKey, &VsIndexEntry)> {

@@ -7,8 +7,10 @@ use crate::Config;
 use crate::Connectivity;
 use crate::DbCustomIndex;
 use crate::DbIndexKind;
+use crate::DbUnsupportedIndex;
 use crate::ExpansionAdd;
 use crate::ExpansionSearch;
+use crate::IndexKey;
 use crate::IndexKind;
 use crate::IndexMetadata;
 use crate::IndexOptionsFts;
@@ -26,6 +28,7 @@ use crate::perf;
 use anyhow::bail;
 use futures::StreamExt;
 use futures::stream;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -88,7 +91,7 @@ pub(crate) async fn new(
                         node_state.send_event(
                             Event::DiscoveringIndexes,
                         ).await;
-                        let Ok(new_indexes) = get_indexes(&db, version).await.inspect_err(|err| {
+                        let Ok((new_indexes, unsupported)) = get_indexes(&db, version).await.inspect_err(|err| {
                             info!("monitor_indexes: unable to get the list of indexes: {err}");
                         }) else {
                             // there was an error during retrieving indexes, reset schema version
@@ -98,6 +101,7 @@ pub(crate) async fn new(
                         };
 
                         let new_indexes = filter_disabled_index_kinds(new_indexes, fulltext_indexes);
+                        let unsupported = unsupported_index_reasons(unsupported, fulltext_indexes);
 
                         if alter_index_simulator {
                             node_state.send_event(Event::IndexesDiscovered(
@@ -115,6 +119,7 @@ pub(crate) async fn new(
                             Box::new(|curr_idx| should_delete(curr_idx, &new_indexes))
                         };
                         del_indexes(&engine, indexes.extract_if(for_delete)).await;
+                        engine.set_unsupported_indexes(unsupported).await;
 
                         let for_add: Box<dyn Fn(&IndexMetadata) -> bool + Send> = if alter_index_simulator {
                             Box::new(|new_idx| should_add_simulator(new_idx, &indexes))
@@ -180,14 +185,15 @@ impl SchemaVersion {
 async fn get_indexes(
     db: &Sender<Db>,
     schema_version: Uuid,
-) -> anyhow::Result<HashSet<IndexMetadata>> {
+) -> anyhow::Result<(HashSet<IndexMetadata>, Vec<DbUnsupportedIndex>)> {
     if !db.is_valid_schema(schema_version).await {
         let msg = format!("get_indexes: not valid schema {schema_version} at the start");
         debug!(msg);
         bail!(msg);
     }
+    let (supported, unsupported) = db.get_indexes().await?;
     let mut indexes = HashSet::new();
-    for idx in db.get_indexes().await?.into_iter() {
+    for idx in supported.into_iter() {
         let Some(version) = db
             .get_index_version(idx.keyspace.clone(), idx.table.clone(), idx.index.clone())
             .await
@@ -236,7 +242,7 @@ async fn get_indexes(
         debug!(msg);
         bail!(msg);
     }
-    Ok(indexes)
+    Ok((indexes, unsupported))
 }
 
 async fn build_vs_index_kind(
@@ -352,6 +358,17 @@ fn filter_disabled_index_kinds(
     indexes
         .into_iter()
         .filter(|idx| !matches!(idx.kind, IndexKind::Fts(_)))
+        .collect()
+}
+
+fn unsupported_index_reasons(
+    unsupported: Vec<DbUnsupportedIndex>,
+    fulltext_indexes: bool,
+) -> HashMap<IndexKey, String> {
+    unsupported
+        .into_iter()
+        .filter(|idx| fulltext_indexes || idx.kind != DbIndexKind::FullTextSearch)
+        .map(|idx| (idx.key(), idx.reason))
         .collect()
 }
 
@@ -650,6 +667,10 @@ mod tests {
             }
         });
 
+        mock_engine
+            .expect_set_unsupported_indexes()
+            .returning(|_| async {}.boxed());
+
         // DB mock
         let mut mock_db = MockSimDb::new();
 
@@ -671,7 +692,7 @@ mod tests {
                 let state = state.clone();
                 async move {
                     let indexes = state.get_db_indexes();
-                    tx.send(Ok(indexes)).unwrap();
+                    tx.send(Ok((indexes, vec![]))).unwrap();
                 }
                 .boxed()
             }
@@ -856,7 +877,8 @@ mod tests {
                         alternator_attribute_types: Arc::new(BTreeMap::new()),
                         kind: DbIndexKind::VectorSearch,
                     };
-                    tx.send(Ok(vec![index(), index(), index()])).unwrap();
+                    tx.send(Ok((vec![index(), index(), index()], vec![])))
+                        .unwrap();
                 }
                 .boxed()
             }
@@ -952,7 +974,8 @@ mod tests {
                         alternator_attribute_types: Arc::new(BTreeMap::new()),
                         kind: DbIndexKind::VectorSearch,
                     };
-                    tx.send(Ok(vec![index(), index(), index()])).unwrap();
+                    tx.send(Ok((vec![index(), index(), index()], vec![])))
+                        .unwrap();
                 }
                 .boxed()
             }
@@ -1043,18 +1066,21 @@ mod tests {
 
         mock_db.expect_get_indexes().returning(move |tx| {
             async move {
-                tx.send(Ok(vec![DbCustomIndex {
-                    keyspace: "ks".to_string().into(),
-                    index: "idx".to_string().into(),
-                    table: "tbl".to_string().into(),
-                    primary_key_columns: NonemptyArc::new(["pk"]).unwrap(),
-                    partition_key_count: NonZeroUsize::new(1).unwrap(),
-                    target_columns: NonemptyArc::new(["embedding"]).unwrap(),
-                    partitioning: DbIndexPartitioning::Global,
-                    filtering_columns: Arc::new([]),
-                    alternator_attribute_types: Arc::new(BTreeMap::new()),
-                    kind: DbIndexKind::VectorSearch,
-                }]))
+                tx.send(Ok((
+                    vec![DbCustomIndex {
+                        keyspace: "ks".to_string().into(),
+                        index: "idx".to_string().into(),
+                        table: "tbl".to_string().into(),
+                        primary_key_columns: NonemptyArc::new(["pk"]).unwrap(),
+                        partition_key_count: NonZeroUsize::new(1).unwrap(),
+                        target_columns: NonemptyArc::new(["embedding"]).unwrap(),
+                        partitioning: DbIndexPartitioning::Global,
+                        filtering_columns: Arc::new([]),
+                        alternator_attribute_types: Arc::new(BTreeMap::new()),
+                        kind: DbIndexKind::VectorSearch,
+                    }],
+                    vec![],
+                )))
                 .unwrap();
             }
             .boxed()
@@ -1086,18 +1112,21 @@ mod tests {
 
         mock_db.expect_get_indexes().returning(move |tx| {
             async move {
-                tx.send(Ok(vec![DbCustomIndex {
-                    keyspace: "ks".to_string().into(),
-                    index: "fts_idx".to_string().into(),
-                    table: "tbl".to_string().into(),
-                    primary_key_columns: NonemptyArc::new(["pk"]).unwrap(),
-                    partition_key_count: NonZeroUsize::new(1).unwrap(),
-                    target_columns: NonemptyArc::new(["content"]).unwrap(),
-                    partitioning: DbIndexPartitioning::Global,
-                    filtering_columns: Arc::new([]),
-                    alternator_attribute_types: Arc::new(BTreeMap::new()),
-                    kind: DbIndexKind::FullTextSearch,
-                }]))
+                tx.send(Ok((
+                    vec![DbCustomIndex {
+                        keyspace: "ks".to_string().into(),
+                        index: "fts_idx".to_string().into(),
+                        table: "tbl".to_string().into(),
+                        primary_key_columns: NonemptyArc::new(["pk"]).unwrap(),
+                        partition_key_count: NonZeroUsize::new(1).unwrap(),
+                        target_columns: NonemptyArc::new(["content"]).unwrap(),
+                        partitioning: DbIndexPartitioning::Global,
+                        filtering_columns: Arc::new([]),
+                        alternator_attribute_types: Arc::new(BTreeMap::new()),
+                        kind: DbIndexKind::FullTextSearch,
+                    }],
+                    vec![],
+                )))
                 .unwrap();
             }
             .boxed()
@@ -1146,7 +1175,7 @@ mod tests {
         };
         let db = db::tests::new(mock_db_with_fts_index(Some(options)));
 
-        let result = get_indexes(&db, Uuid::new_v4()).await.unwrap();
+        let (result, _) = get_indexes(&db, Uuid::new_v4()).await.unwrap();
 
         assert_eq!(result.len(), 1);
         let idx = result.into_iter().next().unwrap();
@@ -1158,7 +1187,7 @@ mod tests {
     async fn get_indexes_defaults_fts_options_when_db_has_none() {
         let db = db::tests::new(mock_db_with_fts_index(None));
 
-        let result = get_indexes(&db, Uuid::new_v4()).await.unwrap();
+        let (result, _) = get_indexes(&db, Uuid::new_v4()).await.unwrap();
 
         let idx = result.into_iter().next().unwrap();
         assert_eq!(idx.kind, IndexKind::Fts(IndexOptionsFts::default()));
@@ -1356,5 +1385,26 @@ mod tests {
                 .iter()
                 .all(|idx| matches!(idx.kind, IndexKind::Vs(_)))
         );
+    }
+
+    #[test]
+    fn unsupported_fts_indexes_are_filtered_out_when_disabled() {
+        let unsupported = |name: &str, kind| DbUnsupportedIndex {
+            keyspace: "ks".into(),
+            index: name.into(),
+            kind,
+            reason: "reason".to_string(),
+        };
+        let indexes = || {
+            vec![
+                unsupported("vs_idx", DbIndexKind::VectorSearch),
+                unsupported("fts_idx", DbIndexKind::FullTextSearch),
+            ]
+        };
+
+        assert_eq!(unsupported_index_reasons(indexes(), true).len(), 2);
+        let result = unsupported_index_reasons(indexes(), false);
+        assert_eq!(result.len(), 1);
+        assert!(result.contains_key(&IndexKey::new(&"ks".into(), &"vs_idx".into())));
     }
 }

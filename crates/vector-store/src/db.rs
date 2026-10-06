@@ -14,6 +14,7 @@ use crate::DbDriver;
 use crate::DbIndexKind;
 use crate::DbIndexPartitioning;
 use crate::DbIndexedRow;
+use crate::DbUnsupportedIndex;
 use crate::Dimensions;
 use crate::ExpansionAdd;
 use crate::ExpansionSearch;
@@ -43,11 +44,14 @@ use anyhow::Context;
 use anyhow::anyhow;
 use anyhow::bail;
 use futures::TryStreamExt;
+use itertools::Either;
+use itertools::Itertools;
 use regex::Regex;
 use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
 use secrecy::ExposeSecret;
 use std::collections::BTreeMap;
+use std::convert::identity;
 use std::num::NonZeroUsize;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -71,7 +75,7 @@ type GetDbIndexR = anyhow::Result<(
     mpsc::Receiver<(DbIndexedRow, AsyncInProgress)>,
 )>;
 pub(crate) type LatestSchemaVersionR = anyhow::Result<Uuid>;
-type GetIndexesR = anyhow::Result<Vec<DbCustomIndex>>;
+type GetIndexesR = anyhow::Result<(Vec<DbCustomIndex>, Vec<DbUnsupportedIndex>)>;
 type GetIndexVersionR = anyhow::Result<Option<IndexVersion>>;
 type GetIndexTargetDimensionsR = anyhow::Result<Option<Dimensions>>;
 type GetVsIndexParamsR = anyhow::Result<
@@ -752,14 +756,19 @@ impl<T: DbDriver> Statements<T> {
                         });
                         Ok(options.remove("target").and_then(|target| {
                             let kind = db_index_kind_from_options(&mut options)?;
-                            validate_primary_key_columns(&self.db_driver, table)
-                                .inspect_err(|err| {
-                                    warn!("Skipping index {index_name}: {err}");
-                                })
-                                .ok()?;
+                            if let Err(err) = validate_primary_key_columns(&self.db_driver, table) {
+                                warn!("Skipping index {index_name}: {err}");
+                                let err = err.downcast::<UnsupportedPrimaryKeyType>().ok()?;
+                                return Some(Either::Right(DbUnsupportedIndex {
+                                    keyspace: keyspace_name,
+                                    index: index_name,
+                                    kind,
+                                    reason: err.to_string(),
+                                }));
+                            }
                             from_target_option(&self.db_driver, table, target, kind, is_alternator)
                                 .map(|(partitioning, target_column, filtering_columns)| {
-                                    DbCustomIndex {
+                                    Either::Left(DbCustomIndex {
                                         keyspace: keyspace_name,
                                         index: index_name.clone(),
                                         table: table_name,
@@ -771,7 +780,7 @@ impl<T: DbDriver> Statements<T> {
                                         filtering_columns,
                                         alternator_attribute_types,
                                         kind,
-                                    }
+                                    })
                                 })
                                 .inspect_err(|err| {
                                     warn!(
@@ -784,8 +793,9 @@ impl<T: DbDriver> Statements<T> {
                     }
                 },
             )
-            .try_collect()
-            .await;
+            .try_collect::<Vec<_>>()
+            .await
+            .map(|indexes| indexes.into_iter().partition_map(identity));
         if let Err(err) = &result
             && err.is::<InvalidMetadata>()
         {

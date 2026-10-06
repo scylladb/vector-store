@@ -391,10 +391,8 @@ fn process_db(db: &DbBasic, msg: Db, node_state: Sender<NodeState>) {
                     tokio::time::sleep(std::time::Duration::MAX).await;
                 });
             } else {
-                tx.send(Ok(db
-                    .0
-                    .read()
-                    .unwrap()
+                let db = db.0.read().unwrap();
+                let indexes = db
                     .keyspaces
                     .iter()
                     .flat_map(|(keyspace_name, keyspace)| {
@@ -431,7 +429,8 @@ fn process_db(db: &DbBasic, msg: Db, node_state: Sender<NodeState>) {
                                 },
                             })
                     })
-                    .collect()))
+                    .collect();
+                tx.send(Ok((indexes, vec![])))
                     .map_err(|_| anyhow!("Db::GetIndexes: unable to send response"))
                     .unwrap()
             }

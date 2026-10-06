@@ -441,6 +441,12 @@ impl From<crate::node_state::IndexStatus> for httpapi::IndexStatus {
             body = ErrorMessage
         ),
         (
+            status = 422,
+            description = "Index cannot be served. Possible causes: the index exists in ScyllaDB, but its table has a primary key column of a type Vector Store does not support.",
+            content_type = "application/json",
+            body = ErrorMessage
+        ),
+        (
             status = 500,
             description = "Error while checking index state or counting indexed items. Possible causes: internal error, or issues accessing the database.",
             content_type = "application/json",
@@ -497,6 +503,12 @@ async fn get_index_status(
             body = ErrorMessage
         ),
         (
+            status = 422,
+            description = "Index cannot be served. Possible causes: the index exists in ScyllaDB, but its table has a primary key column of a type Vector Store does not support.",
+            content_type = "application/json",
+            body = ErrorMessage
+        ),
+        (
             status = 500,
             description = "Error while checking index state or counting indexed items. Possible causes: internal error, or issues accessing the database.",
             content_type = "application/json",
@@ -528,6 +540,13 @@ async fn get_index_info(
                 entry.status(),
                 entry.progress(),
             )
+        } else if let Some(reason) = indexes.unsupported(&index_key) {
+            return unsupported_index_response(
+                &keyspace_name,
+                &index_name,
+                reason,
+                "get_index_info",
+            );
         } else {
             let msg = format!("missing index: {keyspace_name}.{index_name}");
             debug!("get_index_info: {msg}");
@@ -963,6 +982,17 @@ async fn post_index_ann(
         }
     })
     .await
+}
+
+fn unsupported_index_response(
+    keyspace: &KeyspaceName,
+    index_name: &IndexName,
+    reason: &str,
+    route_name: &str,
+) -> Response {
+    let msg = format!("index {keyspace}.{index_name} cannot be served: {reason}");
+    debug!("{route_name}: {msg}");
+    (StatusCode::UNPROCESSABLE_ENTITY, msg).into_response()
 }
 
 async fn check_fts_serving<T>(
