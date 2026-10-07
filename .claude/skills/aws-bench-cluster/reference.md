@@ -21,6 +21,7 @@ them when something stops matching.
 - [Detached jobs](#detached-jobs)
 - [Upgrading pins](#upgrading-pins)
 - [Troubleshooting](#troubleshooting)
+- [Production data (Scylla Cloud clusters)](#production-data)
 - [Follow-ups outside this skill](#follow-ups)
 
 ## Code layout
@@ -542,6 +543,88 @@ All pins live at the top of `vsbenchlib/config.py`. When bumping:
 | all percentiles `1.0ms` | tool floor; use `mean_ms` and server metrics |
 | QPS identical for two builds | check `client_saturated` / `plateau`; compare below the knee |
 | `deploy monitoring` fails "template changed" | upstream scylla-monitoring changed; see [Upgrading pins](#upgrading-pins) |
+
+## Production data
+
+When the skill is used to debug a **Scylla Cloud production cluster** (a
+CUSTOMER ticket names one, e.g. `45228`), its Vector Store logs and metrics
+are already collected centrally. Both stores answer plain HTTPS over the
+ScyllaDB VPN, so the first step is a probe, not a reproduction:
+
+```
+curl -s -o /dev/null -w '%{http_code}' https://vmui.app.int.scylla.cloud/flags   # 200 = VPN is up
+```
+
+Everything below is internal data about customers: keep it in internal
+Jira/Slack, never in a public issue, PR or chat.
+
+### Logs: VictoriaLogs
+
+- Endpoint: `https://vmui.app.int.scylla.cloud/select/logsql/query` with
+  form fields `query`, `start`, `end` (RFC 3339 or Unix), `limit`; the
+  response is one JSON object per line. `/select/logsql/field_names` lists
+  the fields. Infra logs (OS, k8s): `https://vmui-infra.app.int.scylla.cloud`.
+- Always filter by `cluster:<id>` (an unfiltered query is expensive). Useful
+  fields: `_msg`, `_time`, `cluster`, `private_ip`, `hostname`, `level`,
+  `service_name`, `node_type`, `systemd_unit`.
+- LogsQL matches **whole tokens**: `_msg:"removed the index"` works, a
+  substring of an index name does not; use the full
+  `_msg:audio_vectors_without_isrc_v1_f16_embedding_idx`.
+- Queries that answered CUSTOMER-765:
+  - `cluster:45228 _msg:"removed the index"` — every DROP INDEX seen by the
+    Vector Store nodes, with the node IP;
+  - `cluster:45228 private_ip:10.0.128.244 _msg:"Starting vector-store"` —
+    the running version (`Starting vector-store version 1.9.1`);
+  - `cluster:45228 (_msg:"CDC handler error" OR _msg:"restarting after" OR
+    _msg:"Session became None" OR _msg:"Session available" OR
+    _msg:"Failed to create")` — the CDC readers' lifecycle;
+  - `cluster:45228 private_ip:<ip> (level:warn OR level:error)` with a
+    one-hour window around an alert's start.
+
+### Metrics: Thanos
+
+- Endpoint: `https://thanos.app.int.scylla.cloud/api/v1/query`,
+  `/query_range` (`start`, `end`, `step`) and `/series` (`match[]`),
+  the Prometheus HTTP API.
+- Vector Store series carry `job="vector_search"`, `cluster="#45228"`
+  (**with the hash**), `cluster_name`, `instance=<private ip>`, `keyspace`,
+  `index_name`, `ks_index`, `reader` (`fine`/`wide`), `rack`, `serverId`.
+  The metric names are the ones in [Metrics](#metrics).
+- Queries that answered CUSTOMER-765:
+  - `cdc_last_processed_timestamp_seconds{cluster="#45228",index_name="<dropped>"}`
+    next to `cdc_reader_up{...}` for the same index — a watermark series
+    without an `up` series is a ghost left by orphaned readers;
+  - `time() - cdc_last_processed_timestamp_seconds{cluster="#45228"}` — the
+    lag of every reader on every node (idle: fine ~15–30 s, wide ~55–70 s);
+  - `max_over_time(cdc_reader_restarts_total{cluster="#45228"}[30d])` and
+    the same for `cdc_handler_errors_total` — whether readers ever restarted;
+  - `sum by (index_name,instance,operation)(rate(index_modified{cluster="#45228",keyspace="<ks>"}[1h]))`
+    as a range query over an episode, and `index_size{...}` per `instance`:
+    the Vector Store nodes index the same table independently, so a node
+    whose rates and size diverge from the others has a stalled reader and a
+    stale index — this is the freshness evidence.
+- The Scylla Cloud alert rules for Vector Store (`VSCdcReaderDown`,
+  `VSCdcReaderStalledFine` > 60 s, `VSCdcReaderStalledWide` > 300 s, all
+  `for 10m`) are in `scylladb/siren`,
+  `db/schema/00713_add_vs_cdc_reader_alerts.sql`.
+
+### The TSE plugin
+
+`scylla-customer-support@scylladb-technical-support` (Confluence page
+431292442, "[TSE] scylla-customer-support Plugin — Installation Guide")
+adds the Support team's workflows (ticket triage, log analysis, metrics
+interpretation, `cx`/`sc` CLI, Alertmanager) and three MCP servers;
+VictoriaLogs runs as two local stdio servers (`victorialogs_clusters`,
+`victorialogs_infra`, binary `mcp-victorialogs`), and `cx-sre-tooling` /
+`thanos-prod` come from the SRE-Tooling repo. Install it with
+`claude plugin marketplace add https://github.com/scylladb/technical-support.git --sparse .claude-plugin plugins/scylla-customer-support`
+and `claude plugin install scylla-customer-support@scylladb-technical-support`;
+the skills load in the next session. Three things the guide got wrong on
+2026-10-07: the mcp-victorialogs release asset is `*Linux_x86_64*`,
+`go install …@latest` fails on the module's replace directives (use the
+release tarball), and `claude mcp add` wants `<name>` before the `-e`
+options. The `cx` CLI (StrongDM) is provisioned per engineer; without it the
+`cx_*` tools answer "cx runtime not found", which is expected.
 
 ## Follow-ups
 

@@ -444,6 +444,15 @@ comparison.
 - Vector Store API on a node: `vsbench exec vs-0 -- curl -s 127.0.0.1:6080/api/v1/indexes`.
 - Scylla: `vsbench exec scylla-0 -- sudo docker exec scylla nodetool status`.
 
+**Debug a Scylla Cloud production cluster.** When the question comes from a
+CUSTOMER ticket, the cluster's logs and metrics are already collected:
+VictoriaLogs and Thanos are reachable over the ScyllaDB VPN with plain
+HTTPS, no node access needed, and the TSE `scylla-customer-support` plugin
+adds the support workflows. Field and label conventions, probe commands and
+the queries that answered CUSTOMER-765 are in
+[reference.md](reference.md#production-data). Reproduce on a benchmark
+cluster only what the production data cannot show.
+
 **Resume after a failure.**
 - `vsbench job list` shows jobs and their state.
 - `vsbench job wait <id>` re-attaches and records. It exits 1 for a failed job,
