@@ -853,6 +853,11 @@ pub async fn create_keyspace(session: &Session) -> KeyspaceName {
 }
 
 #[framed]
+pub async fn drop_keyspace(session: &Session, keyspace: &KeyspaceName) {
+    apply_schema_change(session, format!("DROP KEYSPACE IF EXISTS {keyspace}")).await;
+}
+
+#[framed]
 pub async fn create_table(session: &Session, columns: &str, options: Option<&str>) -> TableName {
     let table = unique_table_name();
 

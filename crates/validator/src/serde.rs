@@ -64,13 +64,13 @@ async fn test_serialization_deserialization_all_types(actors: Arc<TestActors>) {
     let keyspace = create_keyspace(&session).await;
 
     for (typ, data) in &cases {
-        session
-            .query_unpaged(
-                format!("CREATE TABLE tbl_{typ} (id {typ} PRIMARY KEY, vec vector<float, 3>)"),
-                (),
-            )
-            .await
-            .expect("failed to create a table");
+        apply_schema_change(
+            &session,
+            format!(
+                "CREATE TABLE IF NOT EXISTS tbl_{typ} (id {typ} PRIMARY KEY, vec vector<float, 3>)"
+            ),
+        )
+        .await;
         session
             .query_unpaged(
                 format!("INSERT INTO tbl_{typ} (id, vec) VALUES ({data}, [1.0, 2.0, 3.0])"),
@@ -103,10 +103,7 @@ async fn test_serialization_deserialization_all_types(actors: Arc<TestActors>) {
         assert_eq!(value.1, vec![1.0, 2.0, 3.0]);
     }
 
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop keyspace");
+    drop_keyspace(&session, &keyspace).await;
 }
 
 #[e2etest::test(group = serde)]
@@ -198,10 +195,7 @@ async fn test_varint_filter(actors: Arc<TestActors>) {
         "ck > 98765432109876543209 should return {{98765432109876543210}} (requires BigInt, not i64)"
     );
 
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop keyspace");
+    drop_keyspace(&session, &keyspace).await;
 }
 
 /// Test the fundamental PK vs CK asymmetry for decimal types:
@@ -340,10 +334,7 @@ async fn test_decimal_key(actors: Arc<TestActors>) {
     }
     assert!(expected_pks.is_empty());
 
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop keyspace");
+    drop_keyspace(&session, &keyspace).await;
 }
 
 /// Verify decimal filters use semantic BigDecimal comparison (not byte/unscaled comparison).
@@ -455,8 +446,5 @@ async fn test_decimal_filter(actors: Arc<TestActors>) {
         "pk=1.00 partition should have only its own row"
     );
 
-    session
-        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
-        .await
-        .expect("failed to drop keyspace");
+    drop_keyspace(&session, &keyspace).await;
 }
