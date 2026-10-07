@@ -113,3 +113,35 @@ async fn fts_index_metrics_present_in_metrics_endpoint() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn highlight_latency_recorded_under_highlight_operation() {
+    crate::enable_tracing();
+
+    let (client, keyspace_name, index_name, _db, _hold) =
+        fts::setup_fts_and_wait([(vec![CqlValue::Int(1)], "hello world", 10)], 1).await;
+
+    client
+        .highlight(
+            &keyspace_name,
+            &index_name,
+            "hello".into(),
+            vec!["hello there".into()],
+        )
+        .await;
+    let metrics = client.get_metrics_text().await;
+
+    let index_labels = format!(r#"index_name="{index_name}",keyspace="{keyspace_name}""#);
+    assert!(
+        metrics.contains(&format!(
+            r#"request_latency_seconds_count{{{index_labels},operation="highlight"}} 1"#
+        )),
+        "expected a single highlight latency sample in /metrics:\n{metrics}"
+    );
+    assert!(
+        !metrics.contains(&format!(
+            r#"request_latency_seconds_count{{{index_labels},operation="bm25"}}"#
+        )),
+        "highlight must not be recorded under the bm25 operation:\n{metrics}"
+    );
+}
