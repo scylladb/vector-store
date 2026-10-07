@@ -220,21 +220,21 @@ def _fetch_commit(repo: Path, ref: str) -> str:
     )
 
 
-def _tracked_changes(repo: Path) -> bool:
-    return bool(_git(repo, "status", "--porcelain", "--untracked-files=no").stdout.strip())
+def _tree_dirty(repo: Path) -> bool:
+    """Tracked changes against HEAD outside .claude/ (the pathspec of dirty_hash): edits to the
+    skill itself do not change what gets built."""
+    return _git(repo, "diff", "--quiet", "HEAD", "--", *DIRTY_HASH_PATHSPEC, check=False).returncode != 0
 
 
 def _describe(repo: Path, commit: str | None) -> str:
-    """`git describe --tags` of `commit` (or of the working tree with --dirty)."""
+    """`git describe --tags` of `commit` (or of HEAD; local_version adds -dirty itself)."""
     args = ["describe", "--tags", "--match", VERSION_TAG_GLOB]
-    args += [commit] if commit else ["--dirty"]
+    args += [commit] if commit else []
     result = _git(repo, *args, check=False)
     if result.returncode == 0 and result.stdout.strip():
         return result.stdout.strip()
     sha = commit or _git(repo, "rev-parse", "HEAD").stdout.strip()
     fallback = f"0.0.0-g{sha[:7]}"
-    if commit is None and _tracked_changes(repo):
-        fallback += "-dirty"
     proc.warn(f"no version tag is reachable from {sha[:12]}; using version {fallback}")
     return fallback
 
@@ -279,12 +279,14 @@ def dirty_hash(repo: Path) -> str:
 def local_version(repo: Path, label: str) -> tuple[str, str, bool]:
     """(version, commit, dirty) of the working tree.
 
-    `git describe --dirty --tags` (+ `+<label>`); a dirty tree also gets build
-    metadata `d<dirty_hash>` so different uncommitted states get different versions.
+    `git describe --tags`, `-dirty` when tracked files outside .claude/ differ from HEAD
+    (+ `+<label>`); a dirty tree also gets build metadata `d<dirty_hash>` so different
+    uncommitted states get different versions.
     """
     commit = _git(repo, "rev-parse", "HEAD").stdout.strip()
-    version = _describe(repo, None)
-    dirty = version.endswith("-dirty")
+    version, dirty = _describe(repo, None), _tree_dirty(repo)
+    if dirty:
+        version += "-dirty"
     if label:
         version += f"+{label}"
     if dirty:

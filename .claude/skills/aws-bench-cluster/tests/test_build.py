@@ -187,6 +187,17 @@ class LocalVersionTest(TempHomeTest):
         (self.repo / ".claude" / "skills" / "SKILL.md").write_text("x")
         self.assertEqual(build.dirty_hash(self.repo), before)
 
+    def test_agent_file_edits_are_not_dirty(self) -> None:
+        # dirty_hash already excludes .claude/; the -dirty suffix must follow the same rule
+        (self.repo / ".claude" / "skills").mkdir(parents=True)
+        commit_file(self.repo, ".claude/skills/SKILL.md", "v1\n")
+        (self.repo / ".claude" / "skills" / "SKILL.md").write_text("v2\n")
+        version, _, dirty = build.local_version(self.repo, "")
+        self.assertRegex(version, r"^1\.0\.0-1-g[0-9a-f]{7,}$")
+        self.assertFalse(dirty)
+        (self.repo / "Cargo.toml").write_text("changed\n")
+        self.assertTrue(build.local_version(self.repo, "")[2])
+
     def test_untracked_files_alone_are_not_dirty(self) -> None:
         (self.repo / "notes.txt").write_text("x")
         self.assertEqual(build.local_version(self.repo, "")[0::2], ("1.0.0", False))
