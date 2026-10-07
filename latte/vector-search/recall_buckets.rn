@@ -16,6 +16,8 @@
 //!   latte schema             latte/vector-search/recall_buckets.rn <node>
 //!   latte run -f load        latte/vector-search/recall_buckets.rn <node> -d <dataset_size> \
 //!       -P load_data=true -P 'vector_data_dir="<dir>/"' --threads 1 --concurrency 64
+//!         (--threads 1 on purpose: unlike recall.rn, this script reads its
+//!          bucket into ctx.data, which latte copies into every worker thread)
 //!   # full-dataset point — build the global index, then search it (default bucket=-1):
 //!   latte run -f build_index latte/vector-search/recall_buckets.rn <node> -d 1 -P build_index=true
 //!   latte run -f search      latte/vector-search/recall_buckets.rn <node> -d 60s --concurrency 32 \

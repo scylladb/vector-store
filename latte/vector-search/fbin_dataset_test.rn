@@ -1,16 +1,21 @@
-//! Smoke test for the fbin_dataset loaders. Needs any CQL endpoint (plain
-//! ScyllaDB is enough, no vector-store) and the fixture files in testdata/
-//! (regenerate with testdata/gen_fbin_testdata.py):
+//! Smoke test for the dataset loaders. Needs any CQL endpoint (plain ScyllaDB
+//! is enough, no vector-store) and the fixture files in testdata/ (regenerate
+//! with testdata/gen_fbin_testdata.py):
 //!
 //!   latte run -f smoke fbin_dataset_test.rn <node> -d 1
 //!
-//! Checks valid files in every representation, both ground-truth layouts, an
-//! id above i32::MAX, and the error paths: truncated file, unpatched prefix crop,
-//! wrong ground-truth size.
+//! The loaders leave rows on disk and seek to one per cycle, so a mistake in
+//! the offsets reads the wrong bytes and quietly benchmarks the wrong data.
+//! This checks the readers against the fixtures' known values and, for text,
+//! against the eager loader that `recall_buckets.rn` still uses. `data.txt`
+//! carries the line layouts that shift byte offsets: a blank line, and a
+//! final line with no terminator.
+
 
 use latte::*;
 
 mod fbin_dataset;
+mod text_dataset;
 
 const DATA_DIR = latte::param!("data_dir", "testdata/");
 
@@ -26,25 +31,56 @@ fn expect_err(result, expected, label) {
             }
             Ok(msg)
         }
+        other => Err(`${label}: expected a Result, got ${other} (a missing .await?)`),
     }
 }
 
+/// Both fixtures hold 10 x 4 records whose components run 0.0, 0.5, 1.0, ...
+fn expected_vector(id, dimension) {
+    let v = [];
+    for j in 0..dimension {
+        v.push((id * dimension + j) as f64 * 0.5);
+    }
+    v
+}
+
 pub async fn prepare(db) {
-    let rows = fbin_dataset::load_base_vectors(`${DATA_DIR}data.fbin`, false).await?;
-    if rows.len() != 10 || rows[9].vector.len() != 4 {
-        return Err("load_base_vectors: wrong shape");
+    let header = fbin_dataset::read_base_header(`${DATA_DIR}data.fbin`)?;
+    if header.count != 10 || header.dimension != 4 {
+        return Err(`read_base_header: wrong header ${header.count} x ${header.dimension}`);
     }
-    if rows[1].vector[0] != 2.0 {
-        return Err(`load_base_vectors: wrong value ${rows[1].vector[0]}`);
+
+    // Records are read by seeking, so check them out of order and twice.
+    let file = fs::open_binary(`${DATA_DIR}data.fbin`)?;
+    for id in [9, 1, 0, 9, 5] {
+        let expected = expected_vector(id, header.dimension);
+        if fbin_dataset::read_base_vector_at(file, header, id)? != expected {
+            return Err(`read_base_vector_at: record ${id} is not ${expected}`);
+        }
+        let packed = fbin_dataset::read_base_vector_packed_at(file, header, id)?;
+        if packed.len() != header.dimension * 4 {
+            return Err(`read_base_vector_packed_at: record ${id} is ${packed.len()} bytes`);
+        }
     }
-    let packed = fbin_dataset::load_base_vectors_packed(`${DATA_DIR}data.fbin`).await?;
-    if packed.len() != 10 || packed[0].vector.len() != 16 {
-        return Err("load_base_vectors_packed: wrong shape");
+
+    // Text: every row read through the byte-offset index must match the eager
+    // loader, out of order and twice, across the line layouts in data.txt.
+    let rows = text_dataset::load_base_vectors(`${DATA_DIR}data.txt`, false).await?;
+    let index = text_dataset::index_base_vectors(`${DATA_DIR}data.txt`)?;
+    if text_dataset::row_count(index) != rows.len() || rows.len() != 10 {
+        return Err(`data.txt: indexed ${text_dataset::row_count(index)} rows, eager loader read ${rows.len()}`);
     }
+    let text_file = fs::open_binary(`${DATA_DIR}data.txt`)?;
+    for idx in [9, 1, 0, 9, 5, 2, 8, 3, 7, 4, 6] {
+        let row = text_dataset::read_base_vector_at(text_file, index, idx)?;
+        if row.id != rows[idx].id || row.vector != rows[idx].vector {
+            return Err(`data.txt: row ${idx} is ${row.id}, ${row.vector}, eager loader read ${rows[idx].id}, ${rows[idx].vector}`);
+        }
+    }
+
     if fbin_dataset::load_query_vectors(`${DATA_DIR}data.fbin`).await?.len() != 10 {
         return Err("load_query_vectors: wrong count");
     }
-
     let gt = fbin_dataset::load_ground_truth(`${DATA_DIR}gt_ids.ibin`).await?;
     if gt.len() != 10 || gt[9] != [45, 46, 47, 48, 4294967295] {
         return Err("load_ground_truth ids-only: wrong content");
@@ -54,11 +90,11 @@ pub async fn prepare(db) {
     }
 
     expect_err(
-        fbin_dataset::load_base_vectors(`${DATA_DIR}data_cropped.fbin`, false).await,
+        fbin_dataset::read_base_header(`${DATA_DIR}data_cropped.fbin`),
         ["implies 1608", "holds 10 whole records", "patch header count to 10"],
         "unpatched crop")?;
     let msg = expect_err(
-        fbin_dataset::load_base_vectors(`${DATA_DIR}data_trailing.fbin`, false).await,
+        fbin_dataset::read_base_header(`${DATA_DIR}data_trailing.fbin`),
         ["175 bytes, header 10 x 4 implies 168"],
         "trailing bytes")?;
     if msg.contains("patch header") {
@@ -69,7 +105,7 @@ pub async fn prepare(db) {
         ["expected 208", "408", "10 x 5"],
         "wrong ground-truth size")?;
 
-    println!("all fbin loader checks passed");
+    println!("all dataset loader checks passed");
     Ok(())
 }
 
