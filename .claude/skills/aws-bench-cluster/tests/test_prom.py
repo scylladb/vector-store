@@ -415,10 +415,6 @@ class FormatVectorTest(unittest.TestCase):
         self.assertIn("no finite values, first=NaN |", prom.format_vector([{"metric": {}, "values": only_nan}]))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 def vector_payload(items: list[tuple[dict[str, str], str]]) -> dict[str, Any]:
     result = [{"metric": metric, "value": [1_700_000_000, value]} for metric, value in items]
     return {"status": "success", "data": {"resultType": "vector", "result": result}}
@@ -472,3 +468,7 @@ class IndexStatusTest(unittest.TestCase):
         self.assertEqual(prom.index_status("c1", {}), {"note": "no load"})
         with self.assertRaises(PreconditionError):
             prom.index_status("c1", {"load": self.STATE["load"]})
+
+
+if __name__ == "__main__":
+    unittest.main()

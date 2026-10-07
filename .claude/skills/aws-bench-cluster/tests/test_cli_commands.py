@@ -757,10 +757,6 @@ class CollectTest(Case):
         self.assertIn("unexpected snapshot answer", err)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ProvisionContractTest(unittest.TestCase):
     """The shapes provision/teardown return (see their tests) render as the CLI promises."""
 
@@ -804,3 +800,7 @@ class ProvisionContractTest(unittest.TestCase):
         listed = cli.table([cli_cluster._list_row(row)], cli_cluster.LIST_COLUMNS).splitlines()
         self.assertRegex(listed[0], r"tag stale\s+OVERDUE$")
         self.assertRegex(listed[1], r"\s(29|30)h\d\dm\s+yes\s+no$")
+
+
+if __name__ == "__main__":
+    unittest.main()

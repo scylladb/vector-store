@@ -48,10 +48,6 @@ class CallTest(unittest.TestCase):
         self.assertTrue(awsapi.is_not_found(AwsError("x", "InvalidGroup.NotFound")))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class DefaultProfileTest(unittest.TestCase):
     """gimme-aws-creds names the profile differently depending on `include_path`."""
 
@@ -83,3 +79,7 @@ class DefaultProfileTest(unittest.TestCase):
 
     def test_falls_back_to_the_documented_name(self) -> None:
         self.assertEqual(self.profile("[other]\naws_access_key_id = x\n"), awsapi.config.DEFAULT_PROFILE)
+
+
+if __name__ == "__main__":
+    unittest.main()

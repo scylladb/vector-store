@@ -341,12 +341,6 @@ class RerunDriftTest(JobCommandCase):
         self.assertIn("maximum_node_connections 32 -> 16", self.warn.call_args[0][0])
 
 
-if __name__ == "__main__":
-    import unittest
-
-    unittest.main()
-
-
 class ProfileTest(HomeTestCase):
     """`bench search --perf NODE`: captures start when a measured step begins; finalize pulls them."""
 
@@ -438,3 +432,9 @@ class ProfileTest(HomeTestCase):
         self.assertIn("failed (exit 1)", profile["scylla-0"]["error"])
         self.assertIn("still running", profile["vs-1"]["error"])
         self.assertEqual(pulled.call_count, 3)
+
+
+if __name__ == "__main__":
+    import unittest
+
+    unittest.main()
