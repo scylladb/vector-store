@@ -594,6 +594,10 @@ impl<T: DbDriver> Statements<T> {
         tx: mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
         completed_scan_length: Arc<AtomicU64>,
     ) -> anyhow::Result<()> {
+        // TODO: Remove this check when building pattern index is supported
+        if let IndexKind::Pattern(_) = &self.kind {
+            return std::future::pending().await;
+        }
         let ranges = self.fullscan_ranges().await?;
         let concurrency = self.nr_parallel_queries().await?;
         scan_ranges(
