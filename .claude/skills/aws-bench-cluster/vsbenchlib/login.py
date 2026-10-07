@@ -27,6 +27,7 @@ from .proc import VsbenchError, iso
 
 URL_RE = re.compile(r"https://[A-Za-z0-9.-]+\.okta\.com/activate\?user_code=[A-Z0-9]+")
 DEFAULT_TIMEOUT_S = 600
+OKTA_APPROVAL_S = 120  # gimme-aws-creds stops polling about this long after it printed the code
 _SECRET_RE = re.compile(r"secret|token|key|password", re.IGNORECASE)
 _RETRY_HINT = "run `vsbench login` again and approve the URL it prints within a few minutes"
 
@@ -126,7 +127,10 @@ class _suppress_oserror:
 def _failure(code: int, lines: list[str], url: str | None) -> str:
     """One line about why the tool failed, never echoing anything that looks like a secret."""
     if any("Timeout waiting for device authorization" in line for line in lines):
-        return "the Okta device flow was not approved in time" + (f" ({url})" if url else "")
+        expired = (
+            f"the Okta code expired before it was approved (gimme-aws-creds gives up after about {OKTA_APPROVAL_S} s)"
+        )
+        return expired + (f": {url}" if url else "")
     safe = [line for line in lines if line.strip() and not _SECRET_RE.search(line) and "Traceback" not in line]
     detail = safe[-1].strip()[:200] if safe else "no output"
     return f"gimme-aws-creds failed (exit {code}): {detail}"

@@ -78,12 +78,16 @@ def cmd_doctor(ctx: Context, args: argparse.Namespace) -> int:
 
 
 def cmd_login(ctx: Context, args: argparse.Namespace) -> int:
+    login = load_module("login")
+
     def on_url(url: str) -> None:
         out(url)  # stdout: the only thing printed there, so an agent can relay it as it is
         sys.stdout.flush()  # stdout is a pipe when an agent runs this: the URL must not wait for the exit
-        proc.log("approve this URL in a browser (Okta, with MFA); waiting for the login to finish")
+        until = proc.utcnow() + datetime.timedelta(seconds=login.OKTA_APPROVAL_S)
+        proc.log(f"approve this URL in a browser (Okta, with MFA) within about {login.OKTA_APPROVAL_S // 60} minutes,")
+        proc.log(f"by {until.strftime('%H:%M:%S')}Z; then the code expires and the command exits 3")
 
-    result = load_module("login").login(args.username, args.timeout_s, on_url=on_url)
+    result = login.login(args.username, args.timeout_s, on_url=on_url)
     expires = result.get("expires_at") or "unknown"
     proc.log(f"logged in as {result['username']}: profile {result['profile']}, credentials expire at {expires}")
     return 0

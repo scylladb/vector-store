@@ -83,7 +83,7 @@ class LoginTest(unittest.TestCase):
         os.environ["FAKE_MODE"] = "fail"
         with self.assertRaises(AuthError) as ctx:
             login.login("x@scylladb.com", 30)
-        self.assertIn("not approved in time", str(ctx.exception))
+        self.assertIn("the Okta code expired before it was approved", str(ctx.exception))
         self.assertNotIn("Traceback", str(ctx.exception))
 
     def test_missing_tool_and_username(self) -> None:

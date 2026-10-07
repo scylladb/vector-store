@@ -381,13 +381,14 @@ class LifecycleTest(Case):
             self.assertEqual(stdout.flushes, 1)  # flushed right after the URL, not at exit
             return {"username": username, "url": "u", "profile": "p", "expires_at": "2026-10-07T01:00:00Z"}
 
-        fake = self.fake("login", login=mock.Mock(side_effect=fake_login))
+        fake = self.fake("login", login=mock.Mock(side_effect=fake_login), OKTA_APPROVAL_S=120)
         stdout, stderr = Stdout(), io.StringIO()
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             code = cli.main(["-c", CLUSTER, "login", "--username", "a@scylladb.com", "--timeout", "5m"])
         out, err = stdout.getvalue(), stderr.getvalue()
         self.assertEqual((code, out), (0, "https://scylladb.okta.com/activate?user_code=ABCD1234\n"))
         self.assertIn("expire at 2026-10-07T01:00:00Z", err)
+        self.assertIn("within about 2 minutes", err)  # the deadline goes to stderr, next to the URL
         self.assertEqual(fake.login.call_args.args[:2], ("a@scylladb.com", 300))
         fake.login.side_effect = AuthError("not approved", None, "again")
         self.assertEqual(self.run_cli("login")[0], proc.EXIT_AUTH)
