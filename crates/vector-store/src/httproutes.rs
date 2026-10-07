@@ -1204,7 +1204,7 @@ async fn post_index_highlight(
 
     let timer = state
         .metrics
-        .latency
+        .fts_highlight_latency
         .with_label_values(&[keyspace.as_ref(), index_name.as_ref()])
         .start_timer();
 
