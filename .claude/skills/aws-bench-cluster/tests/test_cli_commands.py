@@ -369,12 +369,23 @@ class LifecycleTest(Case):
     def test_login_prints_only_the_url_and_maps_auth_errors(self) -> None:
         from vsbenchlib.awsapi import AuthError
 
+        class Stdout(io.StringIO):  # an agent reads vsbench through a pipe: the URL must be flushed at once
+            flushes = 0
+
+            def flush(self) -> None:
+                self.flushes += 1
+                super().flush()
+
         def fake_login(username: str | None, timeout_s: int, on_url: Any = None) -> dict[str, Any]:
             on_url("https://scylladb.okta.com/activate?user_code=ABCD1234")
+            self.assertEqual(stdout.flushes, 1)  # flushed right after the URL, not at exit
             return {"username": username, "url": "u", "profile": "p", "expires_at": "2026-10-07T01:00:00Z"}
 
         fake = self.fake("login", login=mock.Mock(side_effect=fake_login))
-        code, out, err = self.run_cli("login", "--username", "a@scylladb.com", "--timeout", "5m")
+        stdout, stderr = Stdout(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = cli.main(["-c", CLUSTER, "login", "--username", "a@scylladb.com", "--timeout", "5m"])
+        out, err = stdout.getvalue(), stderr.getvalue()
         self.assertEqual((code, out), (0, "https://scylladb.okta.com/activate?user_code=ABCD1234\n"))
         self.assertIn("expire at 2026-10-07T01:00:00Z", err)
         self.assertEqual(fake.login.call_args.args[:2], ("a@scylladb.com", 300))

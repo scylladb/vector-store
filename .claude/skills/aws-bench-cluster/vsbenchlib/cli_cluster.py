@@ -80,6 +80,7 @@ def cmd_doctor(ctx: Context, args: argparse.Namespace) -> int:
 def cmd_login(ctx: Context, args: argparse.Namespace) -> int:
     def on_url(url: str) -> None:
         out(url)  # stdout: the only thing printed there, so an agent can relay it as it is
+        sys.stdout.flush()  # stdout is a pipe when an agent runs this: the URL must not wait for the exit
         proc.log("approve this URL in a browser (Okta, with MFA); waiting for the login to finish")
 
     result = load_module("login").login(args.username, args.timeout_s, on_url=on_url)
