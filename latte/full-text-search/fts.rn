@@ -4,20 +4,25 @@
 //!   latte schema             fts.rn <node>
 //!   latte schema             fts.rn <node> -P schema_cleanup=true  # full reset
 //!   latte schema             fts.rn <node> -P drop_index=true      # drop index only
-//!   latte load               fts.rn <node> \
-//!       --threads 1 --concurrency 10
-//!   latte run -f load        fts.rn <node> -d <doc_count> \
-//!       --threads 1 --concurrency 10
+//!   latte load               fts.rn <node> --concurrency 10
+//!   latte run -f load        fts.rn <node> -d <doc_count> --concurrency 10
 //!   latte run -f build_index fts.rn <node> -d 1
 //!   latte run -f search      fts.rn <node> -d 60s --concurrency 32 \
 //!       -P 'fts_data_dir="<dir>/"' --generate-report -o report.json
 //!
 //! Schema is idempotent (CREATE TABLE IF NOT EXISTS). Use schema_cleanup=true
 //! to drop the table, or drop_index=true to drop just the FTS index.
+//!
+//! `load` indexes the documents file by byte offset in `prepare` (see
+//! `tsv_dataset.rn`) and reads one document per cycle, so memory depends on
+//! the document count rather than the corpus size. `search` preloads the
+//! (small) query and qrels files: reading inside the measured path would add
+//! I/O to the reported latency.
 
 use latte::*;
 
 mod metrics;
+mod tsv_dataset;
 
 // Schema / table
 const KEYSPACE = latte::param!("keyspace", "fts_bench");
@@ -104,17 +109,16 @@ pub async fn prepare(db) {
             create_index(db).await?;
         }
 
-        let path = join_path(FTS_DATA_DIR, DOCUMENTS_FILE);
-        let it = fs::read_split_lines_iter(path, ["\t"])?;
-        db.data.documents = [];
-        while let Some(entry) = it.next() {
-            let raw = entry?;
-            if !raw.is_empty() {
-                db.data.documents.push(#{ "id": raw[0], "body": raw[1] });
-            }
+        db.data.documents_path = join_path(FTS_DATA_DIR, DOCUMENTS_FILE);
+        db.data.documents_index = tsv_dataset::index(db.data.documents_path)?;
+        db.load_cycle_count = tsv_dataset::document_count(db.data.documents_index);
+        println!("Indexed {} documents in {}, read one per cycle",
+                 db.load_cycle_count, db.data.documents_path);
+        // `load` takes the cycle index modulo this, so zero would be a
+        // division by zero once per cycle.
+        if db.load_cycle_count == 0 {
+            return Err(`${db.data.documents_path}: no documents (empty file?)`);
         }
-        db.load_cycle_count = db.data.documents.len();
-        println!("Loaded {} documents from {}", db.data.documents.len(), path);
         db.prepare(INSERT, `INSERT INTO ${KEYSPACE}.${TABLE} (doc_id, ${TARGET_COLUMN}) VALUES (:doc_id, :body)`).await?;
     }
 
@@ -192,9 +196,19 @@ pub async fn prepare(db) {
     }
 }
 
+// Runs once per worker thread, after `prepare`. Workers get ctx.data as a
+// serialized copy, so a file handle cannot be made in `prepare` and handed
+// over. Only the load phase sets `documents_path`.
+pub async fn prepare_worker(db) {
+    if !is_none(db.data.get("documents_path")) {
+        db.data.documents_file = fs::open_binary(db.data.documents_path)?;
+    }
+}
+
 pub async fn load(db, i) {
-    let row = db.data.documents[i % db.data.documents.len()];
-    db.execute_prepared(INSERT, #{ "doc_id": row.id, "body": row.body }).await?;
+    let index = db.data.documents_index;
+    let doc = tsv_dataset::read_at(db.data.documents_file, index, i % tsv_dataset::document_count(index))?;
+    db.execute_prepared(INSERT, #{ "doc_id": doc.id, "body": doc.body }).await?;
 }
 
 pub async fn build_index(db, i) {
