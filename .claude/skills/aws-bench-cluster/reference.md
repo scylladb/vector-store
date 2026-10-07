@@ -363,6 +363,21 @@ Measured on 2026-10-06 (VECTOR-951 reproduction; Scylla nightly
   (VECTOR-951); the backlog drains at 3–4K rows/s once the searches stop.
 - **Index rebuilds.** The initial build of cohere-1m took 93 s; a rebuild
   after a Vector Store restart runs at ~6K rows/s (3.2M rows in 528 s).
+- **Fresh readers start 10 minutes behind.** Every (re)created index starts
+  both CDC readers from `now - 10 min` (`CHECKPOINT_TIMESTAMP_OFFSET`), so
+  their lag begins near 600 s. Measured on a 100k-row table under a
+  500 rows/s insert stream (2026-10-07, 1.11.0): the fine reader is within
+  its idle lag in under a minute, the wide reader (10 s sleep between
+  windows) in 2–3 minutes (375 s behind 75 s after a recreate). A lag right
+  after `bench load`, `bench index` or a `deploy vs` restart is catch-up,
+  not a stall; `status` says `behind` until it is gone. The Scylla Cloud
+  alerts (`VSCdcReaderStalledFine` > 60 s, `...Wide` > 300 s, both for
+  10 min) see the same thing (VECTOR issue filed from CUSTOMER-765).
+- **Dropped indexes.** Vector Store 1.9.0+ removes a dropped index's four
+  CDC series and its index series within a second of `removed the index`
+  (checked on 1.11.0: 11 drops, idle and under traffic, during bootstrap
+  and drop+recreate back to back); the readers log `finished` at debug
+  level (`--env RUST_LOG=info,vector_store::db_cdc=debug`).
 Raw endpoints on the nodes:
 - `127.0.0.1:9100/metrics` on every node;
 - `<ip>:9180/metrics` on Scylla nodes;

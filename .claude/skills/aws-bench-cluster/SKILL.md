@@ -56,15 +56,19 @@ Below, `vsbench` means `.claude/skills/aws-bench-cluster/vsbench`.
    Prometheus are reachable through the SSH tunnel line that `vsbench status`
    prints. It blocks until Ctrl-C, so the user runs it in their own terminal.
 6. **Credentials are the user's.** When `vsbench` exits with code 3, you
-   cannot log in for the user, but you can start the Okta device flow for them:
+   cannot log in for the user, but you can start the Okta device flow for them.
+   **The code expires about 2 minutes after it is issued**, so first ask the
+   user (one question) whether they are ready to approve it, and only then:
    1. Run `vsbench login` with `run_in_background: true` (`--username` if the
       git `user.email` of the checkout is not the user's Okta login).
    2. Within seconds its stdout holds one line, the
-      `https://scylladb.okta.com/activate?user_code=…` URL. Read the output
-      file and give the user that URL to approve in a browser. Do nothing else
-      first: the code expires after a few minutes.
+      `https://scylladb.okta.com/activate?user_code=…` URL. Read **that
+      attempt's** output file (an older attempt's code is dead) and give the
+      user the URL as your very next message, with the deadline the command
+      prints. Do nothing else first.
    3. It exits 0 once the user approves and reports the new expiry; exit 3
-      means the approval did not come in time, so run it again.
+      means the code expired or the approval did not come in time: ask
+      again whether the user is ready, then run it again.
 
    The `!` prefix does not run commands in every Claude Code front end (the VS
    Code extension sends it as a message), so do not rely on it.
