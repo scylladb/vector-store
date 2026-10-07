@@ -371,9 +371,12 @@ Measured on 2026-10-06 (VECTOR-951 reproduction; Scylla nightly
   its idle lag in under a minute, the wide reader (10 s sleep between
   windows) in 2–3 minutes (375 s behind 75 s after a recreate). A lag right
   after `bench load`, `bench index` or a `deploy vs` restart is catch-up,
-  not a stall; `status` says `behind` until it is gone. The Scylla Cloud
-  alerts (`VSCdcReaderStalledFine` > 60 s, `...Wide` > 300 s, both for
-  10 min) see the same thing (VECTOR issue filed from CUSTOMER-765).
+  not a stall; `status` says `behind` until it is gone. The catch-up
+  depends on the rows written in those 10 minutes, not on the table size:
+  on a production cluster with ~66M-row tables (CUSTOMER-765, four index
+  creations) the wide reader was above the Scylla Cloud alert threshold
+  (300 s) for at most one 5-minute sample, so the rules' `for 10m` absorbs
+  it and a reader still 10 minutes behind after that is genuinely behind.
 - **Dropped indexes.** Vector Store 1.9.0+ removes a dropped index's four
   CDC series and its index series within a second of `removed the index`
   (checked on 1.11.0: 11 drops, idle and under traffic, during bootstrap
