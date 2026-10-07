@@ -44,5 +44,6 @@ Repository skills live in `.claude/skills/`:
   upstream git ref or the local working tree (cross-compiled for arm64), run
   and compare benchmarks, query Prometheus/node_exporter, run commands on the
   nodes, and tear down. Every session ends with a retrospective that proposes
-  improvements to the skill. Unit tests:
+  improvements to the skill. How to use it, with example prompts:
+  [docs/benchmarking.md](docs/benchmarking.md). Unit tests:
   `python3 -m unittest discover -s .claude/skills/aws-bench-cluster/tests -t .claude/skills/aws-bench-cluster`.
