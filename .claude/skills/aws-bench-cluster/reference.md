@@ -531,7 +531,7 @@ All pins live at the top of `vsbenchlib/config.py`. When bumping:
 
 | Symptom | Cause / fix |
 |---|---|
-| exit 3, `ExpiredToken` | credentials expired: the user runs `gimme-aws-creds` |
+| exit 3, `ExpiredToken` | credentials expired: start the Okta device flow with `vsbench login` (SKILL.md rule 6) |
 | exit 4 in `up` | no capacity in any AZ: other instance types or region |
 | `up` fails with a userdata error | `vsbench` printed the log tail and rolled back. Typical causes: GitHub download outage, apt mirror trouble |
 | SSH timeouts | operator IP changed: `vsbench refresh-ip` |

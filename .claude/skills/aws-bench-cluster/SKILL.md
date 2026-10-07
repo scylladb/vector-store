@@ -124,7 +124,7 @@ minutes, then exit **75**.
 | 0 | done | |
 | 1 | error | read `error:` and `hint:` |
 | 2 | usage | fix the arguments (`--help`) |
-| 3 | AWS credentials missing or expired | ask the user to run `gimme-aws-creds` (rule 6) |
+| 3 | AWS credentials missing or expired | start the Okta device flow with `vsbench login` (rule 6) |
 | 4 | AWS has no capacity | `up` already tried every AZ; offer other instance types or a region |
 | 5 | precondition failed (busy cluster, index not serving, invalid flag combination, wrong account) | follow the hint |
 | 75 | still running | a job: `vsbench job wait <id>` (records the results when it ends); `deploy vs`/`deploy all`/`wait-serving`: `vsbench wait-serving` |
