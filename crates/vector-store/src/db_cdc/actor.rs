@@ -218,6 +218,9 @@ struct CdcReaderState<T: DbDriver> {
     metrics: Arc<Metrics>,
     keyspace: KeyspaceName,
     index_name: IndexName,
+    /// The checkpoint saver of the current reader; closed in `stop()` before the series can be
+    /// removed, so a save still in flight in scylla-cdc cannot recreate them.
+    saver: Option<Arc<MetricsCheckpointSaver>>,
 }
 
 impl<T: DbDriver> CdcReaderState<T> {
@@ -243,6 +246,7 @@ impl<T: DbDriver> CdcReaderState<T> {
             metrics,
             keyspace,
             index_name,
+            saver: None,
         };
         state.set_reader_metric_down();
         state
@@ -284,6 +288,9 @@ impl<T: DbDriver> CdcReaderState<T> {
             self.shutdown_notify.notify_one();
             self.start = task.await.unwrap_or(cdc_now());
         }
+        if let Some(saver) = self.saver.take() {
+            saver.close();
+        }
         self.set_reader_metric_down();
     }
 
@@ -312,8 +319,9 @@ impl<T: DbDriver> CdcReaderState<T> {
         )
         .await
         {
-            Ok((reader, handler)) => {
+            Ok((reader, handler, saver)) => {
                 self.reader = Some(reader);
+                self.saver = Some(saver);
                 self.handler_task = Some(spawn_handler_task(
                     handler,
                     Arc::clone(&self.shutdown_notify),
@@ -458,6 +466,7 @@ async fn create_cdc_reader<T: DbDriver>(
 ) -> anyhow::Result<(
     T::CdcLogReader,
     impl std::future::Future<Output = anyhow::Result<()>>,
+    Arc<MetricsCheckpointSaver>,
 )> {
     let consumer_factory = CdcConsumerFactory::new(
         db_driver.clone(),
@@ -483,7 +492,7 @@ async fn create_cdc_reader<T: DbDriver>(
         reader_name.to_string(),
     ));
 
-    db_driver
+    let (reader, handler) = db_driver
         .cdc_log_reader(
             session,
             CdcLogReaderConfig::default()
@@ -494,10 +503,11 @@ async fn create_cdc_reader<T: DbDriver>(
                 .safety_interval(params.safety_interval)
                 .sleep_interval(params.sleep_interval)
                 .should_save_progress(true)
-                .checkpoint_saver(checkpoint_saver),
+                .checkpoint_saver(checkpoint_saver.clone()),
         )
         .await
-        .context(format!("Failed to build {reader_name} CDC log reader"))
+        .context(format!("Failed to build {reader_name} CDC log reader"))?;
+    Ok((reader, handler, checkpoint_saver))
 }
 
 /// Spawns a task that runs the CDC handler future until completion or shutdown.
@@ -549,6 +559,7 @@ mod tests {
     use crate::db_driver::tests::UnimplementedDbDriver;
     use prometheus::Encoder;
     use prometheus::TextEncoder;
+    use scylla_cdc::cdc_types::StreamID;
 
     fn metric_families_text(metrics: &Metrics) -> String {
         let mut buf = Vec::new();
@@ -582,6 +593,32 @@ mod tests {
             output.contains(r#"cdc_reader_up{index_name="idx",keyspace="ks",reader="wide"} 0"#),
             "expected cdc_reader_up=0 immediately after creation, got:\n{output}"
         );
+    }
+
+    #[tokio::test]
+    async fn stop_closes_the_checkpoint_saver_before_the_series_are_removed() {
+        let metrics = Arc::new(Metrics::new());
+        let mut state = new_state(UnimplementedDbDriver, Arc::clone(&metrics));
+        let saver = Arc::new(MetricsCheckpointSaver::new(
+            Arc::clone(&metrics),
+            "ks".to_string(),
+            "idx".to_string(),
+            READER_WIDE.to_string(),
+        ));
+        state.saver = Some(Arc::clone(&saver));
+        saver.record_stream_progress(StreamID::new(vec![1]), Duration::from_secs(1_700_000_100));
+
+        // The actor's exit path, then a checkpoint save that scylla-cdc delivers late.
+        state.stop().await;
+        state.remove_metrics();
+        saver.record_stream_progress(StreamID::new(vec![1]), Duration::from_secs(1_700_000_200));
+
+        let output = metric_families_text(&metrics);
+        assert!(
+            !output.contains(r#"index_name="idx""#),
+            "a series of the stopped reader survived or was recreated:\n{output}"
+        );
+        assert!(state.saver.is_none());
     }
 
     #[tokio::test]

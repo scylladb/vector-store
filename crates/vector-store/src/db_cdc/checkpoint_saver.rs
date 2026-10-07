@@ -30,6 +30,9 @@ pub(super) struct MetricsCheckpointSaver {
 struct StreamProgress {
     positions: HashMap<StreamID, Duration>,
     counts: BTreeMap<Duration, usize>,
+    /// Set by `close()`: the reader is gone and its series are about to be removed, so no
+    /// checkpoint may touch the gauge any more.
+    closed: bool,
 }
 
 impl StreamProgress {
@@ -73,9 +76,14 @@ impl MetricsCheckpointSaver {
         }
     }
 
-    fn record_stream_progress(&self, stream_id: StreamID, timestamp: Duration) {
-        let min_progress = self.state.lock().unwrap().record(stream_id, timestamp);
-        if let Some(progress) = min_progress {
+    pub(super) fn record_stream_progress(&self, stream_id: StreamID, timestamp: Duration) {
+        // The gauge is written under the lock, so a `close()` that has returned is ordered
+        // after every write that could recreate the series.
+        let mut state = self.state.lock().unwrap();
+        if state.closed {
+            return;
+        }
+        if let Some(progress) = state.record(stream_id, timestamp) {
             self.metrics
                 .cdc_last_processed_timestamp_seconds
                 .with_label_values(&[&self.keyspace, &self.index_name, &self.reader_name])
@@ -85,6 +93,14 @@ impl MetricsCheckpointSaver {
 
     fn reset(&self) {
         self.state.lock().unwrap().clear();
+    }
+
+    /// Stops this saver from touching the gauge. The scylla-cdc stream readers are cancelled
+    /// asynchronously when the reader is stopped, so a checkpoint save may still be in flight
+    /// when the actor removes the reader's series; closing first makes that save a no-op
+    /// instead of a resurrected series that never advances again.
+    pub(super) fn close(&self) {
+        self.state.lock().unwrap().closed = true;
     }
 }
 
@@ -130,6 +146,31 @@ mod tests {
 
     fn stream_id(id: u8) -> StreamID {
         StreamID::new(vec![id])
+    }
+
+    #[test]
+    fn closed_saver_cannot_recreate_a_removed_series() {
+        let metrics = Arc::new(Metrics::new());
+        let saver = MetricsCheckpointSaver::new(
+            Arc::clone(&metrics),
+            "ks".to_string(),
+            "idx".to_string(),
+            READER_FINE.to_string(),
+        );
+        saver.record_stream_progress(stream_id(1), Duration::from_secs(1_700_000_100));
+        assert!(metric_families_text(&metrics).contains(r#"reader="fine"} 1700000100"#));
+
+        // The actor's exit path: close the saver, then remove the reader's series. A checkpoint
+        // save that scylla-cdc still delivers afterwards must not bring the series back.
+        saver.close();
+        metrics.remove_reader_labels("ks", "idx", READER_FINE);
+        saver.record_stream_progress(stream_id(2), Duration::from_secs(1_700_000_200));
+
+        let output = metric_families_text(&metrics);
+        assert!(
+            !output.contains("cdc_last_processed_timestamp_seconds{"),
+            "a save after close() recreated the series:\n{output}"
+        );
     }
 
     #[test]
