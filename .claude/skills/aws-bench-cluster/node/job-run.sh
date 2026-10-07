@@ -59,14 +59,14 @@ child=""
 rc=""
 
 # Start a marker line on a fresh line even when the output did not end with one.
-# shellcheck disable=SC2329  # used by the trap handlers
+# shellcheck disable=SC2329,SC2317  # used by the trap handlers (SC2317 on shellcheck < 0.10)
 fresh_line() {
   if [[ -n $(tail -c 1 "$dir/log" 2>/dev/null) ]]; then
     echo
   fi
 }
 
-# shellcheck disable=SC2329  # invoked by the EXIT trap
+# shellcheck disable=SC2329,SC2317  # invoked by the EXIT trap (SC2317 on shellcheck < 0.10)
 on_exit() {
   local status=$?
   trap '' TERM INT HUP
@@ -80,7 +80,7 @@ on_exit() {
 
 # $1: received signal, $2: exit status to record. The child gets SIGTERM
 # (background commands of a non-interactive shell ignore SIGINT).
-# shellcheck disable=SC2329  # invoked by the signal traps
+# shellcheck disable=SC2329,SC2317  # invoked by the signal traps (SC2317 on shellcheck < 0.10)
 on_signal() {
   trap '' TERM INT HUP
   { fresh_line && echo "=== VSBENCH JOB SIGNAL $1 $(utc_now)"; } || true
