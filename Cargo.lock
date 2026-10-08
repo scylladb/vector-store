@@ -3812,6 +3812,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "numkong"
+version = "7.8.5"
+source = "git+https://github.com/swasik/NumKong.git?rev=501e810cd04ee65d00e44a44b94076a77c9c100e#501e810cd04ee65d00e44a44b94076a77c9c100e"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "objc2-core-foundation"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6101,12 +6109,13 @@ checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
 
 [[package]]
 name = "usearch"
-version = "2.22.0"
+version = "2.26.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7aa6dc1b7f3062021396be66cbea6061948592d5025ff2b0f2594352d52ad518"
+checksum = "1086fc5e6b4ee87a5bac4fd80fcf66670526ca21b77d5f95b68de01b15329c67"
 dependencies = [
  "cxx",
  "cxx-build",
+ "numkong",
 ]
 
 [[package]]
