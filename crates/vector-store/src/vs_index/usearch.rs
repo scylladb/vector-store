@@ -39,6 +39,7 @@ use scylla::value::CqlValue;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -176,10 +177,32 @@ struct ThreadedUsearchIndex {
     space_type: usearch::MetricKind,
 }
 
+/// Logs the SIMD kernel usearch picked (e.g. "neon", "sve", "haswell", "serial") once per
+/// (quantization, metric) pair in the process: the choice depends on the build, the CPU and
+/// those two options, and a local index with many partitions must not repeat the line.
+fn log_hardware_acceleration(index: &usearch::Index, options: &IndexOptions) {
+    static LOGGED: Mutex<Vec<(usearch::ScalarKind, usearch::MetricKind)>> = Mutex::new(Vec::new());
+    let key = (options.quantization, options.metric);
+    let mut logged = LOGGED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !logged.contains(&key) {
+        logged.push(key);
+        info!(
+            "usearch hardware acceleration: {} ({:?} {:?})",
+            index.hardware_acceleration(),
+            options.quantization,
+            options.metric
+        );
+    }
+}
+
 impl ThreadedUsearchIndex {
     fn new(options: IndexOptions, threads: usize) -> anyhow::Result<Self> {
+        let inner = usearch::Index::new(&options)?;
+        log_hardware_acceleration(&inner, &options);
         Ok(Self {
-            inner: usearch::Index::new(&options)?,
+            inner,
             threads,
             quantization: options.quantization,
             space_type: options.metric,
