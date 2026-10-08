@@ -168,6 +168,7 @@ async fn quantization_is_returned_as_index_data_type() {
                 assert_eq!(options.quantization, expected_data_type);
             }
             httpapi::IndexOptions::Fulltext(_) => panic!("expected vector index options"),
+            httpapi::IndexOptions::Pattern(_) => panic!("expected vector index options"),
         }
     }
 }

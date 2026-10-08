@@ -193,6 +193,10 @@ pub struct FulltextIndexOptions {
 }
 
 #[derive(Debug, PartialEq, serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
+/// Options a pattern index was created with.
+pub struct PatternIndexOptions {}
+
+#[derive(Debug, PartialEq, serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
 #[serde(tag = "type", rename_all = "lowercase")]
 /// Options an index was created with, tagged with the index's type.
 pub enum IndexOptions {
@@ -200,6 +204,8 @@ pub enum IndexOptions {
     Vector(VectorIndexOptions),
     /// Full-text search index options.
     Fulltext(FulltextIndexOptions),
+    /// Pattern index options.
+    Pattern(PatternIndexOptions),
 }
 
 #[derive(Debug, PartialEq, serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
@@ -512,4 +518,19 @@ pub struct PostIndexHighlightRequest {
 pub struct PostIndexHighlightResponse {
     /// The highlighted documents. Each document is a string of text with the query terms marked.
     pub highlights: Vec<Option<String>>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
+/// Request body for LIKE search.
+pub struct PostIndexLikeRequest {
+    /// The text pattern to search for.
+    pub pattern: String,
+    #[serde(default)]
+    pub limit: Limit,
+}
+
+#[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
+/// Response for LIKE search.
+pub struct PostIndexLikeResponse {
+    pub primary_keys: HashMap<ColumnName, Vec<Value>>,
 }

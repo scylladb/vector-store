@@ -20,6 +20,7 @@ use crate::ExpansionSearch;
 use crate::IndexMetadata;
 use crate::IndexName;
 use crate::IndexOptionsFts;
+use crate::IndexOptionsPattern;
 use crate::IndexVersion;
 use crate::KeyspaceName;
 use crate::Metrics;
@@ -84,6 +85,7 @@ type GetVsIndexParamsR = anyhow::Result<
     )>,
 >;
 type GetFtsIndexParamsR = anyhow::Result<Option<IndexOptionsFts>>;
+type GetPatternIndexParamsR = anyhow::Result<Option<IndexOptionsPattern>>;
 type IsValidIndexR = bool;
 type IsValidSchemaR = bool;
 
@@ -130,6 +132,13 @@ pub enum Db {
         table: TableName,
         index: IndexName,
         tx: oneshot::Sender<GetFtsIndexParamsR>,
+    },
+
+    GetPatternIndexParams {
+        keyspace: KeyspaceName,
+        table: TableName,
+        index: IndexName,
+        tx: oneshot::Sender<GetPatternIndexParamsR>,
     },
 
     // The vector-store reads some schema metadata from system tables directly, because they are
@@ -185,6 +194,13 @@ pub(crate) trait DbExt {
         table: TableName,
         index: IndexName,
     ) -> GetFtsIndexParamsR;
+
+    async fn get_pattern_index_params(
+        &self,
+        keyspace: KeyspaceName,
+        table: TableName,
+        index: IndexName,
+    ) -> GetPatternIndexParamsR;
 
     async fn is_valid_index(&self, metadata: IndexMetadata) -> IsValidIndexR;
 
@@ -271,6 +287,23 @@ impl DbExt for mpsc::Sender<Db> {
     ) -> GetFtsIndexParamsR {
         let (tx, rx) = oneshot::channel();
         self.send(Db::GetFtsIndexParams {
+            keyspace,
+            table,
+            index,
+            tx,
+        })
+        .await?;
+        rx.await?
+    }
+
+    async fn get_pattern_index_params(
+        &self,
+        keyspace: KeyspaceName,
+        table: TableName,
+        index: IndexName,
+    ) -> GetPatternIndexParamsR {
+        let (tx, rx) = oneshot::channel();
+        self.send(Db::GetPatternIndexParams {
             keyspace,
             table,
             index,
@@ -449,6 +482,9 @@ fn respond_with_error(msg: Db, error: anyhow::Error) {
         Db::GetFtsIndexParams { tx, .. } => {
             let _ = tx.send(Err(error));
         }
+        Db::GetPatternIndexParams { tx, .. } => {
+            let _ = tx.send(Err(error));
+        }
         Db::IsValidIndex { tx, .. } => {
             let _ = tx.send(false);
         }
@@ -530,6 +566,21 @@ async fn process<T: DbDriver>(
                     .await,
             )
             .unwrap_or_else(|_| trace!("process: Db::GetFtsIndexParams: unable to send response")),
+
+        Db::GetPatternIndexParams {
+            keyspace,
+            table,
+            index,
+            tx,
+        } => tx
+            .send(
+                statements
+                    .get_pattern_index_params(keyspace, table, index)
+                    .await,
+            )
+            .unwrap_or_else(|_| {
+                trace!("process: Db::GetPatternIndexParams: unable to send response")
+            }),
 
         Db::IsValidIndex { metadata, tx } => tx
             .send(statements.is_valid_index(metadata).await)
@@ -987,6 +1038,16 @@ impl<T: DbDriver> Statements<T> {
         }))
     }
 
+    async fn get_pattern_index_params(
+        &self,
+        keyspace: KeyspaceName,
+        table: TableName,
+        index: IndexName,
+    ) -> GetPatternIndexParamsR {
+        let options = self.get_index_options(keyspace, table, index).await?;
+        Ok(options.map(|_| IndexOptionsPattern {}))
+    }
+
     async fn is_valid_index(&self, metadata: IndexMetadata) -> IsValidIndexR {
         let Some(session) = self.session_rx.borrow().clone() else {
             debug!("is_valid_index: no active session for {}", metadata.key());
@@ -1150,6 +1211,7 @@ fn db_index_kind_from_options(options: &mut BTreeMap<String, String>) -> Option<
     match options.remove("class_name").as_deref() {
         Some("vector_index") | None => Some(DbIndexKind::VectorSearch),
         Some("fulltext_index") => Some(DbIndexKind::FullTextSearch),
+        Some("pattern_index") => Some(DbIndexKind::Pattern),
         Some(unknown) => {
             debug!("unrecognized index class_name: {unknown:?}, skipping index");
             None
@@ -1257,7 +1319,7 @@ fn validate_column_type_for_kind(
                 );
             }
         }
-        DbIndexKind::FullTextSearch => {
+        DbIndexKind::FullTextSearch | DbIndexKind::Pattern => {
             if !matches!(
                 column_type,
                 ColumnType::Native(NativeType::Text) | ColumnType::Native(NativeType::Ascii)
@@ -1330,6 +1392,14 @@ pub(crate) mod tests {
             tx: oneshot::Sender<GetFtsIndexParamsR>,
         ) -> impl Future<Output = ()> + Send + 'static;
 
+        fn get_pattern_index_params(
+            &self,
+            keyspace: KeyspaceName,
+            table: TableName,
+            index: IndexName,
+            tx: oneshot::Sender<GetPatternIndexParamsR>,
+        ) -> impl Future<Output = ()> + Send + 'static;
+
         fn is_valid_index(
             &self,
             metadata: IndexMetadata,
@@ -1399,6 +1469,16 @@ pub(crate) mod tests {
                             index,
                             tx,
                         } => sim.get_fts_index_params(keyspace, table, index, tx).await,
+
+                        Db::GetPatternIndexParams {
+                            keyspace,
+                            table,
+                            index,
+                            tx,
+                        } => {
+                            sim.get_pattern_index_params(keyspace, table, index, tx)
+                                .await
+                        }
 
                         Db::IsValidIndex { metadata, tx } => sim.is_valid_index(metadata, tx).await,
 
@@ -1555,6 +1635,16 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn db_index_kind_from_options_pattern() {
+        let mut options = BTreeMap::from([("class_name".to_string(), "pattern_index".to_string())]);
+        assert_eq!(
+            db_index_kind_from_options(&mut options),
+            Some(DbIndexKind::Pattern)
+        );
+        assert!(!options.contains_key("class_name"));
+    }
+
+    #[test]
     fn db_index_kind_from_options_absent() {
         let mut options = BTreeMap::new();
         assert_eq!(
@@ -1664,6 +1754,47 @@ pub(crate) mod tests {
             dimensions: 3,
         };
         let result = validate_column_type_for_kind("col", &col_type, DbIndexKind::FullTextSearch);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("not a text column")
+        );
+    }
+
+    #[test]
+    fn validate_pattern_accepts_text_column() {
+        let col_type = ColumnType::Native(NativeType::Text);
+        assert!(validate_column_type_for_kind("doc", &col_type, DbIndexKind::Pattern).is_ok());
+    }
+
+    #[test]
+    fn validate_pattern_accepts_ascii_column() {
+        let col_type = ColumnType::Native(NativeType::Ascii);
+        assert!(validate_column_type_for_kind("doc", &col_type, DbIndexKind::Pattern).is_ok());
+    }
+
+    #[test]
+    fn validate_pattern_rejects_non_text_column() {
+        let col_type = ColumnType::Native(NativeType::Int);
+        let result = validate_column_type_for_kind("col", &col_type, DbIndexKind::Pattern);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("not a text column")
+        );
+    }
+
+    #[test]
+    fn validate_pattern_rejects_vector_column() {
+        let col_type = ColumnType::Vector {
+            typ: Box::new(ColumnType::Native(NativeType::Float)),
+            dimensions: 3,
+        };
+        let result = validate_column_type_for_kind("col", &col_type, DbIndexKind::Pattern);
         assert!(result.is_err());
         assert!(
             result

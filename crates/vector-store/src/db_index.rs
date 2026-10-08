@@ -594,6 +594,10 @@ impl<T: DbDriver> Statements<T> {
         tx: mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
         completed_scan_length: Arc<AtomicU64>,
     ) -> anyhow::Result<()> {
+        // TODO: Remove this check when building pattern index is supported
+        if let IndexKind::Pattern(_) = &self.kind {
+            return std::future::pending().await;
+        }
         let ranges = self.fullscan_ranges().await?;
         let concurrency = self.nr_parallel_queries().await?;
         scan_ranges(
@@ -969,6 +973,14 @@ fn parse_indexed_value(value: DbValue, kind: &IndexKind) -> anyhow::Result<DbInd
                 .map(DbIndexedValue::Vector),
         },
         IndexKind::Fts(_) => match value {
+            DbValue::Value(CqlValue::Text(s) | CqlValue::Ascii(s)) => {
+                Ok(DbIndexedValue::Document(s))
+            }
+            other => {
+                bail!("parse_indexed_value: expected text column, got {:?}", other);
+            }
+        },
+        IndexKind::Pattern(_) => match value {
             DbValue::Value(CqlValue::Text(s) | CqlValue::Ascii(s)) => {
                 Ok(DbIndexedValue::Document(s))
             }
