@@ -38,6 +38,10 @@ Below, `vsbench` means `.claude/skills/aws-bench-cluster/vsbench`.
      project.
    - `extend` is spending too: agree on the new TTL first.
    - Never run `down --yes` unless the user agreed in this conversation.
+   - The teardown question comes **after the report**, in the same message:
+     the results table, the findings and what was not measured (§5). The
+     user decides from the report whether more experiments are needed; a
+     status line is not a report.
 2. **Never power off a node or disarm its TTL.**
    - `shutdown`, `poweroff`, `halt` and the like *terminate* the instance,
      losing the instance-store data. `reboot` is safe.
@@ -75,6 +79,11 @@ Below, `vsbench` means `.claude/skills/aws-bench-cluster/vsbench`.
       browser first (Okta then asks for the biometric / FastPass factor that
       the activate page alone does not) and to approve the next code in that
       same browser (reference.md, troubleshooting).
+   5. Any other login failure: before calling it an IT matter or drafting a
+      request, ask the user to sign in to Okta in a browser and say what it
+      asked for. A factor the browser asks for and the device flow did not
+      is the answer; six codes and an IT draft went into one such 400 on
+      2026-10-08 before that question was asked.
 
    The `!` prefix does not run commands in every Claude Code front end (the VS
    Code extension sends it as a message), so do not rely on it.
@@ -355,7 +364,8 @@ cluster is kept or not. If you are going to tear down, do it **before** `down`.
 - **Collect.** Before teardown, `vsbench collect` (background) saves a
   Prometheus TSDB snapshot, the Scylla and Vector Store logs, and the job logs
   to `results/artifacts/`.
-- **Tear down.** Ask the user, then run `vsbench down --yes` (background).
+- **Tear down.** Show the §5 report, ask the user in that same message, then
+  run `vsbench down --yes` (background).
   - It terminates by tags and deletes the security group and the key pair.
   - It keeps local results; `--purge` deletes them.
   - History and retrospectives are never deleted.
@@ -399,6 +409,15 @@ are labelled by the differing option.
 `vsbench deploy vs --source local:+<label>`. Switch back with
 `--source build:<id>`, taking the ID from `vsbench builds --nodes`. Use
 `bench ab` for the actual comparison.
+
+**Test a change that lives on its own branch.** Do not switch the checkout:
+the skill lives on this branch, and a checkout without `.claude/skills/`
+has no `vsbench` (an `up` misfired that way on 2026-10-08). Commit the
+change on its branch (a worktree is fine) and build it from here with
+`vsbench build --source git:<sha>`: when upstream does not have the
+commit, the local ref is used (with a warning), and every variant gets its
+own build id and version — cleaner than `local:+label` on a dirty tree.
+Then `deploy vs --source build:<id>`.
 
 **Measure ingest under query load (churn).**
 `vsbench bench churn --rate 1250 --duration 3m` (background) inserts random

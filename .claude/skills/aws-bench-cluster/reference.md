@@ -462,6 +462,14 @@ Raw endpoints on the nodes:
 - **Index rebuilds.** Every Vector Store restart rebuilds its indexes from
   Scylla, and that time is a result in its own right. A usearch upgrade
   alone shifted it by about 35% (VECTOR-946).
+- **Drift across repeats.** A series that drifts on one build and is flat
+  on the next is noise, not a build effect. On 2026-10-08 the CQL series of
+  the baseline fell 19.1k → 17.8k → 16.8k QPS with nothing on either node
+  to show for it (no compaction, no client network-allowance event, both
+  CPUs falling), while the next build's series stayed flat and its first
+  repeat matched the baseline's within 1%. Repeat the drifting series, or
+  compare first repeats and the medians of the other mode; never read the
+  drift as a finding.
 
 ## Detached jobs
 
