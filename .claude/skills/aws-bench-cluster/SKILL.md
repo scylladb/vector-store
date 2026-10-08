@@ -69,6 +69,12 @@ Below, `vsbench` means `.claude/skills/aws-bench-cluster/vsbench`.
    3. It exits 0 once the user approves and reports the new expiry; exit 3
       means the code expired or the approval did not come in time: ask
       again whether the user is ready, then run it again.
+   4. Exit 3 with `400 Client Error … /oauth2/v1/token` right after the
+      approval is an Okta policy refusal, not a timing problem: do not issue
+      another code. Ask the user to sign in to `scylladb.okta.com` in the
+      browser first (Okta then asks for the biometric / FastPass factor that
+      the activate page alone does not) and to approve the next code in that
+      same browser (reference.md, troubleshooting).
 
    The `!` prefix does not run commands in every Claude Code front end (the VS
    Code extension sends it as a message), so do not rely on it.
