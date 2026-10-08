@@ -45,7 +45,7 @@ checked with shellcheck.
 | `vsbenchlib/state.py`, `config.py`, `proc.py`, `awsapi.py` | local state and locks, pins and defaults, process helpers, `aws` CLI wrapper |
 | `node/` | user-data, Scylla/Vector Store/monitoring start scripts, job runner, dataset fetcher |
 | `datasets.json` | dataset catalog (exact file sizes) |
-| `tests/` | unit tests (`python3 -m unittest discover -s tests -t .`), run in CI by `.github/workflows/claude-skills.yml` |
+| `tests/` | unit tests (`python3 -m unittest discover -s tests -t .`); no CI runs them, so run them and shellcheck (SKILL.md §6) before pushing |
 
 ## AWS access
 
@@ -463,13 +463,15 @@ Raw endpoints on the nodes:
   Scylla, and that time is a result in its own right. A usearch upgrade
   alone shifted it by about 35% (VECTOR-946).
 - **Drift across repeats.** A series that drifts on one build and is flat
-  on the next is noise, not a build effect. On 2026-10-08 the CQL series of
-  the baseline fell 19.1k → 17.8k → 16.8k QPS with nothing on either node
-  to show for it (no compaction, no client network-allowance event, both
-  CPUs falling), while the next build's series stayed flat and its first
-  repeat matched the baseline's within 1%. Repeat the drifting series, or
-  compare first repeats and the medians of the other mode; never read the
-  drift as a finding.
+  on the next is inconclusive: it neither shows a build effect nor rules
+  one out. On 2026-10-08 the CQL series of the baseline fell 19.1k → 17.8k
+  → 16.8k QPS with nothing on either node to show for it (no compaction,
+  no client network-allowance event, both CPUs falling), while the next
+  build's series stayed flat and its first repeat matched the baseline's
+  within 1%. Before attributing such a drift to either side, repeat the
+  comparison with the same setup, workload, order (`bench ab`) and repeat
+  count, and compare the repeats' medians, ranges and CV
+  (`results compare`), not single runs.
 
 ## Detached jobs
 
