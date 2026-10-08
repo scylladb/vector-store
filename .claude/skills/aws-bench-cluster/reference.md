@@ -535,6 +535,7 @@ All pins live at the top of `vsbenchlib/config.py`. When bumping:
 | Symptom | Cause / fix |
 |---|---|
 | exit 3, `ExpiredToken` | credentials expired: start the Okta device flow with `vsbench login` (SKILL.md rule 6) |
+| `login` exits 3 with `400 Client Error … /oauth2/v1/token` right after the approval | Okta refused gimme-aws-creds' web-SSO token exchange for the AWS app: `invalid_grant, "The application's assurance requirements are not met by the 'subject_token'"` (seen 2026-10-08). The device flow succeeded; the AWS app's Okta authentication policy wants a stronger assurance than the factor used (approve with FIDO2 / Okta FastPass rather than push), or no longer allows the device flow at all — then it is for IT, not for the skill. gimme-aws-creds does not print Okta's error body; a 20-line script that calls `OktaIdentityEngine.auth_session()` and `_web_sso_token_exchange()` and prints only `error`/`error_description` shows it. |
 | exit 4 in `up` | no capacity in any AZ: other instance types or region |
 | `up` fails with a userdata error | `vsbench` printed the log tail and rolled back. Typical causes: GitHub download outage, apt mirror trouble |
 | SSH timeouts | operator IP changed: `vsbench refresh-ip` |

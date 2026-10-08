@@ -28,7 +28,9 @@ from .proc import VsbenchError, iso
 URL_RE = re.compile(r"https://[A-Za-z0-9.-]+\.okta\.com/activate\?user_code=[A-Z0-9]+")
 DEFAULT_TIMEOUT_S = 600
 OKTA_APPROVAL_S = 120  # gimme-aws-creds stops polling about this long after it printed the code
-_SECRET_RE = re.compile(r"secret|token|key|password", re.IGNORECASE)
+# A line that assigns or prints a secret value; the words alone (an Okta `/oauth2/v1/token` URL
+# in an HTTP error) must stay, since that line is usually the only useful one.
+_SECRET_RE = re.compile(r"(secret|token|key|password)\w*\s*[=:]\s*\S|[A-Za-z0-9+/_-]{40,}", re.IGNORECASE)
 _RETRY_HINT = "run `vsbench login` again and approve the URL it prints within a few minutes"
 
 

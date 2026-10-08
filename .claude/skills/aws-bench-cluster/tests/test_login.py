@@ -106,6 +106,14 @@ class FailureTextTest(unittest.TestCase):
         self.assertEqual(
             login._failure(1, lines, None), "gimme-aws-creds failed (exit 1): Error: 400 Client Error: Bad Request"
         )
+        # the word "token" in a URL is not a secret: that line is the one that explains the failure
+        http = (
+            "requests.exceptions.HTTPError: 400 Client Error: Bad Request for url: https://x.okta.com/oauth2/v1/token"
+        )
+        lines = ["Traceback (most recent call last):", "    raise HTTPError(http_error_msg, response=self)", http]
+        self.assertEqual(login._failure(1, lines, None), f"gimme-aws-creds failed (exit 1): {http}")
+        blob = "id_token: " + "A" * 60
+        self.assertEqual(login._failure(1, [http, "token = abc", blob], None).split(": ", 1)[1], http)
         self.assertEqual(login._failure(2, [], None), "gimme-aws-creds failed (exit 2): no output")
 
 
