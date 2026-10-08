@@ -441,6 +441,12 @@ impl From<crate::node_state::IndexStatus> for httpapi::IndexStatus {
             body = ErrorMessage
         ),
         (
+            status = 422,
+            description = "Index cannot be served. Possible causes: the index exists in ScyllaDB, but its table has a primary key column of a type Vector Store does not support.",
+            content_type = "application/json",
+            body = ErrorMessage
+        ),
+        (
             status = 500,
             description = "Error while checking index state or counting indexed items. Possible causes: internal error, or issues accessing the database.",
             content_type = "application/json",
@@ -497,6 +503,12 @@ async fn get_index_status(
             body = ErrorMessage
         ),
         (
+            status = 422,
+            description = "Index cannot be served. Possible causes: the index exists in ScyllaDB, but its table has a primary key column of a type Vector Store does not support.",
+            content_type = "application/json",
+            body = ErrorMessage
+        ),
+        (
             status = 500,
             description = "Error while checking index state or counting indexed items. Possible causes: internal error, or issues accessing the database.",
             content_type = "application/json",
@@ -528,6 +540,13 @@ async fn get_index_info(
                 entry.status(),
                 entry.progress(),
             )
+        } else if let Some(reason) = indexes.unsupported(&index_key) {
+            return unsupported_index_response(
+                &keyspace_name,
+                &index_name,
+                reason,
+                "get_index_info",
+            );
         } else {
             let msg = format!("missing index: {keyspace_name}.{index_name}");
             debug!("get_index_info: {msg}");
@@ -728,6 +747,12 @@ If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
             body = ErrorMessage
         ),
         (
+            status = 422,
+            description = "Index cannot be served. Possible causes: the index exists in ScyllaDB, but its table has a primary key column of a type Vector Store does not support.",
+            content_type = "application/json",
+            body = ErrorMessage
+        ),
+        (
             status = 500,
             description = "Error while searching vectors. Possible causes: internal error, or search engine issues.",
             content_type = "application/json",
@@ -833,6 +858,16 @@ async fn post_index_ann(
                         return (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response();
                     }
                 }
+            }
+            indexes::BestIndexState::Unsupported(reason) => {
+                timer.observe_duration();
+
+                return unsupported_index_response(
+                    &keyspace,
+                    &index_name,
+                    &reason,
+                    "post_index_ann",
+                );
             }
             indexes::BestIndexState::NotFound => {
                 timer.observe_duration();
@@ -965,6 +1000,17 @@ async fn post_index_ann(
     .await
 }
 
+fn unsupported_index_response(
+    keyspace: &KeyspaceName,
+    index_name: &IndexName,
+    reason: &str,
+    route_name: &str,
+) -> Response {
+    let msg = format!("index {keyspace}.{index_name} cannot be served: {reason}");
+    debug!("{route_name}: {msg}");
+    (StatusCode::UNPROCESSABLE_ENTITY, msg).into_response()
+}
+
 async fn check_fts_serving<T>(
     serving_or_progress: Result<T, Progress>,
     node_state: &Sender<NodeState>,
@@ -1026,6 +1072,12 @@ If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
             body = ErrorMessage
         ),
         (
+            status = 422,
+            description = "Index cannot be served. Possible causes: the index exists in ScyllaDB, but its table has a primary key column of a type Vector Store does not support.",
+            content_type = "application/json",
+            body = ErrorMessage
+        ),
+        (
             status = 500,
             description = "Error while searching. Possible causes: internal error, or search engine issues.",
             content_type = "application/json",
@@ -1062,6 +1114,14 @@ async fn post_index_bm25(
         let Some(entry) = indexes.get_fts(&index_key) else {
             timer.observe_duration();
 
+            if let Some(reason) = indexes.unsupported(&index_key) {
+                return unsupported_index_response(
+                    &keyspace,
+                    &index_name,
+                    reason,
+                    "post_index_bm25",
+                );
+            }
             let msg = format!("missing index: {keyspace}.{index_name}");
             debug!("post_index_bm25: {msg}");
             return (StatusCode::NOT_FOUND, msg).into_response();
@@ -1179,6 +1239,12 @@ If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
             body = ErrorMessage
         ),
         (
+            status = 422,
+            description = "Index cannot be served. Possible causes: the index exists in ScyllaDB, but its table has a primary key column of a type Vector Store does not support.",
+            content_type = "application/json",
+            body = ErrorMessage
+        ),
+        (
             status = 500,
             description = "Error while highlighting. Possible causes: internal error, or search engine issues.",
             content_type = "application/json",
@@ -1215,6 +1281,14 @@ async fn post_index_highlight(
         let Some(entry) = indexes.get_fts(&index_key) else {
             timer.observe_duration();
 
+            if let Some(reason) = indexes.unsupported(&index_key) {
+                return unsupported_index_response(
+                    &keyspace,
+                    &index_name,
+                    reason,
+                    "post_index_highlight",
+                );
+            }
             let msg = format!("missing index: {keyspace}.{index_name}");
             debug!("post_index_highlight: {msg}");
             return (StatusCode::NOT_FOUND, msg).into_response();

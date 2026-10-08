@@ -20,6 +20,8 @@ use httpapi::IndexOptions;
 use httpapi::IndexStatus;
 use httpapi::SimilarityFunction;
 use httpapi::VectorIndexOptions;
+use httpclient::HttpClient;
+use reqwest::StatusCode;
 use rstest::rstest;
 use scylla::cluster::metadata::NativeType;
 use scylla::value::CqlValue;
@@ -27,7 +29,9 @@ use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::time::Duration;
 use vector_store::Analyzer;
+use vector_store::DbIndexKind;
 use vector_store::DbIndexPartitioning;
+use vector_store::DbUnsupportedIndex;
 use vector_store::IndexKind;
 use vector_store::IndexOptionsFts;
 use vector_store::IndexOptionsVs;
@@ -410,4 +414,63 @@ async fn indexes_listing_reports_status_of_a_fulltext_index() {
     assert_eq!(entries[0].index.as_ref(), index.index_name.as_ref());
     assert!(matches!(entries[0].options, IndexOptions::Fulltext(_)));
     assert_eq!(entries[0].build_progress, 100.0);
+}
+
+const UNSUPPORTED_REASON: &str = "unsupported primary key column type: column pk has type Tuple";
+
+async fn setup_unsupported_index(kind: DbIndexKind) -> (HttpClient, impl Sized) {
+    let (client, db, keep) = setup().await;
+    db.add_unsupported_index(DbUnsupportedIndex {
+        keyspace: "vector".into(),
+        index: "idx".into(),
+        kind,
+        reason: UNSUPPORTED_REASON.to_string(),
+    });
+
+    wait_for(
+        || async {
+            client
+                .index_info(&"vector".into(), &"idx".into())
+                .await
+                .is_err_and(|err| err.to_string().ends_with(UNSUPPORTED_REASON))
+        },
+        "the unsupported index to be discovered",
+    )
+    .await;
+    (client, (db, keep))
+}
+
+#[rstest]
+#[timeout(Duration::from_secs(10))]
+#[tokio::test]
+async fn unsupported_vector_index_reports_why_it_cannot_be_served() {
+    crate::enable_tracing();
+    let (client, _keep) = setup_unsupported_index(DbIndexKind::VectorSearch).await;
+    let (ks, idx) = ("vector".into(), "idx".into());
+
+    let limit = NonZeroUsize::new(1).unwrap().into();
+    let response = client
+        .post_ann(&ks, &idx, vec![1.0, 2.0, 3.0].into(), None, limit)
+        .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(response.text().await.unwrap().ends_with(UNSUPPORTED_REASON));
+}
+
+#[rstest]
+#[timeout(Duration::from_secs(10))]
+#[tokio::test]
+async fn unsupported_fulltext_index_reports_why_it_cannot_be_served() {
+    crate::enable_tracing();
+    let (client, _keep) = setup_unsupported_index(DbIndexKind::FullTextSearch).await;
+    let (ks, idx) = ("vector".into(), "idx".into());
+
+    let limit = NonZeroUsize::new(1).unwrap().into();
+    let response = client.post_bm25(&ks, &idx, "hello".into(), limit).await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(response.text().await.unwrap().ends_with(UNSUPPORTED_REASON));
+    let response = client
+        .post_highlight(&ks, &idx, "hello".into(), vec![])
+        .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(response.text().await.unwrap().ends_with(UNSUPPORTED_REASON));
 }

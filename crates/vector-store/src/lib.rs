@@ -857,6 +857,21 @@ impl DbCustomIndex {
     }
 }
 
+/// A custom index present in the schema that Vector Store cannot serve.
+#[derive(Clone, Debug)]
+pub struct DbUnsupportedIndex {
+    pub keyspace: KeyspaceName,
+    pub index: IndexName,
+    pub kind: DbIndexKind,
+    pub reason: String,
+}
+
+impl DbUnsupportedIndex {
+    pub fn key(&self) -> IndexKey {
+        IndexKey::new(&self.keyspace, &self.index)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 /// The indexed value read from a CDC row or full scan.
 pub enum DbIndexedValue {

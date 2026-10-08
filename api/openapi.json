@@ -127,6 +127,16 @@
               }
             }
           },
+          "422": {
+            "description": "Index cannot be served. Possible causes: the index exists in ScyllaDB, but its table has a primary key column of a type Vector Store does not support.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Error while checking index state or counting indexed items. Possible causes: internal error, or issues accessing the database.",
             "content": {
@@ -210,6 +220,16 @@
           },
           "404": {
             "description": "Index not found. Possible causes: index does not exist, or is not discovered yet.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Index cannot be served. Possible causes: the index exists in ScyllaDB, but its table has a primary key column of a type Vector Store does not support.",
             "content": {
               "application/json": {
                 "schema": {
@@ -312,6 +332,16 @@
               }
             }
           },
+          "422": {
+            "description": "Index cannot be served. Possible causes: the index exists in ScyllaDB, but its table has a primary key column of a type Vector Store does not support.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Error while searching. Possible causes: internal error, or search engine issues.",
             "content": {
@@ -406,6 +436,16 @@
               }
             }
           },
+          "422": {
+            "description": "Index cannot be served. Possible causes: the index exists in ScyllaDB, but its table has a primary key column of a type Vector Store does not support.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Error while highlighting. Possible causes: internal error, or search engine issues.",
             "content": {
@@ -478,6 +518,16 @@
           },
           "404": {
             "description": "Index not found. Possible causes: index does not exist, or is not discovered yet.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Index cannot be served. Possible causes: the index exists in ScyllaDB, but its table has a primary key column of a type Vector Store does not support.",
             "content": {
               "application/json": {
                 "schema": {

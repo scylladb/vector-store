@@ -26,6 +26,7 @@ use vector_store::DbIndexKind;
 use vector_store::DbIndexedOperation;
 use vector_store::DbIndexedRow;
 use vector_store::DbIndexedValue;
+use vector_store::DbUnsupportedIndex;
 use vector_store::Dimensions;
 use vector_store::IndexKind;
 use vector_store::IndexMetadata;
@@ -212,6 +213,7 @@ struct DbMock {
     next_get_db_index_failed: bool,
     next_full_scan_progress: Option<Progress>,
     simulate_endless_get_indexes_processing: bool,
+    unsupported_indexes: Vec<DbUnsupportedIndex>,
     store_vectors: StoreVectors,
     vectors: HashMap<PrimaryKey, Vector>,
 }
@@ -230,6 +232,7 @@ impl DbBasic {
             next_get_db_index_failed: false,
             next_full_scan_progress: None,
             simulate_endless_get_indexes_processing: false,
+            unsupported_indexes: Vec::new(),
             store_vectors,
             vectors: HashMap::new(),
         })))
@@ -338,6 +341,13 @@ impl DbBasic {
         Ok(())
     }
 
+    /// Adds an index that discovery skips as unsupported.
+    pub(crate) fn add_unsupported_index(&self, index: DbUnsupportedIndex) {
+        let mut db = self.0.write().unwrap();
+        db.unsupported_indexes.push(index);
+        db.create_new_schema_version();
+    }
+
     pub(crate) fn del_index(
         &self,
         keyspace_name: &KeyspaceName,
@@ -391,10 +401,8 @@ fn process_db(db: &DbBasic, msg: Db, node_state: Sender<NodeState>) {
                     tokio::time::sleep(std::time::Duration::MAX).await;
                 });
             } else {
-                tx.send(Ok(db
-                    .0
-                    .read()
-                    .unwrap()
+                let db = db.0.read().unwrap();
+                let indexes = db
                     .keyspaces
                     .iter()
                     .flat_map(|(keyspace_name, keyspace)| {
@@ -431,7 +439,8 @@ fn process_db(db: &DbBasic, msg: Db, node_state: Sender<NodeState>) {
                                 },
                             })
                     })
-                    .collect()))
+                    .collect();
+                tx.send(Ok((indexes, db.unsupported_indexes.clone())))
                     .map_err(|_| anyhow!("Db::GetIndexes: unable to send response"))
                     .unwrap()
             }

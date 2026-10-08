@@ -64,6 +64,9 @@ pub(crate) enum Engine {
         key: IndexKey,
         tx: oneshot::Sender<GetFtsIndexR>,
     },
+    SetUnsupportedIndexes {
+        unsupported: HashMap<IndexKey, String>,
+    },
 }
 
 pub(crate) trait EngineExt {
@@ -71,6 +74,7 @@ pub(crate) trait EngineExt {
     async fn del_index(&self, key: IndexKey);
     async fn get_vs_index(&self, key: IndexKey) -> GetVsIndexR;
     async fn get_fts_index(&self, key: IndexKey) -> GetFtsIndexR;
+    async fn set_unsupported_indexes(&self, unsupported: HashMap<IndexKey, String>);
 }
 
 impl EngineExt for mpsc::Sender<Engine> {
@@ -105,6 +109,12 @@ impl EngineExt for mpsc::Sender<Engine> {
             .expect("EngineExt::get_fts_index: internal actor should receive request");
         rx.await
             .expect("EngineExt::get_fts_index: internal actor should send response")
+    }
+
+    async fn set_unsupported_indexes(&self, unsupported: HashMap<IndexKey, String>) {
+        self.send(Engine::SetUnsupportedIndexes { unsupported })
+            .await
+            .expect("EngineExt::set_unsupported_indexes: internal actor should receive request");
     }
 }
 
@@ -165,6 +175,10 @@ pub(crate) async fn new(
 
                             Engine::GetFtsIndex { key, tx } => {
                                 get_fts_index(key, tx, &indexes).await
+                            }
+
+                            Engine::SetUnsupportedIndexes { unsupported } => {
+                                indexes.write().unwrap().set_unsupported(unsupported)
                             }
 
                         }
@@ -453,6 +467,11 @@ pub(crate) mod tests {
             key: IndexKey,
             tx: oneshot::Sender<GetFtsIndexR>,
         ) -> impl Future<Output = ()> + Send + 'static;
+
+        fn set_unsupported_indexes(
+            &self,
+            unsupported: HashMap<IndexKey, String>,
+        ) -> impl Future<Output = ()> + Send + 'static;
     }
 
     pub(crate) fn new(sim: impl SimEngine + Send + 'static) -> mpsc::Sender<Engine> {
@@ -475,6 +494,9 @@ pub(crate) mod tests {
                         Engine::DelIndex { key } => sim.del_index(key).await,
                         Engine::GetVsIndex { key, tx } => sim.get_vs_index(key, tx).await,
                         Engine::GetFtsIndex { key, tx } => sim.get_fts_index(key, tx).await,
+                        Engine::SetUnsupportedIndexes { unsupported } => {
+                            sim.set_unsupported_indexes(unsupported).await
+                        }
                     }
                 }
 
