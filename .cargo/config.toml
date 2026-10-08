@@ -1,2 +1,10 @@
 [alias]
 openapi = "run --features dev-tools --bin generate-openapi -- api/openapi.json"
+
+# usearch 2.22.0 bundles simsimd 6.5.12, whose Linux ARM capability probe is gated on
+# `_POSIX_VERSION` but never includes <unistd.h>, so it reports NEON-only on SVE
+# hardware (Graviton3/4); see VECTOR-1027. Including the header first restores SVE
+# detection. Drop this entry with the usearch upgrade to a NumKong-based version
+# (2.25.3+), where the probe is fixed: VECTOR-720.
+[env]
+CXXFLAGS_aarch64_unknown_linux_gnu = "-include unistd.h"
