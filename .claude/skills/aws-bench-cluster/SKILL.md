@@ -328,7 +328,13 @@ cluster is kept or not. If you are going to tear down, do it **before** `down`.
      - `python3 -m unittest discover -s .claude/skills/aws-bench-cluster/tests -t .claude/skills/aws-bench-cluster`
      - `shellcheck .claude/skills/aws-bench-cluster/node/*.sh .claude/skills/aws-bench-cluster/cross/*.sh`
    - **Out of scope**: a benchmark-tool, Vector Store or Scylla problem. Draft
-     a Jira issue or a follow-up note; this is not a skill edit.
+     a Jira issue or a follow-up note; this is not a skill edit. When the
+     session involves a Scylla Cloud cluster, check the hypothesis against
+     its production data first (VictoriaLogs and Thanos over the VPN,
+     [reference.md](reference.md#production-data)) before filing a Jira
+     issue or stating it on a customer ticket; a hypothesis the data does
+     not support stays in the retrospective as a learning. (VECTOR-1032 was
+     filed from a 100k-row test and refuted by one Thanos range query.)
 
    Run-specific workarounds go into the notes, not into proposals.
 4. Present the proposals to the user. Apply nothing without approval. An
