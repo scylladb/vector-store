@@ -1,2 +1,22 @@
 [alias]
 openapi = "run --features dev-tools --bin generate-openapi -- api/openapi.json"
+
+# usearch 2.26.4 takes its distance kernels from numkong, whose f32 kernels accumulate in f64 by
+# default: 22% fewer searches per second on Graviton4 than the pre-NumKong usearch (VECTOR-720).
+# With NK_ACCUMULATE_F32_IN_F64=0 (our numkong patch, see Cargo.toml) the NEON and SVE angular
+# kernels accumulate in f32 and beat it by 2-5%; an HNSW search only orders distances and cannot
+# use the extra precision. The x86 kernels widen to f64 as well and are not covered by the patch
+# yet (ashvardanian/NumKong#392). numkong's aarch64 kernels need gcc >= 13 or clang; the release
+# toolchain image compiles them with clang (scripts/release-toolchain.Dockerfile). Its SME kernels
+# stay off: no machine we ship to has SME, and clang's SME code needs compiler-rt
+# (`__arm_get_current_vg`), which the gcc link does not provide. A CFLAGS_<target> or NK_TARGET_*
+# variable set in the environment replaces the value here.
+[env]
+CFLAGS_aarch64_unknown_linux_gnu = "-DNK_ACCUMULATE_F32_IN_F64=0"
+NK_TARGET_SME = "0"
+NK_TARGET_SME2 = "0"
+NK_TARGET_SME2P1 = "0"
+NK_TARGET_SMEF64 = "0"
+NK_TARGET_SMEHALF = "0"
+NK_TARGET_SMEBF16 = "0"
+NK_TARGET_SMEBI32 = "0"
