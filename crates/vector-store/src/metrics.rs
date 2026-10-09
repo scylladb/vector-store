@@ -27,6 +27,7 @@ pub(crate) struct Metrics {
     pub cdc_last_processed_timestamp_seconds: GaugeVec,
     pub fts_index_size_bytes: GaugeVec,
     pub fts_segment_count: GaugeVec,
+    pub fts_highlight_latency: HistogramVec,
     dirty_indexes: Arc<DashSet<(String, String)>>,
 }
 
@@ -59,7 +60,7 @@ impl Metrics {
                 "request_latency_seconds",
                 "Latency per index (seconds)",
             )
-            .buckets(buckets),
+            .buckets(buckets.clone()),
             &["keyspace", "index_name"],
         )
         .unwrap();
@@ -159,6 +160,16 @@ impl Metrics {
         )
         .unwrap();
 
+        let fts_highlight_latency = HistogramVec::new(
+            prometheus::HistogramOpts::new(
+                "fts_highlight_latency_seconds",
+                "Latency of highlight requests per full-text search index (seconds)",
+            )
+            .buckets(buckets),
+            &["keyspace", "index_name"],
+        )
+        .unwrap();
+
         registry.register(Box::new(latency.clone())).unwrap();
         registry.register(Box::new(size.clone())).unwrap();
         registry.register(Box::new(modified.clone())).unwrap();
@@ -179,6 +190,9 @@ impl Metrics {
         registry
             .register(Box::new(fts_segment_count.clone()))
             .unwrap();
+        registry
+            .register(Box::new(fts_highlight_latency.clone()))
+            .unwrap();
 
         Self {
             registry,
@@ -192,6 +206,7 @@ impl Metrics {
             cdc_last_processed_timestamp_seconds,
             fts_index_size_bytes,
             fts_segment_count,
+            fts_highlight_latency,
             dirty_indexes: Arc::new(DashSet::new()),
         }
     }
@@ -232,6 +247,9 @@ impl Metrics {
         }
         self.dirty_indexes
             .remove(&(keyspace.to_owned(), index_name.to_owned()));
+        let _ = self
+            .fts_highlight_latency
+            .remove_label_values(&[keyspace, index_name]);
     }
 
     pub(crate) fn remove_reader_labels(&self, keyspace: &str, index_name: &str, reader: &str) {
@@ -281,6 +299,10 @@ mod tests {
             .observe(0.001);
         metrics
             .indexing_lag
+            .with_label_values(&["ks", "idx"])
+            .observe(0.001);
+        metrics
+            .fts_highlight_latency
             .with_label_values(&["ks", "idx"])
             .observe(0.001);
 
@@ -562,6 +584,38 @@ mod tests {
         assert!(
             output.contains(r#"fts_segment_count{index_name="idx",keyspace="ks"} 3"#),
             "expected observed value in export:\n{output}"
+        );
+    }
+
+    #[test]
+    fn fts_highlight_latency_is_exported() {
+        let metrics = Metrics::new();
+
+        metrics
+            .fts_highlight_latency
+            .with_label_values(&["ks", "idx"])
+            .observe(0.001);
+
+        let output = metric_families_text(&metrics);
+        assert!(
+            output.contains("# TYPE fts_highlight_latency_seconds histogram"),
+            "fts_highlight_latency_seconds histogram missing from export:\n{output}"
+        );
+        assert!(
+            output.contains(
+                r#"fts_highlight_latency_seconds_count{index_name="idx",keyspace="ks"} 1"#
+            ),
+            "expected a single observed sample in export:\n{output}"
+        );
+        assert!(
+            output.contains(
+                r#"fts_highlight_latency_seconds_sum{index_name="idx",keyspace="ks"} 0.001"#
+            ),
+            "expected the observed value in sum in export:\n{output}"
+        );
+        assert!(
+            output.contains("fts_highlight_latency_seconds_bucket{"),
+            "fts_highlight_latency_seconds buckets missing from export:\n{output}"
         );
     }
 
