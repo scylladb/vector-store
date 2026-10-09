@@ -1,49 +1,16 @@
 # Benchmarking scylla + vector-store
 
-## Use `vector-search-benchmark`
+The `vector-search-benchmark` tool and the `aws-bench-cluster` Claude Code
+skill live in
+[scylladb/vector-store-bench](https://github.com/scylladb/vector-store-bench);
+they moved there from this repository on 2026-10-08, with their history. Its
+[README](https://github.com/scylladb/vector-store-bench#readme) explains how to
+build and run the tool by hand, and how to use the skill to provision a
+benchmark cluster in AWS, deploy Vector Store from a release, a git ref or a
+local checkout of this repository, and run and compare benchmarks. To set up
+the cluster by hand instead, see
+[cluster-in-aws](../scripts/cluster-in-aws/README.md).
 
-### Building
-
-```bash
-$ git clone git@github.com:scylladb/vector-store.git
-$ cd vector-store
-$ cargo build -r -p vector-search-benchmark
-$ cp target/release/vector-search-benchmark path-to/vector-search-benchmark
-```
-
-### Usage
-
-`vector-search-benchmark` must be used with a running scylla + vector-store
-cluster. You should set up the cluster before running the benchmark. You can
-use [cluster-in-aws](../scripts/cluster-in-aws/README.md) for creating the
-cluster in AWS. You need ip address of one of the scylla nodes and ip addresses
-of all vector-store nodes. You need also a dataset of vectors - currently only
-VectorDBBench format (parquet) is supported - cli has a parameter for
-path-to-directory-with-dataset.
-
-```bash
-$ path-to/vector-search-benchmark --help
-Usage: vector-search-benchmark <COMMAND>
-
-Commands:
-  build-table
-  build-index
-  drop-table
-  drop-index
-  search-cql
-  search-http
-```
-
-Each of the cli commands has its own help. Short description of each command:
-- `build-table` - creates a keyspace and a table for storing vectors and
-  populates it with vectors from dataset.
-- `build-index` - creates a vector search index on the table and check when all
-  vector-store nodes built it.
-- `drop-index` - drops the vector search index.
-- `drop-table` - drops the table and the keyspace.
-- `search-cql` - runs ANN search queries from the dataset and measures qps,
-  latency & recall. This search is using CQL over the scylla.
-- `search-http` - runs ANN search queries from the dataset and measures qps &
-  latency. This search is using HTTP over vector-store directly - it sends no
-  requests to the scylla cluster.
-
+[latte](https://github.com/scylladb/latte) workloads that benchmark vector
+search over CQL, recall included, stay in this repository:
+[latte/vector-search](../latte/vector-search/README.md).

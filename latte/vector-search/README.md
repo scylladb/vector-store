@@ -6,8 +6,8 @@ ScyllaDB vector search over the CQL path — measuring throughput, latency and
 channel, so it can be compared and tracked like QPS and latency.
 
 These are the CQL counterpart to the Rust `vector-search-benchmark`
-(`crates/benchmark`); latte is the load engine, these `.rn` files are the
-workload.
+([scylladb/vector-store-bench](https://github.com/scylladb/vector-store-bench));
+latte is the load engine, these `.rn` files are the workload.
 
 ## Files
 
