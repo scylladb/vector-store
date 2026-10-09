@@ -2,8 +2,11 @@
 //!
 //! A benchmark dataset is three plain-text files (fields separated by ", ").
 //! This layout is the workload's own convention, not a latte requirement —
-//! latte only provides generic line/field reading. A binary reader (e.g. fbin)
-//! would be a sibling module exposing the same loader functions.
+//! latte only provides generic line/field reading.
+//!
+//! Base vectors stay on disk: `index_base_vectors` scans the file once in
+//! `prepare` and `read_base_vector_at` parses one row per cycle. Query
+//! vectors and ground truth are small and load in full.
 //!
 //!   base vectors  — the corpus: loaded into the table and indexed; ANN search
 //!                   returns these.         `id, [v1, v2, ...]`
@@ -32,14 +35,27 @@ fn parse_vector(field) {
     }
     let vector = [];
     for component in body.split(PARSING_DELIMITER) {
-        vector.push(f64::parse(component)?);
+        // rune's parse errors have no Display, so name the token ourselves.
+        match f64::parse(component) {
+            Ok(value) => vector.push(value),
+            Err(_) => return Err(`"${component}" is not a float`),
+        }
     }
     Ok(vector)
+}
+
+/// latte's line reader panics if the file cannot be opened, so every reader
+/// here opens it first: a typo in a `-P ..._file` param should be an error
+/// naming the file, not a Rust backtrace.
+fn open_or_fail(path) {
+    fs::open_binary(path)?;
+    Ok(())
 }
 
 /// Read a file whose every line is a ", "-separated list of values, parsing each
 /// value with `parse`. Returns a Vec of per-line Vecs; empty lines are skipped.
 async fn load_value_lines(path, parse) {
+    open_or_fail(path)?;
     let it = fs::read_split_lines_iter(path, [PARSING_DELIMITER])?;
     let lines = [];
     while let Some(line) = it.next() {
@@ -60,6 +76,7 @@ async fn load_value_lines(path, parse) {
 /// `bucketed` selects the line format: `id, [v...]` (bucket defaults to 0) when
 /// false; `id, bucket, [v...]` (bucket read from the line) when true.
 pub async fn load_base_vectors(path, bucketed) {
+    open_or_fail(path)?;
     let maxsplit = if bucketed { 2 } else { 1 };
     let it = fs::read_split_lines_iter(path, [PARSING_DELIMITER, maxsplit])?;
     let rows = [];
@@ -72,6 +89,80 @@ pub async fn load_base_vectors(path, bucketed) {
         }
     }
     Ok(rows)
+}
+
+/// Parse one `id, [v...]` line into the `#{ id, bucket, vector }` row shape.
+/// The trims absorb the blank lines a span can carry and any whitespace
+/// around the separator; `idx` names the row if the line does not parse.
+fn parse_base_line(line, path, idx) {
+    match line.trim().split_once(PARSING_DELIMITER) {
+        Some((id, vector_field)) => {
+            let id_value = match id.trim().parse::<i64>() {
+                Ok(v) => v,
+                Err(_) => return Err(`${path}:row ${idx}: id "${id.trim()}" is not an integer`),
+            };
+            match parse_vector(vector_field.trim()) {
+                Ok(vector) => Ok(#{ "id": id_value, "bucket": 0, "vector": vector }),
+                Err(e) => Err(`${path}:row ${idx}: id ${id_value}: ${e}`),
+            }
+        }
+        None => Err(`${path}:row ${idx}: not "id${PARSING_DELIMITER}[v...]"`),
+    }
+}
+
+/// Scan a base-vector file once, returning `#{ path, offsets }`: the byte
+/// offset of every row, plus a final entry holding the file length, so row `i`
+/// spans `offsets[i]..offsets[i + 1]`. Pairs with `read_base_vector_at`, which
+/// parses one row per call, so only the offsets stay in memory - one per row,
+/// independent of the dimension.
+///
+/// Blank lines are skipped. A line with no separator is an error, since
+/// skipping it would quietly shrink the row count; anything else malformed
+/// fails when the row is read, naming it. The bucketed line format is not
+/// supported - `recall_buckets.rn` uses `load_base_vectors`.
+pub fn index_base_vectors(path) {
+    open_or_fail(path)?;
+    // Untrimmed and keeping empty fields, so the parts reconstruct the line
+    // byte for byte (the reader leaves the line terminator on the last part);
+    // maxsplit 1 both leaves the vector field whole and makes the part count a
+    // separator check.
+    let it = fs::read_split_lines_iter(path, [PARSING_DELIMITER, 1, false, false])?;
+    let offsets = [];
+    let offset = 0;
+    let line_no = 0;
+    while let Some(entry) = it.next() {
+        line_no += 1;
+        let raw = entry?;
+        let line_len = raw[0].len();
+        if raw.len() == 2 {
+            line_len += PARSING_DELIMITER.len() + raw[1].len();
+            offsets.push(offset);
+        } else if raw[0].trim() != "" {
+            return Err(`${path}:${line_no}: expected "id${PARSING_DELIMITER}[v...]", found no "${PARSING_DELIMITER}"`);
+        }
+        offset += line_len;
+    }
+    // Sentinel: the last row runs to the end of the file.
+    offsets.push(offset);
+    Ok(#{ "path": path, "offsets": offsets })
+}
+
+/// Number of rows in an index returned by `index_base_vectors`.
+pub fn row_count(index) {
+    index.offsets.len() - 1
+}
+
+/// Read row `idx` of a base-vector file opened in `prepare_worker`, using the
+/// `index` built for it.
+///
+/// A worker's concurrent cycles share the handle, so the seek and the read
+/// must stay in one synchronous call: an await between them would let another
+/// cycle reposition the file.
+pub fn read_base_vector_at(file, index, idx) {
+    let start = index.offsets[idx];
+    file.seek(start)?;
+    let line = String::from_utf8(file.read_bytes(index.offsets[idx + 1] - start)?)?;
+    parse_base_line(line, index.path, idx)
 }
 
 /// Load a query-vector file (`v1, v2, ...` per line) into a Vec of Vec<f64>.

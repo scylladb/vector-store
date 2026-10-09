@@ -16,7 +16,8 @@ ScyllaDB full-text search (BM25) indexing and search performance.
 
 - A ScyllaDB cluster with vector-store and full-text search enabled
   (`VECTOR_STORE_FULLTEXT_INDEXES=true`).
-- [Latte](https://github.com/scylladb/latte) 0.49.0-scylladb or later.
+- [Latte](https://github.com/scylladb/latte) 0.50.0-scylladb or later - the
+  loader needs the `prepare_worker` hook and seekable binary file handles.
 - A prepared dataset directory containing the TSV files described below.
 
 ## Dataset Format
@@ -52,14 +53,29 @@ latte schema "$WORKLOAD" "$NODE" -P schema_cleanup=true
 latte schema "$WORKLOAD" "$NODE"
 ```
 
-Load the documents. Latte reads `documents.tsv` during preparation and runs one
-load cycle per document:
+Load the documents. Preparation scans `documents.tsv` once to record where each
+line starts, then each load cycle reads one document from the file:
 
 ```sh
 latte load "$WORKLOAD" "$NODE" \
     -P "fts_data_dir=\"$DATA_DIR\"" \
-    --threads 1 --concurrency 64
+    --concurrency 64 \
+    --threads <cores>
 ```
+
+Only the line offsets are held, so what the loader retains depends on the
+document count rather than document size; like all workload state they are
+copied into every worker thread. Raise `--threads` until the server, not the
+client, is the limit.
+
+Each cycle reads from disk, synchronously, so load-phase latency percentiles
+measure the client too: read them as throughput, and keep the corpus on fast
+local storage. `search` preloads the (small) query and qrels files and does no
+file I/O.
+
+A body containing a tab is stored whole. Earlier runs truncated it at the
+second tab, so BM25 results for such a corpus will differ from older
+baselines.
 
 Build the index and wait until it is serving. The build phase drops a previous
 index, creates a new one, and requires consecutive successful BM25 probes.
@@ -140,6 +156,7 @@ All workload parameters are passed with Latte's `-P` flag.
 
 ```
 fts.rn              # Latte workload for schema, load, index build, and search
+tsv_dataset.rn      # Document-corpus loader
 metrics.rn          # IR accuracy metrics
-testdata/           # Smoke-test fixture
+testdata/           # Smoke-test fixtures
 ```

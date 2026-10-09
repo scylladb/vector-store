@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate the fbin/ibin fixture files for fbin_dataset_test.rn."""
+"""Regenerate the fixture files for fbin_dataset_test.rn."""
 import struct
 from pathlib import Path
 
@@ -37,3 +37,16 @@ ids = u32s(list(range(49)) + [4294967295])
 
 # matches neither ground-truth layout: ids-only file with the last 3 bytes cut off
 (OUT / "gt_bad.bin").write_bytes((header(10, 5) + ids)[:-3])
+
+
+
+# text fixture for the loader smoke test: the same 10 x 4 records as data.fbin,
+# written with the line layouts the byte-offset index has to survive - a blank
+# line, and a final line with no terminator
+rows = [
+    f"{i}, [" + ", ".join(repr(j * 0.5) for j in range(i * 4, i * 4 + 4)) + "]"
+    for i in range(10)
+]
+(OUT / "data.txt").write_bytes(
+    (rows[0] + "\n" + rows[1] + "\n" + "\n" + "\n".join(rows[2:9]) + "\n" + rows[9]).encode()
+)

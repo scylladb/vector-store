@@ -14,7 +14,8 @@
 //! `-P 'vector_data_dir="/abs/dir/"'`.
 //!   latte schema             latte/vector-search/recall.rn <node>
 //!   latte run -f load        latte/vector-search/recall.rn <node> -d <dataset_size> \
-//!       -P load_data=true -P 'vector_data_dir="<dir>/"' --threads 1 --concurrency 64
+//!       -P load_data=true -P 'vector_data_dir="<dir>/"' --threads <cores> \
+//!       --concurrency 64
 //!   latte run -f build_index latte/vector-search/recall.rn <node> -d 1 -P build_index=true
 //!   latte run -f search      latte/vector-search/recall.rn <node> -d 60s --concurrency 32 \
 //!       -P 'vector_data_dir="<dir>/"' --generate-report -o report.json
@@ -32,10 +33,11 @@
 //! index during load (measures the write path, but the index fills async — search
 //! too early sees a partial index).
 //!
-//! `load` preloads the dataset into memory and inserts one row per cycle, so run
-//! it single-threaded with high async concurrency to avoid per-thread copies;
-//! pass `-d <dataset_size>`. `search` loads only the small query-vector and
-//! ground-truth files.
+//! `load` inserts one row per cycle, read from the file as it goes, so memory
+//! does not scale with the dataset; pass `-d <dataset_size>`. `prepare` only
+//! indexes the file - the fbin header, or one byte offset per text line.
+//! `search` loads its (small) query and ground-truth files in full: reading
+//! inside the measured path would add I/O to the reported latency.
 
 use latte::*;
 
@@ -61,8 +63,8 @@ const INDEX_BEFORE_LOAD = latte::param!("index_before_load", false);
 const ANN_LIMIT = latte::param!("ann_limit", 10);   // k for recall@k
 
 // `dataset_format` selects the loader: "text" (text_dataset.rn), "fbin"
-// (fbin_dataset.rn), or "fbin_packed" (base vectors kept as packed bytes,
-// far less memory); file params must match the format.
+// (fbin_dataset.rn), or "fbin_packed" (base vectors bound as raw bytes rather
+// than converted to values); file params must match the format.
 const DATASET_FORMAT = latte::param!("dataset_format", "text");
 const VECTOR_DATA_DIR = latte::param!("vector_data_dir", "./");
 const DATASET_FILE = latte::param!("dataset_file", "dataset.txt");
@@ -78,31 +80,24 @@ const BUILD_INDEX = latte::param!("build_index", false);
 const INSERT = "insert";
 const SEARCH = "search";
 
-// Format-dispatching loaders, selected by DATASET_FORMAT.
-async fn load_base_vectors(path) {
-    match DATASET_FORMAT {
-        "text" => text_dataset::load_base_vectors(path, false).await,
-        "fbin" => fbin_dataset::load_base_vectors(path, false).await,
-        "fbin_packed" => fbin_dataset::load_base_vectors_packed(path).await,
-        _ => Err(`unknown dataset_format "${DATASET_FORMAT}" (expected "text", "fbin" or "fbin_packed")`),
-    }
+// The loaders dispatch on this, so `prepare` rejects an unknown format first.
+fn is_text_dataset() {
+    DATASET_FORMAT == "text"
 }
 
 async fn load_query_vectors(path) {
-    match DATASET_FORMAT {
-        "text" => text_dataset::load_query_vectors(path).await,
-        "fbin" => fbin_dataset::load_query_vectors(path).await,
-        "fbin_packed" => fbin_dataset::load_query_vectors(path).await,
-        _ => Err(`unknown dataset_format "${DATASET_FORMAT}" (expected "text", "fbin" or "fbin_packed")`),
+    if is_text_dataset() {
+        text_dataset::load_query_vectors(path).await
+    } else {
+        fbin_dataset::load_query_vectors(path).await
     }
 }
 
 async fn load_ground_truth(path) {
-    match DATASET_FORMAT {
-        "text" => text_dataset::load_ground_truth(path).await,
-        "fbin" => fbin_dataset::load_ground_truth(path).await,
-        "fbin_packed" => fbin_dataset::load_ground_truth(path).await,
-        _ => Err(`unknown dataset_format "${DATASET_FORMAT}" (expected "text", "fbin" or "fbin_packed")`),
+    if is_text_dataset() {
+        text_dataset::load_ground_truth(path).await
+    } else {
+        fbin_dataset::load_ground_truth(path).await
     }
 }
 
@@ -143,11 +138,31 @@ pub async fn erase(db) {
 }
 
 pub async fn prepare(db) {
+    if DATASET_FORMAT != "text" && DATASET_FORMAT != "fbin" && DATASET_FORMAT != "fbin_packed" {
+        return Err(`unknown dataset_format "${DATASET_FORMAT}" (expected "text", "fbin" or "fbin_packed")`);
+    }
     if LOAD_DATA {
         db.prepare(INSERT, `INSERT INTO ${KEYSPACE}.${TABLE} (id, vector) VALUES (:id, :vector)`).await?;
-        db.data.dataset = load_base_vectors(text_dataset::join_path(VECTOR_DATA_DIR, DATASET_FILE)).await?;
-        db.load_cycle_count = db.data.dataset.len();
-        println!("Loaded {} dataset rows for insert", db.data.dataset.len());
+        // Record where each row lives but leave the rows on disk; `load`
+        // reads one per cycle. `base_path` also tells `prepare_worker` to
+        // open a handle.
+        db.data.base_path = text_dataset::join_path(VECTOR_DATA_DIR, DATASET_FILE);
+        if is_text_dataset() {
+            db.data.base_index = text_dataset::index_base_vectors(db.data.base_path)?;
+            db.load_cycle_count = text_dataset::row_count(db.data.base_index);
+            println!("Indexed {} dataset rows in {}, read one per cycle",
+                     db.load_cycle_count, db.data.base_path);
+        } else {
+            db.data.base_header = fbin_dataset::read_base_header(db.data.base_path)?;
+            db.load_cycle_count = db.data.base_header.count;
+            println!("Dataset {} holds {} rows of dimension {}, read one per cycle",
+                     db.data.base_path, db.data.base_header.count, db.data.base_header.dimension);
+        }
+        // `load` takes the cycle index modulo this, so zero rows would be a
+        // division by zero once per cycle.
+        if db.load_cycle_count == 0 {
+            return Err(`${db.data.base_path}: no dataset rows (empty file?)`);
+        }
     } else if BUILD_INDEX {
         // after_load: create the index now that the table is full; before_load:
         // a no-op create. The `build_index` probe below waits until it is built.
@@ -180,11 +195,34 @@ pub async fn prepare(db) {
     }
 }
 
+// Runs once per worker thread, after `prepare`. Workers get `ctx.data` as a
+// serialized copy, so a file handle cannot be made in `prepare` and handed
+// over. One handle serves the worker's concurrent cycles, which is safe only
+// because the readers seek and read in one synchronous call.
+pub async fn prepare_worker(db) {
+    if !is_none(db.data.get("base_path")) {
+        db.data.base_file = fs::open_binary(db.data.base_path)?;
+    }
+}
+
 pub async fn load(db, i) {
     // Map the cycle index into the dataset; modulo keeps it in bounds regardless
     // of the exact `-d` count (inserts are idempotent on the primary key).
-    let row = db.data.dataset[i % db.data.dataset.len()];
-    db.execute_prepared(INSERT, #{ "id": row.id, "vector": row.vector }).await?;
+    if is_text_dataset() {
+        let index = db.data.base_index;
+        let row = text_dataset::read_base_vector_at(db.data.base_file, index, i % text_dataset::row_count(index))?;
+        db.execute_prepared(INSERT, #{ "id": row.id, "vector": row.vector }).await?;
+    } else {
+        let header = db.data.base_header;
+        // Record index is the row id: fbin ids are implicit.
+        let id = i % header.count;
+        let vector = if DATASET_FORMAT == "fbin_packed" {
+            fbin_dataset::read_base_vector_packed_at(db.data.base_file, header, id)?
+        } else {
+            fbin_dataset::read_base_vector_at(db.data.base_file, header, id)?
+        };
+        db.execute_prepared(INSERT, #{ "id": id, "vector": vector }).await?;
+    }
 }
 
 pub async fn build_index(db, i) {
