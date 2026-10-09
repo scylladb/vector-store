@@ -58,3 +58,17 @@ done
 # rejects a source image that is itself an index ("... is a manifest list")
 echo Combine the per-arch images into $docker_tag
 docker buildx imagetools create --tag $docker_tag $sources
+
+# move `latest` along only when this is the newest GA release, so a patch of
+# an older series or a pre-release never moves it backwards. The newest
+# release is the highest X.Y.Z annotated tag, which is what releases are cut
+# from (see docs/releasing.md); anything else is left to a manual retag
+newest=$(git tag --list --format='%(objecttype) %(refname:short)' \
+    | awk '$1 == "tag" && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+$/ { print $2 }' \
+    | sort -V | tail -n 1)
+if [[ $vector_store_version == "$newest" ]] ; then
+    echo Tag $docker_tag as $docker_image:latest
+    docker buildx imagetools create --tag $docker_image:latest $docker_tag
+else
+    echo "Leave $docker_image:latest unchanged: the newest GA release is ${newest:-unknown}"
+fi

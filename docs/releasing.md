@@ -45,6 +45,15 @@ missing there, the image build fails at the download, naming the URL.
 Re-running a failed release run keeps its `release` event, so that recovery
 path uploads normally.
 
+`push-docker` also tags the image as `scylladb/vector-store:latest`, but only
+when `VECTOR_VERSION` is the newest GA release, i.e. the highest `X.Y.Z`
+annotated tag in the repository. A patch of an older series or a pre-release
+therefore never moves `latest`. To move it anywhere else, retag by hand:
+
+```bash
+docker buildx imagetools create --tag scylladb/vector-store:latest scylladb/vector-store:X.Y.Z
+```
+
 ## Manual release
 
 In case you want to build the release manually, you can use the scripts in
@@ -76,9 +85,9 @@ assembled registry-side from the pushed per-arch images when uploading:
 ./scripts/upload-dockers
 ```
 
-This pushes the per-arch images and then combines them into the multi-arch
-tag with `docker buildx imagetools create`, so the tag lists exactly the two
-architectures:
+This pushes the per-arch images, combines them into the multi-arch tag with
+`docker buildx imagetools create`, and moves `latest` to it under the same
+rule as the workflow. The multi-arch tag lists exactly the two architectures:
 
 ```
 Manifests:
