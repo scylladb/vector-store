@@ -105,6 +105,9 @@ struct Writer {
     // In-progress guards for committed documents, released by the reload that makes them
     // searchable.
     unreloaded_docs_in_progress_guards: Vec<AsyncInProgress>,
+    // Set by a failed reload, so the next tick retries it also when no documents wait for it,
+    // e.g. after a background merge.
+    reader_stale: bool,
 }
 
 impl Writer {
@@ -136,7 +139,9 @@ impl Writer {
     /// Reloads the reader, which then serves every committed document.
     /// releases commited (and reloaded) docuemnts guards.
     fn on_meta_changed(&mut self) -> tantivy::Result<()> {
-        self.reader.reload()?;
+        let reloaded = self.reader.reload();
+        self.reader_stale = reloaded.is_err();
+        reloaded?;
         self.unreloaded_docs_in_progress_guards.clear();
         Ok(())
     }
@@ -151,7 +156,9 @@ impl Writer {
 
     /// A failed reload leaves committed documents unsearchable, and the next commit retries it.
     fn has_unsearchable_docs(&self) -> bool {
-        self.has_uncommitted_docs() || !self.unreloaded_docs_in_progress_guards.is_empty()
+        self.has_uncommitted_docs()
+            || !self.unreloaded_docs_in_progress_guards.is_empty()
+            || self.reader_stale
     }
 }
 
@@ -213,6 +220,7 @@ impl IndexState {
             reader: reader.clone(),
             uncommitted_docs_in_progress_guards: Vec::new(),
             unreloaded_docs_in_progress_guards: Vec::new(),
+            reader_stale: false,
         }));
         let reloads_watch = watch_reloads(&index, &writer)?;
         Ok(Self {
