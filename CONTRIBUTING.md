@@ -210,6 +210,9 @@ cargo openapi
 The `api/openapi.json` file must always be synchronized with the actual API definition in the source code.
 This synchronization is enforced by an integration test in our CI pipeline.
 
+The benchmark in [scylladb/vector-store-bench](https://github.com/scylladb/vector-store-bench) uses the API types and client of this repository (`crates/httpapi`, `crates/httpclient`) as git dependencies, pinned to a commit in its `Cargo.lock`.
+CI here does not build the benchmark, so a change to these crates that breaks it needs a matching change in vector-store-bench, which moves the pin with `cargo update -p httpapi -p httpclient`.
+
 When modifying or extending the Vector Store REST API, please follow this convention:
 
 - **Explicit Index References:** Always refer to an index by explicitly specifying both the keyspace name and the index name, rather than using a qualified index name.
