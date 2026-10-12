@@ -133,9 +133,12 @@ impl Writer {
         Ok(())
     }
 
-    /// Reloads the reader, which then serves every committed document.
-    /// releases commited (and reloaded) docuemnts guards.
+    /// Reloads the reader and releases the guards of committed documents. Skipped while only
+    /// uncommitted documents are unsearchable: their commit reloads anyway.
     fn on_meta_changed(&mut self) {
+        if self.only_uncommitted_docs_unsearchable() {
+            return;
+        }
         let reloaded = (self.reload_reader)();
         self.reload_failed = reloaded.is_err();
         match reloaded {
@@ -158,6 +161,13 @@ impl Writer {
         self.has_uncommitted_docs()
             || !self.unreloaded_docs_in_progress_guards.is_empty()
             || self.reload_failed
+    }
+
+    /// The reader serves every committed document, and only the uncommitted ones are unsearchable.
+    fn only_uncommitted_docs_unsearchable(&self) -> bool {
+        self.unreloaded_docs_in_progress_guards.is_empty()
+            && !self.reload_failed
+            && self.has_uncommitted_docs()
     }
 }
 
@@ -703,6 +713,8 @@ mod tests {
     use crate::worker;
     use rstest::rstest;
     use scylla::value::CqlValue;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
     use std::time::Duration;
 
     use super::super::actor::FtsIndexExt;
@@ -1620,5 +1632,44 @@ mod tests {
             .unwrap();
 
         assert_eq!(keys.len(), 1);
+    }
+
+    #[test]
+    fn meta_change_skips_reload_only_while_just_uncommitted_docs_are_unsearchable() {
+        let reloads = Arc::new(AtomicUsize::new(0));
+        let mut writer = Writer {
+            writer: tantivy::Index::create_in_ram(Schema::builder().build())
+                .writer_with_num_threads(1, 15_000_000)
+                .unwrap(),
+            reload_reader: Box::new({
+                let reloads = Arc::clone(&reloads);
+                move || {
+                    reloads.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                }
+            }),
+            uncommitted_docs_in_progress_guards: Vec::new(),
+            unreloaded_docs_in_progress_guards: Vec::new(),
+            reload_failed: false,
+        };
+
+        // Idle index: a merge is reloaded right away.
+        writer.on_meta_changed();
+        assert_eq!(reloads.load(Ordering::Relaxed), 1);
+
+        // Only uncommitted docs: skipped, their commit reloads anyway.
+        writer
+            .add_document(TantivyDocument::default(), AsyncInProgress::None)
+            .unwrap();
+        writer.on_meta_changed();
+        assert_eq!(reloads.load(Ordering::Relaxed), 1);
+
+        // Committed docs wait for a reload: not skipped despite uncommitted ones.
+        writer.commit().unwrap();
+        writer
+            .add_document(TantivyDocument::default(), AsyncInProgress::None)
+            .unwrap();
+        writer.on_meta_changed();
+        assert_eq!(reloads.load(Ordering::Relaxed), 2);
     }
 }
