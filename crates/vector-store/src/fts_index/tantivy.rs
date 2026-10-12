@@ -10,10 +10,13 @@ use std::sync::RwLock;
 use std::time::Duration;
 
 use anyhow::anyhow;
+use tantivy::Directory;
 use tantivy::IndexWriter;
 use tantivy::ReloadPolicy;
 use tantivy::TantivyDocument;
 use tantivy::collector::TopDocs;
+use tantivy::directory::WatchCallback;
+use tantivy::directory::WatchHandle;
 use tantivy::indexer::IndexWriterOptions;
 use tantivy::query::BooleanQuery;
 use tantivy::query::BoostQuery;
@@ -93,12 +96,15 @@ impl FtsIndexFactory for TantivyIndexFactory {
     }
 }
 
+type ReloadReader = Box<dyn Fn() -> tantivy::Result<()> + Send + Sync>;
+
 struct Writer {
     writer: IndexWriter,
-    // In-progress guards for documents written to the writer but not yet committed. They are held
-    // here so the index is not reported as caught up (SERVING) until the commit that makes those
-    // documents searchable has succeeded.
+    reload_reader: ReloadReader,
+    // Held until the documents are searchable, so the index is not SERVING before that.
     uncommitted_docs_in_progress_guards: Vec<AsyncInProgress>,
+    unreloaded_docs_in_progress_guards: Vec<AsyncInProgress>,
+    reload_failed: bool,
 }
 
 impl Writer {
@@ -118,11 +124,24 @@ impl Writer {
         self.uncommitted_docs()
     }
 
-    fn commit(&mut self, reload: impl FnOnce() -> tantivy::Result<()>) -> tantivy::Result<()> {
+    /// Commits the documents to the index and keeps their in-progress guards until meta.json has
+    /// changed and the reader has been reloaded, making the documents searchable.
+    fn commit(&mut self) -> tantivy::Result<()> {
         self.writer.commit()?;
-        reload()?;
-        self.uncommitted_docs_in_progress_guards.clear();
+        self.unreloaded_docs_in_progress_guards
+            .append(&mut self.uncommitted_docs_in_progress_guards);
         Ok(())
+    }
+
+    /// Reloads the reader, which then serves every committed document.
+    /// releases commited (and reloaded) docuemnts guards.
+    fn on_meta_changed(&mut self) {
+        let reloaded = (self.reload_reader)();
+        self.reload_failed = reloaded.is_err();
+        match reloaded {
+            Ok(()) => self.unreloaded_docs_in_progress_guards.clear(),
+            Err(err) => error!("fts: failed to reload reader: {err}"),
+        }
     }
 
     fn uncommitted_docs(&self) -> usize {
@@ -132,13 +151,39 @@ impl Writer {
     fn has_uncommitted_docs(&self) -> bool {
         !self.uncommitted_docs_in_progress_guards.is_empty()
     }
+
+    /// The tick commits while this holds. Even an empty commit rewrites meta.json, so the watch
+    /// callback retries a failed or pending reload.
+    fn has_unsearchable_docs(&self) -> bool {
+        self.has_uncommitted_docs()
+            || !self.unreloaded_docs_in_progress_guards.is_empty()
+            || self.reload_failed
+    }
 }
 
 struct IndexState {
     index: tantivy::Index,
-    writer: RwLock<Writer>,
+    writer: Arc<RwLock<Writer>>,
     reader: tantivy::IndexReader,
     schema: Schema,
+    _meta_watch: WatchHandle,
+}
+
+fn reload_reader(reader: &tantivy::IndexReader) -> ReloadReader {
+    let reader = reader.clone();
+    Box::new(move || reader.reload())
+}
+
+/// Reloads the reader on every meta.json write, made by both commits and background merges.
+fn watch_meta(index: &tantivy::Index, writer: &Arc<RwLock<Writer>>) -> anyhow::Result<WatchHandle> {
+    let callback = {
+        let writer = Arc::clone(writer);
+        move || writer.write().unwrap().on_meta_changed()
+    };
+    index
+        .directory()
+        .watch(WatchCallback::new(callback))
+        .map_err(|e| anyhow!("fts: failed to watch index metas: {e}"))
 }
 
 const COMMIT_INTERVAL: Duration = Duration::from_secs(1);
@@ -163,14 +208,20 @@ impl IndexState {
             .reload_policy(ReloadPolicy::Manual)
             .try_into()
             .map_err(|e| anyhow!("fts: failed to create reader: {e}"))?;
+        let writer = Arc::new(RwLock::new(Writer {
+            writer,
+            reload_reader: reload_reader(&reader),
+            uncommitted_docs_in_progress_guards: Vec::new(),
+            unreloaded_docs_in_progress_guards: Vec::new(),
+            reload_failed: false,
+        }));
+        let meta_watch = watch_meta(&index, &writer)?;
         Ok(Self {
             index,
-            writer: RwLock::new(Writer {
-                writer,
-                uncommitted_docs_in_progress_guards: Vec::new(),
-            }),
+            writer,
             reader,
             schema,
+            _meta_watch: meta_watch,
         })
     }
 }
@@ -250,11 +301,7 @@ fn create_doc(schema: &Schema, primary_id: PrimaryId, document: &str) -> Tantivy
 }
 
 fn commit(state: &IndexState, key: &IndexKey) {
-    let result = state
-        .writer
-        .write()
-        .unwrap()
-        .commit(|| state.reader.reload());
+    let result = state.writer.write().unwrap().commit();
     if let Err(err) = result {
         error!("fts: failed to commit for {key}: {err}");
     }
@@ -626,12 +673,15 @@ pub(crate) fn new(
                 }
                 _ = interval.tick() => {
                     for state in states.values() {
-                        if !state.writer.read().unwrap().has_uncommitted_docs() {
-                            continue;
-                        }
                         let state = Arc::clone(state);
                         let key = key.clone();
-                        worker.spawn_blocking(move || commit(&state, &key)).await;
+                        worker
+                            .spawn_blocking(move || {
+                                if state.writer.read().unwrap().has_unsearchable_docs() {
+                                    commit(&state, &key);
+                                }
+                            })
+                            .await;
                     }
                 }
             }
@@ -776,6 +826,28 @@ mod tests {
 
     fn tokenize_with_standard_analyzer(text: &str) -> Vec<String> {
         tokenize_with(Analyzer::Standard, text)
+    }
+
+    async fn add_committed_segment(sender: &mpsc::Sender<FtsIndex>, segment: u64) {
+        let (tx, mut rx) = mpsc::channel(1);
+        // Reaching the commit threshold forces a commit, and each commit adds a new segment.
+        let docs_per_segment = TEST_COMMIT_THRESHOLD as u64;
+        for doc in 0..docs_per_segment {
+            sender
+                .add_document(
+                    (segment * docs_per_segment + doc).into(),
+                    format!("segment {segment} document {doc} body text"),
+                    AsyncInProgress::Fullscan(tx.clone()),
+                )
+                .await
+                .unwrap();
+        }
+        drop(tx);
+        rx.recv().await;
+    }
+
+    async fn segment_count(sender: &mpsc::Sender<FtsIndex>) -> usize {
+        sender.stats(make_index_key()).await.unwrap().segment_count
     }
 
     #[rstest]
@@ -1000,6 +1072,35 @@ mod tests {
         let count = sender.count(make_index_key()).await.unwrap();
 
         assert_eq!(count, TEST_COMMIT_THRESHOLD);
+    }
+
+    #[rstest]
+    #[timeout(Duration::from_secs(10))]
+    #[tokio::test]
+    async fn reader_segment_count_drops_after_background_merge() {
+        /// Once the index has this many small segments, Tantivy's default `LogMergePolicy` merges
+        /// them into one segment.
+        const MERGE_POLICY_MIN_NUM_SEGMENTS: u64 = 8;
+        const MERGE_SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+
+        // The last commit leaves exactly enough segments to start a background merge, which
+        // finishes after that commit has already reloaded the reader.
+        for segment in 0..MERGE_POLICY_MIN_NUM_SEGMENTS {
+            add_committed_segment(&sender, segment).await;
+        }
+
+        // Wait until the reader serves the merged segments without any further writes.
+        let deadline = tokio::time::Instant::now() + MERGE_SETTLE_TIMEOUT;
+        while segment_count(&sender).await as u64 >= MERGE_POLICY_MIN_NUM_SEGMENTS {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "reader still serves {} segments after the background merge",
+                segment_count(&sender).await
+            );
+            tokio::time::sleep(TEST_COMMIT_INTERVAL).await;
+        }
     }
 
     async fn highlight(
