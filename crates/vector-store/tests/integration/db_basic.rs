@@ -139,18 +139,51 @@ where
     I: IntoIterator<Item = (PrimaryKey, Option<String>, Timestamp)>,
     I::IntoIter: Send + Sync + 'static,
 {
-    make_scan_fn(items.into_iter().map(|(primary_key, document, timestamp)| {
-        DbIndexedRow {
-            primary_key,
-            operation: DbIndexedOperation::Upsert(
-                NonemptyBox::new([Timestamped::new(
-                    timestamp,
-                    document.map(DbIndexedValue::Document),
-                )])
-                .unwrap(),
-            ),
+    make_scan_fn(
+        items.into_iter().map(|(primary_key, document, timestamp)| {
+            document_row(primary_key, document, timestamp)
+        }),
+    )
+}
+
+/// A scan sending the documents received from `rx` one by one, each only once the index has
+/// processed the previous one, so a test controls the order in which rows reach the index.
+pub(crate) fn channel_scan_fn_documents(
+    mut rx: mpsc::Receiver<(PrimaryKey, Option<String>, Timestamp)>,
+) -> ScanFn {
+    Box::new(move |tx| {
+        async move {
+            while let Some((primary_key, document, timestamp)) = rx.recv().await {
+                let (tx_in_progress, mut rx_in_progress) = mpsc::channel(1);
+                tx.send((
+                    document_row(primary_key, document, timestamp),
+                    AsyncInProgress::Fullscan(tx_in_progress),
+                ))
+                .await
+                .unwrap();
+                // wait until in-progress marker is dropped
+                while rx_in_progress.recv().await.is_some() {}
+            }
         }
-    }))
+        .boxed()
+    })
+}
+
+fn document_row(
+    primary_key: PrimaryKey,
+    document: Option<String>,
+    timestamp: Timestamp,
+) -> DbIndexedRow {
+    DbIndexedRow {
+        primary_key,
+        operation: DbIndexedOperation::Upsert(
+            NonemptyBox::new([Timestamped::new(
+                timestamp,
+                document.map(DbIndexedValue::Document),
+            )])
+            .unwrap(),
+        ),
+    }
 }
 
 #[derive(Clone, derive_more::Debug)]

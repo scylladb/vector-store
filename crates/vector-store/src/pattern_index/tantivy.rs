@@ -4,11 +4,17 @@
  */
 
 use crate::CaseSensitive;
+use crate::IndexKey;
+use crate::Limit;
 use crate::memory::Memory;
 use crate::pattern_index::PatternIndex;
 use crate::pattern_index::PatternIndexConfiguration;
 use crate::pattern_index::PatternIndexFactory;
-use crate::pattern_index::PatternMessage;
+use crate::pattern_index::actor::PatternLikeR;
+use crate::pattern_index::actor::PatternMessage;
+use crate::pattern_index::like_pattern::LikePattern;
+use crate::pattern_index::like_plan::LikePlan;
+use crate::pattern_index::like_search::handle_like;
 use crate::table::PrimaryId;
 use crate::table::Table;
 use crate::table::TableSearch;
@@ -34,6 +40,7 @@ use tantivy::schema::TextOptions;
 use tantivy::tokenizer::NgramTokenizer;
 use tantivy::tokenizer::TextAnalyzer;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 
 pub(crate) struct Factory {
     worker: async_channel::Sender<Worker>,
@@ -64,17 +71,17 @@ pub(super) fn new_factory(
     Factory { worker, memory }
 }
 
-const TEXT_FIELD: &str = "text";
+pub(super) const TEXT_FIELD: &str = "text";
 const TOKENIZER_NAME: &str = "pattern_ngram";
-const MIN_GRAM: usize = 1;
-const MAX_GRAM: usize = 3;
+pub(super) const MIN_GRAM: usize = 1;
+pub(super) const MAX_GRAM: usize = 3;
 
 /// Every value is indexed and stored between these two marks, so a pattern anchored at the start
 /// or at the end of the value, and the empty value itself, are found through the very same grams
 /// as a pattern that is not anchored. They are C0 control characters, which text values are not
 /// expected to carry.
-const VALUE_START: char = '\u{2}';
-const VALUE_END: char = '\u{3}';
+pub(super) const VALUE_START: char = '\u{2}';
+pub(super) const VALUE_END: char = '\u{3}';
 
 #[derive(Clone)]
 pub(crate) struct PatternBackend {
@@ -102,6 +109,15 @@ impl TantivyBackend for PatternBackend {
             TEXT_FIELD,
             &framed(&normalize(text, self.case_sensitive)),
         )
+    }
+}
+
+impl PatternBackend {
+    /// A pattern is matched in the same form as the values: lowercased for a case-insensitive
+    /// index. Lowercasing never yields `%`, `_` or `\`, so it does not change which characters
+    /// of the pattern are wildcards or escapes.
+    fn plan_like(&self, pattern: &str) -> anyhow::Result<LikePlan> {
+        LikePlan::new(LikePattern::parse(&normalize(pattern, self.case_sensitive)))
     }
 }
 
@@ -140,6 +156,13 @@ fn framed(normalized: &str) -> String {
     format!("{VALUE_START}{normalized}{VALUE_END}")
 }
 
+pub(super) fn unframed(stored: &str) -> anyhow::Result<&str> {
+    stored
+        .strip_prefix(VALUE_START)
+        .and_then(|value| value.strip_suffix(VALUE_END))
+        .ok_or_else(|| anyhow!("pattern: stored value is not framed"))
+}
+
 pub(crate) fn new(
     config: PatternIndexConfiguration,
     table: Arc<RwLock<impl TableSearch + Send + Sync + 'static>>,
@@ -167,48 +190,69 @@ impl TantivyMessage for PatternMessage {
 
     async fn handle<T: TableSearch + Send + Sync + 'static>(
         self,
-        _indexer: &mut TantivyIndexer<PatternBackend, T>,
+        indexer: &mut TantivyIndexer<PatternBackend, T>,
     ) {
         match self {
             PatternMessage::Like {
-                index_key: _index_key,
-                pattern: _pattern,
-                limit: _limit,
+                index_key,
+                pattern,
+                limit,
                 tx,
             } => {
-                _ = tx.send(Err(anyhow!("pattern: like not implemented")));
+                like(indexer, index_key, &pattern, limit, tx).await;
             }
         }
     }
 }
 
+async fn like<T: TableSearch + Send + Sync + 'static>(
+    indexer: &TantivyIndexer<PatternBackend, T>,
+    index_key: IndexKey,
+    pattern: &str,
+    limit: Limit,
+    tx: oneshot::Sender<PatternLikeR>,
+) {
+    let plan = match indexer.backend().plan_like(pattern) {
+        Ok(plan) => plan,
+        Err(err) => {
+            _ = tx.send(Err(err));
+            return;
+        }
+    };
+    let table = Arc::clone(indexer.table());
+    indexer
+        .spawn_query(
+            index_key,
+            tx,
+            |_| Ok(vec![]),
+            move |state, index_key| handle_like(state, table.as_ref(), index_key, &plan, limit),
+        )
+        .await;
+}
+
 #[cfg(test)]
-mod tests {
+pub(super) mod test_support {
     use super::*;
     use crate::AsyncInProgress;
     use crate::memory::Allocate;
-    use crate::pattern_index::PatternIndexExt;
     use crate::table::MockTableSearch;
     use crate::tantivy_common::TantivyIndexExt;
     use crate::tantivy_common::test_support::make_index_key;
     use crate::tantivy_common::test_support::make_memory_actor;
-    use crate::tantivy_common::test_support::make_table_with_keys;
     use crate::worker;
-    use rstest::rstest;
-    use std::collections::BTreeSet;
-    use tantivy::schema::Value;
 
     const TEST_COMMIT_INTERVAL: Duration = Duration::from_millis(50);
     const TEST_COMMIT_THRESHOLD: usize = 3;
 
-    fn make_sender_with_memory(
+    pub(in crate::pattern_index) fn make_sender_with(
         table: Arc<RwLock<MockTableSearch>>,
         allocate: Allocate,
+        case_sensitive: bool,
     ) -> mpsc::Sender<PatternIndex> {
         new(
             PatternIndexConfiguration {
                 key: make_index_key(),
-                case_sensitive: CaseSensitive::default(),
+                case_sensitive: CaseSensitive::from(case_sensitive),
             },
             table,
             worker::new(),
@@ -218,11 +262,17 @@ mod tests {
         )
     }
 
-    fn make_sender(table: Arc<RwLock<MockTableSearch>>) -> mpsc::Sender<PatternIndex> {
-        make_sender_with_memory(table, Allocate::Can)
+    pub(in crate::pattern_index) fn make_sender(
+        table: Arc<RwLock<MockTableSearch>>,
+    ) -> mpsc::Sender<PatternIndex> {
+        make_sender_with(table, Allocate::Can, true)
     }
 
-    async fn add_doc(sender: &mpsc::Sender<PatternIndex>, primary: u64, content: &str) {
+    pub(in crate::pattern_index) async fn add_doc(
+        sender: &mpsc::Sender<PatternIndex>,
+        primary: u64,
+        content: &str,
+    ) {
         let (tx, mut rx) = mpsc::channel(1);
         sender
             .add_document(
@@ -235,7 +285,10 @@ mod tests {
         rx.recv().await;
     }
 
-    async fn rm_doc(sender: &mpsc::Sender<PatternIndex>, primary: u64) {
+    pub(in crate::pattern_index) async fn rm_doc(
+        sender: &mpsc::Sender<PatternIndex>,
+        primary: u64,
+    ) {
         let (tx, mut rx) = mpsc::channel(1);
         sender
             .remove_document(primary.into(), AsyncInProgress::Fullscan(tx))
@@ -243,6 +296,22 @@ mod tests {
             .unwrap();
         rx.recv().await;
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory::Allocate;
+    use crate::tantivy_common::TantivyIndexExt;
+    use crate::tantivy_common::test_support::make_index_key;
+    use crate::tantivy_common::test_support::make_table_with_keys;
+    use rstest::rstest;
+    use std::collections::BTreeSet;
+    use tantivy::schema::Value;
+    use test_support::add_doc;
+    use test_support::make_sender;
+    use test_support::make_sender_with;
+    use test_support::rm_doc;
 
     async fn count(sender: &mpsc::Sender<PatternIndex>) -> usize {
         sender.count(make_index_key()).await.unwrap()
@@ -310,24 +379,6 @@ mod tests {
     }
 
     #[rstest]
-    #[timeout(Duration::from_secs(10))]
-    #[tokio::test]
-    async fn like_is_not_implemented_yet() {
-        let sender = make_sender(make_table_with_keys());
-        add_doc(&sender, 1, "AB-1024-XL").await;
-
-        let result = sender
-            .like(
-                make_index_key(),
-                "AB-%".into(),
-                std::num::NonZeroUsize::new(10).unwrap().into(),
-            )
-            .await;
-
-        assert!(result.is_err());
-    }
-
-    #[rstest]
     #[case::latin("NGgamer", "nggamer")]
     #[case::non_ascii("ŻÓŁW Ärger", "żółw ärger")]
     #[case::cjk("将军", "将军")]
@@ -356,6 +407,15 @@ mod tests {
             .get_first(schema.get_field(TEXT_FIELD).unwrap())
             .and_then(|v| v.as_str());
         assert_eq!(stored, Some(expected));
+    }
+
+    #[rstest]
+    #[case::latin("\u{2}abc\u{3}", "abc")]
+    #[case::empty("\u{2}\u{3}", "")]
+    #[case::cjk("\u{2}将军来了\u{3}", "将军来了")]
+    #[case::value_holding_the_marks("\u{2}\u{2}x\u{3}\u{3}", "\u{2}x\u{3}")]
+    fn unframed_strips_the_frame(#[case] stored: &str, #[case] expected: &str) {
+        assert_eq!(unframed(stored).unwrap(), expected);
     }
 
     #[test]
@@ -413,7 +473,7 @@ mod tests {
     #[timeout(Duration::from_secs(10))]
     #[tokio::test]
     async fn add_document_rejected_when_memory_exhausted() {
-        let sender = make_sender_with_memory(make_table_with_keys(), Allocate::Cannot);
+        let sender = make_sender_with(make_table_with_keys(), Allocate::Cannot, true);
 
         add_doc(&sender, 1, "should not be indexed").await;
 

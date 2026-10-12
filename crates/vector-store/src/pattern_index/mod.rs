@@ -5,13 +5,15 @@
 
 mod actor;
 mod factory;
+mod like_pattern;
+mod like_plan;
+mod like_search;
 mod tantivy;
 
 use crate::memory::Memory;
 use crate::worker::Worker;
 pub(crate) use actor::PatternIndex;
 pub(crate) use actor::PatternIndexExt;
-pub(crate) use actor::PatternMessage;
 pub(crate) use factory::PatternIndexConfiguration;
 pub(crate) use factory::PatternIndexFactory;
 use tokio::sync::mpsc;

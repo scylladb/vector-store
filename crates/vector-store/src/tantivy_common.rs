@@ -364,6 +364,10 @@ impl<B: TantivyBackend, T: TableSearch + Send + Sync + 'static> TantivyIndexer<B
         &self.table
     }
 
+    pub(crate) fn backend(&self) -> &B {
+        &self.backend
+    }
+
     async fn add_document(
         &mut self,
         primary_id: PrimaryId,
@@ -582,21 +586,10 @@ pub(crate) mod test_support {
     use crate::table::IndexIdGenerator;
     use crate::table::MockTableSearch;
     use crate::table::PartitionId;
+    use crate::table::PrimaryId;
 
     pub(crate) fn make_table_with_keys() -> Arc<RwLock<MockTableSearch>> {
-        let index_id = IndexIdGenerator::new().next(true).unwrap();
-        let partition_id = PartitionId::global(index_id);
-        let mut mock = MockTableSearch::new();
-        mock.expect_index_id()
-            .returning(move |_index_key| Some(index_id));
-        mock.expect_partition_id()
-            .returning(move |_index_key, _restrictions| Some((partition_id, None)));
-        mock.expect_primary_key()
-            .returning(|_partition_id, primary_id| {
-                let id_val = u64::from(primary_id);
-                Some(PrimaryKey::from(vec![CqlValue::BigInt(id_val as i64)]))
-            });
-        Arc::new(RwLock::new(mock))
+        make_table_resolving(|primary_id| Some(primary_key_of(primary_id)))
     }
 
     pub(crate) fn make_index_key() -> IndexKey {
@@ -616,5 +609,27 @@ pub(crate) mod test_support {
             }
         });
         tx
+    }
+
+    /// A table that turns a primary id into a primary key with `resolve`, which answers `None`
+    /// for a row the table no longer knows.
+    pub(crate) fn make_table_resolving(
+        resolve: impl Fn(PrimaryId) -> Option<PrimaryKey> + Send + 'static,
+    ) -> Arc<RwLock<MockTableSearch>> {
+        let index_id = IndexIdGenerator::new().next(true).unwrap();
+        let partition_id = PartitionId::global(index_id);
+        let mut mock = MockTableSearch::new();
+        mock.expect_index_id()
+            .returning(move |_index_key| Some(index_id));
+        mock.expect_partition_id()
+            .returning(move |_index_key, _restrictions| Some((partition_id, None)));
+        mock.expect_primary_key()
+            .returning(move |_partition_id, primary_id| resolve(primary_id));
+        Arc::new(RwLock::new(mock))
+    }
+
+    pub(crate) fn primary_key_of(primary_id: PrimaryId) -> PrimaryKey {
+        let id_val = u64::from(primary_id);
+        PrimaryKey::from(vec![CqlValue::BigInt(id_val as i64)])
     }
 }
