@@ -1194,7 +1194,7 @@ async fn highlight_escapes_content_for_json_and_html(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn highlight_of_boosted_query_returns_error(fixture: Arc<Fixture>) {
+async fn highlight_marks_terms_of_boosted_query(fixture: Arc<Fixture>) {
     info!("started");
 
     fixture.insert_documents([(1, "the quick brown fox")]).await;
@@ -1206,12 +1206,9 @@ async fn highlight_of_boosted_query_returns_error(fixture: Arc<Fixture>) {
         "BM25() must accept a boosted query"
     );
 
-    let err = fixture.highlight_search_error("fox^2").await;
+    let excerpts = fixture.highlight_excerpts("fox^2").await;
 
-    assert!(
-        err.contains("boosted queries are not supported for highlighting"),
-        "unexpected error message: {err}"
-    );
+    assert_eq!(excerpts[&1], "the quick brown <b>fox</b>");
 
     info!("finished");
 }
