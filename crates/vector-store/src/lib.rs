@@ -35,6 +35,7 @@ mod perf;
 mod primary_key;
 mod similarity;
 mod table;
+mod tantivy;
 mod timestamp;
 pub mod tls;
 mod vector;
