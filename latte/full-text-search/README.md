@@ -105,6 +105,31 @@ latte run -f search "$WORKLOAD" "$NODE" -d 60s \
     --generate-report -o search.json
 ```
 
+### Highlighting overhead
+
+`highlight=true` selects a `BM25_HIGHLIGHT()` excerpt alongside each result.
+Nothing else changes, so a search run with and one without it on the same
+loaded corpus and query set measure what highlighting adds to BM25 query
+latency:
+
+```sh
+latte run -f search "$WORKLOAD" "$NODE" -d 60s \
+    --concurrency 32 --warmup 10s \
+    -P "fts_data_dir=\"$DATA_DIR\"" \
+    --generate-report -o search_plain.json
+latte run -f search "$WORKLOAD" "$NODE" -d 60s \
+    --concurrency 32 --warmup 10s \
+    -P "fts_data_dir=\"$DATA_DIR\"" \
+    -P highlight=true \
+    --generate-report -o search_highlight.json
+latte show search_highlight.json -b search_plain.json
+```
+
+Each report records `highlight` in its run metadata. The coordinator reads the
+text of every matched row and sends it to the index node, which returns the
+excerpt, so the overhead grows with document length and `search_limit` rather
+than with corpus size; pick the corpus with the document sizes you care about.
+
 Remove the index after the benchmark, or drop the complete table:
 
 ```sh
@@ -152,6 +177,7 @@ All workload parameters are passed with Latte's `-P` flag.
 | `queries_file` | `queries_natural.tsv` | Query filename | search |
 | `qrels_file` | `qrels_natural.tsv` | Relevance-judgment filename | search |
 | `compute_accuracy` | `true` | Record accuracy metrics; requires qrels | search |
+| `highlight` | `false` | Also select a `BM25_HIGHLIGHT()` excerpt per result | search |
 
 ## Smoke test
 
