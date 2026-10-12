@@ -3,7 +3,6 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
-use std::collections::BTreeMap;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -30,7 +29,6 @@ use tantivy::tokenizer::StopWordFilter;
 use tantivy::tokenizer::TextAnalyzer;
 use tantivy::tokenizer::WhitespaceTokenizer;
 use tokio::sync::mpsc;
-use tracing::debug;
 
 use crate::Analyzer;
 use crate::IndexKey;
@@ -39,11 +37,7 @@ use crate::Positions;
 use crate::QueryError;
 use crate::fts_index::factory::FtsIndexConfiguration;
 use crate::fts_index::factory::FtsIndexFactory;
-use crate::memory::Allocate;
 use crate::memory::Memory;
-use crate::memory::MemoryExt;
-use crate::perf;
-use crate::table::IndexId;
 use crate::table::PrimaryId;
 use crate::table::Table;
 use crate::table::TableSearch;
@@ -52,17 +46,13 @@ use crate::tantivy_common::IndexState;
 use crate::tantivy_common::MAX_UNCOMMITTED_THRESHOLD;
 use crate::tantivy_common::PRIMARY_ID_FIELD;
 use crate::tantivy_common::TantivyBackend;
+use crate::tantivy_common::TantivyIndexer;
+use crate::tantivy_common::TantivyMessage;
 use crate::tantivy_common::build_schema;
-use crate::tantivy_common::can_allocate_memory;
-use crate::tantivy_common::commit;
 use crate::tantivy_common::create_doc;
 use crate::tantivy_common::find_partition_id;
-use crate::tantivy_common::get_or_create_state;
-use crate::tantivy_common::get_state;
-use crate::tantivy_common::handle_add_document;
-use crate::tantivy_common::handle_remove_document;
+use crate::tantivy_common::spawn_actor;
 use crate::worker::Worker;
-use crate::worker::WorkerExt;
 
 use super::actor::FtsHighlightR;
 use super::actor::FtsIndex;
@@ -101,7 +91,7 @@ impl FtsIndexFactory for TantivyIndexFactory {
 const BODY_FIELD: &str = "body";
 
 #[derive(Clone)]
-struct FtsBackend {
+pub(crate) struct FtsBackend {
     analyzer: Analyzer,
     positions: Positions,
 }
@@ -334,214 +324,108 @@ pub(crate) fn new(
     commit_interval: Duration,
     commit_threshold: usize,
 ) -> mpsc::Sender<FtsIndex> {
-    let (tx, mut rx) = mpsc::channel::<FtsIndex>(perf::channel_size().into());
-    tokio::spawn(async move {
-        let key = index.key.clone();
-        debug!("fts index actor starting for {key}");
-        let mut states: BTreeMap<IndexId, Arc<FtsIndexState>> = BTreeMap::new();
-        let backend = FtsBackend {
-            analyzer: index.analyzer,
-            positions: index.positions,
-        };
+    let backend = FtsBackend {
+        analyzer: index.analyzer,
+        positions: index.positions,
+    };
+    spawn_actor(
+        index.key,
+        backend,
+        table,
+        worker,
+        memory,
+        commit_interval,
+        commit_threshold,
+    )
+}
 
-        let mut allocate_prev = Allocate::Can;
-        let allocate_rx = memory.subscribe_allocate().await;
+impl TantivyMessage for FtsIndex {
+    type Backend = FtsBackend;
 
-        let mut interval = tokio::time::interval(commit_interval);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-        loop {
-            tokio::select! {
-                msg = rx.recv() => {
-                    let Some(msg) = msg else {
-                        break;
-                    };
-                    match msg {
-                        FtsIndex::AddDocument {
-                            primary_id,
-                            document,
-                            in_progress,
-                        } => {
-                            let Some(state) = get_or_create_state(
-                                &mut states,
-                                table.as_ref(),
-                                &key,
-                                &backend,
-                            ) else {
-                                continue;
-                            };
-                            if !can_allocate_memory(&allocate_rx, &mut allocate_prev, &key) {
-                                continue;
-                            }
-                            let key = key.clone();
-                            worker
-                                .spawn_blocking(move || {
-                                    let pending = handle_add_document(
-                                        &state,
-                                        primary_id,
-                                        document,
-                                        in_progress,
-                                    );
-                                    if pending >= commit_threshold {
-                                        commit(&state, &key);
-                                    }
-                                })
-                                .await;
-                        }
-                        FtsIndex::RemoveDocument {
-                            primary_id,
-                            in_progress,
-                        } => {
-                            let Some(state) = get_or_create_state(
-                                &mut states,
-                                table.as_ref(),
-                                &key,
-                                &backend,
-                            ) else {
-                                continue;
-                            };
-                            let key = key.clone();
-                            worker
-                                .spawn_blocking(move || {
-                                    let pending =
-                                        handle_remove_document(&state, primary_id, in_progress);
-                                    if pending >= commit_threshold {
-                                        commit(&state, &key);
-                                    }
-                                })
-                                .await;
-                        }
-                        FtsIndex::Count { tx, index_key, .. } => {
-                            let result = get_state(&states, table.as_ref(), &index_key)
-                                .map(|s| s.num_docs() as usize)
-                                .unwrap_or(0);
-                            _ = tx.send(Ok(result));
-                        }
-                        FtsIndex::Search {
-                            index_key,
-                            query,
-                            limit,
-                            tx,
-                        } => {
-                            let Some(state) = get_state(&states, table.as_ref(), &index_key) else {
-                                _ = tx.send(Ok((vec![], vec![])));
-                                continue;
-                            };
-                            let table = Arc::clone(&table);
-                            worker
-                                .spawn_blocking(move || {
-                                    let result = handle_search(
-                                        &state,
-                                        table.as_ref(),
-                                        &index_key,
-                                        &query,
-                                        limit,
-                                    );
-                                    _ = tx.send(result);
-                                })
-                                .await;
-                        }
-                        FtsIndex::Highlight {
-                            index_key,
-                            query,
-                            documents,
-                            tx,
-                        } => {
-                            let Some(state) = get_state(&states, table.as_ref(), &index_key)
-                            else {
-                                _ = tx.send(Err(anyhow!("fts: missing index {index_key}")));
-                                continue;
-                            };
-                            worker
-                                .spawn_blocking(move || {
-                                    let result = handle_highlight(&state, &query, &documents);
-                                    _ = tx.send(result);
-                                })
-                                .await;
-                        }
-                        FtsIndex::Stats { index_key, tx } => {
-                            let Some(state) = get_state(&states, table.as_ref(), &index_key)
-                            else {
-                                _ = tx.send(Ok(FtsStats::default()));
-                                continue;
-                            };
-                            worker
-                                .spawn_blocking(move || {
-                                    let result = handle_stats(&state);
-                                    _ = tx.send(result);
-                                })
-                                .await;
-                        }
-                    }
-                }
-                _ = interval.tick() => {
-                    for state in states.values() {
-                        if !state.has_uncommitted_docs() {
-                            continue;
-                        }
-                        let state = Arc::clone(state);
-                        let key = key.clone();
-                        worker.spawn_blocking(move || commit(&state, &key)).await;
-                    }
-                }
+    async fn handle<T: TableSearch + Send + Sync + 'static>(
+        self,
+        indexer: &mut TantivyIndexer<FtsBackend, T>,
+    ) {
+        match self {
+            FtsIndex::AddDocument {
+                primary_id,
+                document,
+                in_progress,
+            } => {
+                indexer
+                    .add_document(primary_id, document, in_progress)
+                    .await;
+            }
+            FtsIndex::RemoveDocument {
+                primary_id,
+                in_progress,
+            } => {
+                indexer.remove_document(primary_id, in_progress).await;
+            }
+            FtsIndex::Count { tx, index_key, .. } => {
+                _ = tx.send(Ok(indexer.count(&index_key)));
+            }
+            FtsIndex::Search {
+                index_key,
+                query,
+                limit,
+                tx,
+            } => {
+                let table = Arc::clone(indexer.table());
+                indexer
+                    .spawn_query(
+                        index_key,
+                        tx,
+                        |_| Ok((vec![], vec![])),
+                        move |state, index_key| {
+                            handle_search(state, table.as_ref(), index_key, &query, limit)
+                        },
+                    )
+                    .await;
+            }
+            FtsIndex::Highlight {
+                index_key,
+                query,
+                documents,
+                tx,
+            } => {
+                indexer
+                    .spawn_query(
+                        index_key,
+                        tx,
+                        |index_key| Err(anyhow!("fts: missing index {index_key}")),
+                        move |state, _| handle_highlight(state, &query, &documents),
+                    )
+                    .await;
+            }
+            FtsIndex::Stats { index_key, tx } => {
+                indexer
+                    .spawn_query(
+                        index_key,
+                        tx,
+                        |_| Ok(FtsStats::default()),
+                        |state, _| handle_stats(state),
+                    )
+                    .await;
             }
         }
-        debug!("fts index actor finished for {key}");
-    });
-    tx
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::AsyncInProgress;
-    use crate::IndexKey;
-    use crate::PrimaryKey;
-    use crate::table::IndexIdGenerator;
+    use crate::memory::Allocate;
     use crate::table::MockTableSearch;
-    use crate::table::PartitionId;
+    use crate::tantivy_common::test_support::make_index_key;
+    use crate::tantivy_common::test_support::make_memory_actor;
+    use crate::tantivy_common::test_support::make_table_with_keys;
     use crate::worker;
     use rstest::rstest;
-    use scylla::value::CqlValue;
     use std::time::Duration;
-    use tokio::sync::watch;
 
     use super::super::actor::FtsIndexExt;
-
-    fn make_table_with_keys() -> Arc<RwLock<MockTableSearch>> {
-        let index_id = IndexIdGenerator::new().next(true).unwrap();
-        let partition_id = PartitionId::global(index_id);
-        let mut mock = MockTableSearch::new();
-        mock.expect_index_id()
-            .returning(move |_index_key| Some(index_id));
-        mock.expect_partition_id()
-            .returning(move |_index_key, _restrictions| Some((partition_id, None)));
-        mock.expect_primary_key()
-            .returning(|_partition_id, primary_id| {
-                let id_val = u64::from(primary_id);
-                Some(PrimaryKey::from(vec![CqlValue::BigInt(id_val as i64)]))
-            });
-        Arc::new(RwLock::new(mock))
-    }
-
-    fn make_index_key() -> IndexKey {
-        IndexKey::new(&"ks".into(), &"idx".into())
-    }
-
-    fn make_memory_actor() -> mpsc::Sender<Memory> {
-        let (tx, mut rx) = mpsc::channel::<Memory>(1);
-        tokio::spawn(async move {
-            let (watch_tx, _) = watch::channel(Allocate::Can);
-            while let Some(msg) = rx.recv().await {
-                match msg {
-                    Memory::SubscribeAllocate { tx } => {
-                        let _ = tx.send(watch_tx.subscribe());
-                    }
-                }
-            }
-        });
-        tx
-    }
 
     const TEST_COMMIT_INTERVAL: Duration = Duration::from_millis(50);
     const TEST_COMMIT_THRESHOLD: usize = 3;
@@ -563,7 +447,7 @@ mod tests {
         analyzer: Analyzer,
         positions: Positions,
     ) -> mpsc::Sender<FtsIndex> {
-        let memory = make_memory_actor();
+        let memory = make_memory_actor(Allocate::Can);
         new(
             FtsIndexConfiguration {
                 analyzer,
@@ -598,21 +482,6 @@ mod tests {
             .await
             .unwrap();
         rx.recv().await;
-    }
-
-    fn make_memory_actor_cannot_allocate() -> mpsc::Sender<Memory> {
-        let (tx, mut rx) = mpsc::channel::<Memory>(1);
-        tokio::spawn(async move {
-            let (watch_tx, _) = watch::channel(Allocate::Cannot);
-            while let Some(msg) = rx.recv().await {
-                match msg {
-                    Memory::SubscribeAllocate { tx } => {
-                        let _ = tx.send(watch_tx.subscribe());
-                    }
-                }
-            }
-        });
-        tx
     }
 
     fn tokenize_with(analyzer: Analyzer, text: &str) -> Vec<String> {
@@ -800,7 +669,7 @@ mod tests {
     #[tokio::test]
     async fn add_document_rejected_when_memory_exhausted() {
         let table = make_table_with_keys();
-        let memory = make_memory_actor_cannot_allocate();
+        let memory = make_memory_actor(Allocate::Cannot);
         let sender = new(
             make_configuration(),
             table,
@@ -822,7 +691,7 @@ mod tests {
     #[tokio::test]
     async fn threshold_forces_commit_before_interval() {
         let table = make_table_with_keys();
-        let memory = make_memory_actor();
+        let memory = make_memory_actor(Allocate::Can);
         let sender = new(
             make_configuration(),
             table,
