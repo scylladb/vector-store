@@ -175,7 +175,7 @@ async fn pattern_index_visible_in_indexes() {
             (vec![CqlValue::Int(1)], "the quick brown fox", 10),
             (vec![CqlValue::Int(2)], "lazy dog sleeps all day", 20),
         ],
-        0,
+        2,
     )
     .await;
 
@@ -228,9 +228,9 @@ async fn pattern_index_returns_proper_count() {
             client
                 .index_status(&keyspace_name, &index_name)
                 .await
-                .is_ok_and(|status| status.status == IndexStatus::Serving && status.count == 0)
+                .is_ok_and(|status| status.status == IndexStatus::Serving && status.count == 2)
         },
-        "Waiting for pattern index to be serving with count == 0",
+        "Waiting for pattern index to be serving with count == 2",
     )
     .await;
 }
@@ -244,7 +244,7 @@ async fn pattern_like_search_returns_error() {
             (vec![CqlValue::Int(1)], "the quick brown fox", 10),
             (vec![CqlValue::Int(2)], "lazy dog sleeps all day", 20),
         ],
-        0,
+        2,
     )
     .await;
 

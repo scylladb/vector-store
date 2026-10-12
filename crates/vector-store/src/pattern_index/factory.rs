@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
+use crate::CaseSensitive;
 use crate::IndexKey;
 use crate::pattern_index::PatternIndex;
 use crate::table::Table;
@@ -13,6 +14,7 @@ use tokio::sync::mpsc;
 #[derive(Clone, Debug)]
 pub(crate) struct PatternIndexConfiguration {
     pub key: IndexKey,
+    pub case_sensitive: CaseSensitive,
 }
 
 pub(crate) trait PatternIndexFactory {
