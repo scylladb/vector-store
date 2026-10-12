@@ -261,8 +261,10 @@ impl From<&IndexOptionsFts> for FulltextIndexOptions {
 }
 
 impl From<&IndexOptionsPattern> for PatternIndexOptions {
-    fn from(_options: &IndexOptionsPattern) -> Self {
-        PatternIndexOptions {}
+    fn from(options: &IndexOptionsPattern) -> Self {
+        PatternIndexOptions {
+            case_sensitive: *options.case_sensitive.as_ref(),
+        }
     }
 }
 
@@ -2175,6 +2177,24 @@ mod tests {
         assert_eq!(
             super::progress_to_percentage(Progress::InProgress(0.0.try_into().unwrap())),
             0.0
+        );
+    }
+
+    #[test]
+    fn pattern_index_option_conversion() {
+        assert_eq!(
+            PatternIndexOptions::from(&IndexOptionsPattern::default()),
+            PatternIndexOptions {
+                case_sensitive: true,
+            }
+        );
+        assert_eq!(
+            PatternIndexOptions::from(&IndexOptionsPattern {
+                case_sensitive: false.into(),
+            }),
+            PatternIndexOptions {
+                case_sensitive: false,
+            }
         );
     }
 }

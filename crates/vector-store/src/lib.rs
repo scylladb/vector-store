@@ -577,6 +577,14 @@ impl FromStr for Analyzer {
     }
 }
 
+fn parse_bool_option(s: &str, name: &str) -> anyhow::Result<bool> {
+    match s.to_ascii_lowercase().as_str() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(anyhow::anyhow!("Unknown {name} value: {s}")),
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, derive_more::AsRef, derive_more::From)]
 /// Whether a full-text index stores token positions, which are required by phrase queries.
 pub struct Positions(bool);
@@ -591,11 +599,26 @@ impl FromStr for Positions {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_ascii_lowercase().as_str() {
-            "true" => Ok(Self(true)),
-            "false" => Ok(Self(false)),
-            _ => Err(anyhow::anyhow!("Unknown positions value: {s}")),
-        }
+        parse_bool_option(s, "positions").map(Self)
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, derive_more::AsRef, derive_more::From)]
+/// Whether a pattern index matches letter case exactly (the CQL `LIKE` semantics) or
+/// lowercases both the indexed values and the patterns.
+pub struct CaseSensitive(bool);
+
+impl Default for CaseSensitive {
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
+impl FromStr for CaseSensitive {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        parse_bool_option(s, "case_sensitive").map(Self)
     }
 }
 
@@ -714,7 +737,9 @@ pub struct IndexOptionsFts {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 /// Pattern-specific index configuration.
-pub struct IndexOptionsPattern {}
+pub struct IndexOptionsPattern {
+    pub case_sensitive: CaseSensitive,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 /// Discriminates between index types.
@@ -1200,5 +1225,19 @@ mod tests {
 
         let filtering_columns: Vec<_> = metadata.nonpk_filtering_columns().cloned().collect();
         assert_eq!(filtering_columns, vec!["f".into()]);
+    }
+
+    #[test]
+    fn case_sensitive_parses_booleans_case_insensitively() {
+        assert!(*"true".parse::<CaseSensitive>().unwrap().as_ref());
+        assert!(*"TRUE".parse::<CaseSensitive>().unwrap().as_ref());
+        assert!(!*"false".parse::<CaseSensitive>().unwrap().as_ref());
+        assert!(!*"False".parse::<CaseSensitive>().unwrap().as_ref());
+        assert!("yes".parse::<CaseSensitive>().is_err());
+    }
+
+    #[test]
+    fn case_sensitive_defaults_to_enabled() {
+        assert!(*CaseSensitive::default().as_ref());
     }
 }

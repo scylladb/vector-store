@@ -894,7 +894,16 @@
       },
       "PatternIndexOptions": {
         "type": "object",
-        "description": "Options a pattern index was created with."
+        "description": "Options a pattern index was created with.",
+        "required": [
+          "case_sensitive"
+        ],
+        "properties": {
+          "case_sensitive": {
+            "type": "boolean",
+            "description": "Whether matching respects letter case (the CQL LIKE semantics); when false, both the\nindexed values and the patterns are lowercased."
+          }
+        }
       },
       "PostIndexAnnFilter": {
         "type": "object",

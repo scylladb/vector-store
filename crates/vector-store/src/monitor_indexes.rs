@@ -1155,6 +1155,63 @@ mod tests {
         mock_db
     }
 
+    fn mock_db_with_pattern_index(options: Option<IndexOptionsPattern>) -> MockSimDb {
+        let mut mock_db = MockSimDb::new();
+
+        mock_db.expect_get_indexes().returning(move |tx| {
+            async move {
+                tx.send(Ok(vec![DbCustomIndex {
+                    keyspace: "ks".to_string().into(),
+                    index: "pattern_idx".to_string().into(),
+                    table: "tbl".to_string().into(),
+                    primary_key_columns: NonemptyArc::new(["pk"]).unwrap(),
+                    partition_key_count: NonZeroUsize::new(1).unwrap(),
+                    target_columns: NonemptyArc::new(["content"]).unwrap(),
+                    partitioning: DbIndexPartitioning::Global,
+                    filtering_columns: Arc::new([]),
+                    alternator_attribute_types: Arc::new(BTreeMap::new()),
+                    kind: DbIndexKind::Pattern,
+                }]))
+                .unwrap();
+            }
+            .boxed()
+        });
+
+        mock_db
+            .expect_get_index_version()
+            .returning(move |_, _, _, tx| {
+                async move {
+                    tx.send(Ok(Some(Uuid::new_v4().into()))).unwrap();
+                }
+                .boxed()
+            });
+
+        mock_db
+            .expect_get_pattern_index_params()
+            .returning(move |_, _, _, tx| {
+                async move {
+                    tx.send(Ok(options)).unwrap();
+                }
+                .boxed()
+            });
+
+        mock_db.expect_is_valid_index().returning(move |_, tx| {
+            async move {
+                tx.send(true).unwrap();
+            }
+            .boxed()
+        });
+
+        mock_db.expect_is_valid_schema().returning(move |_, tx| {
+            async move {
+                tx.send(true).unwrap();
+            }
+            .boxed()
+        });
+
+        mock_db
+    }
+
     #[tokio::test]
     async fn get_indexes_returns_fts_index() {
         let options = IndexOptionsFts {
@@ -1372,6 +1429,40 @@ mod tests {
             result
                 .iter()
                 .all(|idx| matches!(idx.kind, IndexKind::Vs(_)))
+        );
+    }
+
+    #[tokio::test]
+    async fn get_indexes_returns_case_insensitive_pattern_index() {
+        let db = db::tests::new(mock_db_with_pattern_index(Some(IndexOptionsPattern {
+            case_sensitive: false.into(),
+        })));
+
+        let result = get_indexes(&db, Uuid::new_v4()).await.unwrap();
+
+        // The index keeps the case_sensitive option read from the db.
+        let kinds: Vec<_> = result.into_iter().map(|idx| idx.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![IndexKind::Pattern(IndexOptionsPattern {
+                case_sensitive: false.into(),
+            })]
+        );
+    }
+
+    #[tokio::test]
+    async fn get_indexes_returns_case_sensitive_pattern_index_when_db_has_no_options() {
+        let db = db::tests::new(mock_db_with_pattern_index(None));
+
+        let result = get_indexes(&db, Uuid::new_v4()).await.unwrap();
+
+        // Without options the index is case-sensitive.
+        let kinds: Vec<_> = result.into_iter().map(|idx| idx.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![IndexKind::Pattern(IndexOptionsPattern {
+                case_sensitive: true.into(),
+            })]
         );
     }
 }

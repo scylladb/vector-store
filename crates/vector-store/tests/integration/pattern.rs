@@ -185,7 +185,9 @@ async fn pattern_index_visible_in_indexes() {
     assert_eq!(indexes[0].index, index_name);
     assert_eq!(
         indexes[0].options,
-        IndexOptions::Pattern(PatternIndexOptions {})
+        IndexOptions::Pattern(PatternIndexOptions {
+            case_sensitive: true
+        })
     );
 }
 

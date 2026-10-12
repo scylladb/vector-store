@@ -5,6 +5,7 @@
 
 use crate::Analyzer;
 use crate::AsyncInProgress;
+use crate::CaseSensitive;
 use crate::ColumnName;
 use crate::Config;
 use crate::Connectivity;
@@ -1045,7 +1046,10 @@ impl<T: DbDriver> Statements<T> {
         index: IndexName,
     ) -> GetPatternIndexParamsR {
         let options = self.get_index_options(keyspace, table, index).await?;
-        Ok(options.map(|_| IndexOptionsPattern {}))
+        Ok(options.map(|options| {
+            let case_sensitive: CaseSensitive = parse_index_option(&options, "case_sensitive");
+            IndexOptionsPattern { case_sensitive }
+        }))
     }
 
     async fn is_valid_index(&self, metadata: IndexMetadata) -> IsValidIndexR {

@@ -194,7 +194,11 @@ pub struct FulltextIndexOptions {
 
 #[derive(Debug, PartialEq, serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
 /// Options a pattern index was created with.
-pub struct PatternIndexOptions {}
+pub struct PatternIndexOptions {
+    /// Whether matching respects letter case (the CQL LIKE semantics); when false, both the
+    /// indexed values and the patterns are lowercased.
+    pub case_sensitive: bool,
+}
 
 #[derive(Debug, PartialEq, serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
 #[serde(tag = "type", rename_all = "lowercase")]
