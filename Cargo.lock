@@ -908,7 +908,7 @@ version = "3.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "519bd3116aeeb42d5372c29d982d16d0170d3d4a5ed85fc7dd91642ffff3c67c"
 dependencies = [
- "darling 0.21.3",
+ "darling 0.20.11",
  "ident_case",
  "prettyplease",
  "proc-macro2",
@@ -1174,7 +1174,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2064,7 +2064,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3015,7 +3015,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3477,7 +3477,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -3684,8 +3684,7 @@ checksum = "1a80800c0488c3a21695ea981a54918fbb37abf04f4d0720c453632255e2ff0e"
 [[package]]
 name = "ownedbytes"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2fbd56f7631767e61784dc43f8580f403f4475bd4aaa4da003e6295e1bab4a7e"
+source = "git+https://github.com/knowack1/tantivy?rev=c487c2709683bfde034d3332b281ff6510fbbd67#c487c2709683bfde034d3332b281ff6510fbbd67"
 dependencies = [
  "stable_deref_trait",
 ]
@@ -3982,7 +3981,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27c6023962132f4b30eb4c172c91ce92d933da334c59c23cddee82358ddafb0b"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -4488,7 +4487,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5056,8 +5055,7 @@ dependencies = [
 [[package]]
 name = "tantivy"
 version = "0.26.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "edde6a10743fff00a4e1a8c9ef020bf5f3cbad301b7d2d39f2b07f123c4eac07"
+source = "git+https://github.com/knowack1/tantivy?rev=c487c2709683bfde034d3332b281ff6510fbbd67#c487c2709683bfde034d3332b281ff6510fbbd67"
 dependencies = [
  "aho-corasick",
  "arc-swap",
@@ -5109,8 +5107,7 @@ dependencies = [
 [[package]]
 name = "tantivy-bitpacker"
 version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4fed3d674429bcd2de5d0a6d1aa5495fed8afd9c5ecce993019caf7615f53fa4"
+source = "git+https://github.com/knowack1/tantivy?rev=c487c2709683bfde034d3332b281ff6510fbbd67#c487c2709683bfde034d3332b281ff6510fbbd67"
 dependencies = [
  "bitpacking",
 ]
@@ -5118,8 +5115,7 @@ dependencies = [
 [[package]]
 name = "tantivy-columnar"
 version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c57166f5bcfd478f370ab8445afb4678dce44801fa5ce5c451aaf8595583c5dc"
+source = "git+https://github.com/knowack1/tantivy?rev=c487c2709683bfde034d3332b281ff6510fbbd67#c487c2709683bfde034d3332b281ff6510fbbd67"
 dependencies = [
  "downcast-rs",
  "fastdivide",
@@ -5134,8 +5130,7 @@ dependencies = [
 [[package]]
 name = "tantivy-common"
 version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbf10915aa75da3c3b0d58b58853d2e889efbaf32d4982a4c3715dde6bba23e5"
+source = "git+https://github.com/knowack1/tantivy?rev=c487c2709683bfde034d3332b281ff6510fbbd67#c487c2709683bfde034d3332b281ff6510fbbd67"
 dependencies = [
  "async-trait",
  "byteorder",
@@ -5158,8 +5153,7 @@ dependencies = [
 [[package]]
 name = "tantivy-query-grammar"
 version = "0.26.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dfadb8526b6da90704feb293b0701a6aae62ea14983143344be2dc5ce30f1d82"
+source = "git+https://github.com/knowack1/tantivy?rev=c487c2709683bfde034d3332b281ff6510fbbd67#c487c2709683bfde034d3332b281ff6510fbbd67"
 dependencies = [
  "fnv",
  "nom",
@@ -5171,8 +5165,7 @@ dependencies = [
 [[package]]
 name = "tantivy-sstable"
 version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a2cfc3ac5164cbadc28965ffb145a8f47582a60ae5897859ad8d4316596c606"
+source = "git+https://github.com/knowack1/tantivy?rev=c487c2709683bfde034d3332b281ff6510fbbd67#c487c2709683bfde034d3332b281ff6510fbbd67"
 dependencies = [
  "futures-util",
  "itertools 0.14.0",
@@ -5185,8 +5178,7 @@ dependencies = [
 [[package]]
 name = "tantivy-stacker"
 version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cbb051742da9d53ca9e8fff43a9b10e319338b24e2c0e15d0372df19ffeb951"
+source = "git+https://github.com/knowack1/tantivy?rev=c487c2709683bfde034d3332b281ff6510fbbd67#c487c2709683bfde034d3332b281ff6510fbbd67"
 dependencies = [
  "murmurhash32",
  "tantivy-common",
@@ -5195,8 +5187,7 @@ dependencies = [
 [[package]]
 name = "tantivy-tokenizer-api"
 version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eac258c2c6390673f2685813afeeafcb8c4e0ee7de8dd3fc46838dcc37263f98"
+source = "git+https://github.com/knowack1/tantivy?rev=c487c2709683bfde034d3332b281ff6510fbbd67#c487c2709683bfde034d3332b281ff6510fbbd67"
 dependencies = [
  "serde",
 ]
@@ -5226,7 +5217,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6197,7 +6188,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
