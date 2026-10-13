@@ -28,7 +28,10 @@ services:
       - vector-net
 
   vector-store:
-    image: scylladb/vector-store:1.9.1
+    # `latest` is the newest GA release. Pulling on every `up` keeps an older
+    # image cached locally under the same tag from being reused.
+    image: scylladb/vector-store:latest
+    pull_policy: always
     container_name: vector-store
     environment:
       VECTOR_STORE_URI: "0.0.0.0:6080"
