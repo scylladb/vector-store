@@ -28,6 +28,10 @@ use crate::info::Info;
 use crate::internals::Internals;
 use crate::internals::InternalsExt;
 use crate::metrics::Metrics;
+use crate::metrics::OP_ANN;
+use crate::metrics::OP_BM25;
+use crate::metrics::OP_HIGHLIGHT;
+use crate::metrics::OP_LIKE;
 use crate::node_state::NodeState;
 use crate::node_state::NodeStateExt;
 use crate::pattern_index::PatternIndex;
@@ -797,7 +801,7 @@ async fn post_index_ann(
         let timer = state
             .metrics
             .latency
-            .with_label_values(&[keyspace.as_ref(), index_name.as_ref()])
+            .with_label_values(&[keyspace.as_ref(), index_name.as_ref(), OP_ANN])
             .start_timer();
 
         let index_key = IndexKey::new(&keyspace, &index_name);
@@ -1092,7 +1096,7 @@ async fn post_index_bm25(
     let timer = state
         .metrics
         .latency
-        .with_label_values(&[keyspace.as_ref(), index_name.as_ref()])
+        .with_label_values(&[keyspace.as_ref(), index_name.as_ref(), OP_BM25])
         .start_timer();
 
     let index_key = IndexKey::new(&keyspace, &index_name);
@@ -1245,7 +1249,7 @@ async fn post_index_highlight(
     let timer = state
         .metrics
         .latency
-        .with_label_values(&[keyspace.as_ref(), index_name.as_ref()])
+        .with_label_values(&[keyspace.as_ref(), index_name.as_ref(), OP_HIGHLIGHT])
         .start_timer();
 
     let index_key = IndexKey::new(&keyspace, &index_name);
@@ -1373,7 +1377,7 @@ async fn post_index_like(
     let timer = state
         .metrics
         .latency
-        .with_label_values(&[keyspace.as_ref(), index_name.as_ref()])
+        .with_label_values(&[keyspace.as_ref(), index_name.as_ref(), OP_LIKE])
         .start_timer();
 
     let index_key = IndexKey::new(&keyspace, &index_name);

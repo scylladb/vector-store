@@ -13,6 +13,11 @@ pub(crate) const OP_INSERT: &str = "insert";
 pub(crate) const OP_UPDATE: &str = "update";
 pub(crate) const OP_REMOVE: &str = "remove";
 pub(crate) const OPERATIONS: &[&str] = &[OP_INSERT, OP_UPDATE, OP_REMOVE];
+pub(crate) const OP_ANN: &str = "ann";
+pub(crate) const OP_BM25: &str = "bm25";
+pub(crate) const OP_HIGHLIGHT: &str = "highlight";
+pub(crate) const OP_LIKE: &str = "like";
+pub(crate) const REQUEST_OPERATIONS: &[&str] = &[OP_ANN, OP_BM25, OP_HIGHLIGHT, OP_LIKE];
 
 #[derive(Clone)]
 pub(crate) struct Metrics {
@@ -57,10 +62,10 @@ impl Metrics {
         let latency = HistogramVec::new(
             prometheus::HistogramOpts::new(
                 "request_latency_seconds",
-                "Latency per index (seconds)",
+                "Latency per index and operation (seconds)",
             )
             .buckets(buckets),
-            &["keyspace", "index_name"],
+            &["keyspace", "index_name", "operation"],
         )
         .unwrap();
 
@@ -214,7 +219,11 @@ impl Metrics {
     }
 
     pub(crate) fn remove_index_labels(&self, keyspace: &str, index_name: &str) {
-        let _ = self.latency.remove_label_values(&[keyspace, index_name]);
+        for op in REQUEST_OPERATIONS {
+            let _ = self
+                .latency
+                .remove_label_values(&[keyspace, index_name, op]);
+        }
         let _ = self.size.remove_label_values(&[keyspace, index_name]);
         let _ = self
             .indexing_lag
@@ -277,11 +286,15 @@ mod tests {
             .inc();
         metrics
             .latency
-            .with_label_values(&["ks", "idx"])
+            .with_label_values(&["ks", "idx", OP_BM25])
             .observe(0.001);
         metrics
             .indexing_lag
             .with_label_values(&["ks", "idx"])
+            .observe(0.001);
+        metrics
+            .latency
+            .with_label_values(&["ks", "idx", OP_HIGHLIGHT])
             .observe(0.001);
 
         metrics.remove_index_labels("ks", "idx");
@@ -563,6 +576,34 @@ mod tests {
             output.contains(r#"fts_segment_count{index_name="idx",keyspace="ks"} 3"#),
             "expected observed value in export:\n{output}"
         );
+    }
+
+    #[test]
+    fn request_latency_is_exported() {
+        let metrics = Metrics::new();
+
+        for op in REQUEST_OPERATIONS {
+            metrics
+                .latency
+                .with_label_values(&["ks", "idx", op])
+                .observe(0.001);
+        }
+
+        let output = metric_families_text(&metrics);
+
+        assert!(
+            output.contains("# TYPE request_latency_seconds histogram"),
+            "request_latency_seconds histogram missing from export:\n{output}"
+        );
+        // Listed explicitly so that dropping an operation from REQUEST_OPERATIONS fails the test.
+        for op in ["ann", "bm25", "highlight", "like"] {
+            assert!(
+                output.contains(&format!(
+                    r#"request_latency_seconds_count{{index_name="idx",keyspace="ks",operation="{op}"}} 1"#
+                )),
+                "expected a single {op} latency sample in export:\n{output}"
+            );
+        }
     }
 
     #[test]
