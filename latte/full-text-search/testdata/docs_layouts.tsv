@@ -1,0 +1,6 @@
+doc_a	first document
+doc_tab	body with	an embedded tab
+
+doc_empty	
+doc_utf8	zażółć gęślą jaźń 中文 🙂
+doc_last	no newline after this one

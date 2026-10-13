@@ -1,0 +1,88 @@
+//! Smoke test for the document loader. Needs any CQL endpoint (plain ScyllaDB
+//! is enough, no vector-store and no full-text index) and the fixture files in
+//! testdata/ (regenerate with testdata/gen_tsv_testdata.py):
+//!
+//!   latte run -f smoke tsv_dataset_test.rn <node> -d 1
+//!
+//! The loader leaves documents on disk and seeks to one per cycle, so a
+//! mistake in the offsets reads the wrong bytes and quietly loads the wrong
+//! corpus. This checks the reader against known values across the line
+//! layouts that shift offsets, and the malformed lines that must fail at
+//! prepare rather than part-way through a load.
+
+use latte::*;
+
+mod tsv_dataset;
+
+const DATA_DIR = latte::param!("data_dir", "testdata/");
+
+fn expect_err(result, expected, label) {
+    match result {
+        Ok(_) => Err(`${label}: expected an error, got Ok`),
+        Err(e) => {
+            let msg = `${e}`;
+            for part in expected {
+                if !msg.contains(part) {
+                    return Err(`${label}: error "${msg}" does not contain "${part}"`);
+                }
+            }
+            Ok(msg)
+        }
+        other => Err(`${label}: expected a Result, got ${other} (a missing .await?)`),
+    }
+}
+
+pub async fn prepare(db) {
+    // The same five documents gen_tsv_testdata.py writes, around a blank line
+    // and ending without a newline.
+    let expected = [
+        ["doc_a", "first document"],
+        ["doc_tab", "body with\tan embedded tab"],
+        ["doc_empty", ""],
+        ["doc_utf8", "zażółć gęślą jaźń \u{4e2d}\u{6587} \u{1f642}"],
+        ["doc_last", "no newline after this one"],
+    ];
+    let path = `${DATA_DIR}docs_layouts.tsv`;
+    let index = tsv_dataset::index(path)?;
+    if tsv_dataset::document_count(index) != expected.len() {
+        return Err(`docs_layouts.tsv: indexed ${tsv_dataset::document_count(index)} documents, expected ${expected.len()}`);
+    }
+    // Documents are read by seeking, so check them out of order and twice.
+    let file = fs::open_binary(path)?;
+    for idx in [4, 1, 0, 4, 3, 2] {
+        let doc = tsv_dataset::read_at(file, index, idx)?;
+        if doc.id != expected[idx][0] || doc.body != expected[idx][1] {
+            return Err(`docs_layouts.tsv: document ${idx} read back as "${doc.id}" / "${doc.body}"`);
+        }
+    }
+
+    // The shipped corpus, as the load phase reads it: every document must
+    // come back with an id.
+    let corpus = tsv_dataset::index(`${DATA_DIR}documents.tsv`)?;
+    let corpus_file = fs::open_binary(`${DATA_DIR}documents.tsv`)?;
+    for idx in 0..tsv_dataset::document_count(corpus) {
+        if tsv_dataset::read_at(corpus_file, corpus, idx)?.id == "" {
+            return Err(`documents.tsv: document ${idx} has an empty id`);
+        }
+    }
+
+    expect_err(
+        tsv_dataset::index(`${DATA_DIR}docs_no_tab.tsv`),
+        ["docs_no_tab.tsv:2", "found no tab"],
+        "line without a tab")?;
+    expect_err(
+        tsv_dataset::index(`${DATA_DIR}docs_no_id.tsv`),
+        ["docs_no_id.tsv:2", "no id before the tab"],
+        "body without an id")?;
+    expect_err(
+        tsv_dataset::index(`${DATA_DIR}no_such_file.tsv`),
+        ["no_such_file.tsv"],
+        "missing documents file")?;
+
+    println!("all tsv loader checks passed");
+    Ok(())
+}
+
+pub async fn smoke(db, i) {
+    Ok(())
+}

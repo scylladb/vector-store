@@ -11,16 +11,24 @@
 //!                   file. Official big-ann files append count x k f32
 //!                   distances; both layouts are accepted (distances unread).
 
+/// Byte length of the `count, dimension` header that precedes the records.
+const HEADER_LEN = 8;
+
+/// Byte offset of record `id` in a file of `dimension`-component records.
+fn record_offset(dimension, id) {
+    HEADER_LEN + id * dimension * 4
+}
+
 /// Read an fbin header, returning `#{ count, dimension }` validated against the
 /// file length.
 fn read_fbin_header(file, path) {
     let count = file.read_u32(fs::LE)?;
     let dimension = file.read_u32(fs::LE)?;
-    let expected = 8 + count * dimension * 4;
+    let expected = record_offset(dimension, count);
     if file.len() != expected {
         let hint = "";
         if file.len() < expected && dimension > 0 {
-            let holds = (file.len() - 8) / (dimension * 4);
+            let holds = (file.len() - HEADER_LEN) / (dimension * 4);
             hint = `; truncated or unpatched prefix crop (holds ${holds} whole \
                 records; for a crop, patch header count to ${holds})`;
         }
@@ -30,33 +38,30 @@ fn read_fbin_header(file, path) {
     Ok(#{ "count": count, "dimension": dimension })
 }
 
-/// Load an fbin base-vector file into a Vec of `#{ id, bucket, vector }` (the
-/// text-loader row shape). fbin has no buckets, so `bucketed` must be false.
-pub async fn load_base_vectors(path, bucketed) {
-    if bucketed {
-        return Err("fbin datasets have no bucket column; use the text format for the bucketed workload");
-    }
+/// Read and validate a base-vector file's header without reading any records.
+/// Pairs with the `read_base_vector*_at` readers: the file stays on disk and
+/// one record is read per cycle. fbin has no bucket column, so
+/// `recall_buckets.rn` uses the text loader and never comes here.
+pub fn read_base_header(path) {
     let file = fs::open_binary(path)?;
-    let header = read_fbin_header(file, path)?;
-    let rows = [];
-    for id in 0..header.count {
-        rows.push(#{ "id": id, "bucket": 0, "vector": file.read_f32_vec(fs::LE, header.dimension)? });
-    }
-    Ok(rows)
+    read_fbin_header(file, path)
 }
 
-/// Like `load_base_vectors`, but keeps each vector as packed little-endian f32
-/// bytes (4 bytes per component instead of a rune value); latte binds them to
-/// `vector<float, N>` directly. Bind-only: script code cannot index the
-/// components.
-pub async fn load_base_vectors_packed(path) {
-    let file = fs::open_binary(path)?;
-    let header = read_fbin_header(file, path)?;
-    let rows = [];
-    for id in 0..header.count {
-        rows.push(#{ "id": id, "bucket": 0, "vector": file.read_bytes(header.dimension * 4)? });
-    }
-    Ok(rows)
+/// Read record `id` of an open base-vector file as a Vec<f64>. `header` is the
+/// one `read_base_header` returned for this file; open the file with
+/// `fs::open_binary` in `prepare_worker`, since a handle cannot travel through
+/// `ctx.data`.
+pub fn read_base_vector_at(file, header, id) {
+    file.seek(record_offset(header.dimension, id))?;
+    Ok(file.read_f32_vec(fs::LE, header.dimension)?)
+}
+
+/// Like `read_base_vector_at`, but returns the record as packed little-endian
+/// f32 bytes, which latte binds to `vector<float, N>` directly. Bind-only:
+/// script code cannot index the components.
+pub fn read_base_vector_packed_at(file, header, id) {
+    file.seek(record_offset(header.dimension, id))?;
+    Ok(file.read_bytes(header.dimension * 4)?)
 }
 
 /// Load an fbin query-vector file into a Vec of Vec<f64>.
@@ -77,8 +82,8 @@ pub async fn load_ground_truth(path) {
     let file = fs::open_binary(path)?;
     let count = file.read_u32(fs::LE)?;
     let k = file.read_u32(fs::LE)?;
-    let ids_only = 8 + count * k * 4;
-    let with_distances = 8 + count * k * 8;
+    let ids_only = HEADER_LEN + count * k * 4;
+    let with_distances = HEADER_LEN + count * k * 8;
     if file.len() != ids_only && file.len() != with_distances {
         return Err(`${path}: file is ${file.len()} bytes, expected ${ids_only} \
             (ids) or ${with_distances} (ids + distances) for ${count} x ${k}`);
