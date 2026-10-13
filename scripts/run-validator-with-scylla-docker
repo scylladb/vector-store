@@ -1,19 +1,55 @@
 #!/bin/bash
+#
+# Runs the validator against a ScyllaDB docker image.
+#
+# ScyllaDB is the only thing that runs from the image. The validator and Vector
+# Store run on the host, so they can be built with any toolchain, whatever libc
+# the image ships (the image is a ScyllaDB release, and its libc is older than
+# the one a current toolchain produces binaries for).
+#
+# The three still have to share one network, because the harness gives every
+# node its own loopback address and runs the DNS server ScyllaDB resolves the
+# Vector Store names with. So the script:
+#
+# - starts an idle container from the image (the "sandbox"); it owns a private
+#   network namespace with only a loopback interface, and its resolver points at
+#   the harness DNS server;
+# - runs the validator (and through it Vector Store) inside that network
+#   namespace, with `nsenter --net`;
+# - gives the validator, as the `scylla` executable, a wrapper that enters the
+#   sandbox's mount namespace, so `/usr/bin/scylla` and everything it loads come
+#   from the image. The host's `/tmp` is mounted at `/tmp` in the sandbox, and
+#   everything the run writes (ScyllaDB working directories, option files, TLS
+#   files) goes to one directory under it that the script removes at the end,
+#   so ScyllaDB sees the files under the same paths. Every step of the wrapper
+#   `exec`s, so the process the validator spawns is the ScyllaDB process itself
+#   and stopping a node (the harness kills the process) works as it does with a
+#   local ScyllaDB binary. ScyllaDB stays in the host PID namespace, with its
+#   own private `/proc`, since the one mounted in the container belongs to the
+#   container's PID namespace.
+#
+# Entering namespaces needs root: the validator runs under `sudo`, like
+# `run-validator-with-scylla-unshare`, and ScyllaDB runs as root (as it does
+# there). This needs Linux, `nsenter` and `unshare` (util-linux), and a docker
+# daemon running as root on this host (not rootless, not a remote DOCKER_HOST).
+# The script passes `--tmpdir` itself, do not pass one.
 
 set -e
 
 usage() {
-    echo "usage: $0 <docker-scylla-tag> <vector-store-bin-path> <vector-search-validator-bin-path>"
+    echo "usage: $0 <docker-scylla-tag> <vector-store-bin-path> <vector-search-validator-bin-path> [validator-args...]"
     exit 1
 }
+
+[[ $# -ge 3 ]] || usage
 
 scylla_tag=$1
 [[ -n $scylla_tag ]] || usage
 
-vector_store=$(realpath $2)
+vector_store=$(realpath "$2")
 [[ -x $vector_store ]] || usage
 
-validator=$(realpath $3)
+validator=$(realpath "$3")
 [[ -x $validator ]] || usage
 
 shift 3
@@ -21,15 +57,110 @@ shift 3
 dns_ip=127.0.1.1
 base_ip=127.0.2.1
 
-docker run --rm \
-    --cap-add NET_ADMIN \
-    --user root \
-    --security-opt seccomp=unconfined \
-    --dns=$dns_ip \
-    --dns-search=. \
-    --volume="$vector_store:/vector-store" \
-    --volume="$validator:/vector-search-validator" \
-    --network=none \
-    --entrypoint=/vector-search-validator \
-    $scylla_tag \
-    run --dns-ip $dns_ip --base-ip $base_ip --scylla-default-conf /etc/scylla/scylla.yaml /usr/bin/scylla /vector-store "$@"
+# The harness starts ScyllaDB as the `scylla` user when the host has one; the
+# wrapper would then lack the privileges to enter the sandbox's namespaces.
+if getent passwd scylla > /dev/null; then
+    echo "error: this host has a 'scylla' user: the harness would start ScyllaDB as that user," \
+        "and the wrapper could not enter the container's namespaces" >&2
+    exit 1
+fi
+
+if docker info --format '{{.SecurityOptions}}' | grep -q rootless; then
+    echo "error: the docker daemon is rootless; the script needs one running as root on this host" >&2
+    exit 1
+fi
+
+tmp=$(mktemp -d /tmp/validator-scylla-docker.XXXXXX)
+
+# Signals: the run below is a background job, so a trapped SIGINT or SIGTERM is
+# forwarded to it at once (bash defers traps while a foreground command runs)
+# and the script waits for it to finish before cleaning up. It is forwarded as
+# SIGTERM: a background job of a non-interactive shell starts with SIGINT
+# ignored, and the validator inherits that.
+sandbox=""
+run=""
+# shellcheck disable=SC2329  # invoked by the traps
+cleanup() {
+    [[ -n $sandbox ]] || sandbox=$(cat "$tmp/sandbox.cid" 2> /dev/null) || true
+    [[ -z $sandbox ]] || docker rm --force "$sandbox" > /dev/null 2>&1 || true
+    rm -rf "$tmp" 2> /dev/null || true
+}
+trap cleanup EXIT
+trap '[[ -z $run ]] || kill -TERM "$run" 2> /dev/null' INT TERM
+
+# Waits for the background job $1 and sets $status to its exit status; a trapped
+# signal interrupts `wait`, so wait again until the job is gone.
+wait_for() {
+    while wait "$1"; status=$?; [[ $status -gt 128 ]] && kill -0 "$1" 2> /dev/null; do :; done
+}
+
+sandbox=$(docker run --detach --rm \
+    --cidfile "$tmp/sandbox.cid" \
+    --network none \
+    --dns $dns_ip \
+    --dns-search . \
+    --volume /tmp:/tmp \
+    --entrypoint /usr/bin/sleep \
+    "$scylla_tag" \
+    infinity)
+sandbox_pid=$(docker inspect --format '{{.State.Pid}}' "$sandbox")
+if [[ ! $sandbox_pid -gt 0 || ! -d /proc/$sandbox_pid ]]; then
+    echo "error: the sandbox container is not running, or its processes are not visible on this host" >&2
+    exit 1
+fi
+
+# The validator reads the default ScyllaDB configuration itself.
+docker cp --quiet "$sandbox:/etc/scylla/scylla.yaml" "$tmp/scylla.yaml"
+
+# The `scylla` executable for the validator, see the top of the file. The
+# image's environment (its PATH) is exported over the validator's.
+{
+    echo '#!/bin/bash'
+    docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$sandbox" \
+        | while IFS= read -r env; do [[ -z $env ]] || printf 'export %q\n' "$env"; done
+    cat <<EOF
+exec nsenter --target $sandbox_pid --mount -- \\
+    unshare --mount --propagation private -- \\
+    /usr/bin/sh -c 'mount -t proc proc /proc && exec /usr/bin/scylla "\$@"' scylla "\$@"
+EOF
+} > "$tmp/scylla"
+chmod +x "$tmp/scylla"
+
+# One sudo for the run and its cleanup (`sudo -v` takes the password up front,
+# the job below then runs on the cached credentials). The ScyllaDB and Vector
+# Store processes are not in the container, so removing it would not stop the
+# ones an interrupted run leaves behind: once the validator is gone, the root
+# shell kills everything else in the sandbox's network namespace (never the
+# host's, should the sandbox be gone and its PID reused), then removes the run's
+# files, which are root's by then. A signal is forwarded to the validator as
+# above; the shell survives it and still cleans up.
+sudo -v
+status=0
+sudo bash -c '
+    tmp=$1 sandbox_pid=$2
+    shift 2
+    export TMPDIR=$tmp
+    nsenter --target "$sandbox_pid" --net -- "$@" &
+    run=$!
+    trap "kill -TERM $run 2> /dev/null" TERM
+    while wait "$run"; status=$?; [[ $status -gt 128 ]] && kill -0 "$run" 2> /dev/null; do :; done
+    netns=$(readlink "/proc/$sandbox_pid/ns/net" 2> /dev/null) || netns=""
+    if [[ -n $netns && $netns != "$(readlink /proc/1/ns/net)" ]]; then
+        for proc in /proc/[0-9]*; do
+            pid=${proc#/proc/}
+            [[ $pid == "$sandbox_pid" || $pid == $$ ]] && continue
+            [[ $(readlink "$proc/ns/net" 2> /dev/null) == "$netns" ]] && kill -KILL "$pid" 2> /dev/null
+        done
+    fi
+    rm -rf "$tmp"
+    exit $status
+' run "$tmp" "$sandbox_pid" \
+    "$validator" run \
+    --dns-ip $dns_ip \
+    --base-ip $base_ip \
+    --scylla-default-conf "$tmp/scylla.yaml" \
+    --tmpdir "$tmp" \
+    "$tmp/scylla" "$vector_store" "$@" &
+run=$!
+wait_for "$run"
+exit "$status"

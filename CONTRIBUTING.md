@@ -91,39 +91,45 @@ against it. This is the suite CI runs (see `.github/workflows/validator.yml`).
 Because the harness launches actual `scylla` and `vector-store` processes, it
 needs two release binaries plus a ScyllaDB image.
 
-**1. Build the binaries with the release toolchain:**
+**1. Build the binaries:**
+```sh
+cargo build --release --bin vector-store
+cargo build --release --bin vector-search-validator -p vector-search-validator
+```
+
+A plain host build is enough: the harness runs the validator and Vector Store
+on the host, and only ScyllaDB comes from the image. To run exactly what CI and
+the release build produce, build with `run-with-release-toolchain` instead; it
+builds inside the pinned toolchain image and writes to `target/<arch>/release/`,
+where `<arch>` is the `TARGETARCH` it builds for (`amd64` by default), so pass
+that path to the script below:
 ```sh
 ./scripts/run-with-release-toolchain cargo build --release --bin vector-store
 ./scripts/run-with-release-toolchain cargo build --release --bin vector-search-validator -p vector-search-validator
-```
-
-Build with `run-with-release-toolchain` rather than a plain host `cargo build`.
-The script builds inside the pinned toolchain image and writes to
-`target/<arch>/release/`, producing binaries whose glibc is compatible with the
-ScyllaDB container that runs them. Host-built binaries may link a newer glibc and
-fail to start inside the image.
-
-`<arch>` is the `TARGETARCH` the script builds for; it defaults to `amd64`
-(so the path is `target/amd64/release/`). It must match the architecture of the
-ScyllaDB image you run the harness against — on an arm64 host running an arm64
-image, set it explicitly for both builds:
-```sh
-TARGETARCH=arm64 ./scripts/run-with-release-toolchain cargo build --release --bin vector-store
-TARGETARCH=arm64 ./scripts/run-with-release-toolchain cargo build --release --bin vector-search-validator -p vector-search-validator
 ```
 
 **2. Run the harness against a ScyllaDB image:**
 ```sh
 ./scripts/run-validator-with-scylla-docker \
     <scylla-image> \
-    target/<arch>/release/vector-store \
-    target/<arch>/release/vector-search-validator \
+    target/release/vector-store \
+    target/release/vector-search-validator \
     [filters...] --verbose
 ```
 
-- `<scylla-image>` is a ScyllaDB docker tag, e.g. `scylladb/scylla-nightly:latest`.
-  CI runs against `scylla-nightly`; some tests exercise features that are only
-  available there.
+- `<scylla-image>` is a ScyllaDB docker tag for the host's architecture, e.g.
+  `scylladb/scylla-nightly:latest`. CI runs against `scylla-nightly`; some tests
+  exercise features that are only available there. Any ScyllaDB image works, a
+  release included, since nothing but ScyllaDB runs from it.
+- The script keeps ScyllaDB in a container and runs the validator and Vector
+  Store on the host, in the container's network namespace, as root: it prompts
+  for `sudo` once, and kills whatever an interrupted run leaves in that network
+  namespace (the comment at the top of the script explains how it works). It
+  needs Linux, `nsenter` and `unshare` from util-linux, a docker daemon running
+  as root on the host (not rootless, not a remote `DOCKER_HOST`), and no
+  `scylla` user on the host. The run's files go to a directory under `/tmp`,
+  shared with the container, that the script removes at the end; do not pass
+  `--tmpdir`.
 - Filters select test cases using `<group>::<test>` syntax. Partial matches work,
   and wrapping either side in double quotes forces an exact match. Omit filters to
   run everything. For example, `cdc_direct::` runs every group whose name contains
@@ -132,7 +138,7 @@ TARGETARCH=arm64 ./scripts/run-with-release-toolchain cargo build --release --bi
 
 **List available test cases:**
 ```sh
-./target/<arch>/release/vector-search-validator list
+./target/release/vector-search-validator list
 ```
 
 **Using a locally built ScyllaDB:**
