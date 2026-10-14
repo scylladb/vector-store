@@ -740,7 +740,7 @@ async fn fts_query_without_limit_returns_error(fixture: Arc<Fixture>) {
 
     assert!(
         err.to_string()
-            .contains("Full-text search queries require a LIMIT"),
+            .contains("Full-text search queries must have a limit specified"),
         "unexpected error message: {err}"
     );
 
