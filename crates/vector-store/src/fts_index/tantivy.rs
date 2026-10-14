@@ -1346,6 +1346,17 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn highlight_marks_only_the_exact_case_with_a_case_preserving_analyzer() {
+        let table = make_table_with_keys();
+        let sender = make_sender_with_options(table, Analyzer::Whitespace, Positions::default());
+        add_doc(&sender, 1, "foo, bar! Baz").await;
+
+        let highlights = highlight(&sender, "Baz", &["Baz and baz"]).await;
+
+        assert_eq!(highlights[0].as_deref(), Some("<b>Baz</b> and baz"));
+    }
+
     #[test]
     fn tokenize_lowercases_mixed_case() {
         assert_eq!(
