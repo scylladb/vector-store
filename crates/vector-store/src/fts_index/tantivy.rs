@@ -54,6 +54,7 @@ use crate::fts_index::factory::FtsIndexFactory;
 use crate::memory::Allocate;
 use crate::memory::Memory;
 use crate::memory::MemoryExt;
+use crate::metrics::Metrics;
 use crate::perf;
 use crate::table::IndexId;
 use crate::table::PrimaryId;
@@ -71,11 +72,20 @@ use super::actor::FtsStatsR;
 pub(crate) struct TantivyIndexFactory {
     worker: async_channel::Sender<Worker>,
     memory: mpsc::Sender<Memory>,
+    metrics: Arc<Metrics>,
 }
 
 impl TantivyIndexFactory {
-    pub(crate) fn new(worker: async_channel::Sender<Worker>, memory: mpsc::Sender<Memory>) -> Self {
-        Self { worker, memory }
+    pub(crate) fn new(
+        worker: async_channel::Sender<Worker>,
+        memory: mpsc::Sender<Memory>,
+        metrics: Arc<Metrics>,
+    ) -> Self {
+        Self {
+            worker,
+            memory,
+            metrics,
+        }
     }
 }
 
@@ -92,6 +102,7 @@ impl FtsIndexFactory for TantivyIndexFactory {
             self.memory.clone(),
             COMMIT_INTERVAL,
             MAX_UNCOMMITTED_THRESHOLD,
+            Arc::clone(&self.metrics),
         )
     }
 }
@@ -179,9 +190,20 @@ struct IndexState {
     _meta_watch: WatchHandle,
 }
 
-fn reload_reader(reader: &tantivy::IndexReader) -> ReloadReader {
+/// Reloads the reader and marks the index dirty, so the next /metrics scrape refreshes its gauges
+/// from the segments the reader now serves.
+fn reload_reader_and_mark_dirty(
+    reader: &tantivy::IndexReader,
+    key: &IndexKey,
+    metrics: Arc<Metrics>,
+) -> ReloadReader {
     let reader = reader.clone();
-    Box::new(move || reader.reload())
+    let key = key.clone();
+    Box::new(move || {
+        reader.reload()?;
+        metrics.mark_dirty(key.keyspace().as_ref(), key.index().as_ref());
+        Ok(())
+    })
 }
 
 /// Reloads the reader on every meta.json write, made by both commits and background merges.
@@ -200,7 +222,12 @@ const COMMIT_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_UNCOMMITTED_THRESHOLD: usize = 10_000;
 
 impl IndexState {
-    fn new(analyzer: Analyzer, positions: Positions) -> anyhow::Result<Self> {
+    fn new(
+        analyzer: Analyzer,
+        positions: Positions,
+        key: &IndexKey,
+        metrics: Arc<Metrics>,
+    ) -> anyhow::Result<Self> {
         let tokenizer = analyzer.to_string();
         let schema = build_schema(&tokenizer, positions);
         let index = tantivy::Index::create_in_ram(schema.clone());
@@ -220,7 +247,7 @@ impl IndexState {
             .map_err(|e| anyhow!("fts: failed to create reader: {e}"))?;
         let writer = Arc::new(RwLock::new(Writer {
             writer,
-            reload_reader: reload_reader(&reader),
+            reload_reader: reload_reader_and_mark_dirty(&reader, key, metrics),
             uncommitted_docs_in_progress_guards: Vec::new(),
             unreloaded_docs_in_progress_guards: Vec::new(),
             reload_failed: false,
@@ -494,13 +521,14 @@ fn get_or_create_state<T: TableSearch>(
     states: &mut BTreeMap<IndexId, Arc<IndexState>>,
     table: &RwLock<T>,
     index: &FtsIndexConfiguration,
+    metrics: &Arc<Metrics>,
 ) -> Option<Arc<IndexState>> {
     let key = &index.key;
     let index_id = table.read().unwrap().index_id(key)?;
     if let Some(state) = states.get(&index_id) {
         return Some(Arc::clone(state));
     }
-    match IndexState::new(index.analyzer, index.positions) {
+    match IndexState::new(index.analyzer, index.positions, key, Arc::clone(metrics)) {
         Ok(state) => {
             let state = Arc::new(state);
             states.insert(index_id, Arc::clone(&state));
@@ -546,6 +574,7 @@ pub(crate) fn new(
     memory: mpsc::Sender<Memory>,
     commit_interval: Duration,
     commit_threshold: usize,
+    metrics: Arc<Metrics>,
 ) -> mpsc::Sender<FtsIndex> {
     let (tx, mut rx) = mpsc::channel::<FtsIndex>(perf::channel_size().into());
     tokio::spawn(async move {
@@ -575,6 +604,7 @@ pub(crate) fn new(
                                 &mut states,
                                 table.as_ref(),
                                 &index,
+                                &metrics,
                             ) else {
                                 continue;
                             };
@@ -604,6 +634,7 @@ pub(crate) fn new(
                                 &mut states,
                                 table.as_ref(),
                                 &index,
+                                &metrics,
                             ) else {
                                 continue;
                             };
@@ -786,6 +817,7 @@ mod tests {
             memory,
             TEST_COMMIT_INTERVAL,
             TEST_COMMIT_THRESHOLD,
+            Arc::new(Metrics::new()),
         )
     }
 
@@ -1041,6 +1073,7 @@ mod tests {
             memory,
             TEST_COMMIT_INTERVAL,
             TEST_COMMIT_THRESHOLD,
+            Arc::new(Metrics::new()),
         );
 
         add_doc(&sender, 1, "should not be indexed").await;
@@ -1063,6 +1096,7 @@ mod tests {
             memory,
             Duration::from_secs(3600),
             TEST_COMMIT_THRESHOLD,
+            Arc::new(Metrics::new()),
         );
         let (tx, mut rx) = mpsc::channel(1);
 
@@ -1671,5 +1705,22 @@ mod tests {
             .unwrap();
         writer.on_meta_changed();
         assert_eq!(reloads.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn reader_reload_marks_index_dirty() {
+        let metrics = Arc::new(Metrics::new());
+        let reader = tantivy::Index::create_in_ram(Schema::builder().build())
+            .reader_builder()
+            .reload_policy(ReloadPolicy::Manual)
+            .try_into()
+            .unwrap();
+
+        reload_reader_and_mark_dirty(&reader, &make_index_key(), Arc::clone(&metrics))().unwrap();
+
+        assert_eq!(
+            metrics.take_dirty_indexes(),
+            vec![("ks".to_owned(), "idx".to_owned())]
+        );
     }
 }

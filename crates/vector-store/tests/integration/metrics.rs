@@ -5,13 +5,16 @@
 
 use crate::db_basic;
 use crate::db_basic::DbBasic;
+use crate::db_basic::ScanFn;
 use crate::fts;
 use crate::vs_index;
 use crate::wait_for;
+use futures::FutureExt;
 use httpclient::HttpClient;
 use scylla::cluster::metadata::NativeType;
 use scylla::value::CqlValue;
 use tokio::sync::mpsc::Sender;
+use tokio::sync::oneshot;
 use vector_store::DbIndexPartitioning;
 use vector_store::IndexMetadata;
 use vector_store::Timestamp;
@@ -110,6 +113,65 @@ async fn fts_index_metrics_present_in_metrics_endpoint() {
                 && metrics.contains(&format!("fts_segment_count{{{expected_labels}}}"))
         },
         "Waiting for fts index metrics to appear in /metrics",
+    )
+    .await;
+}
+
+fn gauge_value(metrics: &str, name: &str, labels: &str) -> Option<f64> {
+    let prefix = format!("{name}{{{labels}}} ");
+    metrics
+        .lines()
+        .find_map(|line| line.strip_prefix(&prefix))
+        .and_then(|value| value.parse().ok())
+}
+
+/// Writes the rows of `first`, then holds the rows of `second` back until the returned sender
+/// fires.
+fn scan_fn_with_gated_second(first: ScanFn, second: ScanFn) -> (oneshot::Sender<()>, ScanFn) {
+    let (release_tx, release_rx) = oneshot::channel();
+    let scan_fn: ScanFn = Box::new(move |tx| {
+        async move {
+            first(tx.clone()).await;
+            let _ = release_rx.await;
+            second(tx).await;
+        }
+        .boxed()
+    });
+    (release_tx, scan_fn)
+}
+
+fn document(pk: i32, text: &str, timestamp_millis: u64) -> ScanFn {
+    db_basic::scan_fn_documents([(
+        [CqlValue::Int(pk)].into(),
+        Some(text.to_string()),
+        Timestamp::from_millis(timestamp_millis),
+    )])
+}
+
+#[tokio::test]
+async fn fts_index_metrics_follow_commit_after_scrape() {
+    crate::enable_tracing();
+
+    let (release_second_document, cdc_fn) =
+        scan_fn_with_gated_second(document(1, "hello world", 10), document(2, "foo bar", 20));
+    // Returns once the first document is searchable, right after the commit tick that reloaded
+    // the reader, so the second document is written almost a whole commit interval before its own
+    // commit.
+    let (client, keyspace_name, index_name, _db, _hold) =
+        fts::setup_fts_with_cdc_and_wait(Vec::<(Vec<CqlValue>, &str, u64)>::new(), Some(cdc_fn), 1)
+            .await;
+    let labels = format!(r#"index_name="{index_name}",keyspace="{keyspace_name}""#);
+
+    // A scrape before that commit takes the dirty mark of the write and records the gauges of the
+    // reader without the second document. Only the reload after the commit can update them.
+    release_second_document.send(()).unwrap();
+    wait_for(
+        || async {
+            let metrics = client.get_metrics_text().await;
+            gauge_value(&metrics, "index_size", &labels) == Some(2.0)
+                && gauge_value(&metrics, "fts_segment_count", &labels) == Some(2.0)
+        },
+        "Waiting for fts index metrics to reflect the second commit",
     )
     .await;
 }

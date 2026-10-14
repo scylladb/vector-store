@@ -163,6 +163,20 @@ pub(crate) async fn setup_fts_and_wait(
     DbBasic,
     impl Sized,
 ) {
+    setup_fts_with_cdc_and_wait(documents, None, expected_count).await
+}
+
+pub(crate) async fn setup_fts_with_cdc_and_wait(
+    documents: impl IntoIterator<Item = (Vec<CqlValue>, &str, u64)>,
+    cdc_fn: Option<ScanFn>,
+    expected_count: usize,
+) -> (
+    HttpClient,
+    httpapi::KeyspaceName,
+    httpapi::IndexName,
+    DbBasic,
+    impl Sized,
+) {
     let docs: Vec<_> = documents
         .into_iter()
         .map(|(pk, doc, ts)| {
@@ -179,7 +193,7 @@ pub(crate) async fn setup_fts_and_wait(
         1,
         [("pk".to_string().into(), NativeType::Int)],
         Some(db_basic::scan_fn_documents(docs)),
-        None,
+        cdc_fn,
     )
     .await;
 
