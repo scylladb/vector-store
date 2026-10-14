@@ -8,7 +8,11 @@ repo=$(realpath $repo/..)
 TARGETARCH="${TARGETARCH:-amd64}"
 
 rust_version=$(grep channel $repo/rust-toolchain.toml | cut -d '"' -f 2)
-image=rust:$rust_version-bookworm
+
+# rust:$rust_version-bookworm plus clang for arm64 (see the Dockerfile); cached after the first run
+image=vector-store-toolchain:$rust_version-$TARGETARCH
+docker build --quiet --platform linux/$TARGETARCH --build-arg RUST_VERSION=$rust_version \
+    --tag $image -f $repo/scripts/release-toolchain.Dockerfile $repo/scripts > /dev/null
 
 user_cargo_home=$CARGO_HOME
 [[ -z $user_cargo_home ]] && [[ -d "$HOME/.cargo" ]] && user_cargo_home="$HOME/.cargo"

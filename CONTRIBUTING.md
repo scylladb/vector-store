@@ -98,10 +98,12 @@ needs two release binaries plus a ScyllaDB image.
 ```
 
 Build with `run-with-release-toolchain` rather than a plain host `cargo build`.
-The script builds inside the pinned toolchain image and writes to
-`target/<arch>/release/`, producing binaries whose glibc is compatible with the
-ScyllaDB container that runs them. Host-built binaries may link a newer glibc and
-fail to start inside the image.
+The script builds inside the pinned toolchain image (`rust:<channel>-bookworm`
+plus clang for arm64, built on first use from
+`scripts/release-toolchain.Dockerfile`) and writes to `target/<arch>/release/`,
+producing binaries whose glibc is compatible with the ScyllaDB container that
+runs them. Host-built binaries may link a newer glibc and fail to start inside
+the image.
 
 `<arch>` is the `TARGETARCH` the script builds for; it defaults to `amd64`
 (so the path is `target/amd64/release/`). It must match the architecture of the
