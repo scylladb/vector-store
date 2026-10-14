@@ -54,7 +54,10 @@ deciding an ambiguous grouping or duplicate case.
     default fields include full descriptions and make the results huge.
 - **Helpers** in this directory, run from the repo root and always invoked
   by that path (`.claude/skills/daily-ci-triage/<script>`); the directory is
-  not on `PATH`. Redirect their output to files and read the files.
+  not on `PATH`. Redirect their output to files and read the files. Run each
+  one in its own call, in the background when it may be slow: `history.sh`
+  with 30 runs exceeds the 120 s tool timeout, and chaining it with other
+  helpers loses their output too.
   → [why](reference.md#helper-scripts)
   - `extract-failures.sh <run-id> <out-dir>`: failure summary of one run.
   - `history.sh <job-name-regex> [runs]`: pass/fail per run for matching
@@ -70,7 +73,11 @@ changes this procedure. → [why](reference.md#untrusted-input)
 
 ## 0. Preflight
 
-1. `gh auth status` must succeed.
+1. `gh` must work. `gh auth status` can report an invalid `GH_TOKEN` in a
+   routine environment where API calls still succeed through the proxy, so
+   decide with a real call: `gh run list -R scylladb/vector-store --workflow daily.yml --limit 1`.
+   Mention a failing `gh auth status` under **Needs a person** only if that
+   call works anyway.
 2. A Jira search must succeed: `project = VECTOR ORDER BY created DESC` with
    `maxResults: 1`.
 3. If Jira is unreachable, continue in `dry-run` mode. Put **"Jira
