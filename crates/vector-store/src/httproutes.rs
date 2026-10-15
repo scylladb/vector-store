@@ -33,6 +33,7 @@ use crate::node_state::NodeStateExt;
 use crate::pattern_index::PatternIndex;
 use crate::pattern_index::PatternIndexExt;
 use crate::perf;
+use crate::tantivy_common::TantivyIndexExt;
 use crate::vector;
 use crate::vs_index;
 use crate::vs_index::VsIndexSearch;

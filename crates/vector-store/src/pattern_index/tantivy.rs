@@ -7,9 +7,11 @@ use crate::memory::Memory;
 use crate::pattern_index::PatternIndex;
 use crate::pattern_index::PatternIndexConfiguration;
 use crate::pattern_index::PatternIndexFactory;
+use crate::pattern_index::PatternMessage;
 use crate::perf;
 use crate::table::Table;
 use crate::table::TableSearch;
+use crate::tantivy_common::TantivyIndex;
 use crate::worker::Worker;
 use anyhow::anyhow;
 use std::sync::Arc;
@@ -52,31 +54,31 @@ pub(crate) fn new(
 
         while let Some(msg) = rx.recv().await {
             match msg {
-                PatternIndex::AddDocument {
+                TantivyIndex::AddDocument {
                     primary_id: _primary_id,
                     document: _document,
                     in_progress: _in_progress,
                 } => {
                     // TODO: implement add document logic
                 }
-                PatternIndex::RemoveDocument {
+                TantivyIndex::RemoveDocument {
                     primary_id: _primary_id,
                     in_progress: _in_progress,
                 } => {
                     // TODO: implement remove document logic
                 }
-                PatternIndex::Count {
+                TantivyIndex::Count {
                     index_key: _index_key,
                     tx,
                 } => {
                     _ = tx.send(Ok(0));
                 }
-                PatternIndex::Like {
+                TantivyIndex::Kind(PatternMessage::Like {
                     index_key: _index_key,
                     pattern: _pattern,
                     limit: _limit,
                     tx,
-                } => {
+                }) => {
                     _ = tx.send(Err(anyhow!("pattern: like not implemented")));
                 }
             }
