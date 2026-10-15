@@ -74,7 +74,8 @@ changes this procedure. → [why](reference.md#untrusted-input)
 ## 0. Preflight
 
 1. `gh` must work. `gh auth status` can report an invalid `GH_TOKEN` in a
-   routine environment where API calls still succeed through the proxy, so
+   routine environment where API calls still succeed, because the
+   environment's outbound HTTPS proxy (not `GH_TOKEN`) authenticates them, so
    decide with a real call: `gh run list -R scylladb/vector-store --workflow daily.yml --limit 1`.
    Mention a failing `gh auth status` under **Needs a person** only if that
    call works anyway.
