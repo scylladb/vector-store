@@ -4,16 +4,23 @@
  */
 
 use std::collections::BTreeMap;
+use std::mem;
 use std::ops::Deref;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::RwLock;
 use std::time::Duration;
 
 use anyhow::anyhow;
+use tantivy::Directory;
 use tantivy::IndexWriter;
+use tantivy::Opstamp;
 use tantivy::ReloadPolicy;
+use tantivy::Searcher;
 use tantivy::TantivyDocument;
 use tantivy::collector::TopDocs;
+use tantivy::directory::WatchCallback;
+use tantivy::directory::WatchHandle;
 use tantivy::indexer::IndexWriterOptions;
 use tantivy::query::BooleanQuery;
 use tantivy::query::BoostQuery;
@@ -95,13 +102,24 @@ impl FtsIndexFactory for TantivyIndexFactory {
 
 struct Writer {
     writer: IndexWriter,
-    // In-progress guards for documents written to the writer but not yet committed. They are held
-    // here so the index is not reported as caught up (SERVING) until the commit that makes those
-    // documents searchable has succeeded.
+    // Held until the documents are searchable, so the index is not SERVING before that.
     uncommitted_docs_in_progress_guards: Vec<AsyncInProgress>,
 }
 
 impl Writer {
+    fn new(index: &tantivy::Index) -> anyhow::Result<Self> {
+        let options = IndexWriterOptions::builder()
+            .num_worker_threads(perf::num_workers().into())
+            .build();
+        let writer = index
+            .writer_with_options(options)
+            .map_err(|e| anyhow!("fts: failed to create writer: {e}"))?;
+        Ok(Self {
+            writer,
+            uncommitted_docs_in_progress_guards: Vec::new(),
+        })
+    }
+
     fn add_document(
         &mut self,
         doc: TantivyDocument,
@@ -118,11 +136,14 @@ impl Writer {
         self.uncommitted_docs()
     }
 
-    fn commit(&mut self, reload: impl FnOnce() -> tantivy::Result<()>) -> tantivy::Result<()> {
-        self.writer.commit()?;
-        reload()?;
-        self.uncommitted_docs_in_progress_guards.clear();
-        Ok(())
+    /// Commits the documents to the index and returns the commit opstamp with their in-progress
+    /// guards.
+    fn commit(&mut self) -> tantivy::Result<(Opstamp, Vec<AsyncInProgress>)> {
+        let opstamp = self.writer.commit()?;
+        Ok((
+            opstamp,
+            mem::take(&mut self.uncommitted_docs_in_progress_guards),
+        ))
     }
 
     fn uncommitted_docs(&self) -> usize {
@@ -134,10 +155,110 @@ impl Writer {
     }
 }
 
+#[derive(Default)]
+struct ReloadState {
+    // Committed documents by commit opstamp, held until a reload makes them searchable.
+    unsearchable_docs: BTreeMap<Opstamp, Vec<AsyncInProgress>>,
+    reloaded_opstamp: Opstamp,
+}
+
+/// A thin wrapper over the Tantivy reader that reloads it whenever the index metadata changes and
+/// drops the in-progress guards of committed documents once they are searchable.
+struct Reader {
+    // Shared with the reload task.
+    inner: Arc<ReaderInner>,
+    _meta_watch: WatchHandle,
+}
+
+struct ReaderInner {
+    index: tantivy::Index,
+    reader: tantivy::IndexReader,
+    key: IndexKey,
+    reload_state: Mutex<ReloadState>,
+}
+
+impl ReaderInner {
+    /// Reloads the reader and drops the guards of the committed documents it made searchable.
+    fn reload(&self) {
+        // The index meta holds the opstamp of its last commit, so a reload after reading it
+        // serves at least that commit.
+        let reloaded = self.index.load_metas().and_then(|meta| {
+            self.reader.reload()?;
+            Ok(meta.opstamp)
+        });
+        match reloaded {
+            Ok(opstamp) => {
+                let mut reload_state = self.reload_state.lock().unwrap();
+                reload_state.reloaded_opstamp = opstamp;
+                reload_state
+                    .unsearchable_docs
+                    .retain(|committed, _| *committed > opstamp);
+            }
+            Err(err) => error!("fts: failed to reload reader for {}: {err}", self.key),
+        }
+    }
+}
+
+impl Reader {
+    fn new(
+        index: &tantivy::Index,
+        key: &IndexKey,
+        worker: async_channel::Sender<Worker>,
+    ) -> anyhow::Result<Self> {
+        let reader: tantivy::IndexReader = index
+            .reader_builder()
+            .reload_policy(ReloadPolicy::Manual)
+            .try_into()
+            .map_err(|e| anyhow!("fts: failed to create reader: {e}"))?;
+        let inner = Arc::new(ReaderInner {
+            index: index.clone(),
+            reader,
+            key: key.clone(),
+            reload_state: Mutex::new(ReloadState::default()),
+        });
+        let (reload_tx, mut reload_rx) = watch::channel(());
+        let callback = move || _ = reload_tx.send(());
+        let meta_watch = index
+            .directory()
+            .watch(WatchCallback::new(callback))
+            .map_err(|e| anyhow!("fts: failed to watch index metas: {e}"))?;
+        tokio::spawn({
+            let inner = Arc::clone(&inner);
+            async move {
+                // The reloads run one at a time, so a reload never stores an older searcher or
+                // opstamp after a newer one. Ends when the watch callback is dropped.
+                while reload_rx.changed().await.is_ok() {
+                    let inner = Arc::clone(&inner);
+                    worker.run_blocking(move || inner.reload()).await;
+                }
+            }
+        });
+        Ok(Self {
+            inner,
+            _meta_watch: meta_watch,
+        })
+    }
+
+    fn searcher(&self) -> Searcher {
+        self.inner.reader.searcher()
+    }
+
+    /// Holds the guards until a reload makes its documents searchable.
+    fn drop_guards_when_searchable(&self, commit_opstamp: Opstamp, guards: Vec<AsyncInProgress>) {
+        let mut reload_state = self.inner.reload_state.lock().unwrap();
+        // The watch callback of this commit may have reloaded before the guards got here.
+        if commit_opstamp > reload_state.reloaded_opstamp {
+            reload_state
+                .unsearchable_docs
+                .insert(commit_opstamp, guards);
+        }
+    }
+}
+
 struct IndexState {
     index: tantivy::Index,
     writer: RwLock<Writer>,
-    reader: tantivy::IndexReader,
+    reader: Reader,
     schema: Schema,
 }
 
@@ -145,30 +266,23 @@ const COMMIT_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_UNCOMMITTED_THRESHOLD: usize = 10_000;
 
 impl IndexState {
-    fn new(analyzer: Analyzer, positions: Positions) -> anyhow::Result<Self> {
+    fn new(
+        analyzer: Analyzer,
+        positions: Positions,
+        key: &IndexKey,
+        worker: async_channel::Sender<Worker>,
+    ) -> anyhow::Result<Self> {
         let tokenizer = analyzer.to_string();
         let schema = build_schema(&tokenizer, positions);
         let index = tantivy::Index::create_in_ram(schema.clone());
         index
             .tokenizers()
             .register(&tokenizer, build_token_pipeline(analyzer)?);
-        let options = IndexWriterOptions::builder()
-            .num_worker_threads(perf::num_workers().into())
-            .build();
-        let writer = index
-            .writer_with_options(options)
-            .map_err(|e| anyhow!("fts: failed to create writer: {e}"))?;
-        let reader = index
-            .reader_builder()
-            .reload_policy(ReloadPolicy::Manual)
-            .try_into()
-            .map_err(|e| anyhow!("fts: failed to create reader: {e}"))?;
+        let reader = Reader::new(&index, key, worker)?;
+        let writer = RwLock::new(Writer::new(&index)?);
         Ok(Self {
             index,
-            writer: RwLock::new(Writer {
-                writer,
-                uncommitted_docs_in_progress_guards: Vec::new(),
-            }),
+            writer,
             reader,
             schema,
         })
@@ -250,13 +364,12 @@ fn create_doc(schema: &Schema, primary_id: PrimaryId, document: &str) -> Tantivy
 }
 
 fn commit(state: &IndexState, key: &IndexKey) {
-    let result = state
-        .writer
-        .write()
-        .unwrap()
-        .commit(|| state.reader.reload());
-    if let Err(err) = result {
-        error!("fts: failed to commit for {key}: {err}");
+    let result = state.writer.write().unwrap().commit();
+    match result {
+        Ok((commit_opstamp, guards)) => state
+            .reader
+            .drop_guards_when_searchable(commit_opstamp, guards),
+        Err(err) => error!("fts: failed to commit for {key}: {err}"),
     }
 }
 
@@ -437,13 +550,14 @@ fn get_or_create_state<T: TableSearch>(
     states: &mut BTreeMap<IndexId, Arc<IndexState>>,
     table: &RwLock<T>,
     index: &FtsIndexConfiguration,
+    worker: &async_channel::Sender<Worker>,
 ) -> Option<Arc<IndexState>> {
     let key = &index.key;
     let index_id = table.read().unwrap().index_id(key)?;
     if let Some(state) = states.get(&index_id) {
         return Some(Arc::clone(state));
     }
-    match IndexState::new(index.analyzer, index.positions) {
+    match IndexState::new(index.analyzer, index.positions, key, worker.clone()) {
         Ok(state) => {
             let state = Arc::new(state);
             states.insert(index_id, Arc::clone(&state));
@@ -518,6 +632,7 @@ pub(crate) fn new(
                                 &mut states,
                                 table.as_ref(),
                                 &index,
+                                &worker,
                             ) else {
                                 continue;
                             };
@@ -547,6 +662,7 @@ pub(crate) fn new(
                                 &mut states,
                                 table.as_ref(),
                                 &index,
+                                &worker,
                             ) else {
                                 continue;
                             };
@@ -776,6 +892,28 @@ mod tests {
 
     fn tokenize_with_standard_analyzer(text: &str) -> Vec<String> {
         tokenize_with(Analyzer::Standard, text)
+    }
+
+    async fn add_committed_segment(sender: &mpsc::Sender<FtsIndex>, segment: u64) {
+        let (tx, mut rx) = mpsc::channel(1);
+        // Reaching the commit threshold forces a commit, and each commit adds a new segment.
+        let docs_per_segment = TEST_COMMIT_THRESHOLD as u64;
+        for doc in 0..docs_per_segment {
+            sender
+                .add_document(
+                    (segment * docs_per_segment + doc).into(),
+                    format!("segment {segment} document {doc} body text"),
+                    AsyncInProgress::Fullscan(tx.clone()),
+                )
+                .await
+                .unwrap();
+        }
+        drop(tx);
+        rx.recv().await;
+    }
+
+    async fn segment_count(sender: &mpsc::Sender<FtsIndex>) -> usize {
+        sender.stats(make_index_key()).await.unwrap().segment_count
     }
 
     #[rstest]
@@ -1519,5 +1657,30 @@ mod tests {
             .unwrap();
 
         assert_eq!(keys.len(), 1);
+    }
+
+    #[rstest]
+    #[timeout(Duration::from_secs(10))]
+    #[tokio::test]
+    async fn reader_segment_count_drops_after_background_merge() {
+        /// Once the index has this many small segments, the default merge policy merges them into
+        /// one segment.
+        const MERGE_POLICY_MIN_NUM_SEGMENTS: u64 = 8;
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+
+        // The last commit leaves exactly enough segments to start a background merge, which
+        // finishes after that commit has already reloaded the reader.
+        for segment in 0..MERGE_POLICY_MIN_NUM_SEGMENTS {
+            add_committed_segment(&sender, segment).await;
+        }
+
+        // Wait until the reader serves the merged segments without any further writes. A tick
+        // between two documents can commit a partial segment, so the merge may leave more than
+        // one segment. Without a reload after the merge, the reader keeps all 8 segments and the
+        // test times out.
+        while segment_count(&sender).await >= MERGE_POLICY_MIN_NUM_SEGMENTS as usize {
+            tokio::time::sleep(TEST_COMMIT_INTERVAL).await;
+        }
     }
 }
