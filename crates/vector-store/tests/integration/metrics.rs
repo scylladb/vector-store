@@ -101,6 +101,24 @@ async fn fts_index_metrics_present_in_metrics_endpoint() {
     )
     .await;
 
+    wait_for_fts_index_metrics(&client, &keyspace_name, &index_name).await;
+}
+
+#[tokio::test]
+async fn fts_index_metrics_present_in_metrics_endpoint_without_writes() {
+    crate::enable_tracing();
+
+    let (client, keyspace_name, index_name, _db, _hold) =
+        fts::setup_fts_and_wait(Vec::<(Vec<CqlValue>, &str, u64)>::new(), 0).await;
+
+    wait_for_fts_index_metrics(&client, &keyspace_name, &index_name).await;
+}
+
+async fn wait_for_fts_index_metrics(
+    client: &HttpClient,
+    keyspace_name: &httpapi::KeyspaceName,
+    index_name: &httpapi::IndexName,
+) {
     let expected_labels = format!(r#"index_name="{index_name}",keyspace="{keyspace_name}""#);
 
     wait_for(

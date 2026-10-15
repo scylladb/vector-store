@@ -73,6 +73,7 @@ use scylla::cluster::metadata::NativeType;
 use scylla::value::CqlValue;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -649,13 +650,31 @@ fn progress_to_percentage(progress: Progress) -> f64 {
     }
 }
 
+/// Indexes whose gauges need refreshing before a scrape: every index a write marked dirty,
+/// plus every full-text index. A full-text reader also reloads when background merges finish,
+/// with no write to mark the index dirty, so its segment count and size would otherwise stay
+/// at the value from the last write.
+fn indexes_to_refresh(state: &RoutesInnerState) -> HashSet<(KeyspaceName, IndexName)> {
+    let dirty = state
+        .metrics
+        .take_dirty_indexes()
+        .into_iter()
+        .map(|(keyspace, index_name)| (KeyspaceName::from(keyspace), IndexName::from(index_name)));
+    let fulltext = state
+        .indexes
+        .read()
+        .unwrap()
+        .iter_fts()
+        .map(|(key, _)| (key.keyspace(), key.index()))
+        .collect::<Vec<_>>();
+    dirty.chain(fulltext).collect()
+}
+
 async fn get_metrics(
     State(state): State<RoutesInnerState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    for (keyspace_str, index_name_str) in state.metrics.take_dirty_indexes() {
-        let keyspace = KeyspaceName::from(keyspace_str);
-        let index_name = IndexName::from(index_name_str);
+    for (keyspace, index_name) in indexes_to_refresh(&state) {
         refresh_index_metrics(&state, keyspace, index_name).await;
     }
     let metric_families = state.metrics.registry.gather();
