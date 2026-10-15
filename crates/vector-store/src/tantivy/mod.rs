@@ -37,6 +37,7 @@ use crate::table::IndexId;
 use crate::table::PartitionId;
 use crate::table::PrimaryId;
 use crate::table::TableSearch;
+use crate::vs_index::CountR;
 use crate::worker::Worker;
 use crate::worker::WorkerExt;
 
@@ -214,8 +215,108 @@ pub(crate) fn find_partition_id<B: TantivyBackend>(
     Ok(partition_id)
 }
 
-/// Kind-specific messages of a Tantivy-backed index actor. Each kind handles its own queries and
-/// hands writes and counts to the shared [`TantivyIndexer`].
+/// Messages of a Tantivy-backed index actor: the ones every index kind handles the same way, and
+/// the kind-specific ones in `Kind`.
+pub(crate) enum TantivyIndex<M> {
+    AddDocument {
+        primary_id: PrimaryId,
+        document: String,
+        in_progress: AsyncInProgress,
+    },
+    RemoveDocument {
+        primary_id: PrimaryId,
+        in_progress: AsyncInProgress,
+    },
+    Count {
+        index_key: IndexKey,
+        tx: oneshot::Sender<CountR>,
+    },
+    Kind(M),
+}
+
+impl<M: TantivyMessage> TantivyIndex<M> {
+    async fn handle<T: TableSearch + Send + Sync + 'static>(
+        self,
+        indexer: &mut TantivyIndexer<M::Backend, T>,
+    ) {
+        match self {
+            TantivyIndex::AddDocument {
+                primary_id,
+                document,
+                in_progress,
+            } => {
+                indexer
+                    .add_document(primary_id, document, in_progress)
+                    .await;
+            }
+            TantivyIndex::RemoveDocument {
+                primary_id,
+                in_progress,
+            } => {
+                indexer.remove_document(primary_id, in_progress).await;
+            }
+            TantivyIndex::Count { index_key, tx } => {
+                _ = tx.send(Ok(indexer.count(&index_key)));
+            }
+            TantivyIndex::Kind(msg) => {
+                msg.handle(indexer).await;
+            }
+        }
+    }
+}
+
+pub(crate) trait TantivyIndexExt {
+    async fn add_document(
+        &self,
+        primary_id: PrimaryId,
+        document: String,
+        in_progress: AsyncInProgress,
+    ) -> anyhow::Result<()>;
+    async fn remove_document(
+        &self,
+        primary_id: PrimaryId,
+        in_progress: AsyncInProgress,
+    ) -> anyhow::Result<()>;
+    async fn count(&self, index_key: IndexKey) -> CountR;
+}
+
+impl<M: Send + Sync + 'static> TantivyIndexExt for mpsc::Sender<TantivyIndex<M>> {
+    async fn add_document(
+        &self,
+        primary_id: PrimaryId,
+        document: String,
+        in_progress: AsyncInProgress,
+    ) -> anyhow::Result<()> {
+        Ok(self
+            .send(TantivyIndex::AddDocument {
+                primary_id,
+                document,
+                in_progress,
+            })
+            .await?)
+    }
+
+    async fn remove_document(
+        &self,
+        primary_id: PrimaryId,
+        in_progress: AsyncInProgress,
+    ) -> anyhow::Result<()> {
+        Ok(self
+            .send(TantivyIndex::RemoveDocument {
+                primary_id,
+                in_progress,
+            })
+            .await?)
+    }
+
+    async fn count(&self, index_key: IndexKey) -> CountR {
+        let (tx, rx) = oneshot::channel();
+        self.send(TantivyIndex::Count { index_key, tx }).await?;
+        rx.await?
+    }
+}
+
+/// Kind-specific messages of a Tantivy-backed index actor.
 pub(crate) trait TantivyMessage: Send + 'static {
     type Backend: TantivyBackend;
 
@@ -263,7 +364,7 @@ impl<B: TantivyBackend, T: TableSearch + Send + Sync + 'static> TantivyIndexer<B
         &self.table
     }
 
-    pub(crate) async fn add_document(
+    async fn add_document(
         &mut self,
         primary_id: PrimaryId,
         document: String,
@@ -281,11 +382,7 @@ impl<B: TantivyBackend, T: TableSearch + Send + Sync + 'static> TantivyIndexer<B
         .await;
     }
 
-    pub(crate) async fn remove_document(
-        &mut self,
-        primary_id: PrimaryId,
-        in_progress: AsyncInProgress,
-    ) {
+    async fn remove_document(&mut self, primary_id: PrimaryId, in_progress: AsyncInProgress) {
         let Some(state) = self.get_or_create_state() else {
             return;
         };
@@ -295,7 +392,7 @@ impl<B: TantivyBackend, T: TableSearch + Send + Sync + 'static> TantivyIndexer<B
         .await;
     }
 
-    pub(crate) fn count(&self, index_key: &IndexKey) -> usize {
+    fn count(&self, index_key: &IndexKey) -> usize {
         self.state(index_key)
             .map(|s| s.num_docs() as usize)
             .unwrap_or(0)
@@ -393,9 +490,9 @@ impl<B: TantivyBackend, T: TableSearch + Send + Sync + 'static> TantivyIndexer<B
     }
 }
 
-/// Spawns the actor of a Tantivy-backed index. Messages go to [`TantivyMessage::handle`];
-/// pending writes are committed every `commit_interval`, or as soon as `commit_threshold` of them
-/// are waiting.
+/// Spawns the actor of a Tantivy-backed index. Kind-specific messages go to
+/// [`TantivyMessage::handle`]; pending writes are committed every `commit_interval`, or as soon
+/// as `commit_threshold` of them are waiting.
 pub(crate) fn spawn_actor<M: TantivyMessage>(
     key: IndexKey,
     backend: M::Backend,
@@ -404,8 +501,8 @@ pub(crate) fn spawn_actor<M: TantivyMessage>(
     memory: mpsc::Sender<Memory>,
     commit_interval: Duration,
     commit_threshold: usize,
-) -> mpsc::Sender<M> {
-    let (tx, rx) = mpsc::channel::<M>(perf::channel_size().into());
+) -> mpsc::Sender<TantivyIndex<M>> {
+    let (tx, rx) = mpsc::channel::<TantivyIndex<M>>(perf::channel_size().into());
     tokio::spawn(async move {
         let name = <M::Backend as TantivyBackend>::NAME;
         debug!("{name} index actor starting for {key}");
@@ -426,7 +523,7 @@ pub(crate) fn spawn_actor<M: TantivyMessage>(
 
 async fn run_actor_loop<M: TantivyMessage, T: TableSearch + Send + Sync + 'static>(
     mut indexer: TantivyIndexer<M::Backend, T>,
-    mut rx: mpsc::Receiver<M>,
+    mut rx: mpsc::Receiver<TantivyIndex<M>>,
     commit_interval: Duration,
 ) {
     let mut interval = tokio::time::interval(commit_interval);

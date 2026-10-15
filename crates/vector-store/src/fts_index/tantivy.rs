@@ -56,6 +56,7 @@ use crate::worker::Worker;
 
 use super::actor::FtsHighlightR;
 use super::actor::FtsIndex;
+use super::actor::FtsMessage;
 use super::actor::FtsSearchR;
 use super::actor::FtsStats;
 use super::actor::FtsStatsR;
@@ -332,7 +333,7 @@ pub(crate) fn new(
     )
 }
 
-impl TantivyMessage for FtsIndex {
+impl TantivyMessage for FtsMessage {
     type Backend = FtsBackend;
 
     async fn handle<T: TableSearch + Send + Sync + 'static>(
@@ -340,25 +341,7 @@ impl TantivyMessage for FtsIndex {
         indexer: &mut TantivyIndexer<FtsBackend, T>,
     ) {
         match self {
-            FtsIndex::AddDocument {
-                primary_id,
-                document,
-                in_progress,
-            } => {
-                indexer
-                    .add_document(primary_id, document, in_progress)
-                    .await;
-            }
-            FtsIndex::RemoveDocument {
-                primary_id,
-                in_progress,
-            } => {
-                indexer.remove_document(primary_id, in_progress).await;
-            }
-            FtsIndex::Count { tx, index_key, .. } => {
-                _ = tx.send(Ok(indexer.count(&index_key)));
-            }
-            FtsIndex::Search {
+            FtsMessage::Search {
                 index_key,
                 query,
                 limit,
@@ -376,7 +359,7 @@ impl TantivyMessage for FtsIndex {
                     )
                     .await;
             }
-            FtsIndex::Highlight {
+            FtsMessage::Highlight {
                 index_key,
                 query,
                 documents,
@@ -391,7 +374,7 @@ impl TantivyMessage for FtsIndex {
                     )
                     .await;
             }
-            FtsIndex::Stats { index_key, tx } => {
+            FtsMessage::Stats { index_key, tx } => {
                 indexer
                     .spawn_query(
                         index_key,
@@ -411,6 +394,7 @@ mod tests {
     use crate::AsyncInProgress;
     use crate::memory::Allocate;
     use crate::table::MockTableSearch;
+    use crate::tantivy::TantivyIndexExt;
     use crate::tantivy::test_support::make_index_key;
     use crate::tantivy::test_support::make_memory_actor;
     use crate::tantivy::test_support::make_table_with_keys;
