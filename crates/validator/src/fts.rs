@@ -93,7 +93,7 @@ impl Fixture {
 
     async fn bm25_search_pks(&self, query: &str) -> Vec<i32> {
         let result = self.bm25_search(query).await;
-        Self::extract_pks(&result)
+        extract_pks(&result)
     }
 
     #[framed]
@@ -132,9 +132,7 @@ impl Fixture {
     }
 
     async fn wait_for_index_on_all_nodes(&self, index: IndexInfo) {
-        for client in &self.clients {
-            wait_for_index(client, &index).await;
-        }
+        wait_for_index_on_all_nodes(&self.clients, &index).await;
         *self.index.write().unwrap() = Some(Arc::new(index));
     }
 
@@ -162,14 +160,6 @@ impl Fixture {
 
     fn bm25_select_query(&self, query: &str, limit: usize) -> String {
         bm25_ordered_query(&self.table, "pk", &format!("'{query}'"), limit)
-    }
-
-    fn extract_pks(result: &QueryRowsResult) -> Vec<i32> {
-        result
-            .rows::<(i32,)>()
-            .expect("failed to get rows")
-            .map(|row| row.expect("failed to get row").0)
-            .collect()
     }
 
     fn highlight_select_query(&self, query: &str, limit: usize) -> String {

@@ -680,6 +680,13 @@ pub async fn wait_for_index(client: &HttpClient, index: &IndexInfo) -> IndexInfo
 }
 
 #[framed]
+pub async fn wait_for_index_on_all_nodes(clients: &[HttpClient], index: &IndexInfo) {
+    for client in clients {
+        wait_for_index(client, index).await;
+    }
+}
+
+#[framed]
 pub async fn wait_for_no_index(client: &HttpClient, index: &IndexInfo) {
     wait_for(
         || async {
@@ -776,6 +783,14 @@ pub async fn get_opt_query_results(
         .ok()?
         .into_rows_result()
         .ok()
+}
+
+pub fn extract_pks(result: &QueryRowsResult) -> Vec<i32> {
+    result
+        .rows::<(i32,)>()
+        .expect("failed to get rows")
+        .map(|row| row.expect("failed to get row").0)
+        .collect()
 }
 
 static KEYSPACE_COUNTER: AtomicUsize = AtomicUsize::new(0);
