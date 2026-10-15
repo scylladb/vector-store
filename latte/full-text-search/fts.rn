@@ -9,6 +9,15 @@
 //!   latte run -f build_index fts.rn <node> -d 1
 //!   latte run -f search      fts.rn <node> -d 60s --concurrency 32 \
 //!       -P 'fts_data_dir="<dir>/"' --generate-report -o report.json
+//!   latte run -f search      fts.rn <node> -d 60s --concurrency 32 \
+//!       -P 'fts_data_dir="<dir>/"' -P highlight=true \
+//!       --generate-report -o report_highlight.json
+//!
+//! `highlight=true` adds `BM25_HIGHLIGHT()` to the search SELECT, so a run
+//! with and one without it on the same corpus measure the highlighting
+//! overhead. The coordinator reads each matched row's text and sends it to
+//! the index node for the excerpt, so the overhead grows with document
+//! length, not corpus size.
 //!
 //! Schema is idempotent (CREATE TABLE IF NOT EXISTS). Use schema_cleanup=true
 //! to drop the table, or drop_index=true to drop just the FTS index.
@@ -49,6 +58,9 @@ const QRELS_FILE = latte::param!("qrels_file", "qrels_natural.tsv");
 // Search
 const SEARCH_LIMIT = latte::param!("search_limit", 5);
 const COMPUTE_ACCURACY = latte::param!("compute_accuracy", true);
+// Select a BM25_HIGHLIGHT() excerpt for each result. The excerpt is not read;
+// the run exists to be compared with one without it.
+const HIGHLIGHT = latte::param!("highlight", false);
 
 // Prepared statement names
 const INSERT = "insert";
@@ -181,11 +193,17 @@ pub async fn prepare(db) {
 
         println!("Search limit: {}", SEARCH_LIMIT);
 
-        db.prepare(SEARCH, `SELECT doc_id FROM ${KEYSPACE}.${TABLE} WHERE BM25(${TARGET_COLUMN}, :q) > 0 ORDER BY BM25(${TARGET_COLUMN}, :q) LIMIT ${SEARCH_LIMIT}`).await?;
+        let selection = if HIGHLIGHT {
+            `doc_id, BM25_HIGHLIGHT(${TARGET_COLUMN}, :q) AS excerpt`
+        } else {
+            "doc_id"
+        };
+        db.prepare(SEARCH, `SELECT ${selection} FROM ${KEYSPACE}.${TABLE} WHERE BM25(${TARGET_COLUMN}, :q) > 0 ORDER BY BM25(${TARGET_COLUMN}, :q) LIMIT ${SEARCH_LIMIT}`).await?;
 
         db.set_report_field("dataset", FTS_DATA_DIR);
         db.set_report_field("queries_file", QUERIES_FILE);
         db.set_report_field("compute_accuracy", `${COMPUTE_ACCURACY}`);
+        db.set_report_field("highlight", `${HIGHLIGHT}`);
 
         db.declare_metric("result_count", "higher");
 
