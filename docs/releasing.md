@@ -206,3 +206,21 @@ instead. In the manifest the AWS `artifact_id` is a comma-separated
 - `cargo-cyclonedx` installed (`cargo install cargo-cyclonedx`)
 - `syft` installed (see https://github.com/anchore/syft)
 - `gh` CLI installed and authenticated (see https://cli.github.com/)
+
+## Releasing docker toolchain image
+
+Building release of vector-store requires a docker image with the toolchain.
+The image is built from `scripts/Dockerfile.toolchain` and pushed to GitHub
+registry as
+`ghcr.io/scylladb/vector-store-toolchain:$toolchain_version-$rust_version-$TARGETARCH`.
+
+The `$toolchain_version` is defined in `scripts/build-docker-toolchain` and
+`$rust_version` is defined in `rust-toolchain.toml`. When CI processes PRs the
+image is built when versions differ from master and pulled otherwise. If PR
+with the versions changed is merged, the image must be built and pushed to the
+registry by using workflow `release-toolchain.yaml`.
+
+When we change rust version we must release the toolchain. When we change
+`Dockerfile.toolchain` or `build-docker-toolchain` script in a way that affects
+the image, we must bump the `$toolchain_version` in `build-docker-toolchain`
+and release the toolchain.
