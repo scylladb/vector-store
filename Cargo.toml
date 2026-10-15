@@ -96,11 +96,13 @@ vector-store = { path = "crates/vector-store" }
 secrecy = "0.10.3"
 
 [patch.crates-io]
-# numkong 7.8.5 with the opt-in f32 accumulation of the f32 angular kernels (VECTOR-720): the
-# f32-accumulate-angular-f32 branch of scylladb/NumKong, proposed upstream as ashvardanian/NumKong#393.
-# The switch itself is set in .cargo/config.toml. Drop this entry once upstream ships
-# NK_ACCUMULATE_F32_IN_F64.
-numkong = { git = "https://github.com/scylladb/NumKong.git", rev = "501e810cd04ee65d00e44a44b94076a77c9c100e" }
+# numkong 7.8.5 with scylladb/NumKong's kernel patches (VECTOR-720, VECTOR-1054), branch
+# f32-accumulate-angular-f32-x86: the opt-in f32 accumulation of the f32 angular kernels on NEON, SVE,
+# Haswell and Skylake (the NEON/SVE part is proposed upstream as ashvardanian/NumKong#393), and f16
+# angular kernels on SVE2 and FEAT_FHM that accumulate with widening multiply-adds instead of
+# converting every lane. The switch is set in .cargo/config.toml. Drop this entry once upstream ships
+# both.
+numkong = { git = "https://github.com/scylladb/NumKong.git", rev = "23067331805af83747a42aea8836a77e071ae294" }
 # Currently, axum-server-dual-protocol doesn't have a published version that supports axum 0.8, so we need to use the git version from the PR.
 axum-server-dual-protocol = { git = "https://github.com/vinchona/axum-server-dual-protocol", rev = "ca6db055254255b74238673ce4135698e347d71c" }
 
