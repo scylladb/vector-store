@@ -50,6 +50,7 @@ hotpath.workspace = true
 httpapi.workspace = true
 humantime.workspace = true
 itertools.workspace = true
+libc.workspace = true
 mimalloc.workspace = true
 num-bigint.workspace = true
 rustls.workspace = true

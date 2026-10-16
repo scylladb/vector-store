@@ -6101,6 +6101,7 @@ dependencies = [
  "httpclient",
  "humantime",
  "itertools 0.14.0",
+ "libc",
  "mimalloc",
  "mockall",
  "num-bigint 0.4.6",

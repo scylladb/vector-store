@@ -54,6 +54,7 @@ httpapi = { path = "crates/httpapi" }
 httpclient = { path = "crates/httpclient" }
 humantime = "2.2.0"
 itertools = "0.14.0"
+libc = "0.2.177"
 linkme = "0.3.36"
 macros = { path = "crates/macros" }
 mimalloc = "0.1.48"

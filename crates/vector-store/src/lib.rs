@@ -23,6 +23,7 @@ mod indexes;
 mod info;
 mod internals;
 mod invariant_key;
+pub mod malloc;
 mod memory;
 mod metrics;
 mod monitor_indexes;

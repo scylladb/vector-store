@@ -49,6 +49,12 @@ fn main() -> anyhow::Result<()> {
         .with(fmt::layer().with_target(false).with_ansi(use_ansi))
         .init();
 
+    // Before any other thread starts allocating. Without it the service still works, but
+    // its RSS creeps up with each index dropped and created.
+    if let Err(err) = vector_store::malloc::pin_mmap_threshold() {
+        tracing::warn!("{err}");
+    }
+
     aws_lc_rs::default_provider()
         .install_default()
         .expect("install aws-lc-rs crypto provider");
