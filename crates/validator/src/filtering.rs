@@ -5,6 +5,7 @@
 
 use crate::TestActors;
 use crate::common::*;
+use httpapi::IndexInfo;
 use httpapi::KeyspaceName;
 use scylla::client::session::Session;
 use scylla::value::CqlTimeuuid;
@@ -34,6 +35,16 @@ impl e2etest::Fixture for Fixture {
     async fn teardown(self) {
         cleanup(&self.actors).await;
     }
+}
+
+fn no_matching_index_err_msg(index: &IndexInfo) -> String {
+    format!(
+        "The vector index {keyspace}.{index} and/or other vector indexes \
+        defined on the same target don't support provided restrictions \
+        (or lack thereof)",
+        keyspace = index.keyspace,
+        index = index.index
+    )
 }
 
 /// Test ANN search filtered by partition key equality.
@@ -709,6 +720,73 @@ async fn global_index_filter_by_filtering_columns(actors: Arc<TestActors>) {
         .map(|row| row.expect("failed to get row"))
         .collect();
     assert_eq!(results, HashSet::from([(2,), (6,)]));
+
+    session
+        .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
+        .await
+        .expect("failed to drop a keyspace");
+
+    info!("finished");
+}
+
+/// Test filtering on a non-indexed column with a global index.
+///
+/// Steps:
+/// 1. Create a table with a vector column and a non-indexed integer column.
+/// 2. Create a global index on the vector column without specifying the filtering column
+/// 3. Query the table with a WHERE clause filtering on the integer column and verify the
+///    correctness of the error message.
+/// 4. Drop the keyspace.
+#[e2etest::test(group = filtering)]
+async fn global_index_filter_by_non_filtering_columns(actors: Arc<TestActors>) {
+    info!("started");
+
+    let (session, clients) = prepare_connection(&actors).await;
+
+    let keyspace = create_keyspace(&session).await;
+    let table = create_table(
+        &session,
+        "pk INT, ck INT, f INT, v VECTOR<FLOAT, 3>, PRIMARY KEY (pk, ck)",
+        None,
+    )
+    .await;
+
+    let index = create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
+
+    wait_for_index_count(&clients, &index, 0).await;
+
+    info!("Querying index with ALLOW FILTERING");
+    let err = session
+        .query_unpaged(
+            format!(
+                "SELECT pk FROM {table} WHERE f = 0 ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10
+                ALLOW FILTERING"
+            ),
+            (),
+        )
+        .await
+        .expect_err("Expected error when filtering on non-filtering column");
+
+    let valid_msg = no_matching_index_err_msg(&index);
+    assert!(
+        err.to_string().contains(&valid_msg),
+        "Unexpected error message: {err}, expected to contain: {valid_msg}"
+    );
+
+    info!("Querying index without ALLOW FILTERING");
+    let err = session
+        .query_unpaged(
+            format!(
+                "SELECT pk FROM {table} WHERE f = 0 ORDER BY v ANN OF [0.0, 0.0, 0.0] LIMIT 10"
+            ),
+            (),
+        )
+        .await
+        .expect_err("Expected error when filtering on non-filtering column");
+    assert!(
+        err.to_string().contains(&valid_msg),
+        "Unexpected error message: {err}, expected to contain: {valid_msg}"
+    );
 
     session
         .query_unpaged(format!("DROP KEYSPACE {keyspace}"), ())
@@ -1802,11 +1880,10 @@ async fn global_ann_query_on_local_only_index_fails(actors: Arc<TestActors>) {
         .await
         .expect_err("global ANN query on a local-only vector index should fail");
 
+    let valid_msg = no_matching_index_err_msg(&index);
     assert!(
-        err.to_string().contains(
-            "Global ANN query is not supported when only a local vector index is available"
-        ),
-        "unexpected error message: {err}"
+        err.to_string().contains(&valid_msg),
+        "unexpected error message: {err}, expected to contain: {valid_msg}"
     );
 
     session
