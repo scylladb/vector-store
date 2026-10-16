@@ -840,12 +840,13 @@ async fn post_index_ann(
                     table_columns,
                 )
             }
-            indexes::BestIndexState::NoGlobalIndex => {
+            indexes::BestIndexState::NoMatchingIndex => {
                 timer.observe_duration();
 
                 let msg = format!(
-                    "Global ANN query is not supported when only a local \
-                    vector index is available for {keyspace}.{index_name}"
+                    "The vector index {keyspace}.{index_name} and/or other vector indexes \
+                    defined on the same target don't support provided restrictions \
+                    (or lack thereof)"
                 );
                 debug!("post_index_ann: {msg}");
                 return (StatusCode::BAD_REQUEST, msg).into_response();
