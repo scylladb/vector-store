@@ -41,7 +41,7 @@ fn read_fbin_header(file, path) {
 /// Read and validate a base-vector file's header without reading any records.
 /// Pairs with the `read_base_vector*_at` readers: the file stays on disk and
 /// one record is read per cycle. fbin has no bucket column, so
-/// `recall_buckets.rn` uses the text loader and never comes here.
+/// `ann_buckets.rn` uses the text loader and never comes here.
 pub fn read_base_header(path) {
     let file = fs::open_binary(path)?;
     read_fbin_header(file, path)

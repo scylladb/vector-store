@@ -13,4 +13,4 @@ the cluster by hand instead, see
 
 [latte](https://github.com/scylladb/latte) workloads that benchmark vector
 search over CQL, recall included, stay in this repository:
-[latte/vector-search](../latte/vector-search/README.md).
+[latte](../latte/README.md).

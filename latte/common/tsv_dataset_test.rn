@@ -1,8 +1,9 @@
 //! Smoke test for the document loader. Needs any CQL endpoint (plain ScyllaDB
 //! is enough, no vector-store and no full-text index) and the fixture files in
-//! testdata/ (regenerate with testdata/gen_tsv_testdata.py):
+//! latte/full-text-search/testdata/ (regenerate with gen_tsv_testdata.py
+//! there). From the repository root:
 //!
-//!   latte run -f smoke tsv_dataset_test.rn <node> -d 1
+//!   latte run -f smoke latte/common/tsv_dataset_test.rn <node> -d 1
 //!
 //! The loader leaves documents on disk and seeks to one per cycle, so a
 //! mistake in the offsets reads the wrong bytes and quietly loads the wrong
@@ -14,7 +15,7 @@ use latte::*;
 
 mod tsv_dataset;
 
-const DATA_DIR = latte::param!("data_dir", "testdata/");
+const DATA_DIR = latte::param!("data_dir", "latte/full-text-search/testdata/");
 
 fn expect_err(result, expected, label) {
     match result {

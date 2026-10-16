@@ -1,15 +1,15 @@
 //! Full-text search (BM25) workload - schema, load, build_index and search phases.
 //!
 //! Usage:
-//!   latte schema             fts.rn <node>
-//!   latte schema             fts.rn <node> -P schema_cleanup=true  # full reset
-//!   latte schema             fts.rn <node> -P drop_index=true      # drop index only
-//!   latte load               fts.rn <node> --concurrency 10
-//!   latte run -f load        fts.rn <node> -d <doc_count> --concurrency 10
-//!   latte run -f build_index fts.rn <node> -d 1
-//!   latte run -f search      fts.rn <node> -d 60s --concurrency 32 \
+//!   latte schema             latte/fts.rn <node>
+//!   latte schema             latte/fts.rn <node> -P schema_cleanup=true  # full reset
+//!   latte schema             latte/fts.rn <node> -P drop_index=true      # drop index only
+//!   latte load               latte/fts.rn <node> --concurrency 10
+//!   latte run -f load        latte/fts.rn <node> -d <doc_count> --concurrency 10
+//!   latte run -f build_index latte/fts.rn <node> -d 1
+//!   latte run -f search      latte/fts.rn <node> -d 60s --concurrency 32 \
 //!       -P 'fts_data_dir="<dir>/"' --generate-report -o report.json
-//!   latte run -f search      fts.rn <node> -d 60s --concurrency 32 \
+//!   latte run -f search      latte/fts.rn <node> -d 60s --concurrency 32 \
 //!       -P 'fts_data_dir="<dir>/"' -P highlight=true \
 //!       --generate-report -o report_highlight.json
 //!
@@ -23,15 +23,19 @@
 //! to drop the table, or drop_index=true to drop just the FTS index.
 //!
 //! `load` indexes the documents file by byte offset in `prepare` (see
-//! `tsv_dataset.rn`) and reads one document per cycle, so memory depends on
+//! `common/tsv_dataset.rn`) and reads one document per cycle, so memory depends on
 //! the document count rather than the corpus size. `search` preloads the
 //! (small) query and qrels files: reading inside the measured path would add
 //! I/O to the reported latency.
 
 use latte::*;
 
-mod metrics;
-mod tsv_dataset;
+mod common {
+    pub mod relevance_metrics;
+    pub mod tsv_dataset;
+}
+use common::relevance_metrics;
+use common::tsv_dataset;
 
 // Schema / table
 const KEYSPACE = latte::param!("keyspace", "fts_bench");
@@ -305,10 +309,10 @@ pub async fn search(db, i) {
                     relevances.push(#{ "doc_id": qrel.doc_id, "grade": qrel.grade });
                 }
                 if relevances.len() > 0 {
-                    db.record_metric("recall", metrics::recall_at_k(returned_ids, relevant_ids, SEARCH_LIMIT));
-                    db.record_metric("precision", metrics::precision_at_k(returned_ids, relevant_ids, SEARCH_LIMIT));
-                    db.record_metric("mrr", metrics::reciprocal_rank(returned_ids, relevant_ids));
-                    db.record_metric("ndcg", metrics::ndcg_at_k(returned_ids, relevances, SEARCH_LIMIT));
+                    db.record_metric("recall", relevance_metrics::recall_at_k(returned_ids, relevant_ids, SEARCH_LIMIT));
+                    db.record_metric("precision", relevance_metrics::precision_at_k(returned_ids, relevant_ids, SEARCH_LIMIT));
+                    db.record_metric("mrr", relevance_metrics::reciprocal_rank(returned_ids, relevant_ids));
+                    db.record_metric("ndcg", relevance_metrics::ndcg_at_k(returned_ids, relevances, SEARCH_LIMIT));
                 }
             }
         }
