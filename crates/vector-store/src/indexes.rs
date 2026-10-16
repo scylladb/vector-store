@@ -303,6 +303,8 @@ impl PatternIndexEntry {
 pub(crate) enum BestIndexState {
     /// The requested index does not exist at all.
     NotFound,
+    /// The requested index exists in the schema, but cannot be served for the given reason.
+    Unsupported(String),
     /// The requested index exists but no serving candidate was found.
     NotServing(Progress),
     /// Serving candidates exist but none can handle a global query
@@ -326,6 +328,7 @@ pub(crate) struct Indexes {
     vs_routing: HashMap<RoutingGroupKey, Vec<IndexKey>>,
     fts_entries: HashMap<IndexKey, FtsIndexEntry>,
     pattern_entries: HashMap<IndexKey, PatternIndexEntry>,
+    unsupported: HashMap<IndexKey, String>,
 }
 
 impl Indexes {
@@ -335,6 +338,7 @@ impl Indexes {
             vs_routing: HashMap::new(),
             fts_entries: HashMap::new(),
             pattern_entries: HashMap::new(),
+            unsupported: HashMap::new(),
         }
     }
 
@@ -398,6 +402,15 @@ impl Indexes {
         }
     }
 
+    /// Returns why the index found in the schema cannot be served, if it was skipped at discovery.
+    pub(crate) fn unsupported(&self, key: &IndexKey) -> Option<&str> {
+        self.unsupported.get(key).map(String::as_str)
+    }
+
+    pub(crate) fn set_unsupported(&mut self, unsupported: HashMap<IndexKey, String>) {
+        self.unsupported = unsupported;
+    }
+
     pub(crate) fn iter_vs(&self) -> impl Iterator<Item = (&IndexKey, &VsIndexEntry)> {
         self.vs_entries.iter()
     }
@@ -415,7 +428,8 @@ impl Indexes {
     /// When `routing` is `true`, ensures queries are routed to the most
     /// up-to-date and best-matching index by applying the following logic:
     ///
-    /// 1. Returns `NotFound` if the requested index key does not exist.
+    /// 1. Returns `Unsupported` if the requested index was skipped at discovery,
+    ///    or `NotFound` if it does not exist.
     /// 2. Identifies all candidate indexes within the same routing group
     ///    (i.e., sharing the same keyspace, table, and target column).
     /// 3. Filters out candidates whose `score_index` returns `None` (invalid).
@@ -435,7 +449,10 @@ impl Indexes {
         routing: bool,
     ) -> BestIndexState {
         let Some(requested_entry) = self.vs_entries.get(key) else {
-            return BestIndexState::NotFound;
+            return match self.unsupported(key) {
+                Some(reason) => BestIndexState::Unsupported(reason.to_string()),
+                None => BestIndexState::NotFound,
+            };
         };
         let candidates: &[IndexKey] = if routing {
             self.vs_routing
