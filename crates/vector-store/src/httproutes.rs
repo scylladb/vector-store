@@ -37,6 +37,7 @@ use crate::node_state::NodeStateExt;
 use crate::pattern_index::PatternIndex;
 use crate::pattern_index::PatternIndexExt;
 use crate::perf;
+use crate::tantivy_common::TantivyIndexExt;
 use crate::vector;
 use crate::vs_index;
 use crate::vs_index::VsIndexSearch;
@@ -264,8 +265,10 @@ impl From<&IndexOptionsFts> for FulltextIndexOptions {
 }
 
 impl From<&IndexOptionsPattern> for PatternIndexOptions {
-    fn from(_options: &IndexOptionsPattern) -> Self {
-        PatternIndexOptions {}
+    fn from(options: &IndexOptionsPattern) -> Self {
+        PatternIndexOptions {
+            case_sensitive: *options.case_sensitive.as_ref(),
+        }
     }
 }
 
@@ -1317,8 +1320,14 @@ async fn post_index_highlight(
     tag = "scylla-vector-store-index",
     description = "Performs a LIKE 'pattern' search query against the specified index. \
 Returns primary keys of the documents matched to the provided pattern. \
-The pattern rules are the same as the LIKE operator in ScyllaDB: '%' and '_' are wildcards, \
-'\\' is the escape character, and matching is case-sensitive. \
+The pattern rules are the same as the LIKE operator in ScyllaDB: the pattern must match the whole value, \
+character by character; '%' matches any sequence of characters, including an empty one, \
+and '_' matches exactly one character; '\\' makes the character following it literal, \
+and a '\\' ending the pattern matches '\\'; an empty pattern matches only an empty value. \
+Matching is case-sensitive, unless the index was created with the 'case_sensitive' option set to false, \
+in which case both the pattern and the values are compared lowercased. \
+A non-empty pattern made only of '%' and '_' is rejected with 400. \
+Each matching row is returned once, in no particular order. \
 The maximum number of results is controlled by the optional 'limit' parameter in the payload. \
 If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
     params(
@@ -1334,7 +1343,7 @@ If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
         ),
         (
             status = 400,
-            description = "Bad request. Possible causes: malformed input, invalid pattern, or missing required fields.",
+            description = "Bad request. Possible causes: malformed input, a non-empty pattern made only of '%' and '_', or missing required fields.",
             content_type = "application/json",
             body = ErrorMessage
         ),
@@ -2178,6 +2187,24 @@ mod tests {
         assert_eq!(
             super::progress_to_percentage(Progress::InProgress(0.0.try_into().unwrap())),
             0.0
+        );
+    }
+
+    #[test]
+    fn pattern_index_option_conversion() {
+        assert_eq!(
+            PatternIndexOptions::from(&IndexOptionsPattern::default()),
+            PatternIndexOptions {
+                case_sensitive: true,
+            }
+        );
+        assert_eq!(
+            PatternIndexOptions::from(&IndexOptionsPattern {
+                case_sensitive: false.into(),
+            }),
+            PatternIndexOptions {
+                case_sensitive: false,
+            }
         );
     }
 }

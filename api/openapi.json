@@ -427,7 +427,7 @@
         "tags": [
           "scylla-vector-store-index"
         ],
-        "description": "Performs a LIKE 'pattern' search query against the specified index. Returns primary keys of the documents matched to the provided pattern. The pattern rules are the same as the LIKE operator in ScyllaDB: '%' and '_' are wildcards, '\\' is the escape character, and matching is case-sensitive. The maximum number of results is controlled by the optional 'limit' parameter in the payload. If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
+        "description": "Performs a LIKE 'pattern' search query against the specified index. Returns primary keys of the documents matched to the provided pattern. The pattern rules are the same as the LIKE operator in ScyllaDB: the pattern must match the whole value, character by character; '%' matches any sequence of characters, including an empty one, and '_' matches exactly one character; '\\' makes the character following it literal, and a '\\' ending the pattern matches '\\'; an empty pattern matches only an empty value. Matching is case-sensitive, unless the index was created with the 'case_sensitive' option set to false, in which case both the pattern and the values are compared lowercased. A non-empty pattern made only of '%' and '_' is rejected with 400. Each matching row is returned once, in no particular order. The maximum number of results is controlled by the optional 'limit' parameter in the payload. If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
         "operationId": "post_index_like",
         "parameters": [
           {
@@ -471,7 +471,7 @@
             }
           },
           "400": {
-            "description": "Bad request. Possible causes: malformed input, invalid pattern, or missing required fields.",
+            "description": "Bad request. Possible causes: malformed input, a non-empty pattern made only of '%' and '_', or missing required fields.",
             "content": {
               "application/json": {
                 "schema": {
@@ -894,7 +894,16 @@
       },
       "PatternIndexOptions": {
         "type": "object",
-        "description": "Options a pattern index was created with."
+        "description": "Options a pattern index was created with.",
+        "required": [
+          "case_sensitive"
+        ],
+        "properties": {
+          "case_sensitive": {
+            "type": "boolean",
+            "description": "Whether matching respects letter case (the CQL LIKE semantics); when false, both the\nindexed values and the patterns are lowercased."
+          }
+        }
       },
       "PostIndexAnnFilter": {
         "type": "object",

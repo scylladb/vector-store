@@ -3,30 +3,23 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
-use std::collections::BTreeMap;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Duration;
 
 use anyhow::anyhow;
-use tantivy::IndexWriter;
-use tantivy::ReloadPolicy;
 use tantivy::TantivyDocument;
 use tantivy::collector::TopDocs;
-use tantivy::indexer::IndexWriterOptions;
 use tantivy::query::BooleanQuery;
 use tantivy::query::BoostQuery;
 use tantivy::query::Occur;
 use tantivy::query::Query;
 use tantivy::query::QueryParser;
-use tantivy::schema::INDEXED;
 use tantivy::schema::IndexRecordOption;
-use tantivy::schema::STORED;
 use tantivy::schema::Schema;
 use tantivy::schema::TextFieldIndexing;
 use tantivy::schema::TextOptions;
-use tantivy::schema::Value;
 use tantivy::snippet::SnippetGenerator;
 use tantivy::tokenizer::Language;
 use tantivy::tokenizer::LowerCaser;
@@ -36,31 +29,34 @@ use tantivy::tokenizer::StopWordFilter;
 use tantivy::tokenizer::TextAnalyzer;
 use tantivy::tokenizer::WhitespaceTokenizer;
 use tokio::sync::mpsc;
-use tokio::sync::watch;
-use tracing::debug;
-use tracing::error;
 
 use crate::Analyzer;
-use crate::AsyncInProgress;
 use crate::IndexKey;
 use crate::Limit;
 use crate::Positions;
 use crate::QueryError;
 use crate::fts_index::factory::FtsIndexConfiguration;
 use crate::fts_index::factory::FtsIndexFactory;
-use crate::memory::Allocate;
 use crate::memory::Memory;
-use crate::memory::MemoryExt;
-use crate::perf;
-use crate::table::IndexId;
 use crate::table::PrimaryId;
 use crate::table::Table;
 use crate::table::TableSearch;
+use crate::tantivy_common::COMMIT_INTERVAL;
+use crate::tantivy_common::IndexState;
+use crate::tantivy_common::MAX_UNCOMMITTED_THRESHOLD;
+use crate::tantivy_common::PRIMARY_ID_FIELD;
+use crate::tantivy_common::TantivyBackend;
+use crate::tantivy_common::TantivyIndexer;
+use crate::tantivy_common::TantivyMessage;
+use crate::tantivy_common::build_schema;
+use crate::tantivy_common::create_doc;
+use crate::tantivy_common::find_partition_id;
+use crate::tantivy_common::spawn_actor;
 use crate::worker::Worker;
-use crate::worker::WorkerExt;
 
 use super::actor::FtsHighlightR;
 use super::actor::FtsIndex;
+use super::actor::FtsMessage;
 use super::actor::FtsSearchR;
 use super::actor::FtsStats;
 use super::actor::FtsStatsR;
@@ -93,87 +89,38 @@ impl FtsIndexFactory for TantivyIndexFactory {
     }
 }
 
-struct Writer {
-    writer: IndexWriter,
-    // In-progress guards for documents written to the writer but not yet committed. They are held
-    // here so the index is not reported as caught up (SERVING) until the commit that makes those
-    // documents searchable has succeeded.
-    uncommitted_docs_in_progress_guards: Vec<AsyncInProgress>,
+const BODY_FIELD: &str = "body";
+
+#[derive(Clone)]
+pub(crate) struct FtsBackend {
+    analyzer: Analyzer,
+    positions: Positions,
 }
 
-impl Writer {
-    fn add_document(
-        &mut self,
-        doc: TantivyDocument,
-        in_progress: AsyncInProgress,
-    ) -> tantivy::Result<usize> {
-        self.writer.add_document(doc)?;
-        self.uncommitted_docs_in_progress_guards.push(in_progress);
-        Ok(self.uncommitted_docs())
+impl TantivyBackend for FtsBackend {
+    const NAME: &'static str = "fts";
+
+    fn build_schema(&self) -> Schema {
+        build_schema(
+            BODY_FIELD,
+            body_text_options(&self.analyzer.to_string(), self.positions),
+        )
     }
 
-    fn rm_document(&mut self, term: tantivy::Term, in_progress: AsyncInProgress) -> usize {
-        self.writer.delete_term(term);
-        self.uncommitted_docs_in_progress_guards.push(in_progress);
-        self.uncommitted_docs()
-    }
-
-    fn commit(&mut self, reload: impl FnOnce() -> tantivy::Result<()>) -> tantivy::Result<()> {
-        self.writer.commit()?;
-        reload()?;
-        self.uncommitted_docs_in_progress_guards.clear();
+    fn register_tokenizers(&self, index: &tantivy::Index) -> anyhow::Result<()> {
+        index.tokenizers().register(
+            &self.analyzer.to_string(),
+            build_token_pipeline(self.analyzer)?,
+        );
         Ok(())
     }
 
-    fn uncommitted_docs(&self) -> usize {
-        self.uncommitted_docs_in_progress_guards.len()
-    }
-
-    fn has_uncommitted_docs(&self) -> bool {
-        !self.uncommitted_docs_in_progress_guards.is_empty()
+    fn create_doc(&self, schema: &Schema, primary_id: PrimaryId, text: &str) -> TantivyDocument {
+        create_doc(schema, primary_id, BODY_FIELD, text)
     }
 }
 
-struct IndexState {
-    index: tantivy::Index,
-    writer: RwLock<Writer>,
-    reader: tantivy::IndexReader,
-    schema: Schema,
-}
-
-const COMMIT_INTERVAL: Duration = Duration::from_secs(1);
-const MAX_UNCOMMITTED_THRESHOLD: usize = 10_000;
-
-impl IndexState {
-    fn new(analyzer: Analyzer, positions: Positions) -> anyhow::Result<Self> {
-        let tokenizer = analyzer.to_string();
-        let schema = build_schema(&tokenizer, positions);
-        let index = tantivy::Index::create_in_ram(schema.clone());
-        index
-            .tokenizers()
-            .register(&tokenizer, build_token_pipeline(analyzer)?);
-        let options = IndexWriterOptions::builder()
-            .num_worker_threads(perf::num_workers().into())
-            .build();
-        let writer = index
-            .writer_with_options(options)
-            .map_err(|e| anyhow!("fts: failed to create writer: {e}"))?;
-        let reader = index
-            .reader_builder()
-            .reload_policy(ReloadPolicy::Manual)
-            .try_into()
-            .map_err(|e| anyhow!("fts: failed to create reader: {e}"))?;
-        Ok(Self {
-            index,
-            writer: RwLock::new(Writer {
-                writer,
-                uncommitted_docs_in_progress_guards: Vec::new(),
-            }),
-            reader,
-            schema,
-        })
-    }
-}
+type FtsIndexState = IndexState<FtsBackend>;
 
 fn stop_words(language: Language) -> anyhow::Result<StopWordFilter> {
     StopWordFilter::new(language)
@@ -232,65 +179,6 @@ fn body_text_options(tokenizer: &str, positions: Positions) -> TextOptions {
     TextOptions::default().set_indexing_options(indexing)
 }
 
-fn build_schema(tokenizer: &str, positions: Positions) -> Schema {
-    let mut schema_builder = Schema::builder();
-    schema_builder.add_u64_field("primary_id", INDEXED | STORED);
-    schema_builder.add_text_field("body", body_text_options(tokenizer, positions));
-    schema_builder.build()
-}
-
-fn create_doc(schema: &Schema, primary_id: PrimaryId, document: &str) -> TantivyDocument {
-    let primary_id_field = schema.get_field("primary_id").unwrap();
-    let body_field = schema.get_field("body").unwrap();
-
-    let mut doc = TantivyDocument::new();
-    doc.add_u64(primary_id_field, u64::from(primary_id));
-    doc.add_text(body_field, document);
-    doc
-}
-
-fn commit(state: &IndexState, key: &IndexKey) {
-    let result = state
-        .writer
-        .write()
-        .unwrap()
-        .commit(|| state.reader.reload());
-    if let Err(err) = result {
-        error!("fts: failed to commit for {key}: {err}");
-    }
-}
-
-fn handle_add_document(
-    state: &IndexState,
-    primary_id: PrimaryId,
-    document: String,
-    in_progress: AsyncInProgress,
-) -> usize {
-    let doc = create_doc(&state.schema, primary_id, &document);
-    let mut writer = state.writer.write().unwrap();
-    match writer.add_document(doc, in_progress) {
-        Ok(pending) => pending,
-        Err(err) => {
-            error!("fts: failed to add document {primary_id:?}: {err}");
-            writer.uncommitted_docs()
-        }
-    }
-}
-
-fn create_term(schema: &Schema, primary_id: PrimaryId) -> tantivy::Term {
-    let primary_id_field = schema.get_field("primary_id").unwrap();
-    tantivy::Term::from_field_u64(primary_id_field, u64::from(primary_id))
-}
-
-fn handle_remove_document(
-    state: &IndexState,
-    primary_id: PrimaryId,
-    in_progress: AsyncInProgress,
-) -> usize {
-    let term = create_term(&state.schema, primary_id);
-    state.writer.write().unwrap().rm_document(term, in_progress)
-}
-
 fn make_query(
     index: &tantivy::Index,
     body_field: tantivy::schema::Field,
@@ -302,28 +190,17 @@ fn make_query(
         .map_err(|e| QueryError(format!("fts: failed to parse query: {e}")).into())
 }
 
-fn find_partition_id(
-    table: &impl TableSearch,
-    index_key: &IndexKey,
-) -> anyhow::Result<crate::table::PartitionId> {
-    let (partition_id, _) = table
-        .partition_id(index_key, None)
-        .ok_or_else(|| anyhow!("fts: partition id not found for index key {index_key:?}"))?;
-    Ok(partition_id)
-}
-
 fn handle_search(
-    state: &IndexState,
+    state: &FtsIndexState,
     table: &RwLock<impl TableSearch>,
     index_key: &IndexKey,
     query_str: &str,
     limit: Limit,
 ) -> FtsSearchR {
-    let body_field = state.schema.get_field("body").unwrap();
-    let primary_id_field = state.schema.get_field("primary_id").unwrap();
+    let body_field = state.schema().get_field(BODY_FIELD).unwrap();
 
-    let searcher = state.reader.searcher();
-    let query = make_query(&state.index, body_field, query_str)?;
+    let searcher = state.searcher();
+    let query = make_query(state.index(), body_field, query_str)?;
     let limit: usize = (*limit.as_ref()).into();
 
     let top_docs = searcher
@@ -331,18 +208,25 @@ fn handle_search(
         .map_err(|e| anyhow!("fts: search failed: {e}"))?;
 
     let table = table.read().unwrap();
-    let partition_id = find_partition_id(table.deref(), index_key)?;
+    let partition_id = find_partition_id::<FtsBackend>(table.deref(), index_key)?;
+
+    let primary_ids = searcher
+        .segment_readers()
+        .iter()
+        .map(|segment| {
+            segment
+                .fast_fields()
+                .u64(PRIMARY_ID_FIELD)
+                .map_err(|e| anyhow!("fts: failed to open the primary id column: {e}"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
 
     let (primary_keys, scores) = top_docs
         .into_iter()
         .map(|(score, doc_address)| {
-            let doc: TantivyDocument = searcher
-                .doc(doc_address)
-                .map_err(|e| anyhow!("fts: failed to retrieve doc: {e}"))?;
-            let raw_id = doc
-                .get_first(primary_id_field)
-                .and_then(|v| v.as_u64())
-                .ok_or_else(|| anyhow!("fts: missing primary_id in doc"))?;
+            let raw_id = primary_ids[doc_address.segment_ord as usize]
+                .first(doc_address.doc_id)
+                .ok_or_else(|| anyhow!("fts: missing primary_id in the column"))?;
             Ok((score, PrimaryId::from(raw_id)))
         })
         .collect::<anyhow::Result<Vec<_>>>()?
@@ -392,10 +276,10 @@ fn strip_negated_clauses(query: &dyn Query) -> anyhow::Result<Box<dyn Query>> {
     Ok(Box::new(BooleanQuery::new(clauses)))
 }
 
-fn handle_highlight(state: &IndexState, query_str: &str, documents: &[String]) -> FtsHighlightR {
-    let body_field = state.schema.get_field("body").unwrap();
-    let searcher = state.reader.searcher();
-    let query = make_query(&state.index, body_field, query_str)?;
+fn handle_highlight(state: &FtsIndexState, query_str: &str, documents: &[String]) -> FtsHighlightR {
+    let body_field = state.schema().get_field(BODY_FIELD).unwrap();
+    let searcher = state.searcher();
+    let query = make_query(state.index(), body_field, query_str)?;
     let query = strip_negated_clauses(query.as_ref())?;
 
     // The generator uses the live index to weight terms by document frequency,
@@ -417,8 +301,8 @@ fn handle_highlight(state: &IndexState, query_str: &str, documents: &[String]) -
         .collect())
 }
 
-fn handle_stats(state: &IndexState) -> FtsStatsR {
-    let searcher = state.reader.searcher();
+fn handle_stats(state: &FtsIndexState) -> FtsStatsR {
+    let searcher = state.searcher();
     let num_docs = searcher.num_docs();
     let segment_count = searcher.segment_readers().len();
     let size_bytes = searcher
@@ -433,55 +317,6 @@ fn handle_stats(state: &IndexState) -> FtsStatsR {
     })
 }
 
-fn get_or_create_state<T: TableSearch>(
-    states: &mut BTreeMap<IndexId, Arc<IndexState>>,
-    table: &RwLock<T>,
-    index: &FtsIndexConfiguration,
-) -> Option<Arc<IndexState>> {
-    let key = &index.key;
-    let index_id = table.read().unwrap().index_id(key)?;
-    if let Some(state) = states.get(&index_id) {
-        return Some(Arc::clone(state));
-    }
-    match IndexState::new(index.analyzer, index.positions) {
-        Ok(state) => {
-            let state = Arc::new(state);
-            states.insert(index_id, Arc::clone(&state));
-            Some(state)
-        }
-        Err(err) => {
-            error!("fts: failed to create index state for {key}: {err}");
-            None
-        }
-    }
-}
-
-fn get_state<T: TableSearch>(
-    states: &BTreeMap<IndexId, Arc<IndexState>>,
-    table: &RwLock<T>,
-    key: &IndexKey,
-) -> Option<Arc<IndexState>> {
-    let index_id = table.read().unwrap().index_id(key)?;
-    states.get(&index_id).cloned()
-}
-
-fn can_allocate_memory(
-    rx_allocate: &watch::Receiver<Allocate>,
-    allocate_prev: &mut Allocate,
-    key: &IndexKey,
-) -> bool {
-    let allocate = *rx_allocate.borrow();
-    if allocate == Allocate::Cannot {
-        if *allocate_prev == Allocate::Can {
-            error!("Unable to add document for index {key}: not enough memory");
-        }
-        *allocate_prev = allocate;
-        return false;
-    }
-    *allocate_prev = allocate;
-    true
-}
-
 pub(crate) fn new(
     index: FtsIndexConfiguration,
     table: Arc<RwLock<impl TableSearch + Send + Sync + 'static>>,
@@ -490,207 +325,91 @@ pub(crate) fn new(
     commit_interval: Duration,
     commit_threshold: usize,
 ) -> mpsc::Sender<FtsIndex> {
-    let (tx, mut rx) = mpsc::channel::<FtsIndex>(perf::channel_size().into());
-    tokio::spawn(async move {
-        let key = index.key.clone();
-        debug!("fts index actor starting for {key}");
-        let mut states: BTreeMap<IndexId, Arc<IndexState>> = BTreeMap::new();
+    let backend = FtsBackend {
+        analyzer: index.analyzer,
+        positions: index.positions,
+    };
+    spawn_actor(
+        index.key,
+        backend,
+        table,
+        worker,
+        memory,
+        commit_interval,
+        commit_threshold,
+    )
+}
 
-        let mut allocate_prev = Allocate::Can;
-        let allocate_rx = memory.subscribe_allocate().await;
+impl TantivyMessage for FtsMessage {
+    type Backend = FtsBackend;
 
-        let mut interval = tokio::time::interval(commit_interval);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-        loop {
-            tokio::select! {
-                msg = rx.recv() => {
-                    let Some(msg) = msg else {
-                        break;
-                    };
-                    match msg {
-                        FtsIndex::AddDocument {
-                            primary_id,
-                            document,
-                            in_progress,
-                        } => {
-                            let Some(state) = get_or_create_state(
-                                &mut states,
-                                table.as_ref(),
-                                &index,
-                            ) else {
-                                continue;
-                            };
-                            if !can_allocate_memory(&allocate_rx, &mut allocate_prev, &key) {
-                                continue;
-                            }
-                            let key = key.clone();
-                            worker
-                                .spawn_blocking(move || {
-                                    let pending = handle_add_document(
-                                        &state,
-                                        primary_id,
-                                        document,
-                                        in_progress,
-                                    );
-                                    if pending >= commit_threshold {
-                                        commit(&state, &key);
-                                    }
-                                })
-                                .await;
-                        }
-                        FtsIndex::RemoveDocument {
-                            primary_id,
-                            in_progress,
-                        } => {
-                            let Some(state) = get_or_create_state(
-                                &mut states,
-                                table.as_ref(),
-                                &index,
-                            ) else {
-                                continue;
-                            };
-                            let key = key.clone();
-                            worker
-                                .spawn_blocking(move || {
-                                    let pending =
-                                        handle_remove_document(&state, primary_id, in_progress);
-                                    if pending >= commit_threshold {
-                                        commit(&state, &key);
-                                    }
-                                })
-                                .await;
-                        }
-                        FtsIndex::Count { tx, index_key, .. } => {
-                            let result = get_state(&states, table.as_ref(), &index_key)
-                                .map(|s| s.reader.searcher().num_docs() as usize)
-                                .unwrap_or(0);
-                            _ = tx.send(Ok(result));
-                        }
-                        FtsIndex::Search {
-                            index_key,
-                            query,
-                            limit,
-                            tx,
-                        } => {
-                            let Some(state) = get_state(&states, table.as_ref(), &index_key) else {
-                                _ = tx.send(Ok((vec![], vec![])));
-                                continue;
-                            };
-                            let table = Arc::clone(&table);
-                            worker
-                                .spawn_blocking(move || {
-                                    let result = handle_search(
-                                        &state,
-                                        table.as_ref(),
-                                        &index_key,
-                                        &query,
-                                        limit,
-                                    );
-                                    _ = tx.send(result);
-                                })
-                                .await;
-                        }
-                        FtsIndex::Highlight {
-                            index_key,
-                            query,
-                            documents,
-                            tx,
-                        } => {
-                            let Some(state) = get_state(&states, table.as_ref(), &index_key)
-                            else {
-                                _ = tx.send(Err(anyhow!("fts: missing index {index_key}")));
-                                continue;
-                            };
-                            worker
-                                .spawn_blocking(move || {
-                                    let result = handle_highlight(&state, &query, &documents);
-                                    _ = tx.send(result);
-                                })
-                                .await;
-                        }
-                        FtsIndex::Stats { index_key, tx } => {
-                            let Some(state) = get_state(&states, table.as_ref(), &index_key)
-                            else {
-                                _ = tx.send(Ok(FtsStats::default()));
-                                continue;
-                            };
-                            worker
-                                .spawn_blocking(move || {
-                                    let result = handle_stats(&state);
-                                    _ = tx.send(result);
-                                })
-                                .await;
-                        }
-                    }
-                }
-                _ = interval.tick() => {
-                    for state in states.values() {
-                        if !state.writer.read().unwrap().has_uncommitted_docs() {
-                            continue;
-                        }
-                        let state = Arc::clone(state);
-                        let key = key.clone();
-                        worker.spawn_blocking(move || commit(&state, &key)).await;
-                    }
-                }
+    async fn handle<T: TableSearch + Send + Sync + 'static>(
+        self,
+        indexer: &mut TantivyIndexer<FtsBackend, T>,
+    ) {
+        match self {
+            FtsMessage::Search {
+                index_key,
+                query,
+                limit,
+                tx,
+            } => {
+                let table = Arc::clone(indexer.table());
+                indexer
+                    .spawn_query(
+                        index_key,
+                        tx,
+                        |_| Ok((vec![], vec![])),
+                        move |state, index_key| {
+                            handle_search(state, table.as_ref(), index_key, &query, limit)
+                        },
+                    )
+                    .await;
+            }
+            FtsMessage::Highlight {
+                index_key,
+                query,
+                documents,
+                tx,
+            } => {
+                indexer
+                    .spawn_query(
+                        index_key,
+                        tx,
+                        |index_key| Err(anyhow!("fts: missing index {index_key}")),
+                        move |state, _| handle_highlight(state, &query, &documents),
+                    )
+                    .await;
+            }
+            FtsMessage::Stats { index_key, tx } => {
+                indexer
+                    .spawn_query(
+                        index_key,
+                        tx,
+                        |_| Ok(FtsStats::default()),
+                        |state, _| handle_stats(state),
+                    )
+                    .await;
             }
         }
-        debug!("fts index actor finished for {key}");
-    });
-    tx
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::AsyncInProgress;
-    use crate::IndexKey;
-    use crate::PrimaryKey;
-    use crate::table::IndexIdGenerator;
+    use crate::memory::Allocate;
     use crate::table::MockTableSearch;
-    use crate::table::PartitionId;
+    use crate::tantivy_common::TantivyIndexExt;
+    use crate::tantivy_common::test_support::make_index_key;
+    use crate::tantivy_common::test_support::make_memory_actor;
+    use crate::tantivy_common::test_support::make_table_with_keys;
     use crate::worker;
     use rstest::rstest;
-    use scylla::value::CqlValue;
     use std::time::Duration;
 
     use super::super::actor::FtsIndexExt;
-
-    fn make_table_with_keys() -> Arc<RwLock<MockTableSearch>> {
-        let index_id = IndexIdGenerator::new().next(true).unwrap();
-        let partition_id = PartitionId::global(index_id);
-        let mut mock = MockTableSearch::new();
-        mock.expect_index_id()
-            .returning(move |_index_key| Some(index_id));
-        mock.expect_partition_id()
-            .returning(move |_index_key, _restrictions| Some((partition_id, None)));
-        mock.expect_primary_key()
-            .returning(|_partition_id, primary_id| {
-                let id_val = u64::from(primary_id);
-                Some(PrimaryKey::from(vec![CqlValue::BigInt(id_val as i64)]))
-            });
-        Arc::new(RwLock::new(mock))
-    }
-
-    fn make_index_key() -> IndexKey {
-        IndexKey::new(&"ks".into(), &"idx".into())
-    }
-
-    fn make_memory_actor() -> mpsc::Sender<Memory> {
-        let (tx, mut rx) = mpsc::channel::<Memory>(1);
-        tokio::spawn(async move {
-            let (watch_tx, _) = watch::channel(Allocate::Can);
-            while let Some(msg) = rx.recv().await {
-                match msg {
-                    Memory::SubscribeAllocate { tx } => {
-                        let _ = tx.send(watch_tx.subscribe());
-                    }
-                }
-            }
-        });
-        tx
-    }
 
     const TEST_COMMIT_INTERVAL: Duration = Duration::from_millis(50);
     const TEST_COMMIT_THRESHOLD: usize = 3;
@@ -712,7 +431,7 @@ mod tests {
         analyzer: Analyzer,
         positions: Positions,
     ) -> mpsc::Sender<FtsIndex> {
-        let memory = make_memory_actor();
+        let memory = make_memory_actor(Allocate::Can);
         new(
             FtsIndexConfiguration {
                 analyzer,
@@ -747,21 +466,6 @@ mod tests {
             .await
             .unwrap();
         rx.recv().await;
-    }
-
-    fn make_memory_actor_cannot_allocate() -> mpsc::Sender<Memory> {
-        let (tx, mut rx) = mpsc::channel::<Memory>(1);
-        tokio::spawn(async move {
-            let (watch_tx, _) = watch::channel(Allocate::Cannot);
-            while let Some(msg) = rx.recv().await {
-                match msg {
-                    Memory::SubscribeAllocate { tx } => {
-                        let _ = tx.send(watch_tx.subscribe());
-                    }
-                }
-            }
-        });
-        tx
     }
 
     fn tokenize_with(analyzer: Analyzer, text: &str) -> Vec<String> {
@@ -949,7 +653,7 @@ mod tests {
     #[tokio::test]
     async fn add_document_rejected_when_memory_exhausted() {
         let table = make_table_with_keys();
-        let memory = make_memory_actor_cannot_allocate();
+        let memory = make_memory_actor(Allocate::Cannot);
         let sender = new(
             make_configuration(),
             table,
@@ -971,7 +675,7 @@ mod tests {
     #[tokio::test]
     async fn threshold_forces_commit_before_interval() {
         let table = make_table_with_keys();
-        let memory = make_memory_actor();
+        let memory = make_memory_actor(Allocate::Can);
         let sender = new(
             make_configuration(),
             table,

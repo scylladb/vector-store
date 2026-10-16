@@ -5,6 +5,9 @@
 
 mod actor;
 mod factory;
+mod like_pattern;
+mod like_plan;
+mod like_search;
 mod tantivy;
 
 use crate::memory::Memory;
