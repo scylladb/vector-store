@@ -1,0 +1,10 @@
+ARG RUST_VERSION=0
+
+FROM rust:$RUST_VERSION-bookworm
+
+RUN true \
+    && apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends clang-19 \
+    && update-alternatives --install /usr/bin/cc  cc  /usr/bin/clang-19 100 \
+    && update-alternatives --install /usr/bin/c++ c++ /usr/bin/clang++-19 100 \
+    && rm -rf /var/lib/apt/lists/*
