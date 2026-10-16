@@ -46,6 +46,8 @@ pub(crate) trait WorkerExt {
     async fn spawn_async_blocking<Fut>(&self, f: impl FnOnce() -> Fut + Send + 'static)
     where
         Fut: Future<Output = ()> + Send + 'static;
+    /// Runs a blocking task and returns its result once it has finished.
+    async fn run_blocking<T: Send + 'static>(&self, f: impl FnOnce() -> T + Send + 'static) -> T;
 }
 
 impl WorkerExt for Sender<Worker> {
@@ -85,6 +87,14 @@ impl WorkerExt for Sender<Worker> {
         })
         .await
         .expect("WorkerExt::spawn_async_blocking: internal actor should receive request");
+    }
+
+    #[hotpath::measure]
+    async fn run_blocking<T: Send + 'static>(&self, f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = oneshot::channel();
+        self.spawn_blocking(move || _ = tx.send(f())).await;
+        rx.await
+            .expect("WorkerExt::run_blocking: internal actor should run the task")
     }
 }
 
