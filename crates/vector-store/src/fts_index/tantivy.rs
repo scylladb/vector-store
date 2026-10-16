@@ -160,6 +160,7 @@ struct ReloadState {
     // Committed documents by commit opstamp, held until a reload makes them searchable.
     unsearchable_docs: BTreeMap<Opstamp, Vec<AsyncInProgress>>,
     reloaded_opstamp: Opstamp,
+    reload_failed: bool,
 }
 
 /// A thin wrapper over the Tantivy reader that reloads it whenever the index metadata changes and
@@ -167,6 +168,8 @@ struct ReloadState {
 struct Reader {
     // Shared with the reload task.
     inner: Arc<ReaderInner>,
+    // Lets the tick request a reload through the same channel as the watch callback.
+    reload_tx: watch::Sender<()>,
     _meta_watch: WatchHandle,
 }
 
@@ -186,15 +189,19 @@ impl ReaderInner {
             self.reader.reload()?;
             Ok(meta.opstamp)
         });
+        let mut reload_state = self.reload_state.lock().unwrap();
         match reloaded {
             Ok(opstamp) => {
-                let mut reload_state = self.reload_state.lock().unwrap();
+                reload_state.reload_failed = false;
                 reload_state.reloaded_opstamp = opstamp;
                 reload_state
                     .unsearchable_docs
                     .retain(|committed, _| *committed > opstamp);
             }
-            Err(err) => error!("fts: failed to reload reader for {}: {err}", self.key),
+            Err(err) => {
+                reload_state.reload_failed = true;
+                error!("fts: failed to reload reader for {}: {err}", self.key);
+            }
         }
     }
 }
@@ -217,7 +224,10 @@ impl Reader {
             reload_state: Mutex::new(ReloadState::default()),
         });
         let (reload_tx, mut reload_rx) = watch::channel(());
-        let callback = move || _ = reload_tx.send(());
+        let callback = {
+            let reload_tx = reload_tx.clone();
+            move || _ = reload_tx.send(())
+        };
         let meta_watch = index
             .directory()
             .watch(WatchCallback::new(callback))
@@ -226,7 +236,8 @@ impl Reader {
             let inner = Arc::clone(&inner);
             async move {
                 // The reloads run one at a time, so a reload never stores an older searcher or
-                // opstamp after a newer one. Ends when the watch callback is dropped.
+                // opstamp after a newer one. Ends when the reader and its watch callback are
+                // dropped.
                 while reload_rx.changed().await.is_ok() {
                     let inner = Arc::clone(&inner);
                     worker.run_blocking(move || inner.reload()).await;
@@ -235,12 +246,23 @@ impl Reader {
         });
         Ok(Self {
             inner,
+            reload_tx,
             _meta_watch: meta_watch,
         })
     }
 
     fn searcher(&self) -> Searcher {
         self.inner.reader.searcher()
+    }
+
+    fn request_reload(&self) {
+        _ = self.reload_tx.send(());
+    }
+
+    /// Whether committed documents wait for a reload or the last reload failed.
+    fn needs_reload(&self) -> bool {
+        let reload_state = self.inner.reload_state.lock().unwrap();
+        reload_state.reload_failed || !reload_state.unsearchable_docs.is_empty()
     }
 
     /// Holds the guards until a reload makes its documents searchable.
@@ -742,12 +764,13 @@ pub(crate) fn new(
                 }
                 _ = interval.tick() => {
                     for state in states.values() {
-                        if !state.writer.read().unwrap().has_uncommitted_docs() {
-                            continue;
+                        if state.writer.read().unwrap().has_uncommitted_docs() {
+                            let state = Arc::clone(state);
+                            let key = key.clone();
+                            worker.spawn_blocking(move || commit(&state, &key)).await;
+                        } else if state.reader.needs_reload() {
+                            state.reader.request_reload();
                         }
-                        let state = Arc::clone(state);
-                        let key = key.clone();
-                        worker.spawn_blocking(move || commit(&state, &key)).await;
                     }
                 }
             }
