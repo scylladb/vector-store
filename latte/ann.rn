@@ -8,19 +8,19 @@
 //! and baseline comparison alongside QPS and latency; the dataset, k, dimension
 //! and index options are recorded as report metadata so a report is
 //! self-describing. For a recall/throughput-vs-index-size curve over nested
-//! subsets of a single upload, see `recall_buckets.rn`.
+//! subsets of a single upload, see `ann_buckets.rn`.
 //!
 //! Note: string `-P` values are parsed as expressions, so quote paths —
 //! `-P 'vector_data_dir="/abs/dir/"'`.
-//!   latte schema             latte/vector-search/recall.rn <node>
-//!   latte run -f load        latte/vector-search/recall.rn <node> -d <dataset_size> \
+//!   latte schema             latte/ann.rn <node>
+//!   latte run -f load        latte/ann.rn <node> -d <dataset_size> \
 //!       -P load_data=true -P 'vector_data_dir="<dir>/"' --threads <cores> \
 //!       --concurrency 64
-//!   latte run -f build_index latte/vector-search/recall.rn <node> -d 1 -P build_index=true
-//!   latte run -f search      latte/vector-search/recall.rn <node> -d 60s --concurrency 32 \
+//!   latte run -f build_index latte/ann.rn <node> -d 1 -P build_index=true
+//!   latte run -f search      latte/ann.rn <node> -d 60s --concurrency 32 \
 //!       -P 'vector_data_dir="<dir>/"' --generate-report -o report.json
 //!
-//! Datasets are plain text (default; see `text_dataset.rn`) or big-ann
+//! Datasets are plain text (default; see `common/text_dataset.rn`) or big-ann
 //! fbin/ibin: pass `-P 'dataset_format="fbin"'` and point the file params at
 //! the binary files.
 //!
@@ -41,9 +41,14 @@
 
 use latte::*;
 
-mod fbin_dataset;
-mod text_dataset;
-mod metrics;
+mod common {
+    pub mod ann_metrics;
+    pub mod fbin_dataset;
+    pub mod text_dataset;
+}
+use common::ann_metrics;
+use common::fbin_dataset;
+use common::text_dataset;
 
 // Schema / index
 const KEYSPACE = latte::param!("keyspace", "vector_bench");
@@ -62,8 +67,8 @@ const INDEX_BEFORE_LOAD = latte::param!("index_before_load", false);
 // Search
 const ANN_LIMIT = latte::param!("ann_limit", 10);   // k for recall@k
 
-// `dataset_format` selects the loader: "text" (text_dataset.rn), "fbin"
-// (fbin_dataset.rn), or "fbin_packed" (base vectors bound as raw bytes rather
+// `dataset_format` selects the loader: "text" (common/text_dataset.rn), "fbin"
+// (common/fbin_dataset.rn), or "fbin_packed" (base vectors bound as raw bytes rather
 // than converted to values); file params must match the format.
 const DATASET_FORMAT = latte::param!("dataset_format", "text");
 const VECTOR_DATA_DIR = latte::param!("vector_data_dir", "./");
@@ -244,5 +249,5 @@ pub async fn search(db, i) {
         returned_ids.push(row.id);
     }
 
-    db.record_metric("recall", metrics::recall_at_k(returned_ids, ground_truth_ids, ANN_LIMIT));
+    db.record_metric("recall", ann_metrics::recall_at_k(returned_ids, ground_truth_ids, ANN_LIMIT));
 }

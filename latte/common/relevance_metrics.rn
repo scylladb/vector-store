@@ -1,9 +1,10 @@
-// IR accuracy metrics for full-text search (BM25) workloads.
+// Relevance metrics for search workloads: results scored against relevance
+// judgments (qrels), as information-retrieval evaluation does.
 //
 // All metrics range from 0.0 (worst) to 1.0 (perfect). They compare what the
 // search returned against the ground-truth qrels (graded relevance judgments).
 //
-// Example from testdata/:
+// Example from full-text-search/testdata/:
 //   Query "where is the great barrier reef located" (q_008)
 //   qrels: doc_008 (grade 3), doc_001 (grade 1)
 //   BM25 returns: [doc_008, doc_001, ...] at k=100

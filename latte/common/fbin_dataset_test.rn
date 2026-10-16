@@ -1,13 +1,14 @@
 //! Smoke test for the dataset loaders. Needs any CQL endpoint (plain ScyllaDB
-//! is enough, no vector-store) and the fixture files in testdata/ (regenerate
-//! with testdata/gen_fbin_testdata.py):
+//! is enough, no vector-store) and the fixture files in
+//! latte/vector-search/testdata/ (regenerate with gen_fbin_testdata.py there).
+//! From the repository root:
 //!
-//!   latte run -f smoke fbin_dataset_test.rn <node> -d 1
+//!   latte run -f smoke latte/common/fbin_dataset_test.rn <node> -d 1
 //!
 //! The loaders leave rows on disk and seek to one per cycle, so a mistake in
 //! the offsets reads the wrong bytes and quietly benchmarks the wrong data.
 //! This checks the readers against the fixtures' known values and, for text,
-//! against the eager loader that `recall_buckets.rn` still uses. `data.txt`
+//! against the eager loader that `ann_buckets.rn` still uses. `data.txt`
 //! carries the line layouts that shift byte offsets: a blank line, and a
 //! final line with no terminator.
 
@@ -17,7 +18,7 @@ use latte::*;
 mod fbin_dataset;
 mod text_dataset;
 
-const DATA_DIR = latte::param!("data_dir", "testdata/");
+const DATA_DIR = latte::param!("data_dir", "latte/vector-search/testdata/");
 
 fn expect_err(result, expected, label) {
     match result {

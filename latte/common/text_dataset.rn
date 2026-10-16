@@ -119,7 +119,7 @@ fn parse_base_line(line, path, idx) {
 /// Blank lines are skipped. A line with no separator is an error, since
 /// skipping it would quietly shrink the row count; anything else malformed
 /// fails when the row is read, naming it. The bucketed line format is not
-/// supported - `recall_buckets.rn` uses `load_base_vectors`.
+/// supported - `ann_buckets.rn` uses `load_base_vectors`.
 pub fn index_base_vectors(path) {
     open_or_fail(path)?;
     // Untrimmed and keeping empty fields, so the parts reconstruct the line

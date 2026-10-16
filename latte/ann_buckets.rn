@@ -7,30 +7,30 @@
 //! curve against index size with no re-upload — querying a stratum searches only
 //! its own smaller index. Bucket assignments and the matching per-bucket ground
 //! truth are precomputed offline (bucketed dataset format documented in
-//! `text_dataset.rn`), so the script only reads them. Recall reaches the report
-//! through the custom-metrics channel, as in `recall.rn`.
+//! `common/text_dataset.rn`), so the script only reads them. Recall reaches the report
+//! through the custom-metrics channel, as in `ann.rn`.
 //!
 //! Note: string `-P` values are parsed as expressions, so quote paths —
 //! `-P 'vector_data_dir="/abs/dir/"'`.
 //!   # one upload (table is PK((bucket, id)); index built AFTER load):
-//!   latte schema             latte/vector-search/recall_buckets.rn <node>
-//!   latte run -f load        latte/vector-search/recall_buckets.rn <node> -d <dataset_size> \
+//!   latte schema             latte/ann_buckets.rn <node>
+//!   latte run -f load        latte/ann_buckets.rn <node> -d <dataset_size> \
 //!       -P load_data=true -P 'vector_data_dir="<dir>/"' --threads 1 --concurrency 64
-//!         (--threads 1 on purpose: unlike recall.rn, this script reads its
+//!         (--threads 1 on purpose: unlike ann.rn, this script reads its
 //!          bucket into ctx.data, which latte copies into every worker thread)
 //!   # full-dataset point — build the global index, then search it (default bucket=-1):
-//!   latte run -f build_index latte/vector-search/recall_buckets.rn <node> -d 1 -P build_index=true
-//!   latte run -f search      latte/vector-search/recall_buckets.rn <node> -d 60s --concurrency 32 \
+//!   latte run -f build_index latte/ann_buckets.rn <node> -d 1 -P build_index=true
+//!   latte run -f search      latte/ann_buckets.rn <node> -d 60s --concurrency 32 \
 //!       -P 'vector_data_dir="<dir>/"' --generate-report -o full.json
 //!   # per-stratum sweep off the SAME data: drop the global index, build a local
 //!   # per-bucket index, then query strata (defaults: vector_bench.vectors_bucketed_ann_idx):
 //!   cqlsh -e "DROP INDEX vector_bench.vectors_bucketed_ann_idx"
-//!   latte run -f build_index latte/vector-search/recall_buckets.rn <node> -d 9 \
+//!   latte run -f build_index latte/ann_buckets.rn <node> -d 9 \
 //!       -P build_index=true -P local_index=true
-//!   latte run -f search      latte/vector-search/recall_buckets.rn <node> -d 30s --concurrency 32 -P bucket=0 \
+//!   latte run -f search      latte/ann_buckets.rn <node> -d 30s --concurrency 32 -P bucket=0 \
 //!       -P 'vector_data_dir="<dir>/"' --generate-report -o bucket0.json
 //!
-//! Index build timing works as in `recall.rn`: by default the index is built
+//! Index build timing works as in `ann.rn`: by default the index is built
 //! after load in the `build_index` phase (which blocks until it is ready), so
 //! search measures a complete index; `-P index_before_load=true` builds it in
 //! `schema` instead. What is bucket-specific is that global vs. local is an
@@ -39,8 +39,12 @@
 
 use latte::*;
 
-mod text_dataset;
-mod metrics;
+mod common {
+    pub mod ann_metrics;
+    pub mod text_dataset;
+}
+use common::ann_metrics;
+use common::text_dataset;
 
 // Schema / index
 const KEYSPACE = latte::param!("keyspace", "vector_bench");
@@ -214,5 +218,5 @@ pub async fn search(db, i) {
         returned_ids.push(row.id);
     }
 
-    db.record_metric("recall", metrics::recall_at_k(returned_ids, ground_truth_ids, ANN_LIMIT));
+    db.record_metric("recall", ann_metrics::recall_at_k(returned_ids, ground_truth_ids, ANN_LIMIT));
 }
