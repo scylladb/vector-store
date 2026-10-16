@@ -880,6 +880,7 @@ impl DbCustomIndex {
 pub struct DbUnsupportedIndex {
     pub keyspace: KeyspaceName,
     pub index: IndexName,
+    pub kind: DbIndexKind,
     pub reason: String,
 }
 

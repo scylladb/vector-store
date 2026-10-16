@@ -102,7 +102,7 @@ pub(crate) async fn new(
                         };
 
                         let new_indexes = filter_disabled_index_kinds(new_indexes, fulltext_indexes);
-                        let unsupported = unsupported_index_reasons(unsupported);
+                        let unsupported = unsupported_index_reasons(unsupported, fulltext_indexes);
 
                         if alter_index_simulator {
                             node_state.send_event(Event::IndexesDiscovered(
@@ -378,9 +378,13 @@ fn filter_disabled_index_kinds(
         .collect()
 }
 
-fn unsupported_index_reasons(unsupported: Vec<DbUnsupportedIndex>) -> HashMap<IndexKey, String> {
+fn unsupported_index_reasons(
+    unsupported: Vec<DbUnsupportedIndex>,
+    fulltext_indexes: bool,
+) -> HashMap<IndexKey, String> {
     unsupported
         .into_iter()
+        .filter(|idx| fulltext_indexes || idx.kind != DbIndexKind::FullTextSearch)
         .map(|idx| (idx.key(), idx.reason))
         .collect()
 }
@@ -1398,5 +1402,26 @@ mod tests {
                 .iter()
                 .all(|idx| matches!(idx.kind, IndexKind::Vs(_)))
         );
+    }
+
+    #[test]
+    fn unsupported_fts_indexes_are_filtered_out_when_disabled() {
+        let unsupported = |name: &str, kind| DbUnsupportedIndex {
+            keyspace: "ks".into(),
+            index: name.into(),
+            kind,
+            reason: "reason".to_string(),
+        };
+        let indexes = || {
+            vec![
+                unsupported("vs_idx", DbIndexKind::VectorSearch),
+                unsupported("fts_idx", DbIndexKind::FullTextSearch),
+            ]
+        };
+
+        assert_eq!(unsupported_index_reasons(indexes(), true).len(), 2);
+        let result = unsupported_index_reasons(indexes(), false);
+        assert_eq!(result.len(), 1);
+        assert!(result.contains_key(&IndexKey::new(&"ks".into(), &"vs_idx".into())));
     }
 }

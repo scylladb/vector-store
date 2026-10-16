@@ -813,6 +813,7 @@ impl<T: DbDriver> Statements<T> {
                                 return Some(Either::Right(DbUnsupportedIndex {
                                     keyspace: keyspace_name,
                                     index: index_name,
+                                    kind,
                                     reason: err.to_string(),
                                 }));
                             }
