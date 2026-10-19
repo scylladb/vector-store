@@ -56,7 +56,7 @@ humantime = "2.2.0"
 itertools = "0.14.0"
 linkme = "0.3.36"
 macros = { path = "crates/macros" }
-mimalloc = "0.1.48"
+mimalloc = { version = "0.1.48", features = ["override"] }
 mockall = "0.13.1"
 num-bigint = "0.4"
 rustls = "0.23"
