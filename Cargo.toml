@@ -88,9 +88,9 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 tracing-test = "0.2.5"
 usearch = "2.26.4"
-utoipa = { version = "5.3.1", features = ["axum_extras"] }
-utoipa-axum = "0.2.0"
-utoipa-swagger-ui = { version = "9.0.0", features = ["axum", "vendored"] }
+utoipa = { version = "6.0.0", features = ["axum_extras"] }
+utoipa-axum = "0.3.0"
+utoipa-swagger-ui = { version = "10.0.1", features = ["axum", "vendored"] }
 uuid = "1.16.0"
 vector-store = { path = "crates/vector-store" }
 secrecy = "0.10.3"
@@ -105,6 +105,14 @@ secrecy = "0.10.3"
 numkong = { git = "https://github.com/scylladb/NumKong.git", rev = "23067331805af83747a42aea8836a77e071ae294" }
 # Currently, axum-server-dual-protocol doesn't have a published version that supports axum 0.8, so we need to use the git version from the PR.
 axum-server-dual-protocol = { git = "https://github.com/vinchona/axum-server-dual-protocol", rev = "ca6db055254255b74238673ce4135698e347d71c" }
+# The zip that utoipa-swagger-ui unpacks the vendored Swagger UI with is covered by RUSTSEC-2026-0367,
+# -0368 and -0369: 3.0.0 behind release 9.0.2, and 8.6 behind 10.0.1, the latest release. The fix is
+# zip >= 9.0.0, which upstream took in juhaku/utoipa#1645 (2026-10-17) but has not released. utoipa and
+# utoipa-axum come from the same commit, so that one copy of utoipa is linked. Drop these three entries
+# once a utoipa-swagger-ui release depends on zip >= 9.
+utoipa = { git = "https://github.com/juhaku/utoipa", rev = "5aff30b375c0c72aeccfa8fa6100db8f2901b3ba" }
+utoipa-axum = { git = "https://github.com/juhaku/utoipa", rev = "5aff30b375c0c72aeccfa8fa6100db8f2901b3ba" }
+utoipa-swagger-ui = { git = "https://github.com/juhaku/utoipa", rev = "5aff30b375c0c72aeccfa8fa6100db8f2901b3ba" }
 
 [profile.dev]
 opt-level = 1
