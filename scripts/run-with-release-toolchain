@@ -1,23 +1,36 @@
 #!/bin/bash
 
-set -e
+set -eo pipefail
 
 repo=$(dirname "${BASH_SOURCE[0]}")
 repo=$(realpath $repo/..)
 
+cd $repo
+
 TARGETARCH="${TARGETARCH:-amd64}"
 
-rust_version=$(grep channel $repo/rust-toolchain.toml | cut -d '"' -f 2)
+rust_version=$(grep channel ./rust-toolchain.toml | cut -d '"' -f 2)
+toolchain_version=$(grep '^toolchain_version=' ./scripts/build-docker-toolchain | cut -d '=' -f 2)
 
-# rust:$rust_version-bookworm plus clang for arm64 (see the Dockerfile); cached after the first run
-image=vector-store-toolchain:$rust_version-$TARGETARCH
-docker build --quiet --platform linux/$TARGETARCH --build-arg RUST_VERSION=$rust_version \
-    --tag $image -f $repo/scripts/release-toolchain.Dockerfile $repo/scripts > /dev/null
+docker_tag=ghcr.io/scylladb/vector-store-toolchain:$toolchain_version-$rust_version-$TARGETARCH
+
+# In the local repo master must exist, in CI origin/master must exist.
+[[ -n $(git branch --list master) ]] && master_branch=master || master_branch=origin/master
+
+rust_master_version=$(git show $master_branch:rust-toolchain.toml | grep channel | cut -d '"' -f 2)
+toolchain_master_version=0
+if out=$(git show $master_branch:scripts/build-docker-toolchain) ; then
+    toolchain_master_version=$(echo "$out" | grep '^toolchain_version=' | cut -d '=' -f 2)
+fi
+
+if [[ $rust_version != $rust_master_version ]] || [[ $toolchain_version != $toolchain_master_version ]] ; then
+    ./scripts/build-docker-toolchain
+fi
 
 user_cargo_home=$CARGO_HOME
 [[ -z $user_cargo_home ]] && [[ -d "$HOME/.cargo" ]] && user_cargo_home="$HOME/.cargo"
 
-docker_cargo_home=$(docker run --rm $image sh -c 'echo $CARGO_HOME')
+docker_cargo_home=$(docker run --rm $docker_tag sh -c 'echo $CARGO_HOME')
 
 if [[ -n $user_cargo_home ]] ; then
     mkdir -p "$user_cargo_home/git" "$user_cargo_home/registry"
@@ -31,10 +44,10 @@ tmp_cargo_lock=$(mktemp /tmp/Cargo_lock.XXXXXX)
 tmp_rust_toolchain=$(mktemp /tmp/rust-toolchain.XXXXXX)
 trap "rm -f $tmp_cargo_toml $tmp_cargo_lock $tmp_rust_toolchain" EXIT
 
-cat $repo/Cargo.toml | sed -e "s/version = \"0.0.0-dev\"/version = \"$version\"/" > $tmp_cargo_toml
-cat $repo/Cargo.lock | sed -e "s/version = \"0.0.0-dev\"/version = \"$version\"/" > $tmp_cargo_lock
+cat ./Cargo.toml | sed -e "s/version = \"0.0.0-dev\"/version = \"$version\"/" > $tmp_cargo_toml
+cat ./Cargo.lock | sed -e "s/version = \"0.0.0-dev\"/version = \"$version\"/" > $tmp_cargo_lock
 
-grep -v components $repo/rust-toolchain.toml > $tmp_rust_toolchain
+grep -v components ./rust-toolchain.toml > $tmp_rust_toolchain
 
 docker run --rm \
     --platform linux/$TARGETARCH \
@@ -46,5 +59,5 @@ docker run --rm \
     -v $tmp_rust_toolchain:"$repo/rust-toolchain.toml" \
     $mount_cargo \
     -w "$repo" \
-    $image \
+    $docker_tag \
     "$@"

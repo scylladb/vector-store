@@ -1,0 +1,28 @@
+#!/bin/bash
+
+set -e
+
+repo=$(dirname "${BASH_SOURCE[0]}")
+repo=$(realpath $repo/..)
+
+cd $repo
+
+TARGETARCH="${TARGETARCH:-amd64}"
+
+# The toolchain version is used to differentiate between different toolchain
+# builds. It should be incremented whenever the toolchain build changes in a
+# way that would require rebuilding dependent images or Dockerfile changed.
+toolchain_version=1
+
+rust_version=$(grep channel ./rust-toolchain.toml | cut -d '"' -f 2)
+
+docker_tag=ghcr.io/scylladb/vector-store-toolchain:$toolchain_version-$rust_version-$TARGETARCH
+
+docker build \
+    --platform linux/$TARGETARCH \
+    --build-arg RUST_VERSION=$rust_version \
+    --label org.opencontainers.image.source=https://github.com/scylladb/vector-store \
+    --label org.opencontainers.image.revision=$(git rev-parse HEAD) \
+    --tag $docker_tag \
+    -f scripts/Dockerfile.toolchain \
+    .

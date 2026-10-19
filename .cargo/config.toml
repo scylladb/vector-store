@@ -9,8 +9,8 @@ openapi = "run --features dev-tools --bin generate-openapi -- api/openapi.json"
 # accumulation they cost 10% of the searches per second on Sapphire Rapids against the pre-NumKong
 # usearch, with f32 accumulation 4% (VECTOR-1054). numkong's aarch64 kernels need gcc >= 13 or
 # clang; the release toolchain image compiles them with clang
-# (scripts/release-toolchain.Dockerfile). Its SME kernels stay off: no machine we ship to has SME,
-# and clang's SME code needs compiler-rt (`__arm_get_current_vg`), which the gcc link does not
+# (scripts/Dockerfile.toolchain). Its SME kernels stay off: no machine we ship to has SME,
+# and clang's SME code needs compiler-rt (`__arm_get_current_vg`), which the libgcc link does not
 # provide. A CFLAGS_<target> or NK_TARGET_* variable set in the environment replaces the value here.
 [env]
 CFLAGS_aarch64_unknown_linux_gnu = "-DNK_ACCUMULATE_F32_IN_F64=0"
