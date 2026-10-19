@@ -925,10 +925,10 @@
           "filter": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/PostIndexAnnFilter"
               },
               {
-                "$ref": "#/components/schemas/PostIndexAnnFilter"
+                "type": "null"
               }
             ]
           },
