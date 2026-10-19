@@ -20,13 +20,12 @@ use tantivy::query::BoostQuery;
 use tantivy::query::Occur;
 use tantivy::query::Query;
 use tantivy::query::QueryParser;
+use tantivy::schema::FAST;
 use tantivy::schema::INDEXED;
 use tantivy::schema::IndexRecordOption;
-use tantivy::schema::STORED;
 use tantivy::schema::Schema;
 use tantivy::schema::TextFieldIndexing;
 use tantivy::schema::TextOptions;
-use tantivy::schema::Value;
 use tantivy::snippet::SnippetGenerator;
 use tantivy::tokenizer::Language;
 use tantivy::tokenizer::LowerCaser;
@@ -218,7 +217,7 @@ fn build_token_pipeline(analyzer: Analyzer) -> anyhow::Result<TextAnalyzer> {
         .build())
 }
 
-fn body_text_options(tokenizer: &str, positions: Positions) -> TextOptions {
+fn text_options(tokenizer: &str, positions: Positions) -> TextOptions {
     // Positions are what phrase queries match on.
     // Dropping them makes the index smaller at the cost of rejecting phrase queries against it.
     let index_option = if *positions.as_ref() {
@@ -234,18 +233,18 @@ fn body_text_options(tokenizer: &str, positions: Positions) -> TextOptions {
 
 fn build_schema(tokenizer: &str, positions: Positions) -> Schema {
     let mut schema_builder = Schema::builder();
-    schema_builder.add_u64_field("primary_id", INDEXED | STORED);
-    schema_builder.add_text_field("body", body_text_options(tokenizer, positions));
+    schema_builder.add_u64_field("primary_id", INDEXED | FAST);
+    schema_builder.add_text_field("text", text_options(tokenizer, positions));
     schema_builder.build()
 }
 
 fn create_doc(schema: &Schema, primary_id: PrimaryId, document: &str) -> TantivyDocument {
     let primary_id_field = schema.get_field("primary_id").unwrap();
-    let body_field = schema.get_field("body").unwrap();
+    let text_field = schema.get_field("text").unwrap();
 
     let mut doc = TantivyDocument::new();
     doc.add_u64(primary_id_field, u64::from(primary_id));
-    doc.add_text(body_field, document);
+    doc.add_text(text_field, document);
     doc
 }
 
@@ -293,10 +292,10 @@ fn handle_remove_document(
 
 fn make_query(
     index: &tantivy::Index,
-    body_field: tantivy::schema::Field,
+    text_field: tantivy::schema::Field,
     query_str: &str,
 ) -> anyhow::Result<Box<dyn tantivy::query::Query>> {
-    let query_parser = QueryParser::for_index(index, vec![body_field]);
+    let query_parser = QueryParser::for_index(index, vec![text_field]);
     query_parser
         .parse_query(query_str)
         .map_err(|e| QueryError(format!("fts: failed to parse query: {e}")).into())
@@ -319,11 +318,10 @@ fn handle_search(
     query_str: &str,
     limit: Limit,
 ) -> FtsSearchR {
-    let body_field = state.schema.get_field("body").unwrap();
-    let primary_id_field = state.schema.get_field("primary_id").unwrap();
+    let text_field = state.schema.get_field("text").unwrap();
 
     let searcher = state.reader.searcher();
-    let query = make_query(&state.index, body_field, query_str)?;
+    let query = make_query(&state.index, text_field, query_str)?;
     let limit: usize = (*limit.as_ref()).into();
 
     let top_docs = searcher
@@ -336,13 +334,13 @@ fn handle_search(
     let (primary_keys, scores) = top_docs
         .into_iter()
         .map(|(score, doc_address)| {
-            let doc: TantivyDocument = searcher
-                .doc(doc_address)
-                .map_err(|e| anyhow!("fts: failed to retrieve doc: {e}"))?;
-            let raw_id = doc
-                .get_first(primary_id_field)
-                .and_then(|v| v.as_u64())
-                .ok_or_else(|| anyhow!("fts: missing primary_id in doc"))?;
+            let raw_id = searcher
+                .segment_reader(doc_address.segment_ord)
+                .fast_fields()
+                .u64("primary_id")
+                .map_err(|e| anyhow!("fts: failed to open the primary id column: {e}"))?
+                .first(doc_address.doc_id)
+                .ok_or_else(|| anyhow!("fts: missing primary_id in the column"))?;
             Ok((score, PrimaryId::from(raw_id)))
         })
         .collect::<anyhow::Result<Vec<_>>>()?
@@ -393,14 +391,14 @@ fn strip_negated_clauses(query: &dyn Query) -> anyhow::Result<Box<dyn Query>> {
 }
 
 fn handle_highlight(state: &IndexState, query_str: &str, documents: &[String]) -> FtsHighlightR {
-    let body_field = state.schema.get_field("body").unwrap();
+    let text_field = state.schema.get_field("text").unwrap();
     let searcher = state.reader.searcher();
-    let query = make_query(&state.index, body_field, query_str)?;
+    let query = make_query(&state.index, text_field, query_str)?;
     let query = strip_negated_clauses(query.as_ref())?;
 
     // The generator uses the live index to weight terms by document frequency,
     // prioritizing rarer indexed terms when picking which fragment of a long text to show.
-    let mut generator = SnippetGenerator::create(&searcher, query.as_ref(), body_field)
+    let mut generator = SnippetGenerator::create(&searcher, query.as_ref(), text_field)
         .map_err(|e| anyhow!("fts: failed to create snippet generator: {e}"))?;
     generator.set_max_num_chars(HIGHLIGHT_MAX_NUM_CHARS);
 
