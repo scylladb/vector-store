@@ -74,6 +74,28 @@ enum EmbeddingColumnError {
     UnsupportedType(ColumnType<'static>),
     #[error("invalid Alternator embedding: {0:#}")]
     Alternator(anyhow::Error),
+    #[error("a non-NULL embedding column has no value")]
+    MissingValue,
+    #[error("invalid CQL vector encoding: {got} bytes for a vector<float, {dimensions}>, expected {}", *dimensions as usize * size_of::<f32>())]
+    WrongByteLength { got: usize, dimensions: u16 },
+}
+
+fn parse_cql_vector(bytes: &[u8], dimensions: u16) -> Result<Vec<f32>, EmbeddingColumnError> {
+    let chunks = bytes.chunks_exact(size_of::<f32>());
+
+    if chunks.len() != dimensions as usize || !chunks.remainder().is_empty() {
+        return Err(EmbeddingColumnError::WrongByteLength {
+            got: bytes.len(),
+            dimensions,
+        });
+    }
+
+    Ok(chunks
+        .map(|chunk| {
+            let bytes = chunk.try_into().expect("chunks_exact yields 4 bytes");
+            f32::from_be_bytes(bytes)
+        })
+        .collect())
 }
 
 /// Deserializes a [`Vector`] straight out of the frame, accepting both
@@ -96,7 +118,14 @@ impl<'frame, 'metadata> DeserializeValue<'frame, 'metadata> for Vector {
         v: Option<FrameSlice<'frame>>,
     ) -> Result<Self, DeserializationError> {
         match typ {
-            ColumnType::Vector { .. } => <Vec<f32>>::deserialize(typ, v).map(Self::from),
+            ColumnType::Vector { dimensions, .. } => {
+                let bytes = v
+                    .ok_or_else(|| DeserializationError::new(EmbeddingColumnError::MissingValue))?
+                    .as_slice();
+                parse_cql_vector(bytes, *dimensions)
+                    .map(Self::from)
+                    .map_err(DeserializationError::new)
+            }
             // Type-checked above
             _ => {
                 let bytes = <&'frame [u8]>::deserialize(typ, v)?;
