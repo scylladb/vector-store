@@ -71,7 +71,11 @@ pub const DEFAULT_DB_PASSWORD: &str = "vector_store_password";
 
 /// Fine-grained indexing permissions granted to `DEFAULT_DB_USER`, mirroring
 /// the reduced-privilege role used in production deployments rather than full `SELECT` access.
-const DEFAULT_ROLE_PERMISSIONS: &[&str] = &["VECTOR_SEARCH_INDEXING", "TEXT_SEARCH_INDEXING"];
+const DEFAULT_ROLE_PERMISSIONS: &[&str] = &[
+    "VECTOR_SEARCH_INDEXING",
+    "TEXT_SEARCH_INDEXING",
+    "PATTERN_SEARCH_INDEXING",
+];
 
 pub(crate) static SUPERUSER_NAME: LazyLock<String> =
     LazyLock::new(|| Uuid::new_v4().simple().to_string());
