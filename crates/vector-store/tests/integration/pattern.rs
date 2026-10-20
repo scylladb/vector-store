@@ -12,6 +12,7 @@ use crate::wait_for;
 use httpapi::IndexOptions;
 use httpapi::IndexStatus;
 use httpapi::PatternIndexOptions;
+use httpapi::PostIndexLikeResponse;
 use httpclient::HttpClient;
 use reqwest::StatusCode;
 use scylla::cluster::metadata::NativeType;
@@ -234,7 +235,7 @@ async fn pattern_index_returns_proper_count() {
 }
 
 #[tokio::test]
-async fn pattern_like_search_returns_error() {
+async fn pattern_like_search_returns_matching_keys() {
     crate::enable_tracing();
 
     let (client, keyspace_name, index_name, _db, _hold) = setup_pattern_and_wait(
@@ -255,5 +256,7 @@ async fn pattern_like_search_returns_error() {
         )
         .await;
 
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.status(), StatusCode::OK);
+    let response: PostIndexLikeResponse = response.json().await.unwrap();
+    assert_eq!(response.primary_keys.get(&"pk".into()).unwrap(), &[1]);
 }
