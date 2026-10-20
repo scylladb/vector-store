@@ -1334,7 +1334,7 @@ If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
         ),
         (
             status = 400,
-            description = "Bad request. Possible causes: malformed input, invalid pattern, or missing required fields.",
+            description = "Bad request. Possible causes: malformed input, a non-empty pattern made only of '%' and '_', or missing required fields.",
             content_type = "application/json",
             body = ErrorMessage
         ),
