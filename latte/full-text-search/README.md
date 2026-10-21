@@ -153,9 +153,79 @@ available when measuring write throughput rather than loading the corpus once.
 - `custom_metrics.indexing_throughput_docs_per_sec.distribution.mean`, when
   `document_count` is greater than zero
 
+## Hybrid search
+
+`hybrid.rn` benchmarks a table with both a vector index and a full-text index,
+queried by `RRF(ANN(..), BM25(..))`; the SEP target is a hybrid p99 under
+50 ms on a single coordinator. Each leg alone is measured by `fts.rn` and
+`ann.rn`.
+
+The dataset is the full-text corpus above plus an embedding per document and
+per query, in the big-ann fbin format:
+
+| File | Content |
+|------|---------|
+| `documents.fbin` | record `i` is the embedding of line `i` of `documents.tsv` |
+| `queries_<set>.fbin` | record `i` is the embedding of line `i` of `queries_<set>.tsv` |
+
+`prepare` fails when a TSV and its fbin disagree on the count, or when the
+`documents.fbin` dimension differs from `dimension`. The bundled `testdata/`
+embeddings are random (`gen_hybrid_testdata.py`), so they exercise the
+workload and not the ranking. Accuracy metrics are therefore off by default
+(`compute_accuracy=false`); with real embeddings, turn them on to score the
+fused ranking against the same qrels as `fts.rn`.
+
+```sh
+WORKLOAD=latte/hybrid.rn
+DIM=4   # the fbin dimension
+
+latte schema "$WORKLOAD" "$NODE" -P schema_cleanup=true
+latte schema "$WORKLOAD" "$NODE" -P dimension=$DIM
+latte load "$WORKLOAD" "$NODE" \
+    -P "fts_data_dir=\"$DATA_DIR\"" -P dimension=$DIM \
+    --threads 4 --concurrency 64
+latte run -f build_index "$WORKLOAD" "$NODE" -d 1 -P dimension=$DIM
+latte run -f search "$WORKLOAD" "$NODE" -d 60s \
+    --concurrency 32 --warmup 10s \
+    -P "fts_data_dir=\"$DATA_DIR\"" -P dimension=$DIM \
+    --generate-report -o search.json
+```
+
+`build_index` creates both indexes if absent and waits until each answers,
+so `search` runs against complete indexes. It does not drop them: to rebuild,
+run `schema -P drop_index=true` first. It records no metric: each index's
+build time is measured by `fts.rn` and `ann.rn`, and building several indexes
+at once is out of scope here. `highlight=true` adds a `BM25_HIGHLIGHT()`
+excerpt, as for `fts.rn`.
+
+What a hybrid query supports, and how ScyllaDB runs it, is described in
+ScyllaDB's [hybrid search query](https://github.com/scylladb/scylladb/blob/master/docs/cql/dml/select.rst#hybrid-search-queries)
+documentation; its limits apply to `search`.
+
+### Hybrid workload parameters
+
+`hybrid.rn` shares `keyspace`, `table`, `replication_factor`, `schema_cleanup`,
+`drop_index`, `max_index_wait_secs`, `min_successful_probes`, `search_limit`,
+`fts_data_dir`, `documents_file`, `queries_file`, `qrels_file`,
+`compute_accuracy` and `highlight` with `fts.rn` (`drop_index` drops both
+indexes, and `compute_accuracy` defaults to `false`), and adds:
+
+| Parameter | Default | Description | Relevant commands |
+|-----------|---------|-------------|-------------------|
+| `text_column` | `body` | Text column, full-text indexed | schema, load, build_index, search |
+| `vector_column` | `embedding` | Vector column, ANN indexed | schema, load, build_index, search |
+| `dimension` | `4` | Vector dimension; must match the fbin files | schema, load, build_index, search |
+| `fts_index_name` | `documents_fts_idx` | Full-text index name | schema, build_index |
+| `ann_index_name` | `documents_ann_idx` | Vector index name | schema, build_index |
+| `fts_index_options` | `""` | CQL `WITH OPTIONS` string for the full-text index | build_index |
+| `ann_index_options` | `""` | CQL `WITH OPTIONS` string for the vector index | build_index |
+| `vectors_file` | `documents.fbin` | Document embeddings, aligned with `documents_file` | load |
+| `query_vectors_file` | `queries_natural.fbin` | Query embeddings, aligned with `queries_file` | search |
+
 ## Workload Parameters
 
-All workload parameters are passed with Latte's `-P` flag.
+All workload parameters are passed with Latte's `-P` flag. This table is for
+`fts.rn`; see above for what `hybrid.rn` adds.
 
 | Parameter | Default | Description | Relevant commands |
 |-----------|---------|-------------|-------------------|
@@ -196,10 +266,12 @@ with the other workloads (see [../README.md](../README.md)):
 
 ```
 latte/fts.rn                        # Workload for schema, load, index build, and search
+latte/hybrid.rn                     # Hybrid (ANN + BM25) workload over the same corpus plus embeddings
 latte/common/tsv_dataset.rn         # Document-corpus loader
 latte/common/tsv_dataset_test.rn    # Smoke test for the loader
+latte/common/fbin_dataset.rn        # Embedding loader, shared with the vector-search workloads
 latte/common/relevance_metrics.rn   # Relevance metrics: recall, precision, MRR, nDCG
 latte/common/search_queries.rn      # Query and qrels loaders
 latte/common/index_probe.rn         # Index readiness probe for build_index
-latte/full-text-search/testdata/    # Smoke-test fixtures
+latte/full-text-search/testdata/    # Smoke-test fixtures; gen_hybrid_testdata.py regenerates the fbin files
 ```

@@ -1,4 +1,4 @@
-//! Query-set loader for the full-text-search workload.
+//! Query-set loader for the full-text-search and hybrid workloads.
 //!
 //! A query set is two TSV files: `queries_<set>.tsv`, one `query_id<TAB>text`
 //! per line, and `qrels_<set>.tsv`, one `query_id<TAB>doc_id<TAB>grade` per
