@@ -9,6 +9,7 @@ root, for example `latte schema latte/fts.rn <node>`.
 | `ann.rn` | ANN search over the whole dataset: throughput, latency, recall@k | [vector-search](vector-search/README.md) |
 | `ann_buckets.rn` | ANN recall and throughput against index size, from one upload | [vector-search](vector-search/README.md) |
 | `fts.rn` | BM25 index build, search latency and accuracy | [full-text-search](full-text-search/README.md) |
+| `hybrid.rn` | RRF of ANN and BM25: search latency | [hybrid-search](hybrid-search/README.md) |
 
 ## Layout
 
@@ -18,6 +19,7 @@ latte/
   common/             # modules the workloads share, and their smoke tests
   vector-search/      # vector-search documentation and fixtures
   full-text-search/   # full-text-search documentation, fixtures and dataset tools
+  hybrid-search/      # hybrid-search documentation, fixtures and dataset tools
 ```
 
 rune resolves `mod` only beside the importing file or below it, so the
