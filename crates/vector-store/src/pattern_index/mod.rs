@@ -5,6 +5,7 @@
 
 mod actor;
 mod factory;
+mod gram;
 mod tantivy;
 
 use crate::memory::Memory;
