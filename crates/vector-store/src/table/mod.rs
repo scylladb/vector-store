@@ -1078,6 +1078,11 @@ impl TableModify for Table {
         primary_key: PrimaryKey,
         timestamp: Timestamp,
     ) -> anyhow::Result<Vec<Operation>> {
+        // A delete can arrive for a row not seen yet, and then it takes a new primary id
+        // to keep the tombstone.
+        self.reserve_primary_ids()?;
+        self.reserve_partition_ids()?;
+
         let index_id = self
             .index_ids
             .get(index_key)
@@ -2117,6 +2122,61 @@ mod tests {
             let operations = table
                 .delete(&index_key, pk.clone(), Timestamp::from_millis(45))
                 .unwrap();
+            assert_eq!(operations.len(), 0);
+        }
+    }
+
+    #[test]
+    fn delete_unseen_keys_beyond_reserved_ids() {
+        let values = |ts| {
+            NonemptyBox::new([Timestamped::new(
+                Timestamp::from_millis(ts),
+                Some(DbIndexedValue::Vector(vec![1.0].into())),
+            )])
+            .unwrap()
+        };
+
+        for (pk, primary_key_columns, partition_key_columns) in [
+            (
+                (|i| PrimaryKey::from([CqlValue::Int(i)])) as fn(i32) -> PrimaryKey,
+                NonemptyArc::new([ColumnName::from("p")]).unwrap(),
+                None,
+            ),
+            (
+                |i| PrimaryKey::from([CqlValue::Int(i), CqlValue::Int(i)]),
+                NonemptyArc::new([ColumnName::from("p"), ColumnName::from("c")]).unwrap(),
+                Some(NonemptyArc::new([ColumnName::from("p")]).unwrap()),
+            ),
+        ] {
+            dbg!(&primary_key_columns);
+            let index_key = IndexKey::new(&"ks".into(), &"idx".into());
+            let mut table = Table::new(
+                index_key.clone(),
+                primary_key_columns,
+                NonZeroUsize::new(1).unwrap(),
+                partition_key_columns,
+                NonemptyArc::new(["embedding"]).unwrap(),
+                Arc::new([]),
+                Arc::new(
+                    [("p".into(), NativeType::Int), ("c".into(), NativeType::Int)]
+                        .into_iter()
+                        .collect(),
+                ),
+            )
+            .unwrap();
+
+            // CDC deletes of rows the full scan hasn't read yet: each one takes a new primary
+            // id, so they use up the ids reserved at creation and must reserve more
+            let last = Table::INCREMENT_SIZE as i32;
+            for i in 0..=last {
+                let operations = table
+                    .delete(&index_key, pk(i), Timestamp::from_millis(20))
+                    .unwrap();
+                assert_eq!(operations.len(), 0);
+            }
+
+            // the full scan read the last row before it was deleted - the delete must still win
+            let operations = table.upsert(&index_key, pk(last), values(10)).unwrap();
             assert_eq!(operations.len(), 0);
         }
     }
