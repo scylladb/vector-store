@@ -1,6 +1,6 @@
 ---
 name: daily-ci-triage
-description: Triage the scylladb/vector-store Daily GitHub Actions workflow (daily.yml) — find the failed jobs of recent runs, group failures that share a cause or near-identical symptoms, run an initial investigation (history, last-green/first-red bisect over vector-store commits and scylla-nightly builds, code at the panic site, fixes already in flight), check the VECTOR Jira project for duplicates, and then either comment on the existing issue or file a new Bug assigned to Szymon Wasik that mentions Paweł Pery so he is notified. Built to run unattended as a daily routine; also use it whenever the user asks to look at, triage, analyze or file issues for daily/nightly CI failures, a red Daily run, or a specific Daily run URL — even if they do not say "triage" or name the workflow.
+description: Triage the scylladb/vector-store Daily GitHub Actions workflow (daily.yml) — find the failed jobs of recent runs, group failures that share a cause or near-identical symptoms, run an initial investigation (history, last-green/first-red bisect over vector-store commits and scylla-nightly builds, code at the panic site, fixes already in flight), check the VECTOR Jira project for duplicates, and then either comment on the existing issue or file a new Bug assigned to Karol Nowacki that mentions Paweł Pery so he is notified. Built to run unattended as a daily routine; also use it whenever the user asks to look at, triage, analyze or file issues for daily/nightly CI failures, a red Daily run, or a specific Daily run URL — even if they do not say "triage" or name the workflow.
 ---
 
 # Daily CI triage
@@ -23,7 +23,7 @@ deciding an ambiguous grouping or duplicate case.
 | Workflow | `daily.yml` |
 | Jira site / cloudId | `scylladb.atlassian.net` / `440509d8-b7c6-4d6f-90cd-6912671b050c` |
 | Project, issue type | `VECTOR`, `Bug` |
-| Assignee | Szymon Wasik — `712020:55e381fd-0d83-4c28-8f4d-70aad1d09f3c` |
+| Assignee | Karol Nowacki — `712020:6f51b58f-074d-4fec-9d53-0bafc86a585c` |
 | Mentioned on new issues | Paweł Pery — `712020:f0bf3081-cac4-4b74-b0f8-056bed4b3818` |
 | Problem Symptom | `customfield_11120` (multi-select); option `ci stability`, id `12527` |
 | Labels on new issues | `ai-assisted` only |
