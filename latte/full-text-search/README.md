@@ -199,5 +199,7 @@ latte/fts.rn                        # Workload for schema, load, index build, an
 latte/common/tsv_dataset.rn         # Document-corpus loader
 latte/common/tsv_dataset_test.rn    # Smoke test for the loader
 latte/common/relevance_metrics.rn   # Relevance metrics: recall, precision, MRR, nDCG
+latte/common/search_queries.rn      # Query and qrels loaders
+latte/common/index_probe.rn         # Index readiness probe for build_index
 latte/full-text-search/testdata/    # Smoke-test fixtures
 ```

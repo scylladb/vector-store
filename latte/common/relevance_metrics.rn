@@ -222,3 +222,24 @@ pub fn ndcg_at_k(returned_ids, relevances, k) {
     }
     dcg / idcg
 }
+
+/// Declare the metrics `record_metrics` records.
+pub fn declare_metrics(db) {
+    db.declare_metric("recall", "higher");
+    db.declare_metric("precision", "higher");
+    db.declare_metric("mrr", "higher");
+    db.declare_metric("ndcg", "higher");
+}
+
+/// Record all four metrics for one query's results. `judgment` is
+/// `#{ relevant_ids, relevances }`, as `search_queries::load_judgments`
+/// builds it; a query without qrels records nothing.
+pub fn record_metrics(db, judgment, returned_ids, k) {
+    if judgment.relevances.len() == 0 {
+        return;
+    }
+    db.record_metric("recall", recall_at_k(returned_ids, judgment.relevant_ids, k));
+    db.record_metric("precision", precision_at_k(returned_ids, judgment.relevant_ids, k));
+    db.record_metric("mrr", reciprocal_rank(returned_ids, judgment.relevant_ids));
+    db.record_metric("ndcg", ndcg_at_k(returned_ids, judgment.relevances, k));
+}

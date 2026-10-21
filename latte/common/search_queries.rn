@@ -1,0 +1,59 @@
+//! Query-set loader for the full-text-search workload.
+//!
+//! A query set is two TSV files: `queries_<set>.tsv`, one `query_id<TAB>text`
+//! per line, and `qrels_<set>.tsv`, one `query_id<TAB>doc_id<TAB>grade` per
+//! line. Both are small and load in full in `prepare`: reading inside the
+//! measured path would add I/O to the reported latency.
+//!
+//! latte's line reader panics if the file cannot be opened, so both loaders
+//! open it first: a typo in `-P queries_file` or `-P qrels_file` should be an
+//! error naming the file, not a Rust backtrace.
+
+/// Load a queries file into a Vec of `#{ id, text }`, in file order.
+pub fn load_queries(path) {
+    fs::open_binary(path)?;
+    let it = fs::read_split_lines_iter(path, ["\t"])?;
+    let queries = [];
+    while let Some(entry) = it.next() {
+        let raw = entry?;
+        if !raw.is_empty() {
+            queries.push(#{ "id": raw[0], "text": raw[1] });
+        }
+    }
+    println!("Loaded {} queries from {}", queries.len(), path);
+    Ok(queries)
+}
+
+/// Load a qrels file and group it by query: entry `j` of the result holds the
+/// judgments of `queries[j]` as `#{ relevant_ids, relevances }`, the inputs of
+/// the `relevance_metrics` functions. Qrels naming a query absent from
+/// `queries` are skipped; a repeated query id takes them at its first line.
+pub fn load_judgments(path, queries) {
+    let query_index = #{};
+    let judgments = [];
+    for j in 0..queries.len() {
+        if query_index.get(queries[j].id).is_none() {
+            query_index[queries[j].id] = j;
+        }
+        judgments.push(#{ "relevant_ids": [], "relevances": [] });
+    }
+    fs::open_binary(path)?;
+    let it = fs::read_split_lines_iter(path, ["\t"])?;
+    let count = 0;
+    while let Some(entry) = it.next() {
+        let raw = entry?;
+        if raw.is_empty() {
+            continue;
+        }
+        count += 1;
+        if let Some(j) = query_index.get(raw[0]) {
+            let grade = raw[2].parse::<i64>()?;
+            if grade > 0 {
+                judgments[j].relevant_ids.push(raw[1]);
+            }
+            judgments[j].relevances.push(#{ "doc_id": raw[1], "grade": grade });
+        }
+    }
+    println!("Loaded {} qrels from {}", count, path);
+    Ok(judgments)
+}

@@ -1,0 +1,32 @@
+//! Index readiness probe shared by the workloads' `build_index` phases.
+
+/// Run the prepared `stmt` until it succeeds `min_probes` times in a row (at
+/// least once), and return the timestamp at which that streak began: the
+/// moment the index first answered for good. latte retries the "index not
+/// ready" error itself; a probe that still fails after the retries is tried
+/// again until `max_wait_secs` after `start`. Any other error is returned.
+pub async fn wait_until_ready(db, stmt, params, start, max_wait_secs, min_probes) {
+    let consecutive_ok = 0;
+    let streak_start = start;
+    loop {
+        match db.execute_prepared_with_result(stmt, params).await {
+            Ok(_) => {
+                if consecutive_ok == 0 {
+                    streak_start = latte::now_timestamp();
+                }
+                consecutive_ok += 1;
+                if consecutive_ok >= min_probes {
+                    return Ok(streak_start);
+                }
+            }
+            Err(e) => {
+                consecutive_ok = 0;
+                let err_msg = format!("{}", e);
+                if !(err_msg.contains("QueryRetriesExceeded")
+                    && (latte::now_timestamp() - start) < max_wait_secs) {
+                    return Err(e);
+                }
+            }
+        }
+    }
+}
