@@ -31,10 +31,14 @@
 use latte::*;
 
 mod common {
+    pub mod index_probe;
     pub mod relevance_metrics;
+    pub mod search_queries;
     pub mod tsv_dataset;
 }
+use common::index_probe;
 use common::relevance_metrics;
+use common::search_queries;
 use common::tsv_dataset;
 
 // Schema / table
@@ -152,47 +156,12 @@ pub async fn prepare(db) {
     }
 
     if has_search {
-        let queries_path = join_path(FTS_DATA_DIR, QUERIES_FILE);
-        let it = fs::read_split_lines_iter(queries_path, ["\t"])?;
-        db.data.queries = [];
-        while let Some(entry) = it.next() {
-            let raw = entry?;
-            if !raw.is_empty() {
-                db.data.queries.push(#{ "id": raw[0], "text": raw[1] });
-            }
-        }
-        println!("Loaded {} queries from {}", db.data.queries.len(), queries_path);
+        db.data.queries = search_queries::load_queries(join_path(FTS_DATA_DIR, QUERIES_FILE))?;
 
         if COMPUTE_ACCURACY {
-            let qrels_path = join_path(FTS_DATA_DIR, QRELS_FILE);
-            let qit = fs::read_split_lines_iter(qrels_path, ["\t"])?;
-            db.data.qrels = [];
-            while let Some(entry) = qit.next() {
-                let raw = entry?;
-                if !raw.is_empty() {
-                    db.data.qrels.push(#{ "query_id": raw[0], "doc_id": raw[1], "grade": raw[2].parse::<i64>()? });
-                }
-            }
-            println!("Loaded {} qrels from {}", db.data.qrels.len(), qrels_path);
-
-            db.data.qrels_by_query = [];
-            for _ in 0..db.data.queries.len() {
-                db.data.qrels_by_query.push([]);
-            }
-            for qrel in db.data.qrels {
-                for j in 0..db.data.queries.len() {
-                    if db.data.queries[j].id == qrel.query_id {
-                        db.data.qrels_by_query[j].push(#{ "doc_id": qrel.doc_id, "grade": qrel.grade });
-                        break;
-                    }
-                }
-            }
-            db.data.qrels = [];
-
-            db.declare_metric("recall", "higher");
-            db.declare_metric("precision", "higher");
-            db.declare_metric("mrr", "higher");
-            db.declare_metric("ndcg", "higher");
+            db.data.judgments = search_queries::load_judgments(
+                join_path(FTS_DATA_DIR, QRELS_FILE), db.data.queries)?;
+            relevance_metrics::declare_metrics(db);
         }
 
         println!("Search limit: {}", SEARCH_LIMIT);
@@ -243,37 +212,16 @@ pub async fn build_index(db, i) {
         return Ok(());
     }
     let start = db.data.index_build_start;
-    let max_wait = MAX_INDEX_WAIT_SECS;
-    let consecutive_ok = 0;
-    let streak_start = start;
-    loop {
-        match db.execute_prepared_with_result(PROBE, #{}).await {
-            Ok(_) => {
-                if consecutive_ok == 0 {
-                    streak_start = latte::now_timestamp();
-                }
-                consecutive_ok += 1;
-                if consecutive_ok >= MIN_SUCCESSFUL_PROBES {
-                    let elapsed = (streak_start - start) as f64;
-                    db.data.index_ready_elapsed = elapsed;
-                    db.data.index_ready = true;
-                    db.record_metric("index_ready_seconds", elapsed);
-                    if DOCUMENT_COUNT > 0 && elapsed > 0.0 {
-                        db.record_metric("indexing_throughput_docs_per_sec", DOCUMENT_COUNT as f64 / elapsed);
-                    }
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                consecutive_ok = 0;
-                let err_msg = format!("{}", e);
-                if !(err_msg.contains("QueryRetriesExceeded")
-                    && (latte::now_timestamp() - start) < max_wait) {
-                    return Err(e);
-                }
-            }
-        }
+    let ready_at = index_probe::wait_until_ready(db, PROBE, #{}, start,
+        MAX_INDEX_WAIT_SECS, MIN_SUCCESSFUL_PROBES).await?;
+    let elapsed = (ready_at - start) as f64;
+    db.data.index_ready_elapsed = elapsed;
+    db.data.index_ready = true;
+    db.record_metric("index_ready_seconds", elapsed);
+    if DOCUMENT_COUNT > 0 && elapsed > 0.0 {
+        db.record_metric("indexing_throughput_docs_per_sec", DOCUMENT_COUNT as f64 / elapsed);
     }
+    Ok(())
 }
 
 pub async fn search(db, i) {
@@ -300,20 +248,7 @@ pub async fn search(db, i) {
             db.record_metric("result_count", returned_ids.len() as f64);
 
             if COMPUTE_ACCURACY {
-                let relevant_ids = [];
-                let relevances = [];
-                for qrel in db.data.qrels_by_query[idx] {
-                    if qrel.grade > 0 {
-                        relevant_ids.push(qrel.doc_id);
-                    }
-                    relevances.push(#{ "doc_id": qrel.doc_id, "grade": qrel.grade });
-                }
-                if relevances.len() > 0 {
-                    db.record_metric("recall", relevance_metrics::recall_at_k(returned_ids, relevant_ids, SEARCH_LIMIT));
-                    db.record_metric("precision", relevance_metrics::precision_at_k(returned_ids, relevant_ids, SEARCH_LIMIT));
-                    db.record_metric("mrr", relevance_metrics::reciprocal_rank(returned_ids, relevant_ids));
-                    db.record_metric("ndcg", relevance_metrics::ndcg_at_k(returned_ids, relevances, SEARCH_LIMIT));
-                }
+                relevance_metrics::record_metrics(db, db.data.judgments[idx], returned_ids, SEARCH_LIMIT);
             }
         }
     }

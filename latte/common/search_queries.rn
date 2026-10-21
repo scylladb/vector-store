@@ -1,0 +1,50 @@
+//! Query-set loader for the full-text-search workload.
+//!
+//! A query set is two TSV files: `queries_<set>.tsv`, one `query_id<TAB>text`
+//! per line, and `qrels_<set>.tsv`, one `query_id<TAB>doc_id<TAB>grade` per
+//! line. Both are small and load in full in `prepare`: reading inside the
+//! measured path would add I/O to the reported latency.
+
+/// Load a queries file into a Vec of `#{ id, text }`, in file order.
+pub fn load_queries(path) {
+    let it = fs::read_split_lines_iter(path, ["\t"])?;
+    let queries = [];
+    while let Some(entry) = it.next() {
+        let raw = entry?;
+        if !raw.is_empty() {
+            queries.push(#{ "id": raw[0], "text": raw[1] });
+        }
+    }
+    println!("Loaded {} queries from {}", queries.len(), path);
+    Ok(queries)
+}
+
+/// Load a qrels file and group it by query: entry `j` of the result holds the
+/// qrels of `queries[j]`, a Vec of `#{ doc_id, grade }`. Qrels naming a query
+/// absent from `queries` are skipped; a repeated query id takes them at its
+/// first line.
+pub fn load_judgments(path, queries) {
+    let it = fs::read_split_lines_iter(path, ["\t"])?;
+    let qrels = [];
+    while let Some(entry) = it.next() {
+        let raw = entry?;
+        if !raw.is_empty() {
+            qrels.push(#{ "query_id": raw[0], "doc_id": raw[1], "grade": raw[2].parse::<i64>()? });
+        }
+    }
+    println!("Loaded {} qrels from {}", qrels.len(), path);
+
+    let judgments = [];
+    for _ in 0..queries.len() {
+        judgments.push([]);
+    }
+    for qrel in qrels {
+        for j in 0..queries.len() {
+            if queries[j].id == qrel.query_id {
+                judgments[j].push(#{ "doc_id": qrel.doc_id, "grade": qrel.grade });
+                break;
+            }
+        }
+    }
+    Ok(judgments)
+}
