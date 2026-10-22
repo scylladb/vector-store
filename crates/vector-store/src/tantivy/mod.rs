@@ -35,6 +35,7 @@ use crate::IndexKey;
 use crate::memory::Allocate;
 use crate::memory::Memory;
 use crate::memory::MemoryExt;
+use crate::metrics::Metrics;
 use crate::perf;
 use crate::table::IndexId;
 use crate::table::PrimaryId;
@@ -124,6 +125,7 @@ struct ReaderInner {
     key: IndexKey,
     reload_state: Mutex<ReloadState>,
     worker: async_channel::Sender<Worker>,
+    metrics: Arc<Metrics>,
 }
 
 impl ReaderInner {
@@ -143,6 +145,8 @@ impl ReaderInner {
                 reload_state
                     .unsearchable_docs
                     .retain(|committed, _| *committed > opstamp);
+                self.metrics
+                    .mark_dirty(self.key.keyspace().as_ref(), self.key.index().as_ref());
             }
             Err(err) => {
                 reload_state.reload_failed = true;
@@ -170,6 +174,7 @@ impl Reader {
         index: &tantivy::Index,
         key: &IndexKey,
         worker: async_channel::Sender<Worker>,
+        metrics: Arc<Metrics>,
     ) -> anyhow::Result<Self> {
         let reader: tantivy::IndexReader = index
             .reader_builder()
@@ -182,6 +187,7 @@ impl Reader {
             key: key.clone(),
             reload_state: Mutex::new(ReloadState::default()),
             worker,
+            metrics,
         });
         let (reload_tx, mut reload_rx) = watch::channel(());
         let callback = {
@@ -255,6 +261,7 @@ impl Index {
         index_schema: IndexSchema,
         key: &IndexKey,
         worker: async_channel::Sender<Worker>,
+        metrics: Arc<Metrics>,
     ) -> anyhow::Result<Self> {
         let IndexSchema {
             schema,
@@ -263,7 +270,7 @@ impl Index {
         } = index_schema;
         let index = tantivy::Index::create_in_ram(schema.clone());
         index.tokenizers().register(&tokenizer_name, tokenizer);
-        let reader = Reader::new(&index, key, worker)?;
+        let reader = Reader::new(&index, key, worker, metrics)?;
         let writer = RwLock::new(Writer::new(&index)?);
         Ok(Self {
             index,
@@ -347,6 +354,7 @@ pub(crate) struct Indexes<T, F> {
     allocate_rx: watch::Receiver<Allocate>,
     allocate_prev: Allocate,
     index_schema: F,
+    metrics: Arc<Metrics>,
 }
 
 impl<T, F> Indexes<T, F>
@@ -359,6 +367,7 @@ where
         table: Arc<RwLock<T>>,
         worker: async_channel::Sender<Worker>,
         memory: mpsc::Sender<Memory>,
+        metrics: Arc<Metrics>,
     ) -> Self {
         let IndexOptions {
             key,
@@ -379,6 +388,7 @@ where
             allocate_rx,
             allocate_prev: Allocate::Can,
             index_schema,
+            metrics,
         }
     }
 
@@ -462,8 +472,14 @@ where
         if let Some(index) = self.indexes.get(&index_id) {
             return Some(Arc::clone(index));
         }
-        let index = (self.index_schema)()
-            .and_then(|index_schema| Index::new(index_schema, &self.key, self.worker.clone()));
+        let index = (self.index_schema)().and_then(|index_schema| {
+            Index::new(
+                index_schema,
+                &self.key,
+                self.worker.clone(),
+                Arc::clone(&self.metrics),
+            )
+        });
         match index {
             Ok(index) => {
                 let index = Arc::new(index);

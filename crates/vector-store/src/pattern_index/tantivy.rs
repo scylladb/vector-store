@@ -4,6 +4,7 @@
  */
 
 use crate::memory::Memory;
+use crate::metrics::Metrics;
 use crate::pattern_index::PatternIndex;
 use crate::pattern_index::PatternIndexConfiguration;
 use crate::pattern_index::PatternIndexFactory;
@@ -32,6 +33,7 @@ use tracing::debug;
 pub(crate) struct Factory {
     worker: async_channel::Sender<Worker>,
     memory: mpsc::Sender<Memory>,
+    metrics: Arc<Metrics>,
 }
 
 impl PatternIndexFactory for Factory {
@@ -47,6 +49,7 @@ impl PatternIndexFactory for Factory {
             self.memory.clone(),
             COMMIT_INTERVAL,
             MAX_UNCOMMITTED_THRESHOLD,
+            Arc::clone(&self.metrics),
         )
     }
 }
@@ -54,8 +57,13 @@ impl PatternIndexFactory for Factory {
 pub(super) fn new_factory(
     worker: async_channel::Sender<Worker>,
     memory: mpsc::Sender<Memory>,
+    metrics: Arc<Metrics>,
 ) -> Factory {
-    Factory { worker, memory }
+    Factory {
+        worker,
+        memory,
+        metrics,
+    }
 }
 
 const TOKENIZER_NAME: &str = "pattern_ngram";
@@ -99,6 +107,7 @@ pub(crate) fn new(
     memory: mpsc::Sender<Memory>,
     commit_interval: Duration,
     commit_threshold: usize,
+    metrics: Arc<Metrics>,
 ) -> mpsc::Sender<PatternIndex> {
     let (tx, mut rx) = mpsc::channel::<PatternIndex>(perf::channel_size().into());
     tokio::spawn(async move {
@@ -114,6 +123,7 @@ pub(crate) fn new(
             table,
             worker,
             memory,
+            metrics,
         )
         .await;
 
@@ -188,6 +198,7 @@ mod tests {
             make_memory_actor(allocate),
             TEST_COMMIT_INTERVAL,
             TEST_COMMIT_THRESHOLD,
+            Arc::new(Metrics::new()),
         )
     }
 
