@@ -14,8 +14,7 @@ ScyllaDB full-text search (BM25) indexing and search performance.
 
 ## Requirements
 
-- A ScyllaDB cluster with vector-store and full-text search enabled
-  (`VECTOR_STORE_FULLTEXT_INDEXES=true`).
+- A ScyllaDB cluster with vector-store and full-text search enabled.
 - [Latte](https://github.com/scylladb/latte) 0.50.0-scylladb or later - the
   loader needs the `prepare_worker` hook and seekable binary file handles.
 - A prepared dataset directory containing the TSV files described below.

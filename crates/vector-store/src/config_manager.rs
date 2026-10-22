@@ -473,18 +473,6 @@ pub async fn load_config(env: impl Fn(&str) -> anyhow::Result<String>) -> anyhow
             "Unable to parse VECTOR_STORE_ALTER_INDEX_SIMULATOR env (true/false)"
         )))?;
 
-    if let Some(fulltext_indexes) = env("VECTOR_STORE_FULLTEXT_INDEXES")
-        .ok()
-        .map(|v| {
-            v.trim().parse().map_err(|_| {
-                anyhow!("Unable to parse VECTOR_STORE_FULLTEXT_INDEXES env (true/false)")
-            })
-        })
-        .transpose()?
-    {
-        config.fulltext_indexes = fulltext_indexes;
-    }
-
     config.credentials = credentials(&env).await?;
 
     // Load TLS configuration
@@ -923,39 +911,6 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains(
             "VECTOR_STORE_CQL_PREFERRED_RACK requires VECTOR_STORE_CQL_PREFERRED_DATACENTER"
         ));
-    }
-
-    #[tokio::test]
-    async fn load_config_fulltext_indexes_default_true() {
-        let env = mock_env(HashMap::new());
-        let config = load_config(env).await.unwrap();
-        assert!(config.fulltext_indexes);
-    }
-
-    #[tokio::test]
-    async fn load_config_fulltext_indexes_override_false() {
-        let env = mock_env(HashMap::from([(
-            "VECTOR_STORE_FULLTEXT_INDEXES",
-            "false".into(),
-        )]));
-        let config = load_config(env).await.unwrap();
-        assert!(!config.fulltext_indexes);
-    }
-
-    #[tokio::test]
-    async fn load_config_fulltext_indexes_invalid_value_errors() {
-        let env = mock_env(HashMap::from([(
-            "VECTOR_STORE_FULLTEXT_INDEXES",
-            "not-a-bool".into(),
-        )]));
-        let result = load_config(env).await;
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Unable to parse VECTOR_STORE_FULLTEXT_INDEXES")
-        );
     }
 
     #[tokio::test]

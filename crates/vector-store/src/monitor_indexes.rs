@@ -55,14 +55,13 @@ pub(crate) async fn new(
     let (tx, mut rx) = mpsc::channel(perf::channel_size().into());
     tokio::spawn(
         async move {
-            let (interval_duration, mut alter_index_simulator, mut fulltext_indexes) = {
+            let (interval_duration, mut alter_index_simulator) = {
                 let config = config_rx.borrow_and_update();
                 (
                     config
                         .monitor_indexes_interval
                         .unwrap_or(Duration::from_secs(1)),
                     config.alter_index_simulator,
-                    config.fulltext_indexes,
                 )
             };
             let mut interval = time::interval(interval_duration);
@@ -71,9 +70,6 @@ pub(crate) async fn new(
             let mut indexes = HashSet::new();
             if alter_index_simulator {
                 info!("monitor_indexes: alter index simulator is enabled");
-            }
-            if fulltext_indexes {
-                info!("monitor_indexes: fulltext indexes are enabled");
             }
             while !rx.is_closed() {
                 tokio::select! {
@@ -98,7 +94,6 @@ pub(crate) async fn new(
                             continue;
                         };
 
-                        let new_indexes = filter_disabled_index_kinds(new_indexes, fulltext_indexes);
 
                         if alter_index_simulator {
                             node_state.send_event(Event::IndexesDiscovered(
@@ -141,7 +136,6 @@ pub(crate) async fn new(
                         };
                         let config = config_rx.borrow_and_update();
                         update_flag(&mut alter_index_simulator, config.alter_index_simulator, "alter index simulator");
-                        update_flag(&mut fulltext_indexes, config.fulltext_indexes, "fulltext indexes");
                     }
 
                     _ = rx.recv() => { }
@@ -359,19 +353,6 @@ fn update_flag(current: &mut bool, new_value: bool, name: &str) {
     }
 }
 
-fn filter_disabled_index_kinds(
-    indexes: HashSet<IndexMetadata>,
-    fulltext_indexes: bool,
-) -> HashSet<IndexMetadata> {
-    if fulltext_indexes {
-        return indexes;
-    }
-    indexes
-        .into_iter()
-        .filter(|idx| !matches!(idx.kind, IndexKind::Fts(_)))
-        .collect()
-}
-
 /// delete the index if it doesn't appear in the new_indexes
 fn should_delete(curr_idx: &IndexMetadata, new_indexes: &HashSet<IndexMetadata>) -> bool {
     !new_indexes.contains(curr_idx)
@@ -463,22 +444,6 @@ mod tests {
                 space_type: Default::default(),
                 quantization: Default::default(),
             }),
-        }
-    }
-
-    fn sample_fts_index_metadata(name: &str) -> IndexMetadata {
-        IndexMetadata {
-            keyspace_name: "ks".into(),
-            index_name: name.into(),
-            table_name: "tbl".into(),
-            primary_key_columns: NonemptyArc::new(["pk"]).unwrap(),
-            partition_key_count: NonZeroUsize::new(1).unwrap(),
-            target_columns: NonemptyArc::new(["content"]).unwrap(),
-            partitioning: DbIndexPartitioning::Global,
-            filtering_columns: Arc::new([]),
-            alternator_attribute_types: Arc::new(BTreeMap::new()),
-            version: Uuid::new_v4().into(),
-            kind: IndexKind::Fts(IndexOptionsFts::default()),
         }
     }
 
@@ -1346,32 +1311,5 @@ mod tests {
         assert_eq!(discovered.len(), 1);
         assert!(!discovered.contains(&idx1));
         assert!(discovered.contains(&idx2));
-    }
-
-    #[test]
-    fn fts_indexes_are_kept_when_enabled() {
-        let vs_idx = sample_vs_index_metadata("vs_idx");
-        let fts_idx = sample_fts_index_metadata("fts_idx");
-        let indexes: HashSet<_> = [vs_idx, fts_idx].into_iter().collect();
-
-        let result = filter_disabled_index_kinds(indexes, true);
-
-        assert_eq!(result.len(), 2);
-    }
-
-    #[test]
-    fn fts_indexes_are_filtered_out_when_disabled() {
-        let vs_idx = sample_vs_index_metadata("vs_idx");
-        let fts_idx = sample_fts_index_metadata("fts_idx");
-        let indexes: HashSet<_> = [vs_idx, fts_idx].into_iter().collect();
-
-        let result = filter_disabled_index_kinds(indexes, false);
-
-        assert_eq!(result.len(), 1);
-        assert!(
-            result
-                .iter()
-                .all(|idx| matches!(idx.kind, IndexKind::Vs(_)))
-        );
     }
 }
