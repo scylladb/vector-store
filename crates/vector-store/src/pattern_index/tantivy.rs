@@ -3,7 +3,6 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
-use crate::IndexKey;
 use crate::memory::Memory;
 use crate::pattern_index::PatternIndex;
 use crate::pattern_index::PatternIndexConfiguration;
@@ -12,7 +11,7 @@ use crate::perf;
 use crate::table::Table;
 use crate::table::TableSearch;
 use crate::tantivy::COMMIT_INTERVAL;
-use crate::tantivy::Index;
+use crate::tantivy::IndexSchema;
 use crate::tantivy::Indexes;
 use crate::tantivy::MAX_UNCOMMITTED_THRESHOLD;
 use crate::tantivy::build_schema;
@@ -67,14 +66,12 @@ const MAX_GRAM: usize = 3;
 const VALUE_START: char = '\u{2}';
 const VALUE_END: char = '\u{3}';
 
-fn new_index(key: &IndexKey, worker: async_channel::Sender<Worker>) -> anyhow::Result<Index> {
-    Index::new(
-        build_schema(text_options()),
-        TOKENIZER_NAME,
-        build_ngram_analyzer()?,
-        key,
-        worker,
-    )
+fn index_schema() -> anyhow::Result<IndexSchema> {
+    Ok(IndexSchema {
+        schema: build_schema(text_options()),
+        tokenizer_name: TOKENIZER_NAME.to_owned(),
+        tokenizer: build_ngram_analyzer()?,
+    })
 }
 
 fn build_ngram_analyzer() -> anyhow::Result<TextAnalyzer> {
@@ -113,7 +110,7 @@ pub(crate) fn new(
             memory,
             commit_interval,
             commit_threshold,
-            new_index,
+            index_schema,
         )
         .await;
 
