@@ -68,7 +68,6 @@ async fn setup_fts_store(
 ) {
     let config = Config {
         vector_store_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
-        fulltext_indexes: true,
         ..Default::default()
     };
 
