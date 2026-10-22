@@ -323,6 +323,7 @@ pub(crate) enum BestIndexState {
 #[derive(Debug)]
 pub(crate) struct UnsupportedIndexEntry {
     pub(crate) kind: IndexKind,
+    pub(crate) reason: String,
 }
 
 /// Storage for all active indexes and map of routing group to the set of index keys that belong to it.
