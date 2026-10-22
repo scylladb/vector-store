@@ -43,6 +43,7 @@ use crate::table::Table;
 use crate::table::TableSearch;
 use crate::tantivy::COMMIT_INTERVAL;
 use crate::tantivy::Index;
+use crate::tantivy::IndexSchema;
 use crate::tantivy::Indexes;
 use crate::tantivy::MAX_UNCOMMITTED_THRESHOLD;
 use crate::tantivy::build_schema;
@@ -83,21 +84,13 @@ impl FtsIndexFactory for TantivyIndexFactory {
     }
 }
 
-fn new_index(
-    analyzer: Analyzer,
-    positions: Positions,
-    key: &IndexKey,
-    worker: async_channel::Sender<Worker>,
-) -> anyhow::Result<Index> {
-    let tokenizer = analyzer.to_string();
-    let schema = build_schema(text_options(&tokenizer, positions));
-    Index::new(
-        schema,
-        &tokenizer,
-        build_token_pipeline(analyzer)?,
-        key,
-        worker,
-    )
+fn index_schema(analyzer: Analyzer, positions: Positions) -> anyhow::Result<IndexSchema> {
+    let tokenizer_name = analyzer.to_string();
+    Ok(IndexSchema {
+        schema: build_schema(text_options(&tokenizer_name, positions)),
+        tokenizer_name,
+        tokenizer: build_token_pipeline(analyzer)?,
+    })
 }
 
 fn stop_words(language: Language) -> anyhow::Result<StopWordFilter> {
@@ -317,7 +310,7 @@ pub(crate) fn new(
             memory,
             commit_interval,
             commit_threshold,
-            move |key, worker| new_index(index.analyzer, index.positions, key, worker),
+            move || index_schema(index.analyzer, index.positions),
         )
         .await;
 

@@ -236,6 +236,13 @@ impl Reader {
     }
 }
 
+/// The schema of an index with the tokenizer of its text field.
+pub(crate) struct IndexSchema {
+    pub(crate) schema: Schema,
+    pub(crate) tokenizer_name: String,
+    pub(crate) tokenizer: TextAnalyzer,
+}
+
 pub(crate) struct Index {
     pub(crate) index: tantivy::Index,
     writer: RwLock<Writer>,
@@ -244,15 +251,18 @@ pub(crate) struct Index {
 }
 
 impl Index {
-    pub(crate) fn new(
-        schema: Schema,
-        tokenizer_name: &str,
-        tokenizer: TextAnalyzer,
+    fn new(
+        index_schema: IndexSchema,
         key: &IndexKey,
         worker: async_channel::Sender<Worker>,
     ) -> anyhow::Result<Self> {
+        let IndexSchema {
+            schema,
+            tokenizer_name,
+            tokenizer,
+        } = index_schema;
         let index = tantivy::Index::create_in_ram(schema.clone());
-        index.tokenizers().register(tokenizer_name, tokenizer);
+        index.tokenizers().register(&tokenizer_name, tokenizer);
         let reader = Reader::new(&index, key, worker)?;
         let writer = RwLock::new(Writer::new(&index)?);
         Ok(Self {
@@ -328,13 +338,13 @@ pub(crate) struct Indexes<T, F> {
     indexes: BTreeMap<IndexId, Arc<Index>>,
     allocate_rx: watch::Receiver<Allocate>,
     allocate_prev: Allocate,
-    new_index: F,
+    index_schema: F,
 }
 
 impl<T, F> Indexes<T, F>
 where
     T: TableSearch,
-    F: Fn(&IndexKey, async_channel::Sender<Worker>) -> anyhow::Result<Index>,
+    F: Fn() -> anyhow::Result<IndexSchema>,
 {
     pub(crate) async fn new(
         key: IndexKey,
@@ -343,7 +353,7 @@ where
         memory: mpsc::Sender<Memory>,
         commit_interval: Duration,
         commit_threshold: usize,
-        new_index: F,
+        index_schema: F,
     ) -> Self {
         let allocate_rx = memory.subscribe_allocate().await;
         let mut commit_interval = tokio::time::interval(commit_interval);
@@ -357,7 +367,7 @@ where
             indexes: BTreeMap::new(),
             allocate_rx,
             allocate_prev: Allocate::Can,
-            new_index,
+            index_schema,
         }
     }
 
@@ -441,7 +451,9 @@ where
         if let Some(index) = self.indexes.get(&index_id) {
             return Some(Arc::clone(index));
         }
-        match (self.new_index)(&self.key, self.worker.clone()) {
+        let index = (self.index_schema)()
+            .and_then(|index_schema| Index::new(index_schema, &self.key, self.worker.clone()));
+        match index {
             Ok(index) => {
                 let index = Arc::new(index);
                 self.indexes.insert(index_id, Arc::clone(&index));
