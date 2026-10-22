@@ -30,9 +30,10 @@ The workload reads these tab-separated files directly from `fts_data_dir`:
 | `queries_<set>.tsv` | `query_id`, `text` | Query set for the search phase |
 | `qrels_<set>.tsv` | `query_id`, `doc_id`, `relevance` | Relevance judgments for accuracy metrics |
 
-The bundled `testdata/` directory is a small smoke-test fixture. Dataset
-preparation is outside this workload; provide prepared TSV files for larger
-benchmarks.
+The bundled `testdata/` directory is a small smoke-test fixture. For larger
+benchmarks, `prepare_dataset.py` builds a dataset directory from BEIR or a
+custom corpus, with scaling, synthetic queries and sharding; see
+[DATASET_PREPARATION.md](DATASET_PREPARATION.md).
 
 ## Test Workflow
 
