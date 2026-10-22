@@ -286,8 +286,8 @@ async fn local_index_based_on_f_columns(actors: Arc<TestActors>) {
 }
 
 /// Test that an index on a table with a primary key type the service cannot represent is reported
-/// as unsupported. Serving such an index would fail every query, and the other indexes must keep
-/// serving.
+/// as unsupported. Serving such an index would fail every query, so a query must report why,
+/// and the other indexes must keep serving.
 #[e2etest::test(group = index_create)]
 async fn index_with_unsupported_primary_key_type_is_reported_as_unsupported(
     actors: Arc<TestActors>,
@@ -361,6 +361,20 @@ async fn index_with_unsupported_primary_key_type_is_reported_as_unsupported(
         assert_eq!(info, listed);
         assert_eq!(info.status, IndexStatus::Unsupported, "at {url}");
     }
+
+    info!("Check that an ANN query reports why the index cannot be served");
+    let err = session
+        .query_unpaged(
+            format!("SELECT pk FROM {unsupported_table} ORDER BY v ANN OF [1.0, 2.0, 3.0] LIMIT 1"),
+            (),
+        )
+        .await
+        .expect_err("Expected the ANN query on the unsupported index to fail")
+        .to_string();
+    assert!(
+        err.contains("column pk has type Tuple"),
+        "Expected the reason in the query error, got: {err}"
+    );
 
     cleanup_keyspace(&actors, &keyspace).await;
 

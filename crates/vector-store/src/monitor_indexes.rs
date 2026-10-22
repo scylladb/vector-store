@@ -223,12 +223,12 @@ async fn get_indexes(
         indexes.insert(metadata);
     }
     let mut unsupported_indexes = HashMap::new();
-    for DbUnsupportedIndex { index, .. } in unsupported {
+    for DbUnsupportedIndex { index, reason } in unsupported {
         index_version(db, &index).await?;
         let Some(kind) = build_index_kind(db, &index).await? else {
             continue;
         };
-        unsupported_indexes.insert(index.key(), UnsupportedIndexEntry { kind });
+        unsupported_indexes.insert(index.key(), UnsupportedIndexEntry { kind, reason });
     }
     if !db.is_valid_schema(schema_version).await {
         let msg = format!("get_indexes: not valid schema {schema_version} at the end");

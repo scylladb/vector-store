@@ -228,6 +228,16 @@
               }
             }
           },
+          "422": {
+            "description": "Index cannot be served. Possible causes: the index exists in ScyllaDB, but its table has a primary key column of a type Vector Store does not support.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Error while searching vectors. Possible causes: internal error, or search engine issues.",
             "content": {

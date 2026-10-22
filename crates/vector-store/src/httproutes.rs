@@ -814,6 +814,12 @@ If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
             body = ErrorMessage
         ),
         (
+            status = 422,
+            description = "Index cannot be served. Possible causes: the index exists in ScyllaDB, but its table has a primary key column of a type Vector Store does not support.",
+            content_type = "application/json",
+            body = ErrorMessage
+        ),
+        (
             status = 500,
             description = "Error while searching vectors. Possible causes: internal error, or search engine issues.",
             content_type = "application/json",
@@ -924,9 +930,11 @@ async fn post_index_ann(
             indexes::BestIndexState::NotFound => {
                 timer.observe_duration();
 
-                let msg = format!("missing index: {keyspace}.{index_name}");
-                debug!("post_index_ann: {msg}");
-                return (StatusCode::NOT_FOUND, msg).into_response();
+                return missing_index_response(
+                    &state.indexes.read().unwrap(),
+                    &index_key,
+                    "post_index_ann",
+                );
             }
         };
 
@@ -1050,6 +1058,22 @@ async fn post_index_ann(
         }
     })
     .await
+}
+
+/// Answers `422` with the reason for an index skipped at discovery, `404` otherwise.
+fn missing_index_response(indexes: &Indexes, key: &IndexKey, route_name: &str) -> Response {
+    let (keyspace, index_name) = (key.keyspace(), key.index());
+    if let Some(entry) = indexes.get_unsupported(key) {
+        let msg = format!(
+            "index {keyspace}.{index_name} cannot be served: {}",
+            entry.reason
+        );
+        debug!("{route_name}: {msg}");
+        return (StatusCode::UNPROCESSABLE_ENTITY, msg).into_response();
+    }
+    let msg = format!("missing index: {keyspace}.{index_name}");
+    debug!("{route_name}: {msg}");
+    (StatusCode::NOT_FOUND, msg).into_response()
 }
 
 async fn check_index_serving<T>(
