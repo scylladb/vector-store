@@ -11,13 +11,28 @@ engine. Building only the host's native architecture doesn't need qemu.
 Release version is based on git annotated tags. You can create a new tag using:
 
 ```bash
-git tag -a X.Y.Z -m "Release version X.Y.Z"
-git push origin X.Y.Z
+git tag -a X.Y.Z <commit> -m "Release version X.Y.Z"
+git push <remote> refs/tags/X.Y.Z
 ```
+
+`<remote>` is the remote of `scylladb/vector-store`. In a clone of a fork that
+is not `origin`; `git remote -v` shows which one it is. Pushing the one tag,
+rather than `--tags`, keeps local tags that differ from upstream's out of the
+repository.
 
 GitHub doesn't support creating annotated tags, so you must do them from local
 environment. You can add additional metadata to the tag, for example
 `X.Y.Z-dev` for development releases.
+
+Then publish the GitHub release, which starts the release workflow:
+
+```bash
+gh release create X.Y.Z -R scylladb/vector-store --verify-tag \
+    --title vector-store-X.Y.Z --latest --notes-file notes.md
+```
+
+For a patch on an older series, pass `--latest=false` instead of `--latest`,
+so the GitHub release of the newest series stays marked as the latest one.
 
 In GitHub Actions there is a release workflow that builds the release artifacts
 and uploads them to GitHub and DockerHub. It is triggered when a GitHub Release
