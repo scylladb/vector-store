@@ -540,16 +540,80 @@ jobs:
   announce:
     needs: [push-docker, build-cloud-images]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read      # to read the release notes
     steps:
+      - name: Compose the Slack announcement
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Read the notes now rather than from the release event, so that a
+          # workflow_dispatch run finds them too and re-running this job after
+          # fixing them posts the fixed text.
+          gh release view "${VECTOR_VERSION}" --json body,url > release.json
+          url=$(jq -r .url release.json)
+
+          # The notes may carry the announcement in a hidden block, written
+          # in Slack mrkdwn (see docs/releasing.md):
+          #
+          #   <!-- slack-announcement
+          #   ...
+          #   -->
+          #
+          # Notes saved from GitHub's web editor end their lines with CRLF,
+          # and the editor can leave trailing spaces after a marker line.
+          # awk reads a file, not a pipe: it stops at the closing marker,
+          # which under pipefail would fail a writer still feeding it.
+          jq -r .body release.json | tr -d '\r' > body.txt
+          if ! awk '
+              { line = $0; sub(/[[:space:]]+$/, "", line) }
+              !inside && line == "<!-- slack-announcement" { inside = 1; found = 1; next }
+              inside && line == "-->" { closed = 1; exit }
+              inside && !started && /^[[:space:]]*$/ { next }
+              inside { started = 1; print }
+              END { if (found && !closed) exit 1 }
+            ' body.txt > announcement.txt ; then
+            echo "::error::The release notes open a slack-announcement block but no line holding only --> closes it"
+            exit 1
+          fi
+
+          if grep -q '[^[:space:]]' announcement.txt ; then
+            # Link the PR numbers the announcement cites, e.g. (#634, #645),
+            # as Slack does not do it by itself.
+            text="<!here> $(sed -E "s@(^|[ (,])#([0-9]+)@\1<https://github.com/${GH_REPO}/pull/\2|#\2>@g" announcement.txt)"
+            text+=$'\n'"Details: <${url}|ScyllaDB Vector Store ${VECTOR_VERSION} release notes>"
+          else
+            if grep -q 'slack-announcement' body.txt ; then
+              echo "::warning::The release notes mention slack-announcement, but hold no block with text in it; posting the short announcement"
+            fi
+            text="<!here> ScyllaDB Vector Store *${VECTOR_VERSION}* is released: <${url}|release notes>"
+          fi
+          printf '%s\n' "${text}" > announcement.txt
+
+          {
+            echo "Slack announcement:"
+            echo ""
+            echo '```'
+            cat announcement.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Announce release on Slack
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
         run: |
-          curl -sS -X POST -H 'Content-type: application/json' \
-            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
-            --data "{
-              \"channel\": \"#release-announce\",
-              \"text\": \"<!here> ScyllaDB Vector Store *${VECTOR_VERSION}* is released\",
-              \"link_names\": 1
-            }" \
-            https://slack.com/api/chat.postMessage
+          set -euo pipefail
+          # chat.postMessage answers HTTP 200 even when it refuses a message,
+          # so success is read from the `ok` field of its response.
+          jq -n --rawfile text announcement.txt \
+            '{channel: "#release-announce", text: ($text | rtrimstr("\n")), link_names: true, unfurl_links: false}' \
+            | curl -sS -X POST -H 'Content-type: application/json; charset=utf-8' \
+              -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+              --data @- \
+              https://slack.com/api/chat.postMessage > response.json
+          if ! jq -e .ok response.json > /dev/null ; then
+            echo "::error::Slack refused the announcement: $(jq -r '.error // .' response.json)"
+            exit 1
+          fi
