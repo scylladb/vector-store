@@ -974,9 +974,13 @@ pub async fn run(
 
     let index_engine_version = vs_index_factory.index_engine_version();
     let indexes = Arc::new(RwLock::new(Indexes::new()));
-    let fts_index_factory =
-        fts_index::new_fts_index_factory_tantivy(worker.clone(), memory.clone());
-    let pattern_index_factory = pattern_index::new_factory_tantivy(worker, memory);
+    let fts_index_factory = fts_index::new_fts_index_factory_tantivy(
+        worker.clone(),
+        memory.clone(),
+        Arc::clone(&metrics),
+    );
+    let pattern_index_factory =
+        pattern_index::new_factory_tantivy(worker, memory, Arc::clone(&metrics));
     let engine = engine::new(
         db_actor,
         engine::IndexFactories {
