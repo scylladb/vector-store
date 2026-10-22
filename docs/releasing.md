@@ -54,6 +54,46 @@ therefore never moves `latest`. To move it anywhere else, retag by hand:
 docker buildx imagetools create --tag scylladb/vector-store:latest scylladb/vector-store:X.Y.Z
 ```
 
+### Slack announcement
+
+The last job, `announce`, posts the release to `#release-announce` with
+`@here`. On its own it only says that the version is released and links the
+release notes. For a release users should hear more about, write the
+announcement into the release notes as a hidden block, which GitHub does not
+render on the release page:
+
+```markdown
+<!-- slack-announcement
+:rocket: ScyllaDB Vector Store 1.13.0 is out! One fix worth upgrading for, and one trade-off to check first:
+:white_check_mark: Searches no longer stall during deletes. With usearch 2.22 each delete on a 136M-row index walked a long run of slots, and at 2 deletes/s p99 search latency reached 880 ms; with usearch 2.26 it stays under 5 ms at up to 50 deletes/s (#634)
+:warning: Search throughput is lower in some configurations: −4% on x86 F32, −6% on arm64 F16, −13% on x86 F16, and 1M-vector index builds take 5–20% longer. arm64 F32 is at parity and F16 recall is up 1.3 points. For a half-precision index, prefer BF16 (#634, #645)
+:lock: rustls 0.23.46 resolves RUSTSEC-2026-0346 and RUSTSEC-2026-0347 (#647)
+Recommended if your workload deletes rows; benchmark first if you serve F16 indexes on x86.
+-->
+```
+
+The block must open with a line holding exactly `<!-- slack-announcement` and
+close with a line holding exactly `-->`; a block that is never closed fails the
+job rather than posting the wrong text. Its contents are posted as they are,
+so write them in Slack's formatting rather than GitHub's: `*bold*`,
+`<https://…|link text>`, `:emoji:`. Slack reads `<…>` as a link or a mention,
+so write a literal `<`, `>` or `&` (as in `p99 < 5 ms`) as `&lt;`, `&gt;` or
+`&amp;`. The job puts `@here` in front, turns PR
+numbers such as `(#634, #645)` into links, and adds a line linking the release
+notes.
+
+Aim the announcement at someone deciding whether to upgrade: one line on what
+kind of release it is, a `:warning:` line for each change in behaviour, defaults
+or performance they should check first, the fixes that matter grouped into a
+line or two, and a recommendation on who should upgrade. Leave the rest to the
+release notes.
+
+The job reads the notes when it runs, not from the release event, so to correct
+a block before the announcement goes out, edit the release notes. If the job
+has failed, re-run it after editing. The job summary shows the message it
+posted. Slack answers a refused message with HTTP 200, so the job checks the
+`ok` field of the reply and fails, naming Slack's error, when it is false.
+
 ## Manual release
 
 In case you want to build the release manually, you can use the scripts in
