@@ -1426,6 +1426,12 @@ If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
             body = ErrorMessage
         ),
         (
+            status = 422,
+            description = "Index cannot be served. Possible causes: the index exists in ScyllaDB, but its table has a primary key column of a type Vector Store does not support.",
+            content_type = "application/json",
+            body = ErrorMessage
+        ),
+        (
             status = 500,
             description = "Error while searching. Possible causes: internal error, or search engine issues.",
             content_type = "application/json",
@@ -1462,9 +1468,7 @@ async fn post_index_like(
         let Some(entry) = indexes.get_pattern(&index_key) else {
             timer.observe_duration();
 
-            let msg = format!("missing index: {keyspace}.{index_name}");
-            debug!("post_index_like: {msg}");
-            return (StatusCode::NOT_FOUND, msg).into_response();
+            return missing_index_response(&indexes, &index_key, "post_index_like");
         };
         if entry.status() == crate::node_state::IndexStatus::Serving {
             Ok((entry.index().clone(), entry.primary_key_columns().clone()))
