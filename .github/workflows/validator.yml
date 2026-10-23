@@ -15,6 +15,14 @@ permissions:
   contents: read
   pull-requests: read
 
+# A push to a pull request cancels the run still testing its previous commit.
+# Any other run gets a group of its own, so merge group and master runs are
+# never cancelled. So does a re-run: it would test the commit of the run it
+# repeats, which may no longer be the head of the pull request.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number && github.run_attempt == '1' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
@@ -145,4 +153,14 @@ jobs:
         fi
 
         echo "All jobs succeeded"
+
+    # A job ends as cancelled when its run is cancelled, e.g. by a newer push
+    # to the same pull request, or when it times out. It did not finish
+    # testing the change, so the run must not report success. always() runs
+    # this step in a cancelled run too.
+    - name: Check that no job was cancelled
+      if: always() && contains(needs.*.result, 'cancelled')
+      run: |
+        echo "A job was cancelled or timed out, so the change was not fully tested"
+        exit 1
 
