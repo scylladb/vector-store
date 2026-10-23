@@ -9,6 +9,7 @@ use crate::common::CreateIndexQuery;
 use crate::common::TableName;
 use async_backtrace::framed;
 use httpapi::IndexInfo;
+use httpapi::IndexStatus;
 use httpapi::KeyspaceName;
 use httpclient::HttpClient;
 use scylla::client::session::Session;
@@ -285,7 +286,8 @@ async fn local_index_based_on_f_columns(actors: Arc<TestActors>) {
 }
 
 /// Test that an index on a table with a primary key type the service cannot represent is skipped.
-/// Serving such an index would fail every query. Discovery must drop it and keep serving the other indexes.
+/// Serving such an index would fail every query. Discovery must report it as unsupported, and the
+/// other indexes must keep serving.
 #[e2etest::test(group = index_create)]
 async fn index_with_unsupported_primary_key_type_is_skipped(actors: Arc<TestActors>) {
     info!("started");
@@ -341,23 +343,22 @@ async fn index_with_unsupported_primary_key_type_is_skipped(actors: Arc<TestActo
     wait_for_index(&clients, &index).await;
 
     for client in &clients {
+        let url = client.url();
         assert!(
             !client
                 .indexes()
                 .await
                 .iter()
                 .any(|idx| idx.index == unsupported_index),
-            "Expected the unsupported index to be skipped at {url}",
-            url = client.url()
+            "Expected the unsupported index not to be listed at {url}"
         );
-        assert!(
-            client
-                .index_status(&keyspace, &unsupported_index)
-                .await
-                .is_err(),
-            "Expected no status for the skipped index at {url}",
-            url = client.url()
-        );
+        let info = client
+            .index_status(&keyspace, &unsupported_index)
+            .await
+            .unwrap_or_else(|err| {
+                panic!("Expected a status for the skipped index at {url}: {err}")
+            });
+        assert_eq!(info.status, IndexStatus::Unsupported, "at {url}");
     }
 
     cleanup_keyspace(&actors, &keyspace).await;

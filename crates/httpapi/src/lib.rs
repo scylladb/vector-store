@@ -150,6 +150,8 @@ pub enum IndexStatus {
     Bootstrapping,
     /// The index has completed the initial table scan. It is now monitoring the database for changes.
     Serving,
+    /// The index exists in ScyllaDB, but Vector Store cannot serve it.
+    Unsupported,
 }
 
 #[derive(Debug, PartialEq, serde::Deserialize, serde::Serialize, utoipa::ToSchema)]

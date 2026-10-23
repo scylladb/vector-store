@@ -6,6 +6,7 @@
 use crate::ColumnName;
 use crate::DbIndexPartitioning;
 use crate::IndexKey;
+use crate::IndexKind;
 use crate::IndexMetadata;
 use crate::IndexVersion;
 use crate::KeyspaceName;
@@ -318,6 +319,12 @@ pub(crate) enum BestIndexState {
     },
 }
 
+/// An index present in the schema that Vector Store skipped at discovery.
+#[derive(Debug)]
+pub(crate) struct UnsupportedIndexEntry {
+    pub(crate) kind: IndexKind,
+}
+
 /// Storage for all active indexes and map of routing group to the set of index keys that belong to it.
 #[derive(Debug)]
 pub(crate) struct Indexes {
@@ -325,6 +332,7 @@ pub(crate) struct Indexes {
     vs_routing: HashMap<RoutingGroupKey, Vec<IndexKey>>,
     fts_entries: HashMap<IndexKey, FtsIndexEntry>,
     pattern_entries: HashMap<IndexKey, PatternIndexEntry>,
+    unsupported: HashMap<IndexKey, UnsupportedIndexEntry>,
 }
 
 impl Indexes {
@@ -334,6 +342,7 @@ impl Indexes {
             vs_routing: HashMap::new(),
             fts_entries: HashMap::new(),
             pattern_entries: HashMap::new(),
+            unsupported: HashMap::new(),
         }
     }
 
@@ -395,6 +404,17 @@ impl Indexes {
         } else {
             self.pattern_entries.remove(key).is_some()
         }
+    }
+
+    pub(crate) fn get_unsupported(&self, key: &IndexKey) -> Option<&UnsupportedIndexEntry> {
+        self.unsupported.get(key)
+    }
+
+    pub(crate) fn set_unsupported(
+        &mut self,
+        unsupported: HashMap<IndexKey, UnsupportedIndexEntry>,
+    ) {
+        self.unsupported = unsupported;
     }
 
     pub(crate) fn iter_vs(&self) -> impl Iterator<Item = (&IndexKey, &VsIndexEntry)> {

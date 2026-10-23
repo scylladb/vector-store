@@ -848,12 +848,14 @@
         "enum": [
           "INITIALIZING",
           "BOOTSTRAPPING",
-          "SERVING"
+          "SERVING",
+          "UNSUPPORTED"
         ],
         "x-enum-descriptions": [
           "The index has been discovered and is being initialized.",
           "The index is performing the initial full scan of the underlying table to populate the index.",
-          "The index has completed the initial table scan. It is now monitoring the database for changes."
+          "The index has completed the initial table scan. It is now monitoring the database for changes.",
+          "The index exists in ScyllaDB, but Vector Store cannot serve it."
         ]
       },
       "InfoResponse": {

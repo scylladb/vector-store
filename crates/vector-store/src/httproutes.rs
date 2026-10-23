@@ -5,6 +5,7 @@
 
 use crate::Filter;
 use crate::IndexKey;
+use crate::IndexKind;
 use crate::IndexName;
 use crate::IndexOptionsFts;
 use crate::IndexOptionsPattern;
@@ -269,6 +270,16 @@ impl From<&IndexOptionsPattern> for PatternIndexOptions {
     }
 }
 
+impl From<&IndexKind> for IndexOptions {
+    fn from(kind: &IndexKind) -> Self {
+        match kind {
+            IndexKind::Vs(options) => IndexOptions::Vector(options.into()),
+            IndexKind::Fts(options) => IndexOptions::Fulltext(options.into()),
+            IndexKind::Pattern(options) => IndexOptions::Pattern(options.into()),
+        }
+    }
+}
+
 impl From<httpapi::Limit> for crate::Limit {
     fn from(limit: httpapi::Limit) -> Self {
         Self::from(<httpapi::Limit as Into<NonZeroUsize>>::into(limit))
@@ -405,6 +416,17 @@ async fn get_indexes(State(state): State<RoutesInnerState>) -> Response {
     .collect();
 
     (StatusCode::OK, response::Json(indexes)).into_response()
+}
+
+fn unsupported_index_info(key: &IndexKey, entry: &indexes::UnsupportedIndexEntry) -> IndexInfo {
+    IndexInfo {
+        keyspace: key.keyspace().into(),
+        index: key.index().into(),
+        options: (&entry.kind).into(),
+        status: httpapi::IndexStatus::Unsupported,
+        count: 0,
+        build_progress: 0.0,
+    }
 }
 
 /// A human-readable description of the error that occurred.
@@ -571,6 +593,9 @@ async fn get_index_info(
                 entry.status(),
                 entry.progress(),
             )
+        } else if let Some(entry) = indexes.get_unsupported(&index_key) {
+            let info = unsupported_index_info(&index_key, entry);
+            return (StatusCode::OK, response::Json(info)).into_response();
         } else {
             let msg = format!("missing index: {keyspace_name}.{index_name}");
             debug!("get_index_info: {msg}");

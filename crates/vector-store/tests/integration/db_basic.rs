@@ -391,48 +391,50 @@ fn process_db(db: &DbBasic, msg: Db, node_state: Sender<NodeState>) {
                     tokio::time::sleep(std::time::Duration::MAX).await;
                 });
             } else {
-                tx.send(Ok(db
-                    .0
-                    .read()
-                    .unwrap()
-                    .keyspaces
-                    .iter()
-                    .flat_map(|(keyspace_name, keyspace)| {
-                        keyspace
-                            .indexes
-                            .iter()
-                            .map(|(index_name, index)| DbCustomIndex {
-                                keyspace: keyspace_name.clone(),
-                                index: index_name.clone(),
-                                table: index.metadata.table_name.clone(),
-                                primary_key_columns: keyspace
-                                    .tables
-                                    .get(&index.metadata.table_name)
-                                    .map(|table| table.primary_keys.clone())
-                                    .unwrap(),
-                                partition_key_count: NonZeroUsize::new(
-                                    keyspace
+                let response = {
+                    let db = db.0.read().unwrap();
+                    let indexes = db
+                        .keyspaces
+                        .iter()
+                        .flat_map(|(keyspace_name, keyspace)| {
+                            keyspace
+                                .indexes
+                                .iter()
+                                .map(|(index_name, index)| DbCustomIndex {
+                                    keyspace: keyspace_name.clone(),
+                                    index: index_name.clone(),
+                                    table: index.metadata.table_name.clone(),
+                                    primary_key_columns: keyspace
                                         .tables
                                         .get(&index.metadata.table_name)
-                                        .map(|table| table.partition_key_count)
+                                        .map(|table| table.primary_keys.clone())
                                         .unwrap(),
-                                )
-                                .unwrap(),
-                                target_columns: index.metadata.target_columns.clone(),
-                                partitioning: index.metadata.partitioning.clone(),
-                                filtering_columns: index.metadata.filtering_columns.clone(),
-                                alternator_attribute_types: index
-                                    .metadata
-                                    .alternator_attribute_types
-                                    .clone(),
-                                kind: match index.metadata.kind {
-                                    IndexKind::Vs(_) => DbIndexKind::VectorSearch,
-                                    IndexKind::Fts(_) => DbIndexKind::FullTextSearch,
-                                    IndexKind::Pattern(_) => DbIndexKind::Pattern,
-                                },
-                            })
-                    })
-                    .collect()))
+                                    partition_key_count: NonZeroUsize::new(
+                                        keyspace
+                                            .tables
+                                            .get(&index.metadata.table_name)
+                                            .map(|table| table.partition_key_count)
+                                            .unwrap(),
+                                    )
+                                    .unwrap(),
+                                    target_columns: index.metadata.target_columns.clone(),
+                                    partitioning: index.metadata.partitioning.clone(),
+                                    filtering_columns: index.metadata.filtering_columns.clone(),
+                                    alternator_attribute_types: index
+                                        .metadata
+                                        .alternator_attribute_types
+                                        .clone(),
+                                    kind: match index.metadata.kind {
+                                        IndexKind::Vs(_) => DbIndexKind::VectorSearch,
+                                        IndexKind::Fts(_) => DbIndexKind::FullTextSearch,
+                                        IndexKind::Pattern(_) => DbIndexKind::Pattern,
+                                    },
+                                })
+                        })
+                        .collect();
+                    (indexes, vec![])
+                };
+                tx.send(Ok(response))
                     .map_err(|_| anyhow!("Db::GetIndexes: unable to send response"))
                     .unwrap()
             }
