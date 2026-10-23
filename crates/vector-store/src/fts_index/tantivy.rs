@@ -43,6 +43,7 @@ use crate::table::Table;
 use crate::table::TableSearch;
 use crate::tantivy::COMMIT_INTERVAL;
 use crate::tantivy::Index;
+use crate::tantivy::IndexOptions;
 use crate::tantivy::IndexSchema;
 use crate::tantivy::Indexes;
 use crate::tantivy::MAX_UNCOMMITTED_THRESHOLD;
@@ -304,13 +305,15 @@ pub(crate) fn new(
         let key = index.key;
         debug!("fts index actor starting for {key}");
         let mut indexes = Indexes::new(
-            key.clone(),
+            IndexOptions {
+                key: key.clone(),
+                commit_interval,
+                commit_threshold,
+                index_schema: move || index_schema(index.analyzer, index.positions),
+            },
             Arc::clone(&table),
             worker.clone(),
             memory,
-            commit_interval,
-            commit_threshold,
-            move || index_schema(index.analyzer, index.positions),
         )
         .await;
 
