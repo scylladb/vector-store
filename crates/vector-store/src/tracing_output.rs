@@ -9,12 +9,16 @@
 //! WARN lines cannot be told apart with `journalctl -p`. A line that starts with a syslog priority
 //! in angle brackets (`<3>`) is stored at that priority instead, with the prefix removed
 //! (sd-daemon(3), `SyslogLevelPrefix=` in systemd.exec(5)), so the stored message does not change.
+//!
+//! Which lines are written is up to [`log_filter`]: `RUST_LOG`, with the routine INFO lines of
+//! some dependencies left out.
 
 use std::fmt;
 use std::io::IsTerminal;
 use tracing::Event;
 use tracing::Level;
 use tracing::Subscriber;
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::Layer;
 use tracing_subscriber::fmt::FmtContext;
 use tracing_subscriber::fmt::FormatEvent;
@@ -57,6 +61,36 @@ where
             format,
             level_prefix: output == TracingOutput::Journald,
         })
+}
+
+/// The targets whose INFO lines are routine bookkeeping, so they log only from WARN up unless the
+/// filter has a directive of its own for them. tantivy logs every segment merge and each file it
+/// deletes after one, six lines per merged segment, every few seconds under writes (VECTOR-1106).
+/// A directive's target matches by prefix, so `tantivy` covers tantivy's own crates
+/// (`tantivy_fst`, `tantivy_columnar`, ...) too.
+const QUIET_TARGETS: [&str; 1] = ["tantivy"];
+
+/// The log filter of `rust_log`, the value of `RUST_LOG` (`info` when it is unset or invalid),
+/// with a `<target>=warn` directive for each of [`QUIET_TARGETS`] that `rust_log` has no directive
+/// for. A more specific directive still wins over it, so `RUST_LOG=info,tantivy=info` keeps all of
+/// tantivy's INFO lines and `RUST_LOG=info,tantivy::indexer=info` those of its indexer.
+pub fn log_filter(rust_log: Option<&str>) -> EnvFilter {
+    let (spec, filter) = rust_log
+        .and_then(|spec| EnvFilter::try_new(spec).ok().map(|filter| (spec, filter)))
+        .unwrap_or_else(|| ("info", EnvFilter::new("info")));
+    QUIET_TARGETS
+        .into_iter()
+        .filter(|target| !has_directive_for(spec, target))
+        .filter_map(|target| format!("{target}=warn").parse().ok())
+        .fold(filter, EnvFilter::add_directive)
+}
+
+/// Whether one of the comma-separated directives of `spec` (`target[span{field}]=level`) is for
+/// exactly `target`, which a directive added for the same target would be ambiguous with.
+fn has_directive_for(spec: &str, target: &str) -> bool {
+    spec.split(',')
+        .filter_map(|directive| directive.trim().split(['[', '=']).next())
+        .any(|name| name == target)
 }
 
 /// Whether stdout is a terminal.
@@ -297,6 +331,88 @@ mod tests {
             lines.write_str(chunk).unwrap();
         }
         assert_eq!(output, "<4>ab\n<4>c\n<4>d\n");
+    }
+
+    /// The messages that pass `log_filter(rust_log)` of INFO and WARN events from Vector Store,
+    /// from two tantivy modules and from one of tantivy's own crates.
+    fn filtered(rust_log: Option<&str>) -> Vec<&'static str> {
+        let buffer = Buffer::default();
+        let layer = tracing_layer_with_writer(
+            TracingOutput::StdOut,
+            tracing_subscriber::fmt::format().with_target(false),
+            buffer.clone(),
+        );
+        let subscriber = tracing_subscriber::registry()
+            .with(log_filter(rust_log))
+            .with(layer);
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(target: "vector_store::db", "vs info");
+            tracing::warn!(target: "vector_store::db", "vs warn");
+            tracing::info!(target: "tantivy::indexer::segment_updater", "tantivy merge info");
+            tracing::warn!(target: "tantivy::directory", "tantivy warn");
+            tracing::info!(target: "tantivy_fst", "tantivy_fst info");
+        });
+
+        let output = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+        output
+            .lines()
+            .map(|line| *ALL.iter().find(|m| line.ends_with(*m)).expect(line))
+            .collect()
+    }
+
+    const ALL: [&str; 5] = [
+        "vs info",
+        "vs warn",
+        "tantivy merge info",
+        "tantivy warn",
+        "tantivy_fst info",
+    ];
+
+    const QUIETED: [&str; 3] = ["vs info", "vs warn", "tantivy warn"];
+
+    #[test]
+    fn log_filter_leaves_out_tantivy_info_lines_by_default() {
+        for rust_log in [
+            None,
+            Some("info"),
+            Some("debug"),
+            Some(" info , vector_store=debug"),
+        ] {
+            assert_eq!(filtered(rust_log), QUIETED, "{rust_log:?}");
+        }
+        assert_eq!(filtered(Some("warn")), ["vs warn", "tantivy warn"]);
+    }
+
+    #[test]
+    fn log_filter_keeps_tantivy_info_lines_when_rust_log_asks_for_them() {
+        for rust_log in [
+            "info,tantivy=info",
+            "tantivy,info",
+            "info,tantivy[merge]=info",
+        ] {
+            assert_eq!(filtered(Some(rust_log)), ALL, "{rust_log}");
+        }
+        // A directive for one module is more specific than the added `tantivy=warn`, so it wins.
+        assert_eq!(
+            filtered(Some("info,tantivy::indexer=info")),
+            ["vs info", "vs warn", "tantivy merge info", "tantivy warn"]
+        );
+    }
+
+    #[test]
+    fn log_filter_falls_back_to_info_for_an_invalid_rust_log() {
+        assert_eq!(filtered(Some("vector_store=loud")), QUIETED);
+    }
+
+    #[test]
+    fn a_directive_for_a_target_names_exactly_that_target() {
+        assert!(has_directive_for("info,tantivy=debug", "tantivy"));
+        assert!(has_directive_for("tantivy[merge]=info", "tantivy"));
+        assert!(has_directive_for(" tantivy ,info", "tantivy"));
+        assert!(!has_directive_for("tantivy::indexer=info", "tantivy"));
+        assert!(!has_directive_for("info,tantivy_fst=debug", "tantivy"));
+        assert!(!has_directive_for("info", "tantivy"));
     }
 
     #[test]

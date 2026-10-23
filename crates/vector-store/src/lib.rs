@@ -72,6 +72,7 @@ pub use crate::table::PrimaryId;
 pub use crate::timestamp::Timestamp;
 pub use crate::timestamp::Timestamped;
 pub use crate::tracing_output::TracingOutput;
+pub use crate::tracing_output::log_filter;
 pub use crate::tracing_output::stdout_is_journal;
 pub use crate::tracing_output::stdout_is_terminal;
 pub use crate::tracing_output::tracing_layer;
