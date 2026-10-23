@@ -53,7 +53,9 @@ fn main() -> anyhow::Result<()> {
     };
 
     tracing_subscriber::registry()
-        .with(EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new("info"))?)
+        .with(vector_store::log_filter(
+            std::env::var(EnvFilter::DEFAULT_ENV).ok().as_deref(),
+        ))
         .with(vector_store::tracing_layer(
             output,
             fmt::format().with_target(false),
