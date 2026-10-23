@@ -11,13 +11,32 @@ engine. Building only the host's native architecture doesn't need qemu.
 Release version is based on git annotated tags. You can create a new tag using:
 
 ```bash
-git tag -a X.Y.Z -m "Release version X.Y.Z"
-git push origin X.Y.Z
+git tag -a X.Y.Z <commit> -m "Release version X.Y.Z"
+git push <remote> refs/tags/X.Y.Z
 ```
+
+`<remote>` is the remote of `scylladb/vector-store`. In a clone of a fork that
+is not `origin`; `git remote -v` shows which one it is. Pushing the one tag,
+rather than `--tags`, keeps local tags that differ from upstream's out of the
+repository.
 
 GitHub doesn't support creating annotated tags, so you must do them from local
 environment. You can add additional metadata to the tag, for example
 `X.Y.Z-dev` for development releases.
+
+Then publish the GitHub release, which starts the release workflow:
+
+```bash
+gh release create X.Y.Z -R scylladb/vector-store --verify-tag \
+    --title vector-store-X.Y.Z --latest --notes-file notes.md
+```
+
+For a patch on an older series, pass `--latest=false` instead of `--latest`,
+so the GitHub release of the newest series stays marked as the latest one.
+
+The `vector-store-release` Claude Code skill (`.claude/skills/`) walks through
+a whole release: writing the notes and the Slack announcement, tagging,
+publishing, and checking what the workflow produced.
 
 In GitHub Actions there is a release workflow that builds the release artifacts
 and uploads them to GitHub and DockerHub. It is triggered when a GitHub Release
@@ -64,10 +83,9 @@ render on the release page:
 
 ```markdown
 <!-- slack-announcement
-:rocket: ScyllaDB Vector Store 1.13.0 is out! One fix worth upgrading for, and one trade-off to check first:
+:rocket: *ScyllaDB Vector Store 1.13.0* is out! One fix worth upgrading for, and one trade-off to check first:
 :white_check_mark: Searches no longer stall during deletes. With usearch 2.22 each delete on a 136M-row index walked a long run of slots, and at 2 deletes/s p99 search latency reached 880 ms; with usearch 2.26 it stays under 5 ms at up to 50 deletes/s (#634)
 :warning: Search throughput is lower in some configurations: −4% on x86 F32, −6% on arm64 F16, −13% on x86 F16, and 1M-vector index builds take 5–20% longer. arm64 F32 is at parity and F16 recall is up 1.3 points. For a half-precision index, prefer BF16 (#634, #645)
-:lock: rustls 0.23.46 resolves RUSTSEC-2026-0346 and RUSTSEC-2026-0347 (#647)
 Recommended if your workload deletes rows; benchmark first if you serve F16 indexes on x86.
 -->
 ```
@@ -86,7 +104,8 @@ Aim the announcement at someone deciding whether to upgrade: one line on what
 kind of release it is, a `:warning:` line for each change in behaviour, defaults
 or performance they should check first, the fixes that matter grouped into a
 line or two, and a recommendation on who should upgrade. Leave the rest to the
-release notes.
+release notes, including security-related dependency updates such as RUSTSEC
+advisories: they are listed in the notes, not announced.
 
 The job reads the notes when it runs, not from the release event, so to correct
 a block before the announcement goes out, edit the release notes. If the job
