@@ -348,9 +348,9 @@ impl From<crate::SimilarityScore> for httpapi::SimilarityScore {
 )]
 
 async fn get_indexes(State(state): State<RoutesInnerState>) -> Response {
-    let entries: Vec<_> = {
+    let (entries, unsupported): (Vec<_>, Vec<_>) = {
         let indexes = state.indexes.read().unwrap();
-        indexes
+        let entries = indexes
             .iter_vs()
             .map(|(key, entry)| {
                 (
@@ -379,7 +379,12 @@ async fn get_indexes(State(state): State<RoutesInnerState>) -> Response {
                     entry.progress(),
                 )
             }))
-            .collect()
+            .collect();
+        let unsupported = indexes
+            .iter_unsupported()
+            .map(|(key, entry)| unsupported_index_info(key, entry))
+            .collect();
+        (entries, unsupported)
     };
 
     let indexes: Vec<_> = future::join_all(entries.into_iter().map(
@@ -403,6 +408,7 @@ async fn get_indexes(State(state): State<RoutesInnerState>) -> Response {
     .await
     .into_iter()
     .flatten()
+    .chain(unsupported)
     .collect();
 
     (StatusCode::OK, response::Json(indexes)).into_response()

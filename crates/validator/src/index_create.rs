@@ -286,7 +286,7 @@ async fn local_index_based_on_f_columns(actors: Arc<TestActors>) {
 }
 
 /// Test that an index on a table with a primary key type the service cannot represent is skipped.
-/// Serving such an index would fail every query. Discovery must report it as unsupported, and the
+/// Serving such an index would fail every query. Discovery must list it as unsupported, and the
 /// other indexes must keep serving.
 #[e2etest::test(group = index_create)]
 async fn index_with_unsupported_primary_key_type_is_skipped(actors: Arc<TestActors>) {
@@ -344,20 +344,19 @@ async fn index_with_unsupported_primary_key_type_is_skipped(actors: Arc<TestActo
 
     for client in &clients {
         let url = client.url();
-        assert!(
-            !client
-                .indexes()
-                .await
-                .iter()
-                .any(|idx| idx.index == unsupported_index),
-            "Expected the unsupported index not to be listed at {url}"
-        );
+        let listed = client
+            .indexes()
+            .await
+            .into_iter()
+            .find(|idx| idx.index == unsupported_index)
+            .unwrap_or_else(|| panic!("Expected the unsupported index to be listed at {url}"));
         let info = client
             .index_status(&keyspace, &unsupported_index)
             .await
             .unwrap_or_else(|err| {
                 panic!("Expected a status for the skipped index at {url}: {err}")
             });
+        assert_eq!(info, listed);
         assert_eq!(info.status, IndexStatus::Unsupported, "at {url}");
     }
 
