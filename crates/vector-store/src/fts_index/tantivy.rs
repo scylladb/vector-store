@@ -10,11 +10,11 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use tantivy::collector::TopDocs;
-use tantivy::query::BooleanQuery;
-use tantivy::query::BoostQuery;
-use tantivy::query::Occur;
 use tantivy::query::Query;
 use tantivy::query::QueryParser;
+use tantivy::query::QueryParserError;
+use tantivy::query_grammar::Occur;
+use tantivy::query_grammar::UserInputAst;
 use tantivy::schema::IndexRecordOption;
 use tantivy::schema::TextFieldIndexing;
 use tantivy::schema::TextOptions;
@@ -165,7 +165,11 @@ fn make_query(
     let query_parser = QueryParser::for_index(index, vec![text_field]);
     query_parser
         .parse_query(query_str)
-        .map_err(|e| QueryError(format!("fts: failed to parse query: {e}")).into())
+        .map_err(query_parse_error)
+}
+
+fn query_parse_error(error: QueryParserError) -> anyhow::Error {
+    QueryError(format!("fts: failed to parse query: {error}")).into()
 }
 
 fn find_partition_id(
@@ -226,7 +230,8 @@ const HIGHLIGHT_MAX_NUM_CHARS: usize = 150;
 const HIGHLIGHT_PRE_TAG: &str = "<b>";
 const HIGHLIGHT_POST_TAG: &str = "</b>";
 
-/// Rebuilds `query`, dropping any `MustNot` clause at every nesting level.
+/// Rebuilds the parsed query, dropping any `MustNot` clause and unwrapping any boost
+/// at every nesting level.
 ///
 /// Works around a Tantivy limitation.
 /// `SnippetGenerator` uses `BooleanQuery::query_terms` to determine which terms to highlight.
@@ -234,34 +239,40 @@ const HIGHLIGHT_POST_TAG: &str = "</b>";
 /// Without this, a negated term (e.g. `-dog` in `fox -dog`) would still get highlighted
 /// in caller-supplied text even though the query excludes documents containing it.
 ///
-/// Returns `Err` for a query construct we cannot see inside since we cannot rule
-/// out a `MustNot` clause hidden behind it. The caller surfaces this as a query error
-/// rather than silently returning no highlights, since the query may still positively
-/// match the document.
-fn strip_negated_clauses(query: &dyn Query) -> anyhow::Result<Box<dyn Query>> {
-    let Some(boolean_query) = query.downcast_ref::<BooleanQuery>() else {
-        if query.downcast_ref::<BoostQuery>().is_some() {
-            return Err(QueryError(
-                "fts: boosted queries are not supported for highlighting".to_string(),
-            )
-            .into());
-        }
-        return Ok(query.box_clone());
-    };
-    let clauses = boolean_query
-        .clauses()
-        .iter()
-        .filter(|(occur, _)| *occur != Occur::MustNot)
-        .map(|(occur, subquery)| Ok((*occur, strip_negated_clauses(subquery.as_ref())?)))
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    Ok(Box::new(BooleanQuery::new(clauses)))
+/// It works on the parsed tree, not on the built query, because the built `BoostQuery`
+/// keeps its inner query private, so a negation inside a boost, e.g. `(fox -dog)^2`,
+/// could not be removed there. Boosts only affect scoring, so unwrapping them loses nothing.
+fn strip_negated_clauses(ast: UserInputAst) -> UserInputAst {
+    match ast {
+        UserInputAst::Clause(clauses) => UserInputAst::Clause(
+            clauses
+                .into_iter()
+                .filter(|(occur, _)| *occur != Some(Occur::MustNot))
+                .map(|(occur, clause)| (occur, strip_negated_clauses(clause)))
+                .collect(),
+        ),
+        UserInputAst::Boost(inner, _) => strip_negated_clauses(*inner),
+        leaf @ UserInputAst::Leaf(_) => leaf,
+    }
+}
+
+fn make_highlight_query(
+    index: &tantivy::Index,
+    text_field: tantivy::schema::Field,
+    query_str: &str,
+) -> anyhow::Result<Box<dyn Query>> {
+    let ast = tantivy::query_grammar::parse_query(query_str)
+        .map_err(|_| query_parse_error(QueryParserError::SyntaxError(query_str.to_string())))?;
+    QueryParser::for_index(index, vec![text_field])
+        .build_query_from_user_input_ast(strip_negated_clauses(ast))
+        .map_err(query_parse_error)
 }
 
 fn handle_highlight(index: &Index, query_str: &str, documents: &[String]) -> FtsHighlightR {
     let text_field = index.schema.get_field("text").unwrap();
     let searcher = index.reader.searcher();
-    let query = make_query(&index.index, text_field, query_str)?;
-    let query = strip_negated_clauses(query.as_ref())?;
+    make_query(&index.index, text_field, query_str)?;
+    let query = make_highlight_query(&index.index, text_field, query_str)?;
 
     // The generator uses the live index to weight terms by document frequency,
     // prioritizing rarer indexed terms when picking which fragment of a long text to show.
@@ -1023,34 +1034,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn highlight_fails_for_negated_boosted_query() {
+    async fn highlight_does_not_mark_negated_terms_inside_a_boost() {
         let table = make_table_with_keys();
         let sender = make_sender(table);
         add_doc(&sender, 1, "fox").await;
         add_doc(&sender, 2, "dog").await;
+
+        let highlights = highlight(&sender, "(fox -dog)^2", &["fox dog"]).await;
+
+        assert_eq!(highlights[0].as_deref(), Some("<b>fox</b> dog"));
+    }
+
+    #[tokio::test]
+    async fn highlight_marks_boosted_query_terms() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+        add_doc(&sender, 1, "fox").await;
+        add_doc(&sender, 2, "dog").await;
+
+        let highlights = highlight(&sender, "fox^2", &["fox dog"]).await;
+
+        assert_eq!(highlights[0].as_deref(), Some("<b>fox</b> dog"));
+    }
+
+    #[tokio::test]
+    async fn highlight_fails_on_unknown_field_in_negated_clause() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+        add_doc(&sender, 1, "fox").await;
 
         let result = sender
             .highlight(
                 make_index_key(),
-                "(fox -dog)^2".into(),
-                vec!["fox dog".into()],
+                "fox -missing:dog".into(),
+                vec!["a fox".into()],
             )
-            .await;
-
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn highlight_fails_for_boosted_query() {
-        let table = make_table_with_keys();
-        let sender = make_sender(table);
-        add_doc(&sender, 1, "fox").await;
-        add_doc(&sender, 2, "dog").await;
-
-        // A plain boost carries no negation, but we still cannot see inside it
-        // to rule one out, so we report it as unsupported rather than a false "no match".
-        let result = sender
-            .highlight(make_index_key(), "fox^2".into(), vec!["fox dog".into()])
             .await;
 
         assert!(result.is_err());
