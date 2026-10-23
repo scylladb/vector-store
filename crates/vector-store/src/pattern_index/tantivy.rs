@@ -11,6 +11,7 @@ use crate::perf;
 use crate::table::Table;
 use crate::table::TableSearch;
 use crate::tantivy::COMMIT_INTERVAL;
+use crate::tantivy::IndexOptions;
 use crate::tantivy::IndexSchema;
 use crate::tantivy::Indexes;
 use crate::tantivy::MAX_UNCOMMITTED_THRESHOLD;
@@ -104,13 +105,15 @@ pub(crate) fn new(
         let key = config.key;
         debug!("pattern index actor starting for {key}");
         let mut indexes = Indexes::new(
-            key.clone(),
+            IndexOptions {
+                key: key.clone(),
+                commit_interval,
+                commit_threshold,
+                index_schema,
+            },
             table,
             worker,
             memory,
-            commit_interval,
-            commit_threshold,
-            index_schema,
         )
         .await;
 

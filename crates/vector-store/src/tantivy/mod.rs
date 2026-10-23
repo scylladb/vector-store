@@ -328,6 +328,14 @@ fn remove_document(index: &Index, primary_id: PrimaryId, in_progress: AsyncInPro
     index.writer.write().unwrap().rm_document(term, in_progress)
 }
 
+/// The options of the tantivy indexes of one index key.
+pub(crate) struct IndexOptions<F> {
+    pub(crate) key: IndexKey,
+    pub(crate) commit_interval: Duration,
+    pub(crate) commit_threshold: usize,
+    pub(crate) index_schema: F,
+}
+
 /// The tantivy indexes of one index key, one per index id.
 pub(crate) struct Indexes<T, F> {
     key: IndexKey,
@@ -347,14 +355,17 @@ where
     F: Fn() -> anyhow::Result<IndexSchema>,
 {
     pub(crate) async fn new(
-        key: IndexKey,
+        options: IndexOptions<F>,
         table: Arc<RwLock<T>>,
         worker: async_channel::Sender<Worker>,
         memory: mpsc::Sender<Memory>,
-        commit_interval: Duration,
-        commit_threshold: usize,
-        index_schema: F,
     ) -> Self {
+        let IndexOptions {
+            key,
+            commit_interval,
+            commit_threshold,
+            index_schema,
+        } = options;
         let allocate_rx = memory.subscribe_allocate().await;
         let mut commit_interval = tokio::time::interval(commit_interval);
         commit_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
