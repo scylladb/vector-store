@@ -20,7 +20,12 @@ env:
   RUST_BACKTRACE: full
 
 jobs:
+  rust-check-code-changes:
+    uses: $/.github/workflows/check-code-changes.yml
+
   cargo-clippy:
+    needs: ["rust-check-code-changes"]
+    if: needs.rust-check-code-changes.outputs.code-changed == 'true'
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -43,6 +48,8 @@ jobs:
       run: cargo clippy --features slow-test-hooks --all-targets --workspace -- -Dwarnings
 
   cargo-fmt:
+    needs: ["rust-check-code-changes"]
+    if: needs.rust-check-code-changes.outputs.code-changed == 'true'
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -62,6 +69,8 @@ jobs:
       run: cargo fmt --all --check
 
   cargo-test:
+    needs: ["rust-check-code-changes"]
+    if: needs.rust-check-code-changes.outputs.code-changed == 'true'
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -76,6 +85,8 @@ jobs:
       run: cargo test --features dev-tools,slow-test-hooks --verbose --all-targets --workspace
 
   cargo-deny:
+    needs: ["rust-check-code-changes"]
+    if: needs.rust-check-code-changes.outputs.code-changed == 'true'
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -93,6 +104,8 @@ jobs:
       run: cargo deny check
 
   cargo-machete:
+    needs: ["rust-check-code-changes"]
+    if: needs.rust-check-code-changes.outputs.code-changed == 'true'
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -110,6 +123,8 @@ jobs:
       run: cargo machete
 
   cargo-sbom:
+    needs: ["rust-check-code-changes"]
+    if: needs.rust-check-code-changes.outputs.code-changed == 'true'
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -140,13 +155,20 @@ jobs:
         retention-days: 7
 
   rust-workflow-status:
-    needs: ["cargo-clippy", "cargo-fmt", "cargo-test", "cargo-deny", "cargo-machete", "cargo-sbom"]
+    needs: ["rust-check-code-changes", "cargo-clippy", "cargo-fmt", "cargo-test", "cargo-deny", "cargo-machete", "cargo-sbom"]
     runs-on: ubuntu-latest
     if: always()
     steps:
     - name: Check workflow status
       run: |
         return_code=0
+
+        # The jobs below are skipped unless this one succeeds, so anything but
+        # success means nothing was checked.
+        if [[ "${{ needs.rust-check-code-changes.result }}" != "success" ]]; then
+          echo "rust-check-code-changes job did not succeed"
+          return_code=1
+        fi
 
         if [[ "${{ needs.cargo-clippy.result }}" == "failure" ]]; then
           echo "cargo-clippy job failed"

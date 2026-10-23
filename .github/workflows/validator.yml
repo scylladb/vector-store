@@ -21,7 +21,12 @@ env:
   RUST_BACKTRACE: full
 
 jobs:
+  validator-check-code-changes:
+    uses: $/.github/workflows/check-code-changes.yml
+
   validator-config:
+    needs: ["validator-check-code-changes"]
+    if: needs.validator-check-code-changes.outputs.code-changed == 'true'
     runs-on: ubuntu-latest
     outputs:
       config: ${{ steps.prepare-output.outputs.config }}
@@ -102,13 +107,20 @@ jobs:
         testcase: ${{fromJSON(needs.validator-get-validator-test-list.outputs.testcases)}}
 
   validator-workflow-status:
-    needs: ["validator-config", "validator-get-scylla-nightly-digest", "validator-build-validator", "validator-build-vector-store", "validator-get-validator-test-list", "validator-run-validator-tests"]
+    needs: ["validator-check-code-changes", "validator-config", "validator-get-scylla-nightly-digest", "validator-build-validator", "validator-build-vector-store", "validator-get-validator-test-list", "validator-run-validator-tests"]
     runs-on: ubuntu-latest
     if: always()
     steps:
     - name: Check workflow status
       run: |
         return_code=0
+
+        # The jobs below are skipped unless this one succeeds, so anything but
+        # success means nothing was checked.
+        if [[ "${{ needs.validator-check-code-changes.result }}" != "success" ]]; then
+          echo "validator-check-code-changes job did not succeed"
+          return_code=1
+        fi
 
         if [[ "${{ needs.validator-config.result }}" == "failure" ]]; then
           echo "validator-config job failed"

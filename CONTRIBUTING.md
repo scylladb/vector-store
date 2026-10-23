@@ -191,6 +191,13 @@ We use GitHub Actions for CI, configured in `rust.yml`.
 
 **All checks must pass before a pull request can be merged.**
 
+A pull request that changes only files no check reads (Markdown files,
+`docs/`, `.claude/` and the `latte/` benchmark workloads) skips the Rust and
+Validator jobs; `rust-workflow-status` and `validator-workflow-status` still
+report, so it can be merged as usual. The list is kept in
+`.github/workflows/check-code-changes.yml`; add a path there only if nothing
+the checks build, lint or run depends on it.
+
 When a test or job fails in CI, file or update a VECTOR issue and set its
 **Problem Symptom** field to `ci stability`. Use the field rather than a
 label: its values are a fixed list, so every open CI failure can be found
