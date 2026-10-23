@@ -304,7 +304,8 @@ impl From<crate::SimilarityScore> for httpapi::SimilarityScore {
     tag = "scylla-vector-store-index",
     description = "Returns the list of indexes managed by the Vector Store indexing service, each with its current operational status, \
     the total number of items indexed and the progress of the initial table scan that backfills it. \
-    The list includes vector, fulltext and pattern indexes with any status (`INITIALIZING`, `BOOTSTRAPPING`, `SERVING`). \
+    The list includes vector, fulltext and pattern indexes with any status (`INITIALIZING`, `BOOTSTRAPPING`, `SERVING`, `UNSUPPORTED`). \
+    An `UNSUPPORTED` index exists in ScyllaDB but cannot be served by the Vector Store; it is listed with `count` and `build_progress` equal to 0. \
     Due to synchronization delays, it may temporarily differ from the list of indexes inside ScyllaDB. \
     An index whose item count cannot be obtained, e.g. because it is being removed while the request is served, is omitted from the list.",
     responses(
@@ -358,9 +359,9 @@ impl From<crate::SimilarityScore> for httpapi::SimilarityScore {
 )]
 
 async fn get_indexes(State(state): State<RoutesInnerState>) -> Response {
-    let entries: Vec<_> = {
+    let (entries, unsupported): (Vec<_>, Vec<_>) = {
         let indexes = state.indexes.read().unwrap();
-        indexes
+        let entries = indexes
             .iter_vs()
             .map(|(key, entry)| {
                 (
@@ -389,7 +390,12 @@ async fn get_indexes(State(state): State<RoutesInnerState>) -> Response {
                     entry.progress(),
                 )
             }))
-            .collect()
+            .collect();
+        let unsupported = indexes
+            .iter_unsupported()
+            .map(|(key, entry)| unsupported_index_info(key, entry))
+            .collect();
+        (entries, unsupported)
     };
 
     let indexes: Vec<_> = future::join_all(entries.into_iter().map(
@@ -413,6 +419,7 @@ async fn get_indexes(State(state): State<RoutesInnerState>) -> Response {
     .await
     .into_iter()
     .flatten()
+    .chain(unsupported)
     .collect();
 
     (StatusCode::OK, response::Json(indexes)).into_response()

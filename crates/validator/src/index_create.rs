@@ -285,11 +285,13 @@ async fn local_index_based_on_f_columns(actors: Arc<TestActors>) {
     info!("finished");
 }
 
-/// Test that an index on a table with a primary key type the service cannot represent is skipped.
-/// Serving such an index would fail every query. Discovery must report it as unsupported, and the
-/// other indexes must keep serving.
+/// Test that an index on a table with a primary key type the service cannot represent is reported
+/// as unsupported. Serving such an index would fail every query, and the other indexes must keep
+/// serving.
 #[e2etest::test(group = index_create)]
-async fn index_with_unsupported_primary_key_type_is_skipped(actors: Arc<TestActors>) {
+async fn index_with_unsupported_primary_key_type_is_reported_as_unsupported(
+    actors: Arc<TestActors>,
+) {
     info!("started");
 
     let (session, clients) = common::prepare_connection(&actors).await;
@@ -314,7 +316,7 @@ async fn index_with_unsupported_primary_key_type_is_skipped(actors: Arc<TestActo
         .await
         .expect("failed to create an index");
 
-    // Discovery reads `system_schema.indexes`, so the skipped index must be there to be skipped.
+    // Discovery reads `system_schema.indexes`, so the index must be there before it can be reported.
     common::wait_for(
         || async {
             common::get_query_results(
@@ -339,25 +341,24 @@ async fn index_with_unsupported_primary_key_type_is_skipped(actors: Arc<TestActo
         common::create_table(&session, "pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None).await;
     let index = common::create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
 
-    // The valid index serves only after a discovery pass that already saw the skipped one.
+    // The valid index serves only after a discovery pass that already saw the unsupported one.
     wait_for_index(&clients, &index).await;
 
     for client in &clients {
         let url = client.url();
-        assert!(
-            !client
-                .indexes()
-                .await
-                .iter()
-                .any(|idx| idx.index == unsupported_index),
-            "Expected the unsupported index not to be listed at {url}"
-        );
+        let listed = client
+            .indexes()
+            .await
+            .into_iter()
+            .find(|idx| idx.index == unsupported_index)
+            .unwrap_or_else(|| panic!("Expected the unsupported index to be listed at {url}"));
         let info = client
             .index_status(&keyspace, &unsupported_index)
             .await
             .unwrap_or_else(|err| {
-                panic!("Expected a status for the skipped index at {url}: {err}")
+                panic!("Expected a status for the unsupported index at {url}: {err}")
             });
+        assert_eq!(info, listed);
         assert_eq!(info.status, IndexStatus::Unsupported, "at {url}");
     }
 

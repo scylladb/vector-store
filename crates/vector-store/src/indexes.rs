@@ -429,6 +429,12 @@ impl Indexes {
         self.pattern_entries.iter()
     }
 
+    pub(crate) fn iter_unsupported(
+        &self,
+    ) -> impl Iterator<Item = (&IndexKey, &UnsupportedIndexEntry)> {
+        self.unsupported.iter()
+    }
+
     /// Determines the index to route a query to, given a requested `IndexKey`.
     ///
     /// When `routing` is `true`, ensures queries are routed to the most
