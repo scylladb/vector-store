@@ -1,15 +1,16 @@
 name: Validator
 
 on:
-  push:
-    branches:
-    - 'master'
-
   pull_request:
     branches:
     - 'master'
 
   merge_group:
+
+  # There is no push trigger: the merge queue fast-forwards master to the merge
+  # group commit, which this workflow has already tested. Run it by hand for a
+  # commit that reached master without the queue.
+  workflow_dispatch:
 
 permissions:
   contents: read
