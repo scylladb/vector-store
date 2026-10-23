@@ -7,26 +7,32 @@ use crate::Config;
 use crate::Connectivity;
 use crate::DbCustomIndex;
 use crate::DbIndexKind;
+use crate::DbUnsupportedIndex;
 use crate::ExpansionAdd;
 use crate::ExpansionSearch;
+use crate::IndexKey;
 use crate::IndexKind;
 use crate::IndexMetadata;
 use crate::IndexOptionsFts;
 use crate::IndexOptionsPattern;
 use crate::IndexOptionsVs;
+use crate::IndexVersion;
 use crate::Quantization;
 use crate::SpaceType;
 use crate::db::Db;
 use crate::db::DbExt;
 use crate::engine::Engine;
 use crate::engine::EngineExt;
+use crate::indexes::UnsupportedIndexEntry;
 use crate::node_state::Event;
 use crate::node_state::NodeState;
 use crate::node_state::NodeStateExt;
 use crate::perf;
+use anyhow::anyhow;
 use anyhow::bail;
 use futures::StreamExt;
 use futures::stream;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -85,7 +91,7 @@ pub(crate) async fn new(
                         node_state.send_event(
                             Event::DiscoveringIndexes,
                         ).await;
-                        let Ok(new_indexes) = get_indexes(&db, version).await.inspect_err(|err| {
+                        let Ok((new_indexes, unsupported)) = get_indexes(&db, version).await.inspect_err(|err| {
                             info!("monitor_indexes: unable to get the list of indexes: {err}");
                         }) else {
                             // there was an error during retrieving indexes, reset schema version
@@ -111,6 +117,7 @@ pub(crate) async fn new(
                             Box::new(|curr_idx| should_delete(curr_idx, &new_indexes))
                         };
                         del_indexes(&engine, indexes.extract_if(for_delete)).await;
+                        engine.set_unsupported_indexes(unsupported).await;
 
                         let for_add: Box<dyn Fn(&IndexMetadata) -> bool + Send> = if alter_index_simulator {
                             Box::new(|new_idx| should_add_simulator(new_idx, &indexes))
@@ -175,34 +182,22 @@ impl SchemaVersion {
 async fn get_indexes(
     db: &Sender<Db>,
     schema_version: Uuid,
-) -> anyhow::Result<HashSet<IndexMetadata>> {
+) -> anyhow::Result<(
+    HashSet<IndexMetadata>,
+    HashMap<IndexKey, UnsupportedIndexEntry>,
+)> {
     if !db.is_valid_schema(schema_version).await {
         let msg = format!("get_indexes: not valid schema {schema_version} at the start");
         debug!(msg);
         bail!(msg);
     }
+    let (supported, unsupported) = db.get_indexes().await?;
     let mut indexes = HashSet::new();
-    for idx in db.get_indexes().await?.into_iter() {
-        let Some(version) = db
-            .get_index_version(idx.keyspace.clone(), idx.table.clone(), idx.index.clone())
-            .await
-            .inspect_err(|err| warn!("unable to get index version: {err}"))?
-        else {
-            // The index has just been listed, so its schema is still propagating.
-            // Fail the round to have the caller reset the schema version and retry
-            // this index on the next tick.
-            bail!("no options row for the index {idx:?}");
-        };
+    for idx in supported.into_iter() {
+        let version = index_version(db, &idx).await?;
 
-        let kind = match idx.kind {
-            DbIndexKind::VectorSearch => {
-                let Some(kind) = build_vs_index_kind(db, &idx).await? else {
-                    continue;
-                };
-                kind
-            }
-            DbIndexKind::FullTextSearch => build_fts_index_kind(db, &idx).await?,
-            DbIndexKind::Pattern => build_pattern_index_kind(db, &idx).await?,
+        let Some(kind) = build_index_kind(db, &idx).await? else {
+            continue;
         };
 
         let metadata = IndexMetadata {
@@ -227,12 +222,41 @@ async fn get_indexes(
 
         indexes.insert(metadata);
     }
+    let mut unsupported_indexes = HashMap::new();
+    for DbUnsupportedIndex { index, reason } in unsupported {
+        index_version(db, &index).await?;
+        let Some(kind) = build_index_kind(db, &index).await? else {
+            continue;
+        };
+        unsupported_indexes.insert(index.key(), UnsupportedIndexEntry { kind, reason });
+    }
     if !db.is_valid_schema(schema_version).await {
         let msg = format!("get_indexes: not valid schema {schema_version} at the end");
         debug!(msg);
         bail!(msg);
     }
-    Ok(indexes)
+    Ok((indexes, unsupported_indexes))
+}
+
+async fn index_version(db: &Sender<Db>, idx: &DbCustomIndex) -> anyhow::Result<IndexVersion> {
+    // An index listed without an options row has a schema that is still propagating.
+    // Fail the round to have the caller reset the schema version and retry this
+    // index on the next tick.
+    db.get_index_version(idx.keyspace.clone(), idx.table.clone(), idx.index.clone())
+        .await
+        .inspect_err(|err| warn!("unable to get index version: {err}"))?
+        .ok_or_else(|| anyhow!("no options row for the index {idx:?}"))
+}
+
+async fn build_index_kind(
+    db: &Sender<Db>,
+    idx: &DbCustomIndex,
+) -> anyhow::Result<Option<IndexKind>> {
+    Ok(match idx.kind {
+        DbIndexKind::VectorSearch => build_vs_index_kind(db, idx).await?,
+        DbIndexKind::FullTextSearch => Some(build_fts_index_kind(db, idx).await?),
+        DbIndexKind::Pattern => Some(build_pattern_index_kind(db, idx).await?),
+    })
 }
 
 async fn build_vs_index_kind(
@@ -632,6 +656,10 @@ mod tests {
             }
         });
 
+        mock_engine
+            .expect_set_unsupported_indexes()
+            .returning(|_| async {}.boxed());
+
         // DB mock
         let mut mock_db = MockSimDb::new();
 
@@ -653,7 +681,7 @@ mod tests {
                 let state = state.clone();
                 async move {
                     let indexes = state.get_db_indexes();
-                    tx.send(Ok(indexes)).unwrap();
+                    tx.send(Ok((indexes, vec![]))).unwrap();
                 }
                 .boxed()
             }
@@ -838,7 +866,8 @@ mod tests {
                         alternator_attribute_types: Arc::new(BTreeMap::new()),
                         kind: DbIndexKind::VectorSearch,
                     };
-                    tx.send(Ok(vec![index(), index(), index()])).unwrap();
+                    tx.send(Ok((vec![index(), index(), index()], vec![])))
+                        .unwrap();
                 }
                 .boxed()
             }
@@ -934,7 +963,8 @@ mod tests {
                         alternator_attribute_types: Arc::new(BTreeMap::new()),
                         kind: DbIndexKind::VectorSearch,
                     };
-                    tx.send(Ok(vec![index(), index(), index()])).unwrap();
+                    tx.send(Ok((vec![index(), index(), index()], vec![])))
+                        .unwrap();
                 }
                 .boxed()
             }
@@ -1014,18 +1044,20 @@ mod tests {
     }
 
     #[rstest]
+    #[case::supported(true)]
+    #[case::unsupported(false)]
     #[timeout(Duration::from_secs(5))]
     #[tokio::test]
-    async fn get_indexes_failed_while_index_options_row_is_missing() {
+    async fn get_indexes_failed_while_index_options_row_is_missing(#[case] supported: bool) {
         // A listed index without an options row has a schema that is still propagating.
         // The whole round has to fail, so the caller resets the latched schema version
         // and retries. Dropping just the index would leave it undiscovered until
-        // an unrelated schema change.
+        // an unrelated schema change, and a skipped index would keep default options.
         let mut mock_db = MockSimDb::new();
 
         mock_db.expect_get_indexes().returning(move |tx| {
             async move {
-                tx.send(Ok(vec![DbCustomIndex {
+                let index = DbCustomIndex {
                     keyspace: "ks".to_string().into(),
                     index: "idx".to_string().into(),
                     table: "tbl".to_string().into(),
@@ -1036,14 +1068,39 @@ mod tests {
                     filtering_columns: Arc::new([]),
                     alternator_attribute_types: Arc::new(BTreeMap::new()),
                     kind: DbIndexKind::VectorSearch,
-                }]))
-                .unwrap();
+                };
+                let indexes = if supported {
+                    (vec![index], vec![])
+                } else {
+                    let reason = "reason".to_string();
+                    (vec![], vec![DbUnsupportedIndex { index, reason }])
+                };
+                tx.send(Ok(indexes)).unwrap();
             }
             .boxed()
         });
 
         mock_db
             .expect_get_index_version()
+            .returning(move |_, _, _, tx| {
+                async move {
+                    tx.send(Ok(None)).unwrap();
+                }
+                .boxed()
+            });
+
+        mock_db
+            .expect_get_index_target_dimensions()
+            .returning(move |_, _, _, _, tx| {
+                async move {
+                    tx.send(Ok(Some(NonZeroUsize::new(3).unwrap().into())))
+                        .unwrap();
+                }
+                .boxed()
+            });
+
+        mock_db
+            .expect_get_vs_index_params()
             .returning(move |_, _, _, tx| {
                 async move {
                     tx.send(Ok(None)).unwrap();
@@ -1068,18 +1125,21 @@ mod tests {
 
         mock_db.expect_get_indexes().returning(move |tx| {
             async move {
-                tx.send(Ok(vec![DbCustomIndex {
-                    keyspace: "ks".to_string().into(),
-                    index: "fts_idx".to_string().into(),
-                    table: "tbl".to_string().into(),
-                    primary_key_columns: NonemptyArc::new(["pk"]).unwrap(),
-                    partition_key_count: NonZeroUsize::new(1).unwrap(),
-                    target_columns: NonemptyArc::new(["content"]).unwrap(),
-                    partitioning: DbIndexPartitioning::Global,
-                    filtering_columns: Arc::new([]),
-                    alternator_attribute_types: Arc::new(BTreeMap::new()),
-                    kind: DbIndexKind::FullTextSearch,
-                }]))
+                tx.send(Ok((
+                    vec![DbCustomIndex {
+                        keyspace: "ks".to_string().into(),
+                        index: "fts_idx".to_string().into(),
+                        table: "tbl".to_string().into(),
+                        primary_key_columns: NonemptyArc::new(["pk"]).unwrap(),
+                        partition_key_count: NonZeroUsize::new(1).unwrap(),
+                        target_columns: NonemptyArc::new(["content"]).unwrap(),
+                        partitioning: DbIndexPartitioning::Global,
+                        filtering_columns: Arc::new([]),
+                        alternator_attribute_types: Arc::new(BTreeMap::new()),
+                        kind: DbIndexKind::FullTextSearch,
+                    }],
+                    vec![],
+                )))
                 .unwrap();
             }
             .boxed()
@@ -1128,7 +1188,7 @@ mod tests {
         };
         let db = db::tests::new(mock_db_with_fts_index(Some(options)));
 
-        let result = get_indexes(&db, Uuid::new_v4()).await.unwrap();
+        let (result, _) = get_indexes(&db, Uuid::new_v4()).await.unwrap();
 
         assert_eq!(result.len(), 1);
         let idx = result.into_iter().next().unwrap();
@@ -1140,7 +1200,7 @@ mod tests {
     async fn get_indexes_defaults_fts_options_when_db_has_none() {
         let db = db::tests::new(mock_db_with_fts_index(None));
 
-        let result = get_indexes(&db, Uuid::new_v4()).await.unwrap();
+        let (result, _) = get_indexes(&db, Uuid::new_v4()).await.unwrap();
 
         let idx = result.into_iter().next().unwrap();
         assert_eq!(idx.kind, IndexKind::Fts(IndexOptionsFts::default()));

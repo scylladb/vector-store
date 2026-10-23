@@ -18,6 +18,7 @@ use crate::fts_index::FtsIndex;
 use crate::fts_index::FtsIndexConfiguration;
 use crate::fts_index::FtsIndexFactory;
 use crate::indexes::Indexes;
+use crate::indexes::UnsupportedIndexEntry;
 use crate::monitor_indexes;
 use crate::monitor_items;
 use crate::node_state::NodeState;
@@ -72,6 +73,9 @@ pub(crate) enum Engine {
         key: IndexKey,
         tx: oneshot::Sender<GetPatternIndexR>,
     },
+    SetUnsupportedIndexes {
+        unsupported: HashMap<IndexKey, UnsupportedIndexEntry>,
+    },
 }
 
 pub(crate) trait EngineExt {
@@ -80,6 +84,7 @@ pub(crate) trait EngineExt {
     async fn get_vs_index(&self, key: IndexKey) -> GetVsIndexR;
     async fn get_fts_index(&self, key: IndexKey) -> GetFtsIndexR;
     async fn get_pattern_index(&self, key: IndexKey) -> GetPatternIndexR;
+    async fn set_unsupported_indexes(&self, unsupported: HashMap<IndexKey, UnsupportedIndexEntry>);
 }
 
 impl EngineExt for mpsc::Sender<Engine> {
@@ -123,6 +128,12 @@ impl EngineExt for mpsc::Sender<Engine> {
             .expect("EngineExt::get_pattern_index: internal actor should receive request");
         rx.await
             .expect("EngineExt::get_pattern_index: internal actor should send response")
+    }
+
+    async fn set_unsupported_indexes(&self, unsupported: HashMap<IndexKey, UnsupportedIndexEntry>) {
+        self.send(Engine::SetUnsupportedIndexes { unsupported })
+            .await
+            .expect("EngineExt::set_unsupported_indexes: internal actor should receive request");
     }
 }
 
@@ -188,6 +199,10 @@ pub(crate) async fn new(
 
                             Engine::GetPatternIndex { key, tx } => {
                                 get_pattern_index(key, tx, &indexes).await
+                            }
+
+                            Engine::SetUnsupportedIndexes { unsupported } => {
+                                indexes.write().unwrap().set_unsupported(unsupported)
                             }
 
                         }
@@ -539,6 +554,11 @@ pub(crate) mod tests {
             key: IndexKey,
             tx: oneshot::Sender<GetPatternIndexR>,
         ) -> impl Future<Output = ()> + Send + 'static;
+
+        fn set_unsupported_indexes(
+            &self,
+            unsupported: HashMap<IndexKey, UnsupportedIndexEntry>,
+        ) -> impl Future<Output = ()> + Send + 'static;
     }
 
     pub(crate) fn new(sim: impl SimEngine + Send + 'static) -> mpsc::Sender<Engine> {
@@ -562,6 +582,9 @@ pub(crate) mod tests {
                         Engine::GetVsIndex { key, tx } => sim.get_vs_index(key, tx).await,
                         Engine::GetFtsIndex { key, tx } => sim.get_fts_index(key, tx).await,
                         Engine::GetPatternIndex { key, tx } => sim.get_pattern_index(key, tx).await,
+                        Engine::SetUnsupportedIndexes { unsupported } => {
+                            sim.set_unsupported_indexes(unsupported).await
+                        }
                     }
                 }
 

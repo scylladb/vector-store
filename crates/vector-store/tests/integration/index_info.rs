@@ -20,17 +20,24 @@ use httpapi::IndexOptions;
 use httpapi::IndexStatus;
 use httpapi::SimilarityFunction;
 use httpapi::VectorIndexOptions;
+use httpclient::HttpClient;
+use reqwest::StatusCode;
 use rstest::rstest;
 use scylla::cluster::metadata::NativeType;
 use scylla::value::CqlValue;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 use std::time::Duration;
 use vector_store::Analyzer;
+use vector_store::DbCustomIndex;
+use vector_store::DbIndexKind;
 use vector_store::DbIndexPartitioning;
+use vector_store::DbUnsupportedIndex;
 use vector_store::IndexKind;
 use vector_store::IndexOptionsFts;
 use vector_store::IndexOptionsVs;
+use vector_store::NonemptyArc;
 use vector_store::Percentage;
 use vector_store::Progress;
 use vector_store::Timestamp;
@@ -410,4 +417,122 @@ async fn indexes_listing_reports_status_of_a_fulltext_index() {
     assert_eq!(entries[0].index.as_ref(), index.index_name.as_ref());
     assert!(matches!(entries[0].options, IndexOptions::Fulltext(_)));
     assert_eq!(entries[0].build_progress, 100.0);
+}
+
+const UNSUPPORTED_REASON: &str = "unsupported primary key column type: column pk has type Tuple";
+
+async fn setup_unsupported_index(kind: DbIndexKind) -> (HttpClient, impl Sized) {
+    let (client, db, keep) = setup().await;
+    add_table(
+        &db,
+        ["pk".into()],
+        1,
+        [
+            ("pk".into(), NativeType::Int),
+            ("content".into(), NativeType::Text),
+        ],
+        ["embedding".into()],
+    );
+    let target_column = match kind {
+        DbIndexKind::VectorSearch => "embedding",
+        DbIndexKind::FullTextSearch | DbIndexKind::Pattern => "content",
+    };
+    db.add_unsupported_index(DbUnsupportedIndex {
+        index: DbCustomIndex {
+            keyspace: "vector".into(),
+            index: "idx".into(),
+            table: "items".into(),
+            primary_key_columns: NonemptyArc::new(["pk"]).unwrap(),
+            partition_key_count: NonZeroUsize::new(1).unwrap(),
+            target_columns: NonemptyArc::new([target_column]).unwrap(),
+            partitioning: DbIndexPartitioning::Global,
+            filtering_columns: Arc::new([]),
+            alternator_attribute_types: Default::default(),
+            kind,
+        },
+        reason: UNSUPPORTED_REASON.to_string(),
+    });
+
+    wait_for(
+        || async {
+            client
+                .index_info(&"vector".into(), &"idx".into())
+                .await
+                .is_ok_and(|info| info.status == IndexStatus::Unsupported)
+        },
+        "the unsupported index to be discovered",
+    )
+    .await;
+    (client, (db, keep))
+}
+
+#[rstest]
+#[timeout(Duration::from_secs(10))]
+#[tokio::test]
+async fn unsupported_index_is_listed_as_unsupported() {
+    crate::enable_tracing();
+    let (client, _keep) = setup_unsupported_index(DbIndexKind::VectorSearch).await;
+
+    let info = client
+        .index_info(&"vector".into(), &"idx".into())
+        .await
+        .unwrap();
+    assert_eq!(info.status, IndexStatus::Unsupported);
+    assert_eq!(info.count, 0);
+    assert_eq!(info.build_progress, 0.0);
+    assert!(matches!(
+        info.options,
+        IndexOptions::Vector(VectorIndexOptions { dimensions: 3, .. })
+    ));
+    assert_eq!(client.indexes().await, vec![info]);
+}
+
+#[rstest]
+#[timeout(Duration::from_secs(10))]
+#[tokio::test]
+async fn unsupported_vector_index_reports_why_it_cannot_be_served() {
+    crate::enable_tracing();
+    let (client, _keep) = setup_unsupported_index(DbIndexKind::VectorSearch).await;
+    let (ks, idx) = ("vector".into(), "idx".into());
+
+    let limit = NonZeroUsize::new(1).unwrap().into();
+    let response = client
+        .post_ann(&ks, &idx, vec![1.0, 2.0, 3.0].into(), None, limit)
+        .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(response.text().await.unwrap().ends_with(UNSUPPORTED_REASON));
+}
+
+#[rstest]
+#[timeout(Duration::from_secs(10))]
+#[tokio::test]
+async fn unsupported_fulltext_index_reports_why_it_cannot_be_served() {
+    crate::enable_tracing();
+    let (client, _keep) = setup_unsupported_index(DbIndexKind::FullTextSearch).await;
+    let (ks, idx) = ("vector".into(), "idx".into());
+
+    let limit = NonZeroUsize::new(1).unwrap().into();
+    let response = client.post_bm25(&ks, &idx, "hello".into(), limit).await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(response.text().await.unwrap().ends_with(UNSUPPORTED_REASON));
+    let response = client
+        .post_highlight(&ks, &idx, "hello".into(), vec![])
+        .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(response.text().await.unwrap().ends_with(UNSUPPORTED_REASON));
+}
+
+#[rstest]
+#[timeout(Duration::from_secs(10))]
+#[tokio::test]
+async fn unsupported_pattern_index_reports_why_it_cannot_be_served() {
+    crate::enable_tracing();
+    let (client, _keep) = setup_unsupported_index(DbIndexKind::Pattern).await;
+
+    let limit = NonZeroUsize::new(1).unwrap().into();
+    let response = client
+        .post_like(&"vector".into(), &"idx".into(), "%hello%".into(), limit)
+        .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(response.text().await.unwrap().ends_with(UNSUPPORTED_REASON));
 }
