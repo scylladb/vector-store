@@ -1,0 +1,70 @@
+name: check-code-changes
+
+on:
+  workflow_call:
+    outputs:
+      code-changed:
+        description: 'Whether the change touches files the Rust and Validator checks depend on'
+        value: ${{ jobs.check-code-changes.outputs.code-changed }}
+
+permissions:
+  contents: read
+
+jobs:
+  check-code-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code-changed: ${{ steps.check.outputs.code-changed }}
+
+    steps:
+    - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+      with:
+        fetch-depth: 0
+
+    - name: Check if anything besides documentation changed
+      id: check
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+        MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+      run: |
+        set -euo pipefail
+
+        # No crate includes these files and no CI job builds or runs them, so
+        # changing only them cannot change the result of the Rust and Validator
+        # checks.
+        non_code='\.md$|^docs/|^\.claude/|^latte/'
+
+        case "$EVENT_NAME" in
+          pull_request)
+            # The checked out commit is the test merge of the PR into the base
+            # branch, so its first parent is the base branch it is tested on.
+            base=HEAD^1
+            ;;
+          merge_group)
+            base=$MERGE_GROUP_BASE_SHA
+            ;;
+          *)
+            echo "code-changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+            ;;
+        esac
+
+        # --no-renames lists a moved file under its old path too, so moving
+        # code into docs/ does not pass for a documentation change.
+        changed_files=$(mktemp)
+        git diff --no-renames --name-only "$base" HEAD > "$changed_files"
+        echo "Changed files:"
+        cat "$changed_files"
+
+        # grep exits with 1 when every changed file is a non-code one; any
+        # other failure must not be taken for that and skip the checks.
+        status=0
+        grep -qvE "$non_code" "$changed_files" || status=$?
+        case $status in
+          0) code_changed=true ;;
+          1) code_changed=false ;;
+          *) exit $status ;;
+        esac
+
+        echo "code-changed=$code_changed" | tee -a "$GITHUB_OUTPUT"
