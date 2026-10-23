@@ -8,16 +8,19 @@ mod factory;
 mod tantivy;
 
 use crate::memory::Memory;
+use crate::metrics::Metrics;
 use crate::worker::Worker;
 pub(crate) use actor::PatternIndex;
 pub(crate) use actor::PatternIndexExt;
 pub(crate) use factory::PatternIndexConfiguration;
 pub(crate) use factory::PatternIndexFactory;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 pub(crate) fn new_factory_tantivy(
     worker: async_channel::Sender<Worker>,
     memory: mpsc::Sender<Memory>,
+    metrics: Arc<Metrics>,
 ) -> Box<dyn PatternIndexFactory + Send + Sync> {
-    Box::new(tantivy::new_factory(worker, memory))
+    Box::new(tantivy::new_factory(worker, memory, metrics))
 }

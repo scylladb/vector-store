@@ -37,12 +37,15 @@ use crate::QueryError;
 use crate::fts_index::factory::FtsIndexConfiguration;
 use crate::fts_index::factory::FtsIndexFactory;
 use crate::memory::Memory;
+use crate::metrics::Metrics;
 use crate::perf;
 use crate::table::PrimaryId;
 use crate::table::Table;
 use crate::table::TableSearch;
 use crate::tantivy::COMMIT_INTERVAL;
 use crate::tantivy::Index;
+use crate::tantivy::IndexOptions;
+use crate::tantivy::IndexSchema;
 use crate::tantivy::Indexes;
 use crate::tantivy::MAX_UNCOMMITTED_THRESHOLD;
 use crate::tantivy::build_schema;
@@ -58,11 +61,20 @@ use super::actor::FtsStatsR;
 pub(crate) struct TantivyIndexFactory {
     worker: async_channel::Sender<Worker>,
     memory: mpsc::Sender<Memory>,
+    metrics: Arc<Metrics>,
 }
 
 impl TantivyIndexFactory {
-    pub(crate) fn new(worker: async_channel::Sender<Worker>, memory: mpsc::Sender<Memory>) -> Self {
-        Self { worker, memory }
+    pub(crate) fn new(
+        worker: async_channel::Sender<Worker>,
+        memory: mpsc::Sender<Memory>,
+        metrics: Arc<Metrics>,
+    ) -> Self {
+        Self {
+            worker,
+            memory,
+            metrics,
+        }
     }
 }
 
@@ -79,25 +91,18 @@ impl FtsIndexFactory for TantivyIndexFactory {
             self.memory.clone(),
             COMMIT_INTERVAL,
             MAX_UNCOMMITTED_THRESHOLD,
+            Arc::clone(&self.metrics),
         )
     }
 }
 
-fn new_index(
-    analyzer: Analyzer,
-    positions: Positions,
-    key: &IndexKey,
-    worker: async_channel::Sender<Worker>,
-) -> anyhow::Result<Index> {
-    let tokenizer = analyzer.to_string();
-    let schema = build_schema(text_options(&tokenizer, positions));
-    Index::new(
-        schema,
-        &tokenizer,
-        build_token_pipeline(analyzer)?,
-        key,
-        worker,
-    )
+fn index_schema(analyzer: Analyzer, positions: Positions) -> anyhow::Result<IndexSchema> {
+    let tokenizer_name = analyzer.to_string();
+    Ok(IndexSchema {
+        schema: build_schema(text_options(&tokenizer_name, positions)),
+        tokenizer_name,
+        tokenizer: build_token_pipeline(analyzer)?,
+    })
 }
 
 fn stop_words(language: Language) -> anyhow::Result<StopWordFilter> {
@@ -305,19 +310,23 @@ pub(crate) fn new(
     memory: mpsc::Sender<Memory>,
     commit_interval: Duration,
     commit_threshold: usize,
+    metrics: Arc<Metrics>,
 ) -> mpsc::Sender<FtsIndex> {
     let (tx, mut rx) = mpsc::channel::<FtsIndex>(perf::channel_size().into());
     tokio::spawn(async move {
         let key = index.key;
         debug!("fts index actor starting for {key}");
         let mut indexes = Indexes::new(
-            key.clone(),
+            IndexOptions {
+                key: key.clone(),
+                commit_interval,
+                commit_threshold,
+                index_schema: move || index_schema(index.analyzer, index.positions),
+            },
             Arc::clone(&table),
             worker.clone(),
             memory,
-            commit_interval,
-            commit_threshold,
-            move |key, worker| new_index(index.analyzer, index.positions, key, worker),
+            metrics,
         )
         .await;
 
@@ -454,6 +463,7 @@ mod tests {
             memory,
             TEST_COMMIT_INTERVAL,
             TEST_COMMIT_THRESHOLD,
+            Arc::new(Metrics::new()),
         )
     }
 
@@ -694,6 +704,7 @@ mod tests {
             memory,
             TEST_COMMIT_INTERVAL,
             TEST_COMMIT_THRESHOLD,
+            Arc::new(Metrics::new()),
         );
 
         add_doc(&sender, 1, "should not be indexed").await;
@@ -716,6 +727,7 @@ mod tests {
             memory,
             Duration::from_secs(3600),
             TEST_COMMIT_THRESHOLD,
+            Arc::new(Metrics::new()),
         );
         let (tx, mut rx) = mpsc::channel(1);
 
