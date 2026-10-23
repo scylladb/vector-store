@@ -196,6 +196,12 @@ When a test or job fails in CI, file or update a VECTOR issue and set its
 label: its values are a fixed list, so every open CI failure can be found
 with `"Problem Symptom" = "ci stability"`.
 
+The Validator tests are skipped while a pull request is a draft; the Rust
+checks still run. Marking the pull request ready for review runs them. To run
+them on a draft, add the `ci-run-validator-on-draft` label and push: like the
+other `ci-*` labels, it is read when a run starts. Drafts cannot enter the
+merge queue, whose run always includes the Validator tests.
+
 ## OpenAPI Specification
 
 Vector Store exposes an HTTP REST API, documented in the OpenAPI specification file at `api/openapi.json`.
