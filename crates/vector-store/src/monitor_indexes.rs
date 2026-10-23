@@ -14,6 +14,7 @@ use crate::IndexMetadata;
 use crate::IndexOptionsFts;
 use crate::IndexOptionsPattern;
 use crate::IndexOptionsVs;
+use crate::IndexVersion;
 use crate::Quantization;
 use crate::SpaceType;
 use crate::db::Db;
@@ -24,6 +25,7 @@ use crate::node_state::Event;
 use crate::node_state::NodeState;
 use crate::node_state::NodeStateExt;
 use crate::perf;
+use anyhow::anyhow;
 use anyhow::bail;
 use futures::StreamExt;
 use futures::stream;
@@ -183,26 +185,10 @@ async fn get_indexes(
     }
     let mut indexes = HashSet::new();
     for idx in db.get_indexes().await?.into_iter() {
-        let Some(version) = db
-            .get_index_version(idx.keyspace.clone(), idx.table.clone(), idx.index.clone())
-            .await
-            .inspect_err(|err| warn!("unable to get index version: {err}"))?
-        else {
-            // The index has just been listed, so its schema is still propagating.
-            // Fail the round to have the caller reset the schema version and retry
-            // this index on the next tick.
-            bail!("no options row for the index {idx:?}");
-        };
+        let version = index_version(db, &idx).await?;
 
-        let kind = match idx.kind {
-            DbIndexKind::VectorSearch => {
-                let Some(kind) = build_vs_index_kind(db, &idx).await? else {
-                    continue;
-                };
-                kind
-            }
-            DbIndexKind::FullTextSearch => build_fts_index_kind(db, &idx).await?,
-            DbIndexKind::Pattern => build_pattern_index_kind(db, &idx).await?,
+        let Some(kind) = build_index_kind(db, &idx).await? else {
+            continue;
         };
 
         let metadata = IndexMetadata {
@@ -233,6 +219,27 @@ async fn get_indexes(
         bail!(msg);
     }
     Ok(indexes)
+}
+
+async fn index_version(db: &Sender<Db>, idx: &DbCustomIndex) -> anyhow::Result<IndexVersion> {
+    // An index listed without an options row has a schema that is still propagating.
+    // Fail the round to have the caller reset the schema version and retry this
+    // index on the next tick.
+    db.get_index_version(idx.keyspace.clone(), idx.table.clone(), idx.index.clone())
+        .await
+        .inspect_err(|err| warn!("unable to get index version: {err}"))?
+        .ok_or_else(|| anyhow!("no options row for the index {idx:?}"))
+}
+
+async fn build_index_kind(
+    db: &Sender<Db>,
+    idx: &DbCustomIndex,
+) -> anyhow::Result<Option<IndexKind>> {
+    Ok(match idx.kind {
+        DbIndexKind::VectorSearch => build_vs_index_kind(db, idx).await?,
+        DbIndexKind::FullTextSearch => Some(build_fts_index_kind(db, idx).await?),
+        DbIndexKind::Pattern => Some(build_pattern_index_kind(db, idx).await?),
+    })
 }
 
 async fn build_vs_index_kind(
