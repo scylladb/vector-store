@@ -8,6 +8,9 @@ on:
   pull_request:
     branches:
     - 'master'
+    # ready_for_review runs the tests that were skipped while the PR was a
+    # draft
+    types: [opened, synchronize, reopened, ready_for_review]
 
   merge_group:
 
@@ -27,7 +30,7 @@ jobs:
       config: ${{ steps.prepare-output.outputs.config }}
     steps:
     - name: Set default map
-      run: echo 'CONFIG={"latest-scylla-nightly":false,"os":"ubuntu-24.04-arm","arch":"arm64"}' >> $GITHUB_ENV
+      run: echo 'CONFIG={"latest-scylla-nightly":false,"os":"ubuntu-24.04-arm","arch":"arm64","run-tests":true}' >> $GITHUB_ENV
 
     - name: Check if PR has label "ci-use-latest-scylla-nightly"
       if: ${{ contains(github.event.pull_request.labels.*.name, 'ci-use-latest-scylla-nightly') }}
@@ -55,18 +58,26 @@ jobs:
       if: github.event_name == 'merge_group' && contains(fromJSON(steps.merge-labels.outputs.merge_labels), 'ci-use-amd64')
       run: echo "CONFIG=$(echo $CONFIG | jq -c '.os = "ubuntu-latest" | .arch = "amd64"')" >> $GITHUB_ENV
 
+    - name: Skip the tests for a draft PR without label "ci-run-validator-on-draft"
+      if: github.event_name == 'pull_request' && github.event.pull_request.draft && !contains(github.event.pull_request.labels.*.name, 'ci-run-validator-on-draft')
+      run: |
+        echo "CONFIG=$(echo $CONFIG | jq -c '."run-tests" = false')" >> $GITHUB_ENV
+        echo "::notice::Validator tests skipped for a draft PR; they run when it is marked ready for review, or on the next push with label ci-run-validator-on-draft"
+
     - name: Prepare output
       id: prepare-output
       run: echo "config=$CONFIG" >> $GITHUB_OUTPUT
 
   validator-get-scylla-nightly-digest:
     needs: ["validator-config"]
+    if: fromJSON(needs.validator-config.outputs.config).run-tests
     uses: $/.github/workflows/get-scylla-nightly-digest.yml
     with:
       use-latest-scylla-nightly: ${{ fromJSON(needs.validator-config.outputs.config).latest-scylla-nightly }}
 
   validator-build-validator:
     needs: ["validator-config"]
+    if: fromJSON(needs.validator-config.outputs.config).run-tests
     uses: $/.github/workflows/build-validator.yml
     with:
       os: ${{ fromJSON(needs.validator-config.outputs.config).os }}
@@ -75,6 +86,7 @@ jobs:
 
   validator-build-vector-store:
     needs: ["validator-config"]
+    if: fromJSON(needs.validator-config.outputs.config).run-tests
     uses: $/.github/workflows/build-vector-store.yml
     with:
       os: ${{ fromJSON(needs.validator-config.outputs.config).os }}
