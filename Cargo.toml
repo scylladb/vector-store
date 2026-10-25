@@ -87,7 +87,7 @@ tower-http = { version = "0.6.2", features = ["full"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 tracing-test = "0.2.5"
-usearch = "2.26.5"
+usearch = "2.26.6"
 utoipa = { version = "6.0.0", features = ["axum_extras"] }
 utoipa-axum = "0.3.0"
 utoipa-swagger-ui = { version = "10.0.1", features = ["axum", "vendored"] }
@@ -96,13 +96,13 @@ vector-store = { path = "crates/vector-store" }
 secrecy = "0.10.3"
 
 [patch.crates-io]
-# numkong 7.8.5 with scylladb/NumKong's kernel patches (VECTOR-720, VECTOR-1054), branch
-# f32-accumulate-angular-f32-x86: the opt-in f32 accumulation of the f32 angular kernels on NEON, SVE,
+# numkong 7.8.6 with scylladb/NumKong's kernel patches (VECTOR-720, VECTOR-1054), branch
+# f32-accumulate-angular-7.8.6: the opt-in f32 accumulation of the f32 angular kernels on NEON, SVE,
 # Haswell and Skylake (the NEON/SVE part is proposed upstream as ashvardanian/NumKong#393), and f16
 # angular kernels on SVE2 and FEAT_FHM that accumulate with widening multiply-adds instead of
 # converting every lane. The switch is set in .cargo/config.toml. Drop this entry once upstream ships
 # both.
-numkong = { git = "https://github.com/scylladb/NumKong.git", rev = "23067331805af83747a42aea8836a77e071ae294" }
+numkong = { git = "https://github.com/scylladb/NumKong.git", rev = "2e43be7d77b5d136aebc38eaf28c340c7fa5bbd4" }
 # Currently, axum-server-dual-protocol doesn't have a published version that supports axum 0.8, so we need to use the git version from the PR.
 axum-server-dual-protocol = { git = "https://github.com/vinchona/axum-server-dual-protocol", rev = "ca6db055254255b74238673ce4135698e347d71c" }
 # The zip that utoipa-swagger-ui unpacks the vendored Swagger UI with is covered by RUSTSEC-2026-0367,
