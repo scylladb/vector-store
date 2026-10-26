@@ -293,7 +293,7 @@ impl From<crate::SimilarityScore> for httpapi::SimilarityScore {
     tag = "scylla-vector-store-index",
     description = "Returns the list of indexes managed by the Vector Store indexing service, each with its current operational status, \
     the total number of items indexed and the progress of the initial table scan that backfills it. \
-    The list includes both vector and fulltext indexes in any state (initializing, available/built, destroying). \
+    The list includes vector, fulltext and pattern indexes with any status (`INITIALIZING`, `BOOTSTRAPPING`, `SERVING`). \
     Due to synchronization delays, it may temporarily differ from the list of indexes inside ScyllaDB. \
     An index whose item count cannot be obtained, e.g. because it is being removed while the request is served, is omitted from the list.",
     responses(
@@ -330,6 +330,16 @@ impl From<crate::SimilarityScore> for httpapi::SimilarityScore {
                     "status": "BOOTSTRAPPING",
                     "count": 42,
                     "build_progress": 37.5
+                },
+                {
+                    "keyspace": "my_keyspace",
+                    "index": "my_pattern_index",
+                    "options": {
+                        "type": "pattern"
+                    },
+                    "status": "SERVING",
+                    "count": 678,
+                    "build_progress": 100.0
                 }
             ])
         )
