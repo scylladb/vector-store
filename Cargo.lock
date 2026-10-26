@@ -3686,8 +3686,8 @@ dependencies = [
 
 [[package]]
 name = "numkong"
-version = "7.8.5"
-source = "git+https://github.com/scylladb/NumKong.git?rev=23067331805af83747a42aea8836a77e071ae294#23067331805af83747a42aea8836a77e071ae294"
+version = "7.8.6"
+source = "git+https://github.com/scylladb/NumKong.git?rev=2e43be7d77b5d136aebc38eaf28c340c7fa5bbd4#2e43be7d77b5d136aebc38eaf28c340c7fa5bbd4"
 dependencies = [
  "cc",
 ]
@@ -5863,9 +5863,9 @@ checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
 
 [[package]]
 name = "usearch"
-version = "2.26.5"
+version = "2.26.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "caf2c7d2696bad5e99d1d722e371afd83937a6c53d7032caa1c46380210aa6ba"
+checksum = "b0b5eeb9d30a9be03057a1fa6b0096b6d02a42169fb300e096501aa48ee03ce5"
 dependencies = [
  "cxx",
  "cxx-build",
