@@ -78,6 +78,15 @@ ignore = [
     { id = "RUSTSEC-2026-0253", reason = """transitive via tantivy 0.26.1, which pins lru = \"^0.16.3\";
                                             the fix only shipped as lru 0.18.2 and tantivy's main branch has already moved to it,
                                             so drop this once tantivy cuts a release with that bump""" },
+    { id = "RUSTSEC-2026-0391", reason = """transitive via tantivy 0.26.1, which pins zstd = \"^0.13\";
+                                            the fix only shipped as zstd 0.14.3, which tantivy 0.27 moves to,
+                                            so drop this once we upgrade tantivy""" },
+    { id = "RUSTSEC-2026-0398", reason = """transitive via tantivy 0.26.1, which pins zstd = \"^0.13\";
+                                            the fix only shipped as zstd-safe 8.2.0, which tantivy 0.27 moves to,
+                                            so drop this once we upgrade tantivy""" },
+    { id = "RUSTSEC-2026-0403", reason = """transitive via tantivy 0.26.1, which pins zstd = \"^0.13\";
+                                            the fix only shipped as zstd-safe 8.2.0, which tantivy 0.27 moves to,
+                                            so drop this once we upgrade tantivy""" },
 ]
 # If this is true, then cargo deny will use the git executable to fetch advisory database.
 # If this is false, then it uses a built-in git library.
