@@ -904,6 +904,11 @@ pub struct DbIndexedRow {
 #[derive(Debug, derive_more::Display)]
 struct NonRetryable;
 
+/// A token range read that stopped before the range's end: the driver could not fetch a page and
+/// ended the row stream, so the full scan reads the range again.
+#[derive(Debug, derive_more::Display)]
+struct RangeInterrupted;
+
 /// A query-related failure caused by the caller's input (an unparsable query, or a query
 /// construct that this endpoint cannot process, wrong pattern, etc.).
 #[derive(Debug, thiserror::Error)]

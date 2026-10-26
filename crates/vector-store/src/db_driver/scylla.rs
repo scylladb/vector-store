@@ -13,6 +13,7 @@ use crate::KeyspaceIdentifier;
 use crate::KeyspaceName;
 use crate::NonRetryable;
 use crate::PrimaryKey;
+use crate::RangeInterrupted;
 use crate::TableIdentifier;
 use crate::TableName;
 use crate::Vector;
@@ -36,6 +37,8 @@ use scylla::client::session_builder::SessionBuilder;
 use scylla::cluster::ClusterState;
 use scylla::cluster::metadata::Column;
 use scylla::cluster::metadata::Table;
+use scylla::errors::NextPageError;
+use scylla::errors::NextRowError;
 use scylla::observability::metrics::Metrics;
 use scylla::routing::Token;
 use scylla::statement::Consistency;
@@ -399,7 +402,7 @@ impl DbDriver for ScyllaDriver {
             .await?
             .rows_stream::<DbRow>()
             .context(NonRetryable)?
-            .map_err(anyhow::Error::from))
+            .map_err(range_scan_error))
     }
 
     async fn prepare_fetch_vector(
@@ -685,6 +688,28 @@ fn build_columns_list<'a>(
 ///
 /// For CQL-native tables, selects the vector column directly.
 /// For Alternator tables, selects from the `:attrs` map column.
+/// Sorts an error of the range's row stream:
+/// - a page whose rows do not match the expected columns will not match on another read either
+///   (`NonRetryable`: the scan fails);
+/// - any other page error means the range was not read to its end: the pager stops after a page
+///   it could not fetch, and a page it could not decode loses all its rows (`RangeInterrupted`);
+/// - a row that fails to deserialize concerns that row only.
+fn range_scan_error(err: NextRowError) -> anyhow::Error {
+    let page_type_check = matches!(
+        err,
+        NextRowError::NextPageError(NextPageError::TypeCheckError(_))
+    );
+    let page = matches!(err, NextRowError::NextPageError(_));
+    let err = anyhow::Error::from(err);
+    if page_type_check {
+        err.context(NonRetryable)
+    } else if page {
+        err.context(RangeInterrupted)
+    } else {
+        err
+    }
+}
+
 pub(crate) fn range_scan_query<'a>(
     keyspace: &KeyspaceIdentifier,
     table: &TableIdentifier,
@@ -762,6 +787,32 @@ pub(crate) fn fetch_vector_query<'a, 'b>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_page_request_interrupts_the_range() {
+        let err = range_scan_error(NextRowError::NextPageError(NextPageError::RequestFailure(
+            scylla::errors::RequestError::RequestTimeout(std::time::Duration::from_secs(1)),
+        )));
+        assert!(err.downcast_ref::<RangeInterrupted>().is_some());
+    }
+
+    #[test]
+    fn a_page_that_fails_its_type_check_is_not_retried() {
+        let err = range_scan_error(NextRowError::NextPageError(NextPageError::TypeCheckError(
+            scylla::deserialize::TypeCheckError::new(std::fmt::Error),
+        )));
+        assert!(err.downcast_ref::<NonRetryable>().is_some());
+        assert!(err.downcast_ref::<RangeInterrupted>().is_none());
+    }
+
+    #[test]
+    fn a_row_that_fails_to_deserialize_does_not_interrupt_the_range() {
+        let err = range_scan_error(NextRowError::RowDeserializationError(
+            scylla::deserialize::DeserializationError::new(std::fmt::Error),
+        ));
+        assert!(err.downcast_ref::<RangeInterrupted>().is_none());
+        assert!(err.downcast_ref::<NonRetryable>().is_none());
+    }
 
     #[test]
     fn range_scan_query_quotes_lowercase_identifiers() {

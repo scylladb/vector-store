@@ -20,6 +20,7 @@ use crate::NonemptyBox;
 use crate::Percentage;
 use crate::PrimaryKey;
 use crate::Progress;
+use crate::RangeInterrupted;
 use crate::Timestamp;
 use crate::Vector;
 use crate::db_cdc;
@@ -38,7 +39,7 @@ use anyhow::bail;
 use futures::Stream;
 use futures::StreamExt;
 use futures::TryStreamExt;
-use futures::stream::BoxStream;
+use futures::stream;
 use itertools::Itertools;
 use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
@@ -58,6 +59,7 @@ use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
+use tokio::task::JoinError;
 use tokio::task::JoinSet;
 use tracing::Instrument;
 use tracing::debug;
@@ -68,12 +70,15 @@ use tracing::trace;
 use tracing::warn;
 
 type GetTableColumnsR = Arc<HashMap<ColumnName, NativeType>>;
-type RangeScanResult =
-    anyhow::Result<Pin<Box<dyn Stream<Item = DbIndexedRow> + std::marker::Send>>, anyhow::Error>;
+type RangeRows = Pin<Box<dyn Stream<Item = anyhow::Result<DbIndexedRow>> + std::marker::Send>>;
+type RangeScanResult = anyhow::Result<RangeRows, anyhow::Error>;
 
 const START_RETRY_TIMEOUT: Duration = Duration::from_millis(100);
 const RETRY_TIMEOUT_LIMIT: Duration = Duration::from_secs(16);
 const INCREASE_RATE: u32 = 2;
+/// Interruptions of a range's read in a row that get no further than an earlier read of the range,
+/// after which the range fails: a page that fails at the same place every time is not transient.
+const MAX_STALLED_INTERRUPTIONS: u32 = 8;
 
 impl From<u64> for Percentage {
     fn from(value: u64) -> Self {
@@ -559,7 +564,26 @@ impl<T: DbDriver> Statements<T> {
             .await
     }
 
-    async fn preform_range_scan(&self, begin: Token, end: Token) -> RangeScanResult {
+    /// The rows of the range `begin..=end`. A read that the driver interrupts (`RangeInterrupted`)
+    /// is started again from the range's beginning: the rows sent before arrive again, and the
+    /// table ignores a row whose timestamp it already holds.
+    async fn preform_range_scan(self: Arc<Self>, begin: Token, end: Token) -> RangeScanResult {
+        let rows = self.open_range_scan(begin, end).await?;
+        Ok(reread_interrupted_range(
+            rows,
+            move || {
+                let statements = Arc::clone(&self);
+                async move { statements.open_range_scan(begin, end).await }
+            },
+            begin,
+            end,
+            START_RETRY_TIMEOUT,
+        ))
+    }
+
+    /// Opens a read of the range, retrying a failed open with a growing pause until it succeeds or
+    /// fails with a non-retryable error.
+    async fn open_range_scan(&self, begin: Token, end: Token) -> RangeScanResult {
         let mut range_scan = self.range_scan_stream(begin, end).await;
         let mut retry_timeout = START_RETRY_TIMEOUT;
         while let Err(err) = &range_scan {
@@ -600,7 +624,8 @@ impl<T: DbDriver> Statements<T> {
             ranges,
             concurrency,
             async move |begin, end| {
-                self.preform_range_scan(begin, end)
+                Arc::clone(&self)
+                    .preform_range_scan(begin, end)
                     .await
                     .inspect_err(|err| {
                         error!("Error during scan of the range ({begin:?}, {end:?}): {err}",);
@@ -668,11 +693,7 @@ impl<T: DbDriver> Statements<T> {
             }))
     }
 
-    async fn range_scan_stream(
-        &self,
-        begin: Token,
-        end: Token,
-    ) -> anyhow::Result<BoxStream<'static, DbIndexedRow>> {
+    async fn range_scan_stream(&self, begin: Token, end: Token) -> RangeScanResult {
         // last values columns are value and writetime
         let columns_len_expected = self.primary_key_columns.len().get()
             + (self.target_columns.len().get()
@@ -722,10 +743,20 @@ impl<T: DbDriver> Statements<T> {
                 })
             })
             .filter_map(|value| async move {
-                value
-                    .inspect_err(|err| debug!("range_scan_stream: problem with parsing row: {err}"))
-                    .ok()
-                    .flatten()
+                match value {
+                    Ok(row) => row.map(Ok),
+                    // The range is read again (RangeInterrupted), or the scan fails (NonRetryable).
+                    Err(err)
+                        if err.downcast_ref::<RangeInterrupted>().is_some()
+                            || err.downcast_ref::<NonRetryable>().is_some() =>
+                    {
+                        Some(Err(err))
+                    }
+                    Err(err) => {
+                        warn!("range_scan_stream: skipping a row that failed to read: {err:#}");
+                        None
+                    }
+                }
             })
             .boxed())
     }
@@ -751,22 +782,28 @@ async fn scan_ranges(
         let permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
 
         let length = range_length(begin, end);
-        let range_rows = rows(begin, end).await?;
+        // Opening a range can take long (it retries until ScyllaDB answers), so a range that
+        // failed meanwhile is noticed here rather than once every range has been opened.
+        let open = rows(begin, end);
+        tokio::pin!(open);
+        let range_rows = loop {
+            tokio::select! {
+                range_rows = &mut open => break range_rows?,
+                Some(finished) = range_tasks.join_next() => range_task_result(finished)?,
+            }
+        };
         let tx = tx.clone();
         let scan_length = completed_scan_length.clone();
         range_tasks.spawn(async move {
             let (tx_in_progress, mut rx_in_progress) = mpsc::channel(1);
-            range_rows
-                .for_each(move |row| {
-                    let tx = tx.clone();
-                    let tx_in_progress = tx_in_progress.clone();
-                    async move {
-                        _ = tx
-                            .send((row, AsyncInProgress::Fullscan(tx_in_progress)))
-                            .await;
-                    }
-                })
-                .await;
+            let mut range_rows = range_rows;
+            while let Some(row) = range_rows.next().await {
+                let row = row?;
+                _ = tx
+                    .send((row, AsyncInProgress::Fullscan(tx_in_progress.clone())))
+                    .await;
+            }
+            drop(tx_in_progress);
 
             // All rows of this range have been sent. Let the next range start now by dropping
             // the permit, then wait for their acknowledgements.
@@ -778,16 +815,109 @@ async fn scan_ranges(
             }
 
             scan_length.fetch_add(length, Ordering::Relaxed);
+            anyhow::Ok(())
         });
     }
 
-    while let Some(result) = range_tasks.join_next().await {
-        if let Err(err) = result {
-            error!("full scan range task failed: {err}");
-        }
+    while let Some(finished) = range_tasks.join_next().await {
+        range_task_result(finished)?;
     }
 
     Ok(())
+}
+
+/// The result of a finished range task: a range that could not be read to its end fails the scan
+/// (returning drops the JoinSet, which aborts the ranges still being read).
+fn range_task_result(finished: Result<anyhow::Result<()>, JoinError>) -> anyhow::Result<()> {
+    match finished {
+        Ok(result) => result,
+        Err(err) => {
+            error!("full scan range task failed: {err}");
+            Ok(())
+        }
+    }
+}
+
+/// How far the reads of one interrupted range have got.
+struct RereadState<Reopen> {
+    rows: RangeRows,
+    reopen: Reopen,
+    pause: Duration,
+    /// Items the current read has emitted.
+    read: usize,
+    /// The most items any read of the range has emitted.
+    furthest: usize,
+    /// Interruptions in a row that got no further than `furthest`.
+    stalled: u32,
+}
+
+/// `rows` of the range `begin..=end`, read again with `reopen` each time the read stops with
+/// `RangeInterrupted`, after a pause that starts at `first_pause`, grows with every interruption
+/// and starts over once a read gets further than the earlier ones. After
+/// `MAX_STALLED_INTERRUPTIONS` interruptions in a row without such progress, or an error of
+/// `reopen`, the stream ends with that error.
+fn reread_interrupted_range<Reopen, ReopenFut>(
+    rows: RangeRows,
+    reopen: Reopen,
+    begin: Token,
+    end: Token,
+    first_pause: Duration,
+) -> RangeRows
+where
+    Reopen: Fn() -> ReopenFut + Send + 'static,
+    ReopenFut: Future<Output = RangeScanResult> + Send,
+{
+    let state = RereadState {
+        rows,
+        reopen,
+        pause: first_pause,
+        read: 0,
+        furthest: 0,
+        stalled: 0,
+    };
+    stream::unfold(Some(state), move |state| async move {
+        let mut state = state?;
+        loop {
+            match state.rows.next().await {
+                Some(Err(err)) if err.downcast_ref::<RangeInterrupted>().is_some() => {
+                    if state.read > state.furthest {
+                        state.furthest = state.read;
+                        state.stalled = 0;
+                        state.pause = first_pause;
+                    } else {
+                        state.stalled += 1;
+                        if state.stalled >= MAX_STALLED_INTERRUPTIONS {
+                            error!(
+                                "the read of the range ({begin:?}, {end:?}) stopped at the same \
+                                 place {} times: {err:#}",
+                                state.stalled
+                            );
+                            return Some((Err(err), None));
+                        }
+                    }
+                    state.read = 0;
+                    warn!(
+                        "the read of the range ({begin:?}, {end:?}) stopped early: {err:#}; \
+                         reading the range again"
+                    );
+                    tokio::time::sleep(state.pause).await;
+                    if state.pause < RETRY_TIMEOUT_LIMIT {
+                        state.pause *= INCREASE_RATE;
+                    }
+                    match (state.reopen)().await {
+                        Ok(reopened) => state.rows = reopened,
+                        Err(err) => return Some((Err(err), None)),
+                    }
+                }
+                Some(item) => {
+                    state.read += 1;
+                    return Some((item, Some(state)));
+                }
+                None => return None,
+            }
+        }
+    })
+    .boxed()
 }
 
 fn range_length(begin: Token, end: Token) -> u64 {
@@ -1457,7 +1587,7 @@ mod tests {
     }
 
     fn single_row_range(begin: Token) -> RangeScanResult {
-        Ok(stream::iter([row(begin.value())]).boxed())
+        Ok(stream::iter([Ok(row(begin.value()))]).boxed())
     }
 
     fn concurrency(n: usize) -> NonZeroUsize {
@@ -1559,6 +1689,191 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(consumer.await.unwrap(), 1);
     }
+    #[rstest]
+    #[timeout(Duration::from_secs(5))]
+    #[tokio::test]
+    async fn range_that_fails_while_being_read_fails_the_scan() {
+        let (tx, rx) = mpsc::channel(1);
+        let consumer = spawn_consumer_acking_immediately(rx);
+
+        let result = scan_ranges(
+            single_token_ranges(1),
+            concurrency(1),
+            async |begin, _| {
+                Ok(
+                    stream::iter([Ok(row(begin.value())), Err(anyhow!("range read failed"))])
+                        .boxed(),
+                )
+            },
+            tx,
+            Arc::new(AtomicU64::new(0)),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(consumer.await.unwrap(), 1);
+    }
+
+    /// A range that fails while another one is still being opened fails the scan at once: the
+    /// open of the second range never completes here.
+    #[rstest]
+    #[timeout(Duration::from_secs(5))]
+    #[tokio::test]
+    async fn range_failing_while_the_next_one_opens_fails_the_scan() {
+        let (tx, rx) = mpsc::channel(1);
+        let consumer = spawn_consumer_acking_immediately(rx);
+
+        let result = scan_ranges(
+            single_token_ranges(2),
+            concurrency(2),
+            async |begin, _| {
+                if begin.value() == 0 {
+                    Ok(stream::iter([Err(anyhow!("range read failed"))]).boxed())
+                } else {
+                    std::future::pending().await
+                }
+            },
+            tx,
+            Arc::new(AtomicU64::new(0)),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(consumer.await.unwrap(), 0);
+    }
+
+    fn interrupted() -> anyhow::Error {
+        anyhow!("page request timed out").context(RangeInterrupted)
+    }
+
+    fn rows_ending_with(ids: &[i64], end: Option<anyhow::Error>) -> RangeRows {
+        let rows: Vec<_> = ids
+            .iter()
+            .map(|&id| Ok(row(id)))
+            .chain(end.map(Err))
+            .collect();
+        stream::iter(rows).boxed()
+    }
+
+    fn primary_keys(ids: &[i64]) -> Vec<PrimaryKey> {
+        ids.iter().map(|&id| row(id).primary_key).collect()
+    }
+
+    fn read_keys(items: &[anyhow::Result<DbIndexedRow>]) -> Vec<PrimaryKey> {
+        items
+            .iter()
+            .filter_map(|item| item.as_ref().ok())
+            .map(|row| row.primary_key.clone())
+            .collect()
+    }
+
+    /// The driver ends a range's stream after a page it could not fetch: the range is read again
+    /// from its beginning until a read reaches the range's end, so every row arrives.
+    #[tokio::test]
+    async fn an_interrupted_range_is_read_again_until_its_end() {
+        let reopened = Arc::new(AtomicU64::new(0));
+        let rows = reread_interrupted_range(
+            rows_ending_with(&[0, 1], Some(interrupted())),
+            {
+                let reopened = Arc::clone(&reopened);
+                move || {
+                    let attempt = reopened.fetch_add(1, Ordering::Relaxed);
+                    async move {
+                        Ok(if attempt == 0 {
+                            rows_ending_with(&[0, 1, 2], Some(interrupted()))
+                        } else {
+                            rows_ending_with(&[0, 1, 2, 3], None)
+                        })
+                    }
+                }
+            },
+            Token::new(0),
+            Token::new(9),
+            Duration::ZERO,
+        );
+
+        let items: Vec<_> = rows.collect().await;
+
+        assert!(items.iter().all(Result::is_ok));
+        assert_eq!(
+            read_keys(&items),
+            primary_keys(&[0, 1, 0, 1, 2, 0, 1, 2, 3])
+        );
+        assert_eq!(reopened.load(Ordering::Relaxed), 2);
+    }
+
+    /// A page that fails at the same place on every read is not transient: after
+    /// `MAX_STALLED_INTERRUPTIONS` reads that get no further, the range ends with the error.
+    #[tokio::test]
+    async fn a_range_interrupted_at_the_same_place_every_time_ends_with_the_error() {
+        let reopened = Arc::new(AtomicU64::new(0));
+        let rows = reread_interrupted_range(
+            rows_ending_with(&[0, 1], Some(interrupted())),
+            {
+                let reopened = Arc::clone(&reopened);
+                move || {
+                    reopened.fetch_add(1, Ordering::Relaxed);
+                    async { Ok(rows_ending_with(&[0, 1], Some(interrupted()))) }
+                }
+            },
+            Token::new(0),
+            Token::new(9),
+            Duration::ZERO,
+        );
+
+        let items: Vec<_> = rows.collect().await;
+
+        let err = items.last().unwrap().as_ref().unwrap_err();
+        assert!(err.downcast_ref::<RangeInterrupted>().is_some());
+        // The first read gets furthest; the next MAX_STALLED_INTERRUPTIONS reads get no further.
+        let reads = 1 + MAX_STALLED_INTERRUPTIONS as usize;
+        assert_eq!(read_keys(&items), primary_keys(&[0, 1].repeat(reads)));
+        assert_eq!(reopened.load(Ordering::Relaxed), reads as u64 - 1);
+    }
+
+    #[tokio::test]
+    async fn a_range_that_cannot_be_reopened_ends_with_the_error() {
+        let rows = reread_interrupted_range(
+            rows_ending_with(&[0], Some(interrupted())),
+            || async { Err(anyhow!("no session").context(NonRetryable)) },
+            Token::new(0),
+            Token::new(9),
+            Duration::ZERO,
+        );
+
+        let items: Vec<_> = rows.collect().await;
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(read_keys(&items), primary_keys(&[0]));
+        let err = items[1].as_ref().unwrap_err();
+        assert!(err.downcast_ref::<NonRetryable>().is_some());
+    }
+
+    #[tokio::test]
+    async fn an_error_that_did_not_interrupt_the_range_does_not_read_it_again() {
+        let reopened = Arc::new(AtomicU64::new(0));
+        let rows = reread_interrupted_range(
+            stream::iter([Ok(row(0)), Err(anyhow!("unexpected")), Ok(row(1))]).boxed(),
+            {
+                let reopened = Arc::clone(&reopened);
+                move || {
+                    reopened.fetch_add(1, Ordering::Relaxed);
+                    async { Ok(rows_ending_with(&[], None)) }
+                }
+            },
+            Token::new(0),
+            Token::new(9),
+            Duration::ZERO,
+        );
+
+        let items: Vec<_> = rows.collect().await;
+
+        assert_eq!(items.len(), 3);
+        assert!(items[1].is_err());
+        assert_eq!(read_keys(&items), primary_keys(&[0, 1]));
+        assert_eq!(reopened.load(Ordering::Relaxed), 0);
+    }
+
     #[rstest]
     #[case::single_token(token_range(7, 7), 1)]
     #[case::positive(token_range(0, 9), 10)]
