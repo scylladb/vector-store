@@ -128,7 +128,7 @@ pub(crate) fn make_index_with_kind(
     kind: IndexKind,
 ) -> IndexMetadata {
     IndexMetadata {
-        keyspace_name: "vector".into(),
+        keyspace_name: "keyspace".into(),
         table_name: "items".into(),
         index_name: name.into(),
         primary_key_columns: NonemptyArc::new(
@@ -167,7 +167,7 @@ pub(crate) fn add_table(
     vector_columns: impl IntoIterator<Item = ColumnName>,
 ) {
     db.add_table(
-        "vector".into(),
+        "keyspace".into(),
         "items".into(),
         Table {
             primary_keys: primary_keys.into_iter().collect_nonempty_arc().unwrap(),
