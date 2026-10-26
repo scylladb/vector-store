@@ -10,6 +10,7 @@ mod https;
 mod index_info;
 mod index_status;
 mod info;
+mod ingest_under_search;
 mod memory_limit;
 mod metrics;
 mod mock_opensearch;
