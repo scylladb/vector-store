@@ -223,6 +223,7 @@ pub struct Config {
     pub opensearch_addr: Option<String>,
     pub credentials: Option<Credentials>,
     pub usearch_simulator: Option<Vec<Duration>>,
+    pub modify_admission: ModifyAdmission,
     pub diskann_alpha: Option<DiskannAlpha>,
     pub diskann_max_points: Option<NonZeroUsize>,
     pub diskann_backend: Option<DiskannBackendKind>,
@@ -258,6 +259,7 @@ impl Default for Config {
             opensearch_addr: None,
             credentials: None,
             usearch_simulator: None,
+            modify_admission: ModifyAdmission::default(),
             diskann_alpha: None,
             diskann_max_points: None,
             diskann_backend: None,
@@ -280,6 +282,42 @@ impl Default for Config {
             cdc_fine_sleep_interval: None,
             monitor_indexes_interval: None,
             engine_status_update_interval: None,
+        }
+    }
+}
+
+/// How a usearch index admits modifications while searches wait (the DiskANN and OpenSearch
+/// indexes do not use it yet).
+///
+/// Searches go first: the index takes a modification only when no search is queued. Under a busy
+/// search load that happens about a hundred times a second whatever the machine, so with one
+/// modification per such gap ingest falls to ~70-120 rows/s (VECTOR-951). A batch lets more through
+/// each time: after a modification, up to `batch_size` more queued ones follow, until the queue runs
+/// empty. The write stream refills the queue as the batch drains it, so under a sustained stream a
+/// batch takes all `batch_size`: a large value lets writes hold searches off for that long.
+///
+/// The default batch is the modification queue's depth (3 per worker) and `max_wait` is
+/// `DEFAULT_MODIFY_MAX_WAIT`: on 10M and 100M indexes this kept up with a write stream at 20-25% of
+/// the ingest capacity for 14-25% of the search throughput and ~20 ms more p99 under a saturating
+/// search. `batch_size` 0 takes one modification per gap and a zero `max_wait` turns it off, which
+/// favours searches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModifyAdmission {
+    /// Queued modifications taken after the first one before searches again; `None`: the
+    /// modification queue's depth.
+    pub batch_size: Option<usize>,
+    /// Once no modification was taken for this long, one (and its batch) goes ahead of queued
+    /// searches; `None`: never.
+    pub max_wait: Option<Duration>,
+}
+
+pub const DEFAULT_MODIFY_MAX_WAIT: Duration = Duration::from_millis(100);
+
+impl Default for ModifyAdmission {
+    fn default() -> Self {
+        Self {
+            batch_size: None,
+            max_wait: Some(DEFAULT_MODIFY_MAX_WAIT),
         }
     }
 }
