@@ -580,6 +580,15 @@ impl FromStr for Analyzer {
     }
 }
 
+/// Parses the value of a boolean index option, ignoring letter case.
+fn parse_bool_option(option: &str, value: &str) -> anyhow::Result<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(anyhow::anyhow!("Unknown {option} value: {value}")),
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, derive_more::AsRef, derive_more::From)]
 /// Whether a full-text index stores token positions, which are required by phrase queries.
 pub struct Positions(bool);
@@ -594,11 +603,7 @@ impl FromStr for Positions {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_ascii_lowercase().as_str() {
-            "true" => Ok(Self(true)),
-            "false" => Ok(Self(false)),
-            _ => Err(anyhow::anyhow!("Unknown positions value: {s}")),
-        }
+        parse_bool_option("positions", s).map(Self)
     }
 }
 
