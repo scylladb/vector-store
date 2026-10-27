@@ -1409,7 +1409,7 @@ If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
         ),
         (
             status = 400,
-            description = "Bad request. Possible causes: malformed input, invalid pattern, or missing required fields.",
+            description = "Bad request. Possible causes: malformed input, or missing required fields.",
             content_type = "application/json",
             body = ErrorMessage
         ),
@@ -1503,12 +1503,7 @@ async fn post_index_like(
         Err(err) => {
             let msg = format!("index.like request error: {err}");
             debug!("post_index_like: {msg}");
-            let status = if err.downcast_ref::<QueryError>().is_some() {
-                StatusCode::BAD_REQUEST
-            } else {
-                StatusCode::INTERNAL_SERVER_ERROR
-            };
-            (status, msg).into_response()
+            (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
         }
         Ok(primary_keys) => {
             let primary_keys =
