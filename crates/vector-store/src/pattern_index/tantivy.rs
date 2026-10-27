@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
-use crate::IndexKey;
 use crate::memory::Memory;
+use crate::metrics::Metrics;
 use crate::pattern_index::PatternIndex;
 use crate::pattern_index::PatternIndexConfiguration;
 use crate::pattern_index::PatternIndexFactory;
@@ -12,7 +12,8 @@ use crate::perf;
 use crate::table::Table;
 use crate::table::TableSearch;
 use crate::tantivy::COMMIT_INTERVAL;
-use crate::tantivy::Index;
+use crate::tantivy::IndexOptions;
+use crate::tantivy::IndexSchema;
 use crate::tantivy::Indexes;
 use crate::tantivy::MAX_UNCOMMITTED_THRESHOLD;
 use crate::tantivy::build_schema;
@@ -32,6 +33,7 @@ use tracing::debug;
 pub(crate) struct Factory {
     worker: async_channel::Sender<Worker>,
     memory: mpsc::Sender<Memory>,
+    metrics: Arc<Metrics>,
 }
 
 impl PatternIndexFactory for Factory {
@@ -47,6 +49,7 @@ impl PatternIndexFactory for Factory {
             self.memory.clone(),
             COMMIT_INTERVAL,
             MAX_UNCOMMITTED_THRESHOLD,
+            Arc::clone(&self.metrics),
         )
     }
 }
@@ -54,8 +57,13 @@ impl PatternIndexFactory for Factory {
 pub(super) fn new_factory(
     worker: async_channel::Sender<Worker>,
     memory: mpsc::Sender<Memory>,
+    metrics: Arc<Metrics>,
 ) -> Factory {
-    Factory { worker, memory }
+    Factory {
+        worker,
+        memory,
+        metrics,
+    }
 }
 
 const TOKENIZER_NAME: &str = "pattern_ngram";
@@ -67,14 +75,12 @@ const MAX_GRAM: usize = 3;
 const VALUE_START: char = '\u{2}';
 const VALUE_END: char = '\u{3}';
 
-fn new_index(key: &IndexKey, worker: async_channel::Sender<Worker>) -> anyhow::Result<Index> {
-    Index::new(
-        build_schema(text_options()),
-        TOKENIZER_NAME,
-        build_ngram_analyzer()?,
-        key,
-        worker,
-    )
+fn index_schema() -> anyhow::Result<IndexSchema> {
+    Ok(IndexSchema {
+        schema: build_schema(text_options()),
+        tokenizer_name: TOKENIZER_NAME.to_owned(),
+        tokenizer: build_ngram_analyzer()?,
+    })
 }
 
 fn build_ngram_analyzer() -> anyhow::Result<TextAnalyzer> {
@@ -101,19 +107,23 @@ pub(crate) fn new(
     memory: mpsc::Sender<Memory>,
     commit_interval: Duration,
     commit_threshold: usize,
+    metrics: Arc<Metrics>,
 ) -> mpsc::Sender<PatternIndex> {
     let (tx, mut rx) = mpsc::channel::<PatternIndex>(perf::channel_size().into());
     tokio::spawn(async move {
         let key = config.key;
         debug!("pattern index actor starting for {key}");
         let mut indexes = Indexes::new(
-            key.clone(),
+            IndexOptions {
+                key: key.clone(),
+                commit_interval,
+                commit_threshold,
+                index_schema,
+            },
             table,
             worker,
             memory,
-            commit_interval,
-            commit_threshold,
-            new_index,
+            metrics,
         )
         .await;
 
@@ -188,6 +198,7 @@ mod tests {
             make_memory_actor(allocate),
             TEST_COMMIT_INTERVAL,
             TEST_COMMIT_THRESHOLD,
+            Arc::new(Metrics::new()),
         )
     }
 
