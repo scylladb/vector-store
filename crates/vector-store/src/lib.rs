@@ -858,7 +858,7 @@ pub enum DbIndexKind {
     Pattern,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct DbCustomIndex {
     pub keyspace: KeyspaceName,
     pub index: IndexName,
@@ -877,6 +877,13 @@ impl DbCustomIndex {
     pub fn key(&self) -> IndexKey {
         IndexKey::new(&self.keyspace, &self.index)
     }
+}
+
+/// A custom index present in the schema that Vector Store cannot serve.
+#[derive(Clone, Debug)]
+pub struct DbUnsupportedIndex {
+    pub index: DbCustomIndex,
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]

@@ -5,6 +5,7 @@
 
 use crate::Filter;
 use crate::IndexKey;
+use crate::IndexKind;
 use crate::IndexName;
 use crate::IndexOptionsFts;
 use crate::IndexOptionsPattern;
@@ -269,6 +270,16 @@ impl From<&IndexOptionsPattern> for PatternIndexOptions {
     }
 }
 
+impl From<&IndexKind> for IndexOptions {
+    fn from(kind: &IndexKind) -> Self {
+        match kind {
+            IndexKind::Vs(options) => IndexOptions::Vector(options.into()),
+            IndexKind::Fts(options) => IndexOptions::Fulltext(options.into()),
+            IndexKind::Pattern(options) => IndexOptions::Pattern(options.into()),
+        }
+    }
+}
+
 impl From<httpapi::Limit> for crate::Limit {
     fn from(limit: httpapi::Limit) -> Self {
         Self::from(<httpapi::Limit as Into<NonZeroUsize>>::into(limit))
@@ -293,7 +304,8 @@ impl From<crate::SimilarityScore> for httpapi::SimilarityScore {
     tag = "scylla-vector-store-index",
     description = "Returns the list of indexes managed by the Vector Store indexing service, each with its current operational status, \
     the total number of items indexed and the progress of the initial table scan that backfills it. \
-    The list includes vector, fulltext and pattern indexes with any status (`INITIALIZING`, `BOOTSTRAPPING`, `SERVING`). \
+    The list includes vector, fulltext and pattern indexes with any status (`INITIALIZING`, `BOOTSTRAPPING`, `SERVING`, `UNSUPPORTED`). \
+    An `UNSUPPORTED` index exists in ScyllaDB but cannot be served by the Vector Store; it is listed with `count` and `build_progress` equal to 0. \
     Due to synchronization delays, it may temporarily differ from the list of indexes inside ScyllaDB. \
     An index whose item count cannot be obtained, e.g. because it is being removed while the request is served, is omitted from the list.",
     responses(
@@ -347,9 +359,9 @@ impl From<crate::SimilarityScore> for httpapi::SimilarityScore {
 )]
 
 async fn get_indexes(State(state): State<RoutesInnerState>) -> Response {
-    let entries: Vec<_> = {
+    let (entries, unsupported): (Vec<_>, Vec<_>) = {
         let indexes = state.indexes.read().unwrap();
-        indexes
+        let entries = indexes
             .iter_vs()
             .map(|(key, entry)| {
                 (
@@ -378,7 +390,12 @@ async fn get_indexes(State(state): State<RoutesInnerState>) -> Response {
                     entry.progress(),
                 )
             }))
-            .collect()
+            .collect();
+        let unsupported = indexes
+            .iter_unsupported()
+            .map(|(key, entry)| unsupported_index_info(key, entry))
+            .collect();
+        (entries, unsupported)
     };
 
     let indexes: Vec<_> = future::join_all(entries.into_iter().map(
@@ -402,9 +419,21 @@ async fn get_indexes(State(state): State<RoutesInnerState>) -> Response {
     .await
     .into_iter()
     .flatten()
+    .chain(unsupported)
     .collect();
 
     (StatusCode::OK, response::Json(indexes)).into_response()
+}
+
+fn unsupported_index_info(key: &IndexKey, entry: &indexes::UnsupportedIndexEntry) -> IndexInfo {
+    IndexInfo {
+        keyspace: key.keyspace().into(),
+        index: key.index().into(),
+        options: (&entry.kind).into(),
+        status: httpapi::IndexStatus::Unsupported,
+        count: 0,
+        build_progress: 0.0,
+    }
 }
 
 /// A human-readable description of the error that occurred.
@@ -571,6 +600,9 @@ async fn get_index_info(
                 entry.status(),
                 entry.progress(),
             )
+        } else if let Some(entry) = indexes.get_unsupported(&index_key) {
+            let info = unsupported_index_info(&index_key, entry);
+            return (StatusCode::OK, response::Json(info)).into_response();
         } else {
             let msg = format!("missing index: {keyspace_name}.{index_name}");
             debug!("get_index_info: {msg}");
@@ -782,6 +814,12 @@ If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
             body = ErrorMessage
         ),
         (
+            status = 422,
+            description = "Index cannot be served. Possible causes: the index exists in ScyllaDB, but its table has a primary key column of a type Vector Store does not support.",
+            content_type = "application/json",
+            body = ErrorMessage
+        ),
+        (
             status = 500,
             description = "Error while searching vectors. Possible causes: internal error, or search engine issues.",
             content_type = "application/json",
@@ -892,9 +930,11 @@ async fn post_index_ann(
             indexes::BestIndexState::NotFound => {
                 timer.observe_duration();
 
-                let msg = format!("missing index: {keyspace}.{index_name}");
-                debug!("post_index_ann: {msg}");
-                return (StatusCode::NOT_FOUND, msg).into_response();
+                return missing_index_response(
+                    &state.indexes.read().unwrap(),
+                    &index_key,
+                    "post_index_ann",
+                );
             }
         };
 
@@ -1020,6 +1060,22 @@ async fn post_index_ann(
     .await
 }
 
+/// Answers `422` with the reason for an index skipped at discovery, `404` otherwise.
+fn missing_index_response(indexes: &Indexes, key: &IndexKey, route_name: &str) -> Response {
+    let (keyspace, index_name) = (key.keyspace(), key.index());
+    if let Some(entry) = indexes.get_unsupported(key) {
+        let msg = format!(
+            "index {keyspace}.{index_name} cannot be served: {}",
+            entry.reason
+        );
+        debug!("{route_name}: {msg}");
+        return (StatusCode::UNPROCESSABLE_ENTITY, msg).into_response();
+    }
+    let msg = format!("missing index: {keyspace}.{index_name}");
+    debug!("{route_name}: {msg}");
+    (StatusCode::NOT_FOUND, msg).into_response()
+}
+
 async fn check_index_serving<T>(
     serving_or_progress: Result<T, Progress>,
     node_state: &Sender<NodeState>,
@@ -1081,6 +1137,12 @@ If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
             body = ErrorMessage
         ),
         (
+            status = 422,
+            description = "Index cannot be served. Possible causes: the index exists in ScyllaDB, but its table has a primary key column of a type Vector Store does not support.",
+            content_type = "application/json",
+            body = ErrorMessage
+        ),
+        (
             status = 500,
             description = "Error while searching. Possible causes: internal error, or search engine issues.",
             content_type = "application/json",
@@ -1117,9 +1179,7 @@ async fn post_index_bm25(
         let Some(entry) = indexes.get_fts(&index_key) else {
             timer.observe_duration();
 
-            let msg = format!("missing index: {keyspace}.{index_name}");
-            debug!("post_index_bm25: {msg}");
-            return (StatusCode::NOT_FOUND, msg).into_response();
+            return missing_index_response(&indexes, &index_key, "post_index_bm25");
         };
         if entry.status() == crate::node_state::IndexStatus::Serving {
             Ok((entry.index().clone(), entry.primary_key_columns().clone()))
@@ -1234,6 +1294,12 @@ If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
             body = ErrorMessage
         ),
         (
+            status = 422,
+            description = "Index cannot be served. Possible causes: the index exists in ScyllaDB, but its table has a primary key column of a type Vector Store does not support.",
+            content_type = "application/json",
+            body = ErrorMessage
+        ),
+        (
             status = 500,
             description = "Error while highlighting. Possible causes: internal error, or search engine issues.",
             content_type = "application/json",
@@ -1270,9 +1336,7 @@ async fn post_index_highlight(
         let Some(entry) = indexes.get_fts(&index_key) else {
             timer.observe_duration();
 
-            let msg = format!("missing index: {keyspace}.{index_name}");
-            debug!("post_index_highlight: {msg}");
-            return (StatusCode::NOT_FOUND, msg).into_response();
+            return missing_index_response(&indexes, &index_key, "post_index_highlight");
         };
         if entry.status() == crate::node_state::IndexStatus::Serving {
             Ok(entry.index().clone())
@@ -1362,6 +1426,12 @@ If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
             body = ErrorMessage
         ),
         (
+            status = 422,
+            description = "Index cannot be served. Possible causes: the index exists in ScyllaDB, but its table has a primary key column of a type Vector Store does not support.",
+            content_type = "application/json",
+            body = ErrorMessage
+        ),
+        (
             status = 500,
             description = "Error while searching. Possible causes: internal error, or search engine issues.",
             content_type = "application/json",
@@ -1398,9 +1468,7 @@ async fn post_index_like(
         let Some(entry) = indexes.get_pattern(&index_key) else {
             timer.observe_duration();
 
-            let msg = format!("missing index: {keyspace}.{index_name}");
-            debug!("post_index_like: {msg}");
-            return (StatusCode::NOT_FOUND, msg).into_response();
+            return missing_index_response(&indexes, &index_key, "post_index_like");
         };
         if entry.status() == crate::node_state::IndexStatus::Serving {
             Ok((entry.index().clone(), entry.primary_key_columns().clone()))

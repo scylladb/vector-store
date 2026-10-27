@@ -9,6 +9,7 @@ use crate::common::CreateIndexQuery;
 use crate::common::TableName;
 use async_backtrace::framed;
 use httpapi::IndexInfo;
+use httpapi::IndexStatus;
 use httpapi::KeyspaceName;
 use httpclient::HttpClient;
 use scylla::client::session::Session;
@@ -284,10 +285,13 @@ async fn local_index_based_on_f_columns(actors: Arc<TestActors>) {
     info!("finished");
 }
 
-/// Test that an index on a table with a primary key type the service cannot represent is skipped.
-/// Serving such an index would fail every query. Discovery must drop it and keep serving the other indexes.
+/// Test that an index on a table with a primary key type the service cannot represent is reported
+/// as unsupported. Serving such an index would fail every query, so a query must report why,
+/// and the other indexes must keep serving.
 #[e2etest::test(group = index_create)]
-async fn index_with_unsupported_primary_key_type_is_skipped(actors: Arc<TestActors>) {
+async fn index_with_unsupported_primary_key_type_is_reported_as_unsupported(
+    actors: Arc<TestActors>,
+) {
     info!("started");
 
     let (session, clients) = common::prepare_connection(&actors).await;
@@ -312,7 +316,7 @@ async fn index_with_unsupported_primary_key_type_is_skipped(actors: Arc<TestActo
         .await
         .expect("failed to create an index");
 
-    // Discovery reads `system_schema.indexes`, so the skipped index must be there to be skipped.
+    // Discovery reads `system_schema.indexes`, so the index must be there before it can be reported.
     common::wait_for(
         || async {
             common::get_query_results(
@@ -337,28 +341,40 @@ async fn index_with_unsupported_primary_key_type_is_skipped(actors: Arc<TestActo
         common::create_table(&session, "pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None).await;
     let index = common::create_index(CreateIndexQuery::new(&session, &clients, &table, "v")).await;
 
-    // The valid index serves only after a discovery pass that already saw the skipped one.
+    // The valid index serves only after a discovery pass that already saw the unsupported one.
     wait_for_index(&clients, &index).await;
 
     for client in &clients {
-        assert!(
-            !client
-                .indexes()
-                .await
-                .iter()
-                .any(|idx| idx.index == unsupported_index),
-            "Expected the unsupported index to be skipped at {url}",
-            url = client.url()
-        );
-        assert!(
-            client
-                .index_status(&keyspace, &unsupported_index)
-                .await
-                .is_err(),
-            "Expected no status for the skipped index at {url}",
-            url = client.url()
-        );
+        let url = client.url();
+        let listed = client
+            .indexes()
+            .await
+            .into_iter()
+            .find(|idx| idx.index == unsupported_index)
+            .unwrap_or_else(|| panic!("Expected the unsupported index to be listed at {url}"));
+        let info = client
+            .index_status(&keyspace, &unsupported_index)
+            .await
+            .unwrap_or_else(|err| {
+                panic!("Expected a status for the unsupported index at {url}: {err}")
+            });
+        assert_eq!(info, listed);
+        assert_eq!(info.status, IndexStatus::Unsupported, "at {url}");
     }
+
+    info!("Check that an ANN query reports why the index cannot be served");
+    let err = session
+        .query_unpaged(
+            format!("SELECT pk FROM {unsupported_table} ORDER BY v ANN OF [1.0, 2.0, 3.0] LIMIT 1"),
+            (),
+        )
+        .await
+        .expect_err("Expected the ANN query on the unsupported index to fail")
+        .to_string();
+    assert!(
+        err.contains("column pk has type Tuple"),
+        "Expected the reason in the query error, got: {err}"
+    );
 
     cleanup_keyspace(&actors, &keyspace).await;
 

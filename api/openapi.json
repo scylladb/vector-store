@@ -14,7 +14,7 @@
         "tags": [
           "scylla-vector-store-index"
         ],
-        "description": "Returns the list of indexes managed by the Vector Store indexing service, each with its current operational status, the total number of items indexed and the progress of the initial table scan that backfills it. The list includes vector, fulltext and pattern indexes with any status (`INITIALIZING`, `BOOTSTRAPPING`, `SERVING`). Due to synchronization delays, it may temporarily differ from the list of indexes inside ScyllaDB. An index whose item count cannot be obtained, e.g. because it is being removed while the request is served, is omitted from the list.",
+        "description": "Returns the list of indexes managed by the Vector Store indexing service, each with its current operational status, the total number of items indexed and the progress of the initial table scan that backfills it. The list includes vector, fulltext and pattern indexes with any status (`INITIALIZING`, `BOOTSTRAPPING`, `SERVING`, `UNSUPPORTED`). An `UNSUPPORTED` index exists in ScyllaDB but cannot be served by the Vector Store; it is listed with `count` and `build_progress` equal to 0. Due to synchronization delays, it may temporarily differ from the list of indexes inside ScyllaDB. An index whose item count cannot be obtained, e.g. because it is being removed while the request is served, is omitted from the list.",
         "operationId": "get_indexes",
         "responses": {
           "200": {
@@ -228,6 +228,16 @@
               }
             }
           },
+          "422": {
+            "description": "Index cannot be served. Possible causes: the index exists in ScyllaDB, but its table has a primary key column of a type Vector Store does not support.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Error while searching vectors. Possible causes: internal error, or search engine issues.",
             "content": {
@@ -314,6 +324,16 @@
           },
           "404": {
             "description": "Index not found. Possible causes: index does not exist, or is not discovered yet.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Index cannot be served. Possible causes: the index exists in ScyllaDB, but its table has a primary key column of a type Vector Store does not support.",
             "content": {
               "application/json": {
                 "schema": {
@@ -416,6 +436,16 @@
               }
             }
           },
+          "422": {
+            "description": "Index cannot be served. Possible causes: the index exists in ScyllaDB, but its table has a primary key column of a type Vector Store does not support.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Error while highlighting. Possible causes: internal error, or search engine issues.",
             "content": {
@@ -502,6 +532,16 @@
           },
           "404": {
             "description": "Index not found. Possible causes: index does not exist, or is not discovered yet.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Index cannot be served. Possible causes: the index exists in ScyllaDB, but its table has a primary key column of a type Vector Store does not support.",
             "content": {
               "application/json": {
                 "schema": {
@@ -848,12 +888,14 @@
         "enum": [
           "INITIALIZING",
           "BOOTSTRAPPING",
-          "SERVING"
+          "SERVING",
+          "UNSUPPORTED"
         ],
         "x-enum-descriptions": [
           "The index has been discovered and is being initialized.",
           "The index is performing the initial full scan of the underlying table to populate the index.",
-          "The index has completed the initial table scan. It is now monitoring the database for changes."
+          "The index has completed the initial table scan. It is now monitoring the database for changes.",
+          "The index exists in ScyllaDB, but Vector Store cannot serve it."
         ]
       },
       "InfoResponse": {
