@@ -25,32 +25,35 @@ pub fn load_queries(path) {
 }
 
 /// Load a qrels file and group it by query: entry `j` of the result holds the
-/// qrels of `queries[j]`, a Vec of `#{ doc_id, grade }`. Qrels naming a query
-/// absent from `queries` are skipped; a repeated query id takes them at its
-/// first line.
+/// judgments of `queries[j]` as `#{ relevant_ids, relevances }`, the inputs of
+/// the `relevance_metrics` functions. Qrels naming a query absent from
+/// `queries` are skipped; a repeated query id takes them at its first line.
 pub fn load_judgments(path, queries) {
+    let query_index = #{};
+    let judgments = [];
+    for j in 0..queries.len() {
+        if query_index.get(queries[j].id).is_none() {
+            query_index[queries[j].id] = j;
+        }
+        judgments.push(#{ "relevant_ids": [], "relevances": [] });
+    }
     fs::open_binary(path)?;
     let it = fs::read_split_lines_iter(path, ["\t"])?;
-    let qrels = [];
+    let count = 0;
     while let Some(entry) = it.next() {
         let raw = entry?;
-        if !raw.is_empty() {
-            qrels.push(#{ "query_id": raw[0], "doc_id": raw[1], "grade": raw[2].parse::<i64>()? });
+        if raw.is_empty() {
+            continue;
         }
-    }
-    println!("Loaded {} qrels from {}", qrels.len(), path);
-
-    let judgments = [];
-    for _ in 0..queries.len() {
-        judgments.push([]);
-    }
-    for qrel in qrels {
-        for j in 0..queries.len() {
-            if queries[j].id == qrel.query_id {
-                judgments[j].push(#{ "doc_id": qrel.doc_id, "grade": qrel.grade });
-                break;
+        count += 1;
+        if let Some(j) = query_index.get(raw[0]) {
+            let grade = raw[2].parse::<i64>()?;
+            if grade > 0 {
+                judgments[j].relevant_ids.push(raw[1]);
             }
+            judgments[j].relevances.push(#{ "doc_id": raw[1], "grade": grade });
         }
     }
+    println!("Loaded {} qrels from {}", count, path);
     Ok(judgments)
 }

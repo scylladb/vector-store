@@ -231,23 +231,15 @@ pub fn declare_metrics(db) {
     db.declare_metric("ndcg", "higher");
 }
 
-/// Record all four metrics for one query's results. `qrels` is the query's
-/// Vec of `#{ doc_id, grade }`, as `search_queries::load_judgments` groups
-/// them; a query without qrels records nothing.
-pub fn record_metrics(db, qrels, returned_ids, k) {
-    let relevant_ids = [];
-    let relevances = [];
-    for qrel in qrels {
-        if qrel.grade > 0 {
-            relevant_ids.push(qrel.doc_id);
-        }
-        relevances.push(#{ "doc_id": qrel.doc_id, "grade": qrel.grade });
-    }
-    if relevances.len() == 0 {
+/// Record all four metrics for one query's results. `judgment` is
+/// `#{ relevant_ids, relevances }`, as `search_queries::load_judgments`
+/// builds it; a query without qrels records nothing.
+pub fn record_metrics(db, judgment, returned_ids, k) {
+    if judgment.relevances.len() == 0 {
         return;
     }
-    db.record_metric("recall", recall_at_k(returned_ids, relevant_ids, k));
-    db.record_metric("precision", precision_at_k(returned_ids, relevant_ids, k));
-    db.record_metric("mrr", reciprocal_rank(returned_ids, relevant_ids));
-    db.record_metric("ndcg", ndcg_at_k(returned_ids, relevances, k));
+    db.record_metric("recall", recall_at_k(returned_ids, judgment.relevant_ids, k));
+    db.record_metric("precision", precision_at_k(returned_ids, judgment.relevant_ids, k));
+    db.record_metric("mrr", reciprocal_rank(returned_ids, judgment.relevant_ids));
+    db.record_metric("ndcg", ndcg_at_k(returned_ids, judgment.relevances, k));
 }
