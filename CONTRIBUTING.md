@@ -198,6 +198,13 @@ report, so it can be merged as usual. The list is kept in
 `.github/workflows/check-code-changes.yml`; add a path there only if nothing
 the checks build, lint or run depends on it.
 
+The same workflow fails when a crate starts to read one of these paths: an
+`include_str!`-style include, a `#[path]` attribute, a path-like string literal
+or a path key in a `Cargo.toml`. If a crate needs such a file, remove its
+pattern from the list rather than working around the check. Scripts and
+workflows are not checked, so keep the list in mind when one of them starts to
+use a file from it.
+
 When a test or job fails in CI, file or update a VECTOR issue and set its
 **Problem Symptom** field to `ci stability`. Use the field rather than a
 label: its values are a fixed list, so every open CI failure can be found

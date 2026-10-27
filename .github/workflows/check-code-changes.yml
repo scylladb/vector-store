@@ -15,12 +15,78 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       code-changed: ${{ steps.check.outputs.code-changed }}
+    env:
+      # No crate includes these files and no CI job builds or runs them, so
+      # changing only them cannot change the result of the Rust and Validator
+      # checks. The "Check that no crate reads a non-code path" step guards the
+      # first half of that.
+      NON_CODE: '\.md$|^docs/|^\.claude/|^latte/'
 
     steps:
     - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
       with:
         fetch-depth: 0
+
+    - name: Check that no crate reads a non-code path
+      run: |
+        set -euo pipefail
+
+        # A crate that starts to read a NON_CODE file would make skipping the
+        # checks for a change to that file unsafe. Flag the usual ways it
+        # happens: a file included at compile time or named by #[path], a
+        # string literal that looks like a path to one (e.g. a test fixture),
+        # and a path key in a Cargo.toml. Reads by scripts or workflows, and
+        # paths built at runtime, are not detected.
+
+        # git grep exits with 1 when nothing matches; any other failure must
+        # not be taken for that.
+        matches() {
+          git grep "$@" || [[ $? -eq 1 ]]
+        }
+
+        # The repository-relative form of a path given relative to a directory.
+        resolve() {
+          realpath -ms --relative-to=. "$1/$2"
+        }
+
+        found=0
+        check() { # file line path
+          if grep -qE "$NON_CODE" <<< "$3"; then
+            echo "::error file=$1,line=$2::$3 matches NON_CODE in .github/workflows/check-code-changes.yml, so CI would skip a change to it. Remove its pattern from NON_CODE, or do not read it."
+            found=1
+          fi
+        }
+
+        # The target of an include or #[path], in a plain or raw string.
+        includes=$(matches -nPo '(?:\binclude(?:_str|_bytes)?!\s*\(\s*|#\[path\s*=\s*)r?#*"\K[^"]+' -- 'crates/**.rs')
+        declare -A included
+        while IFS=: read -r file line path; do
+          [[ -n $file ]] || continue
+          included["$file:$line:$path"]=1
+          check "$file" "$line" "$(resolve "$(dirname "$file")" "$path")"
+        done <<< "$includes"
+
+        # A literal is taken for a path when it has no whitespace, is not a
+        # URL and has a / or an extension. As it may be relative to a crate
+        # or appended to one, it is resolved against the repository root, so
+        # any leading ../ is dropped. Include targets were checked above.
+        literals=$(matches -nPo '"\K[^"\s\\]+(?=")' -- 'crates/**.rs')
+        while IFS=: read -r file line literal; do
+          if [[ -z $file || -n ${included["$file:$line:$literal"]:-} || $literal == *://* ]] ||
+            ! [[ $literal == */* || $literal =~ \.[A-Za-z0-9]+$ ]]; then
+            continue
+          fi
+          check "$file" "$line" "$(realpath -ms --relative-to=/ "/$literal")"
+        done <<< "$literals"
+
+        # A path key, also dotted (package.readme) or with a single-quoted value.
+        manifests=$(matches -nPo '^\s*(?:[\w-]+\.)*(?:readme|license-file|build|path)\s*=\s*["\x27]\K[^"\x27]+' -- '*Cargo.toml')
+        while IFS=: read -r file line path; do
+          [[ -n $file ]] || continue
+          check "$file" "$line" "$(resolve "$(dirname "$file")" "$path")"
+        done <<< "$manifests"
+
+        exit $found
 
     - name: Check if anything besides documentation changed
       id: check
@@ -29,11 +95,6 @@ jobs:
         MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
       run: |
         set -euo pipefail
-
-        # No crate includes these files and no CI job builds or runs them, so
-        # changing only them cannot change the result of the Rust and Validator
-        # checks.
-        non_code='\.md$|^docs/|^\.claude/|^latte/'
 
         case "$EVENT_NAME" in
           pull_request)
@@ -60,7 +121,7 @@ jobs:
         # grep exits with 1 when every changed file is a non-code one; any
         # other failure must not be taken for that and skip the checks.
         status=0
-        grep -qvE "$non_code" "$changed_files" || status=$?
+        grep -qvE "$NON_CODE" "$changed_files" || status=$?
         case $status in
           0) code_changed=true ;;
           1) code_changed=false ;;
