@@ -607,6 +607,32 @@ impl FromStr for Positions {
     }
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, derive_more::AsRef, derive_more::From)]
+/// Whether a pattern index distinguishes letter case. When false: values (documents) and
+/// patterns are lowercased.
+pub struct CaseSensitive(bool);
+
+impl Default for CaseSensitive {
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
+impl FromStr for CaseSensitive {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        parse_bool_option("case_sensitive", s).map(Self)
+    }
+}
+
+impl CaseSensitive {
+    /// Returns `text` lowercased when letter case is not distinguished, and as it is otherwise.
+    pub(crate) fn fold(self, text: String) -> String {
+        if self.0 { text } else { text.to_lowercase() }
+    }
+}
+
 #[derive(Clone, Copy, derive_more::AsRef, derive_more::Display, derive_more::From)]
 /// Limit the number of search result
 pub struct Limit(NonZeroUsize);
@@ -722,7 +748,9 @@ pub struct IndexOptionsFts {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 /// Pattern-specific index configuration.
-pub struct IndexOptionsPattern {}
+pub struct IndexOptionsPattern {
+    pub case_sensitive: CaseSensitive,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 /// Discriminates between index types.
@@ -1215,5 +1243,19 @@ mod tests {
 
         let filtering_columns: Vec<_> = metadata.nonpk_filtering_columns().cloned().collect();
         assert_eq!(filtering_columns, vec!["f".into()]);
+    }
+
+    #[test]
+    fn case_sensitive_parses_booleans_case_insensitively() {
+        assert!("true".parse::<CaseSensitive>().unwrap().0);
+        assert!("TRUE".parse::<CaseSensitive>().unwrap().0);
+        assert!(!"false".parse::<CaseSensitive>().unwrap().0);
+        assert!(!"False".parse::<CaseSensitive>().unwrap().0);
+        assert!("yes".parse::<CaseSensitive>().is_err());
+    }
+
+    #[test]
+    fn case_sensitive_defaults_to_enabled() {
+        assert!(CaseSensitive::default().0);
     }
 }

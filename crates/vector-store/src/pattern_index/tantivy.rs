@@ -176,7 +176,8 @@ pub(crate) fn new(
                             document,
                             in_progress,
                         } => {
-                            let document = gram::framed(&document);
+                            let document =
+                                gram::framed(&config.case_sensitive.fold(document));
                             indexes.add_document(primary_id, document, in_progress).await;
                         }
                         PatternIndex::RemoveDocument {
@@ -198,6 +199,7 @@ pub(crate) fn new(
                                 _ = tx.send(Ok(vec![]));
                                 continue;
                             };
+                            let pattern = config.case_sensitive.fold(pattern);
                             let table = Arc::clone(&table);
                             worker
                                 .spawn_blocking(move || {
@@ -226,6 +228,7 @@ pub(crate) fn new(
 mod tests {
     use super::*;
     use crate::AsyncInProgress;
+    use crate::CaseSensitive;
     use crate::memory::Allocate;
     use crate::pattern_index::PatternIndexExt;
     use crate::table::MockTableSearch;
@@ -247,6 +250,7 @@ mod tests {
         new(
             PatternIndexConfiguration {
                 key: make_index_key(),
+                case_sensitive: CaseSensitive::default(),
             },
             table,
             worker::new(),
@@ -258,6 +262,20 @@ mod tests {
 
     fn make_sender(table: Arc<RwLock<MockTableSearch>>) -> mpsc::Sender<PatternIndex> {
         make_sender_with_memory(table, Allocate::Can)
+    }
+
+    fn make_case_insensitive_sender() -> mpsc::Sender<PatternIndex> {
+        new(
+            PatternIndexConfiguration {
+                key: make_index_key(),
+                case_sensitive: false.into(),
+            },
+            make_table_with_keys(),
+            worker::new(),
+            make_memory_actor(Allocate::Can),
+            TEST_COMMIT_INTERVAL,
+            TEST_COMMIT_THRESHOLD,
+        )
     }
 
     async fn add_doc(sender: &mpsc::Sender<PatternIndex>, primary: u64, content: &str) {
@@ -534,5 +552,19 @@ mod tests {
         add_docs(&sender, &[(1, "abc"), (2, "x\u{2}abc")]).await;
 
         assert_eq!(like_ids(&sender, "%\u{2}ab%").await, [2]);
+    }
+
+    #[rstest]
+    #[case::checked_by_regex("Ab-%")]
+    #[case::proven_by_grams("%aB%")]
+    #[case::any_char("A_-1024")]
+    #[timeout(Duration::from_secs(10))]
+    #[tokio::test]
+    async fn like_ignores_letter_case_when_not_case_sensitive(#[case] pattern: &str) {
+        let sender = make_case_insensitive_sender();
+        // Rows 1 and 2 differ only in letter case; row 3 matches no pattern.
+        add_docs(&sender, &[(1, "AB-1024"), (2, "ab-1024"), (3, "CD-2048")]).await;
+
+        assert_eq!(like_ids(&sender, pattern).await, [1, 2]);
     }
 }

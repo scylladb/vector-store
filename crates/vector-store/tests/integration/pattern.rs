@@ -37,6 +37,7 @@ use vector_store::node_state::NodeState;
 
 fn pattern_index_metadata(
     primary_key_columns: impl IntoIterator<Item = ColumnName>,
+    options: IndexOptionsPattern,
 ) -> IndexMetadata {
     let primary_key_columns = primary_key_columns
         .into_iter()
@@ -53,7 +54,7 @@ fn pattern_index_metadata(
         filtering_columns: Arc::new([]),
         alternator_attribute_types: Default::default(),
         version: Uuid::new_v4().into(),
-        kind: IndexKind::Pattern(IndexOptionsPattern::default()),
+        kind: IndexKind::Pattern(options),
     }
 }
 
@@ -63,6 +64,7 @@ async fn setup_pattern_store(
     columns: impl IntoIterator<Item = (ColumnName, NativeType)>,
     fullscan_fn: Option<ScanFn>,
     cdc_fn: Option<ScanFn>,
+    options: IndexOptionsPattern,
 ) -> (
     impl std::future::Future<Output = (HttpClient, impl Sized, impl Sized)>,
     IndexMetadata,
@@ -78,7 +80,7 @@ async fn setup_pattern_store(
     let (db_actor, db) = db_basic::new(node_state.clone());
 
     let columns: Arc<HashMap<_, _>> = Arc::new(columns.into_iter().collect());
-    let index = pattern_index_metadata(primary_keys);
+    let index = pattern_index_metadata(primary_keys, options);
 
     db.add_table(
         index.keyspace_name.clone(),
@@ -114,6 +116,7 @@ async fn setup_pattern_store(
 pub(crate) async fn setup_pattern_and_wait(
     documents: impl IntoIterator<Item = (Vec<CqlValue>, &str, u64)>,
     expected_count: usize,
+    options: IndexOptionsPattern,
 ) -> (
     HttpClient,
     httpapi::KeyspaceName,
@@ -138,6 +141,7 @@ pub(crate) async fn setup_pattern_and_wait(
         [("pk".to_string().into(), NativeType::Int)],
         Some(db_basic::scan_fn_documents(docs)),
         None,
+        options,
     )
     .await;
 
@@ -177,6 +181,9 @@ async fn pattern_index_visible_in_indexes() {
             (vec![CqlValue::Int(2)], "lazy dog sleeps all day", 20),
         ],
         2,
+        IndexOptionsPattern {
+            case_sensitive: false.into(),
+        },
     )
     .await;
 
@@ -186,7 +193,9 @@ async fn pattern_index_visible_in_indexes() {
     assert_eq!(indexes[0].index, index_name);
     assert_eq!(
         indexes[0].options,
-        IndexOptions::Pattern(PatternIndexOptions {})
+        IndexOptions::Pattern(PatternIndexOptions {
+            case_sensitive: false
+        })
     );
 }
 
@@ -214,6 +223,7 @@ async fn pattern_index_returns_proper_count() {
             ),
         ])),
         None,
+        IndexOptionsPattern::default(),
     )
     .await;
 
@@ -244,6 +254,7 @@ async fn pattern_like_search_returns_matching_keys() {
             (vec![CqlValue::Int(2)], "lazy dog sleeps all day", 20),
         ],
         2,
+        IndexOptionsPattern::default(),
     )
     .await;
 
@@ -256,6 +267,37 @@ async fn pattern_like_search_returns_matching_keys() {
         )
         .await;
 
+    assert_eq!(response.status(), StatusCode::OK);
+    let response: PostIndexLikeResponse = response.json().await.unwrap();
+    assert_eq!(response.primary_keys.get(&"pk".into()).unwrap(), &[1]);
+}
+
+#[tokio::test]
+async fn pattern_like_search_ignores_letter_case_when_not_case_sensitive() {
+    crate::enable_tracing();
+
+    let (client, keyspace_name, index_name, _db, _hold) = setup_pattern_and_wait(
+        [
+            (vec![CqlValue::Int(1)], "the quick brown fox", 10),
+            (vec![CqlValue::Int(2)], "lazy dog sleeps all day", 20),
+        ],
+        2,
+        IndexOptionsPattern {
+            case_sensitive: false.into(),
+        },
+    )
+    .await;
+
+    let response = client
+        .post_like(
+            &keyspace_name,
+            &index_name,
+            "%FOX%".into(),
+            NonZeroUsize::new(10).unwrap().into(),
+        )
+        .await;
+
+    // The upper-case pattern matches the lower-case value of row 1.
     assert_eq!(response.status(), StatusCode::OK);
     let response: PostIndexLikeResponse = response.json().await.unwrap();
     assert_eq!(response.primary_keys.get(&"pk".into()).unwrap(), &[1]);

@@ -196,7 +196,10 @@ pub struct FulltextIndexOptions {
 
 #[derive(Debug, PartialEq, serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
 /// Options a pattern index was created with.
-pub struct PatternIndexOptions {}
+pub struct PatternIndexOptions {
+    /// Whether matching distinguishes letter case.
+    pub case_sensitive: bool,
+}
 
 #[derive(Debug, PartialEq, serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
 #[serde(tag = "type", rename_all = "lowercase")]
