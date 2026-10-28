@@ -366,7 +366,7 @@ fn fullscan_insert(c: &mut Criterion) {
                                 [(CqlValue::BigInt(pk))].into_iter().collect(),
                                 Some(vec![it as f32; DIMENSIONS].into()),
                                 Timestamp::from_millis(1),
-                                AsyncInProgress::Fullscan(tx_in_progress),
+                                AsyncInProgress::fullscan(tx_in_progress),
                             );
                             let start = Instant::now();
                             tx.send(request).await.unwrap();
@@ -436,7 +436,7 @@ fn search(c: &mut Criterion) {
                         [(CqlValue::BigInt(it))].into_iter().collect(),
                         Some(vec![it as f32; DIMENSIONS].into()),
                         Timestamp::from_millis(1),
-                        AsyncInProgress::Fullscan(tx_in_progress.clone()),
+                        AsyncInProgress::fullscan(tx_in_progress.clone()),
                     ))
                     .await
                     .unwrap();
@@ -571,7 +571,7 @@ fn cdc_insert(c: &mut Criterion) {
                                 [(CqlValue::BigInt(pk))].into_iter().collect(),
                                 Some(vec![it as f32; DIMENSIONS].into()),
                                 Timestamp::from_millis(1),
-                                AsyncInProgress::Fullscan(tx_in_progress),
+                                AsyncInProgress::fullscan(tx_in_progress),
                             );
                             let start = Instant::now();
                             tx.send(request).await.unwrap();
@@ -648,7 +648,7 @@ fn cdc_update(c: &mut Criterion) {
                             [(CqlValue::BigInt(it as i64))].into_iter().collect(),
                             Some(vec![it as f32; DIMENSIONS].into()),
                             Timestamp::from_millis(1),
-                            AsyncInProgress::Fullscan(tx_in_progress.clone()),
+                            AsyncInProgress::fullscan(tx_in_progress.clone()),
                         ))
                         .await
                         .unwrap();
@@ -697,7 +697,7 @@ fn cdc_update(c: &mut Criterion) {
                                     [(CqlValue::BigInt(id))].into_iter().collect(),
                                     Some(vector),
                                     Timestamp::from_millis(timestamp),
-                                    AsyncInProgress::Fullscan(tx_in_progress.clone()),
+                                    AsyncInProgress::fullscan(tx_in_progress.clone()),
                                 ))
                                 .await
                                 .unwrap();
@@ -775,7 +775,7 @@ fn cdc_delete(c: &mut Criterion) {
                             [(CqlValue::BigInt(it as i64))].into_iter().collect(),
                             Some(vec![it as f32; DIMENSIONS].into()),
                             Timestamp::from_millis(1),
-                            AsyncInProgress::Fullscan(tx_in_progress.clone()),
+                            AsyncInProgress::fullscan(tx_in_progress.clone()),
                         ))
                         .await
                         .unwrap();
@@ -823,7 +823,7 @@ fn cdc_delete(c: &mut Criterion) {
                                     [(CqlValue::BigInt(id))].into_iter().collect(),
                                     None,
                                     Timestamp::from_millis(timestamp),
-                                    AsyncInProgress::Fullscan(tx_in_progress.clone()),
+                                    AsyncInProgress::fullscan(tx_in_progress.clone()),
                                 ))
                                 .await
                                 .unwrap();
@@ -905,7 +905,7 @@ fn search_while_updating(c: &mut Criterion) {
                             [(CqlValue::BigInt(it as i64))].into_iter().collect(),
                             Some(vec![it as f32; DIMENSIONS].into()),
                             Timestamp::from_millis(1),
-                            AsyncInProgress::Fullscan(tx_in_progress.clone()),
+                            AsyncInProgress::fullscan(tx_in_progress.clone()),
                         ))
                         .await
                         .unwrap();
@@ -934,7 +934,7 @@ fn search_while_updating(c: &mut Criterion) {
                                 [(CqlValue::BigInt(id))].into_iter().collect(),
                                 Some(vector),
                                 Timestamp::from_millis(timestamp),
-                                AsyncInProgress::Fullscan(tx_in_progress.clone()),
+                                AsyncInProgress::fullscan(tx_in_progress.clone()),
                             ))
                             .await
                             .is_err()
@@ -1066,7 +1066,7 @@ fn search_while_inserting(c: &mut Criterion) {
                                 [(CqlValue::BigInt(pk))].into_iter().collect(),
                                 Some(vector),
                                 timestamp,
-                                AsyncInProgress::Fullscan(tx_in_progress.clone()),
+                                AsyncInProgress::fullscan(tx_in_progress.clone()),
                             ))
                             .await
                             .is_err()
@@ -1190,7 +1190,7 @@ fn search_while_deleting(c: &mut Criterion) {
                             [(CqlValue::BigInt(it as i64))].into_iter().collect(),
                             Some(vec![it as f32; DIMENSIONS].into()),
                             Timestamp::from_millis(1),
-                            AsyncInProgress::Fullscan(tx_in_progress.clone()),
+                            AsyncInProgress::fullscan(tx_in_progress.clone()),
                         ))
                         .await
                         .unwrap();
@@ -1218,7 +1218,7 @@ fn search_while_deleting(c: &mut Criterion) {
                                 [(CqlValue::BigInt(id))].into_iter().collect(),
                                 None,
                                 Timestamp::from_millis(timestamp),
-                                AsyncInProgress::Fullscan(tx_in_progress.clone()),
+                                AsyncInProgress::fullscan(tx_in_progress.clone()),
                             ))
                             .await
                             .is_err()
@@ -1355,7 +1355,7 @@ async fn run_search_in_background(
             [(CqlValue::BigInt(1i64))].into_iter().collect(),
             Some(vec![1.0f32; DIMENSIONS].into()),
             Timestamp::from_millis(1),
-            AsyncInProgress::Fullscan(tx_in_progress),
+            AsyncInProgress::fullscan(tx_in_progress),
         ))
         .await
         .unwrap();

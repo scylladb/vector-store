@@ -342,7 +342,7 @@ async fn process_operations<I: IndexDispatch>(
                 partition_id,
             } => {
                 if index
-                    .remove_value(partition_id, primary_id, AsyncInProgress::None)
+                    .remove_value(partition_id, primary_id, AsyncInProgress::none())
                     .await
                     .is_dead()
                 {
@@ -464,7 +464,7 @@ mod tests {
                     primary_key,
                     operation: DbIndexedOperation::Upsert(values),
                 },
-                AsyncInProgress::None,
+                AsyncInProgress::none(),
             ))
             .await
             .unwrap();
@@ -517,7 +517,7 @@ mod tests {
                     primary_key,
                     operation: DbIndexedOperation::Upsert(values),
                 },
-                AsyncInProgress::Fullscan(tx_progress),
+                AsyncInProgress::fullscan(tx_progress),
             ))
             .await
             .unwrap();
@@ -533,7 +533,7 @@ mod tests {
         assert_eq!(primary_id, 2.into());
         assert_eq!(partition_id, 3.into());
         assert_eq!(embedding, vec![4.].into());
-        assert!(matches!(in_progress, AsyncInProgress::Fullscan(_)));
+        assert!(in_progress.is_fullscan());
 
         drop(tx_db_rows);
         assert!(rx_index.recv().await.is_none());
@@ -668,7 +668,7 @@ mod tests {
                     primary_key,
                     operation: DbIndexedOperation::Upsert(values),
                 },
-                AsyncInProgress::None,
+                AsyncInProgress::none(),
             ))
             .await
             .unwrap();
@@ -676,11 +676,12 @@ mod tests {
         let Some(VsIndexModify::RemoveVector {
             partition_id,
             primary_id,
-            in_progress: AsyncInProgress::None,
+            in_progress,
         }) = rx_index.recv().await
         else {
             unreachable!();
         };
+        assert!(in_progress.is_none());
         assert_eq!(primary_id, 2.into());
         assert_eq!(partition_id, 3.into());
 
@@ -759,7 +760,7 @@ mod tests {
                     primary_key,
                     operation: DbIndexedOperation::Upsert(values),
                 },
-                AsyncInProgress::None,
+                AsyncInProgress::none(),
             ))
             .await
             .unwrap();
@@ -782,11 +783,12 @@ mod tests {
         let Some(VsIndexModify::RemoveVector {
             partition_id,
             primary_id,
-            in_progress: AsyncInProgress::None,
+            in_progress,
         }) = rx_index.recv().await
         else {
             unreachable!();
         };
+        assert!(in_progress.is_none());
         assert_eq!(primary_id, 3.into());
         assert_eq!(partition_id, 4.into());
 
@@ -795,11 +797,12 @@ mod tests {
             partition_id,
             primary_id,
             embedding,
-            in_progress: AsyncInProgress::None,
+            in_progress,
         }) = rx_index.recv().await
         else {
             unreachable!();
         };
+        assert!(in_progress.is_none());
         assert_eq!(primary_id, 5.into());
         assert_eq!(partition_id, 4.into());
         assert_eq!(embedding, vec![20.].into());
@@ -847,7 +850,7 @@ mod tests {
                     primary_key,
                     operation: DbIndexedOperation::Upsert(values),
                 },
-                AsyncInProgress::None,
+                AsyncInProgress::none(),
             ))
             .await
             .unwrap();
@@ -908,7 +911,7 @@ mod tests {
                     primary_key,
                     operation: DbIndexedOperation::Delete(Timestamp::from_millis(10)),
                 },
-                AsyncInProgress::None,
+                AsyncInProgress::none(),
             ))
             .await
             .unwrap();
@@ -969,7 +972,7 @@ mod tests {
                     primary_key,
                     operation: DbIndexedOperation::Upsert(values),
                 },
-                AsyncInProgress::None,
+                AsyncInProgress::none(),
             ))
             .await
             .unwrap();

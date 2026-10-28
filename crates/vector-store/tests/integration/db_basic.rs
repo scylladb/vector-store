@@ -58,7 +58,7 @@ fn make_scan_fn(rows: impl Iterator<Item = DbIndexedRow> + Send + Sync + 'static
 
             for row in rows {
                 let _ = tx
-                    .send((row, AsyncInProgress::Fullscan(tx_in_progress.clone())))
+                    .send((row, AsyncInProgress::fullscan(tx_in_progress.clone())))
                     .await;
             }
 

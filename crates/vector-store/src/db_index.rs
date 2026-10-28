@@ -762,7 +762,7 @@ async fn scan_ranges(
                     let tx_in_progress = tx_in_progress.clone();
                     async move {
                         _ = tx
-                            .send((row, AsyncInProgress::Fullscan(tx_in_progress)))
+                            .send((row, AsyncInProgress::fullscan(tx_in_progress)))
                             .await;
                     }
                 })
