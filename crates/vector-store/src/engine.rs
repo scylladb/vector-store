@@ -390,13 +390,14 @@ async fn add_index_fts(ctx: AddIndexContext<'_>) -> anyhow::Result<()> {
 }
 
 async fn add_index_pattern(ctx: AddIndexContext<'_>) -> anyhow::Result<()> {
-    let _options = ctx
+    let options = ctx
         .metadata
         .pattern()
         .ok_or_else(|| anyhow::anyhow!("add_index_pattern must be called with a pattern index"))?;
     let pattern_sender = ctx.index_factories.pattern.create_index(
         PatternIndexConfiguration {
             key: ctx.key.clone(),
+            case_sensitive: options.case_sensitive,
         },
         Arc::clone(&ctx.table),
     );

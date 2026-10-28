@@ -265,8 +265,10 @@ impl From<&IndexOptionsFts> for FulltextIndexOptions {
 }
 
 impl From<&IndexOptionsPattern> for PatternIndexOptions {
-    fn from(_options: &IndexOptionsPattern) -> Self {
-        PatternIndexOptions {}
+    fn from(options: &IndexOptionsPattern) -> Self {
+        PatternIndexOptions {
+            case_sensitive: *options.case_sensitive.as_ref(),
+        }
     }
 }
 
@@ -1393,7 +1395,8 @@ async fn post_index_highlight(
     description = "Performs a LIKE 'pattern' search query against the specified index. \
 Returns primary keys of the documents matched to the provided pattern. \
 The pattern rules are the same as the LIKE operator in ScyllaDB: '%' and '_' are wildcards, \
-'\\' is the escape character, and matching is case-sensitive. \
+'\\' is the escape character, and matching is case-sensitive unless the index was created \
+with 'case_sensitive' set to false. \
 The maximum number of results is controlled by the optional 'limit' parameter in the payload. \
 If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
     params(
