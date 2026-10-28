@@ -38,7 +38,6 @@ bytemuck.workspace = true
 clap.workspace = true
 const-hex.workspace = true
 console-subscriber = {workspace = true, optional = true}
-dashmap.workspace = true
 derive_more.workspace = true
 diskann.workspace = true
 diskann-vector.workspace = true

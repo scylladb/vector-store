@@ -6102,7 +6102,6 @@ dependencies = [
  "console-subscriber",
  "const-hex",
  "criterion",
- "dashmap 6.1.0",
  "derive_more",
  "diskann",
  "diskann-inmem",

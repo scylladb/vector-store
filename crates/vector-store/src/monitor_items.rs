@@ -199,6 +199,10 @@ where
 {
     let (tx, mut rx) = mpsc::channel(perf::channel_size().into());
     let key_for_span = key.clone();
+    // Taken here, before the engine adds the index, so that a deletion of the index, which removes
+    // its flag, comes after. Each guard handed to the index carries a copy, and this one marks the
+    // index once more when the task ends.
+    let dirty = metrics.dirty_flag(&key);
 
     tokio::spawn(perf::hotpath_async(
         async move {
@@ -210,6 +214,9 @@ where
                         let Some((db_row, in_progress)) = db_row else {
                             break;
                         };
+                        // The index drops the guard once it has applied the change: only then may a
+                        // refresh of the gauges count it.
+                        let in_progress = in_progress.marking(dirty.clone());
                         let primary_key = db_row.primary_key;
                         match db_row.operation {
                             DbIndexedOperation::Upsert(values) => {
@@ -341,8 +348,10 @@ async fn process_operations<I: IndexDispatch>(
                 primary_id,
                 partition_id,
             } => {
+                // The index applies the removal apart from the add, which may go to another
+                // partition, so the removal marks the index too.
                 if index
-                    .remove_value(partition_id, primary_id, AsyncInProgress::none())
+                    .remove_value(partition_id, primary_id, in_progress.marker())
                     .await
                     .is_dead()
                 {
@@ -377,7 +386,6 @@ async fn process_operations<I: IndexDispatch>(
         }
     }
 
-    metrics.mark_dirty(index_key);
     IndexStatus::Live
 }
 
@@ -426,6 +434,21 @@ mod tests {
             .indexing_lag
             .with_label_values(&["vector", "store"])
             .get_sample_count()
+    }
+
+    /// Checks that dropping `in_progress`, the guard of a change the index got, marks `index_key`
+    /// dirty. Called once the monitor has ended, so that no other guard marks the index meanwhile.
+    fn assert_marks_when_dropped(
+        metrics: &Metrics,
+        index_key: &IndexKey,
+        in_progress: AsyncInProgress,
+    ) {
+        metrics.take_dirty_indexes();
+        drop(in_progress);
+        assert_eq!(
+            metrics.take_dirty_indexes(),
+            std::slice::from_ref(index_key)
+        );
     }
 
     #[tokio::test]
@@ -501,7 +524,11 @@ mod tests {
             .write()
             .unwrap()
             .expect_upsert()
-            .with(eq(index_key), eq(primary_key.clone()), eq(values.clone()))
+            .with(
+                eq(index_key.clone()),
+                eq(primary_key.clone()),
+                eq(values.clone()),
+            )
             .once()
             .returning(|_, _, _| {
                 Ok(vec![Operation::AddVector {
@@ -537,6 +564,7 @@ mod tests {
 
         drop(tx_db_rows);
         assert!(rx_index.recv().await.is_none());
+        assert_marks_when_dropped(&metrics, &index_key, in_progress);
         assert_modified_metric_counts(&metrics, 1., 0., 0.);
         assert_eq!(
             indexing_lag_sample_count(&metrics),
@@ -646,7 +674,11 @@ mod tests {
             .write()
             .unwrap()
             .expect_upsert()
-            .with(eq(index_key), eq(primary_key.clone()), eq(values.clone()))
+            .with(
+                eq(index_key.clone()),
+                eq(primary_key.clone()),
+                eq(values.clone()),
+            )
             .once()
             .returning(|_, _, _| {
                 Ok(vec![
@@ -684,12 +716,13 @@ mod tests {
         assert!(in_progress.is_none());
         assert_eq!(primary_id, 2.into());
         assert_eq!(partition_id, 3.into());
+        let removal = in_progress;
 
         let Some(VsIndexModify::AddVector {
             partition_id,
             primary_id,
             embedding,
-            ..
+            in_progress,
         }) = rx_index.recv().await
         else {
             unreachable!();
@@ -700,6 +733,9 @@ mod tests {
 
         drop(tx_db_rows);
         assert!(rx_index.recv().await.is_none());
+        // The index applies the removal apart from the add, so both mark it.
+        assert_marks_when_dropped(&metrics, &index_key, removal);
+        assert_marks_when_dropped(&metrics, &index_key, in_progress);
         assert_modified_metric_counts(&metrics, 0., 1., 0.);
     }
 
@@ -730,7 +766,11 @@ mod tests {
             .write()
             .unwrap()
             .expect_upsert()
-            .with(eq(index_key), eq(primary_key.clone()), eq(values.clone()))
+            .with(
+                eq(index_key.clone()),
+                eq(primary_key.clone()),
+                eq(values.clone()),
+            )
             .once()
             .returning(|_, _, _| {
                 Ok(vec![
@@ -770,7 +810,7 @@ mod tests {
             partition_id,
             primary_id,
             embedding,
-            ..
+            in_progress,
         }) = rx_index.recv().await
         else {
             unreachable!();
@@ -778,6 +818,7 @@ mod tests {
         assert_eq!(primary_id, 1.into());
         assert_eq!(partition_id, 2.into());
         assert_eq!(embedding, vec![10.].into());
+        let insert = in_progress;
 
         // Second: remove half of the update
         let Some(VsIndexModify::RemoveVector {
@@ -791,6 +832,7 @@ mod tests {
         assert!(in_progress.is_none());
         assert_eq!(primary_id, 3.into());
         assert_eq!(partition_id, 4.into());
+        let removal = in_progress;
 
         // Third: add half of the update
         let Some(VsIndexModify::AddVector {
@@ -809,6 +851,10 @@ mod tests {
 
         drop(tx_db_rows);
         assert!(rx_index.recv().await.is_none());
+        // Each change of the row marks the index once applied, not only the first one.
+        for applied in [insert, removal, in_progress] {
+            assert_marks_when_dropped(&metrics, &index_key, applied);
+        }
         assert_modified_metric_counts(&metrics, 1., 1., 0.);
     }
 
