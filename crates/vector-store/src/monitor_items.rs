@@ -377,7 +377,7 @@ async fn process_operations<I: IndexDispatch>(
         }
     }
 
-    metrics.mark_dirty(index_key.keyspace().as_ref(), index_key.index().as_ref());
+    metrics.mark_dirty(index_key);
     IndexStatus::Live
 }
 

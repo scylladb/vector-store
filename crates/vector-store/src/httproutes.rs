@@ -6,11 +6,9 @@
 use crate::Filter;
 use crate::IndexKey;
 use crate::IndexKind;
-use crate::IndexName;
 use crate::IndexOptionsFts;
 use crate::IndexOptionsPattern;
 use crate::IndexOptionsVs;
-use crate::KeyspaceName;
 use crate::Progress;
 use crate::Quantization;
 use crate::QueryError;
@@ -20,7 +18,6 @@ use crate::SpaceType;
 use crate::cql_types;
 use crate::distance;
 use crate::engine::Engine;
-use crate::engine::EngineExt;
 use crate::fts_index::FtsIndex;
 use crate::fts_index::FtsIndexExt;
 use crate::indexes;
@@ -124,7 +121,8 @@ struct ApiDoc;
 
 #[derive(Clone)]
 struct RoutesInnerState {
-    engine: Sender<Engine>,
+    // Keeps the engine running while the routes serve: a router can outlive its server.
+    _engine: Sender<Engine>,
     indexes: Arc<RwLock<Indexes>>,
     metrics: Arc<Metrics>,
     node_state: Sender<NodeState>,
@@ -143,7 +141,7 @@ pub(crate) async fn new(
     use_tls: bool,
 ) -> Router {
     let state = RoutesInnerState {
-        engine,
+        _engine: engine,
         indexes,
         metrics: metrics.clone(),
         node_state,
@@ -633,57 +631,6 @@ async fn get_index_info(
     }
 }
 
-async fn refresh_index_metrics(
-    state: &RoutesInnerState,
-    keyspace: KeyspaceName,
-    index_name: IndexName,
-) {
-    let key = IndexKey::new(&keyspace, &index_name);
-    let labels = [keyspace.as_ref(), index_name.as_ref()];
-
-    if let Some((index, _)) = state.engine.get_vs_index(key.clone()).await {
-        if let Ok(count) = index.count(key).await {
-            state
-                .metrics
-                .size
-                .with_label_values(&labels)
-                .set(count as f64);
-        }
-        return;
-    }
-
-    if let Some((index, _)) = state.engine.get_fts_index(key.clone()).await
-        && let Ok(stats) = index.stats(key.clone()).await
-    {
-        state
-            .metrics
-            .size
-            .with_label_values(&labels)
-            .set(stats.num_docs as f64);
-        state
-            .metrics
-            .fts_index_size_bytes
-            .with_label_values(&labels)
-            .set(stats.size_bytes as f64);
-        state
-            .metrics
-            .fts_segment_count
-            .with_label_values(&labels)
-            .set(stats.segment_count as f64);
-        return;
-    }
-
-    if let Some((index, _)) = state.engine.get_pattern_index(key.clone()).await
-        && let Ok(count) = index.count(key).await
-    {
-        state
-            .metrics
-            .size
-            .with_label_values(&labels)
-            .set(count as f64);
-    }
-}
-
 /// Convert a build [`Progress`] into a percentage in the range `0.0..=100.0`.
 /// A finished full scan (`Progress::Done`) maps to `100.0`.
 fn progress_to_percentage(progress: Progress) -> f64 {
@@ -697,11 +644,6 @@ async fn get_metrics(
     State(state): State<RoutesInnerState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    for (keyspace_str, index_name_str) in state.metrics.take_dirty_indexes() {
-        let keyspace = KeyspaceName::from(keyspace_str);
-        let index_name = IndexName::from(index_name_str);
-        refresh_index_metrics(&state, keyspace, index_name).await;
-    }
     let metric_families = state.metrics.registry.gather();
 
     // Decide which encoder and content-type to use
