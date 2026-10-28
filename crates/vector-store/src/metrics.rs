@@ -50,10 +50,24 @@ const INDEX_REFRESH_TIMEOUT: Duration = Duration::from_secs(1);
 /// refresh that takes the mark then counts the change: the index updates its count (a relaxed
 /// atomic in usearch and DiskANN) before the `Release` mark, and the refresh asks for the count
 /// after its `AcqRel` take.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub(crate) struct DirtyFlag(Arc<AtomicBool>);
 
-impl DirtyFlag {
+impl Drop for DirtyFlag {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+/// The flag of an index that `Metrics` keeps and the refresh takes, which marks the index only when
+/// told to, not when dropped. The index's `DirtyFlag`s share it (`dirty_flag`). A refresh takes a
+/// copy with the index (`Metrics::take_dirty_indexes`), then sets the index's gauges or marks the
+/// index again only through it. An index deleted and created again under the same name gets a new
+/// flag, so a refresh of the deleted index leaves the new one alone.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ManualDirtyFlag(Arc<AtomicBool>);
+
+impl ManualDirtyFlag {
     fn mark(&self) {
         self.0.store(true, Ordering::Release);
     }
@@ -61,11 +75,15 @@ impl DirtyFlag {
     fn take(&self) -> bool {
         self.0.swap(false, Ordering::AcqRel)
     }
-}
 
-impl Drop for DirtyFlag {
-    fn drop(&mut self) {
-        self.mark();
+    fn dirty_flag(&self) -> DirtyFlag {
+        DirtyFlag(Arc::clone(&self.0))
+    }
+
+    /// Whether `other` is a copy of this flag, not the flag of an index created again under the
+    /// same name.
+    fn has_same_orig(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
     }
 }
 
@@ -82,7 +100,7 @@ pub(crate) struct Metrics {
     pub cdc_last_processed_timestamp_seconds: GaugeVec,
     pub fts_index_size_bytes: GaugeVec,
     pub fts_segment_count: GaugeVec,
-    dirty_indexes: Arc<Mutex<BTreeMap<IndexKey, DirtyFlag>>>,
+    dirty_indexes: Arc<Mutex<BTreeMap<IndexKey, ManualDirtyFlag>>>,
 }
 
 impl Metrics {
@@ -258,29 +276,22 @@ impl Metrics {
             .unwrap()
             .entry(key.clone())
             .or_default()
-            .clone()
+            .dirty_flag()
     }
 
-    /// Marks the index `key` dirty again, unless it has been removed.
-    fn mark_dirty(&self, key: &IndexKey) {
-        if let Some(dirty) = self.dirty_indexes.lock().unwrap().get(key) {
-            dirty.mark();
-        }
-    }
-
-    /// Takes the indexes marked dirty since the previous refresh.
-    pub(crate) fn take_dirty_indexes(&self) -> Vec<IndexKey> {
+    /// Takes the indexes marked dirty since the previous refresh, each with a copy of its flag.
+    pub(crate) fn take_dirty_indexes(&self) -> Vec<(IndexKey, ManualDirtyFlag)> {
         self.dirty_indexes
             .lock()
             .unwrap()
             .iter()
             .filter(|(_, dirty)| dirty.take())
-            .map(|(key, _)| key.clone())
+            .map(|(key, dirty)| (key.clone(), dirty.clone()))
             .collect()
     }
 
     pub(crate) fn remove_index_labels(&self, keyspace: &str, index_name: &str) {
-        // First, so that a refresh that ends meanwhile cannot set the gauges again (`set_if_tracked`).
+        // First, so that a refresh that ends meanwhile cannot set the gauges again (`set_if_current`).
         let key = IndexKey::new(&KeyspaceName::from(keyspace), &IndexName::from(index_name));
         self.dirty_indexes.lock().unwrap().remove(&key);
         for op in REQUEST_OPERATIONS {
@@ -305,10 +316,14 @@ impl Metrics {
         }
     }
 
-    /// Runs `set` unless the index `key` has been removed (`remove_index_labels`).
-    fn set_if_tracked(&self, key: &IndexKey, set: impl FnOnce()) {
+    /// Runs `set` while `dirty` is a copy of the flag of the index `key`: not once the index has been
+    /// removed (`remove_index_labels`), nor once it has been created again under the same name.
+    fn set_if_current(&self, key: &IndexKey, dirty: &ManualDirtyFlag, set: impl FnOnce()) {
         let dirty_indexes = self.dirty_indexes.lock().unwrap();
-        if dirty_indexes.contains_key(key) {
+        if dirty_indexes
+            .get(key)
+            .is_some_and(|current| current.has_same_orig(dirty))
+        {
             set();
         }
     }
@@ -330,20 +345,22 @@ impl Metrics {
 
     /// Refreshes the gauges of the indexes marked dirty with `refresh`, which is true once the
     /// gauges of an index are set or the index is gone. The indexes are refreshed all at once, each
-    /// for at most `index_timeout`, so that a busy index delays no other. An index whose refresh
-    /// fails or times out is marked dirty again.
+    /// for at most `index_timeout`, so that a busy index delays no other. `refresh` gets each index
+    /// with the flag it was taken with, so that it sets the gauges of that index only
+    /// (`set_if_current`). An index whose refresh fails or times out is marked dirty again through
+    /// that flag.
     async fn refresh_dirty_indexes<Fut>(
         &self,
         index_timeout: Duration,
-        refresh: impl Fn(IndexKey) -> Fut,
+        refresh: impl Fn(IndexKey, ManualDirtyFlag) -> Fut,
     ) where
         Fut: std::future::Future<Output = bool>,
     {
-        let refreshes = self.take_dirty_indexes().into_iter().map(|key| {
-            let refreshed = time::timeout(index_timeout, refresh(key.clone()));
+        let refreshes = self.take_dirty_indexes().into_iter().map(|(key, dirty)| {
+            let refreshed = time::timeout(index_timeout, refresh(key, dirty.clone()));
             async move {
                 if !matches!(refreshed.await, Ok(true)) {
-                    self.mark_dirty(&key);
+                    dirty.mark();
                 }
             }
         });
@@ -364,8 +381,8 @@ pub(crate) fn spawn_refresh(metrics: Arc<Metrics>, engine: WeakSender<Engine>) {
                     break;
                 };
                 metrics
-                    .refresh_dirty_indexes(INDEX_REFRESH_TIMEOUT, |key| {
-                        refresh_index(&metrics, &engine, key)
+                    .refresh_dirty_indexes(INDEX_REFRESH_TIMEOUT, |key, dirty| {
+                        refresh_index(&metrics, &engine, key, dirty)
                     })
                     .await;
             }
@@ -374,9 +391,14 @@ pub(crate) fn spawn_refresh(metrics: Arc<Metrics>, engine: WeakSender<Engine>) {
     );
 }
 
-/// Sets the gauges of the index `key`: true once they are set or the index is gone, false when its
-/// count or stats failed.
-async fn refresh_index(metrics: &Metrics, engine: &Sender<Engine>, key: IndexKey) -> bool {
+/// Sets the gauges of the index `key` taken with `dirty`: true once they are set or the index is
+/// gone, false when its count or stats failed.
+async fn refresh_index(
+    metrics: &Metrics,
+    engine: &Sender<Engine>,
+    key: IndexKey,
+    dirty: ManualDirtyFlag,
+) -> bool {
     let keyspace = key.keyspace();
     let index_name = key.index();
     let labels = [keyspace.as_ref(), index_name.as_ref()];
@@ -385,7 +407,7 @@ async fn refresh_index(metrics: &Metrics, engine: &Sender<Engine>, key: IndexKey
         let Ok(count) = index.count(key.clone()).await else {
             return false;
         };
-        metrics.set_if_tracked(&key, || {
+        metrics.set_if_current(&key, &dirty, || {
             metrics.size.with_label_values(&labels).set(count as f64);
         });
         return true;
@@ -395,7 +417,7 @@ async fn refresh_index(metrics: &Metrics, engine: &Sender<Engine>, key: IndexKey
         let Ok(stats) = index.stats(key.clone()).await else {
             return false;
         };
-        metrics.set_if_tracked(&key, || {
+        metrics.set_if_current(&key, &dirty, || {
             metrics
                 .size
                 .with_label_values(&labels)
@@ -416,7 +438,7 @@ async fn refresh_index(metrics: &Metrics, engine: &Sender<Engine>, key: IndexKey
         let Ok(count) = index.count(key.clone()).await else {
             return false;
         };
-        metrics.set_if_tracked(&key, || {
+        metrics.set_if_current(&key, &dirty, || {
             metrics.size.with_label_values(&labels).set(count as f64);
         });
     }
@@ -437,7 +459,7 @@ mod tests {
     }
 
     /// Refreshes "fast" at once, fails "failing", and takes a minute for any other index.
-    async fn refresh_by_name(key: IndexKey) -> bool {
+    async fn refresh_by_name(key: IndexKey, _: ManualDirtyFlag) -> bool {
         match key.index().as_ref() {
             "fast" => true,
             "failing" => false,
@@ -523,9 +545,6 @@ mod tests {
 
         metrics.remove_index_labels("ks", "idx");
         assert!(metrics.dirty_indexes.lock().unwrap().is_empty());
-        // A refresh that failed on the index while it was removed does not bring it back.
-        metrics.mark_dirty(&index_key("idx"));
-        assert!(metrics.dirty_indexes.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -545,7 +564,11 @@ mod tests {
         // Refreshed at once, the twenty slow indexes take their 100ms timeout once, not twenty times.
         let took = start.elapsed();
         assert!(took < Duration::from_secs(1), "took {took:?}");
-        let dirty: BTreeSet<_> = metrics.take_dirty_indexes().into_iter().collect();
+        let dirty: BTreeSet<_> = metrics
+            .take_dirty_indexes()
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
         assert_eq!(dirty, left);
     }
 
@@ -554,14 +577,55 @@ mod tests {
         let metrics = Metrics::new();
         let key = index_key("idx");
         drop(metrics.dirty_flag(&key));
+        let (_, dirty) = metrics.take_dirty_indexes().pop().unwrap();
 
         metrics.remove_index_labels("ks", "idx");
         // A refresh whose count was answered before the removal.
-        metrics.set_if_tracked(&key, || {
+        metrics.set_if_current(&key, &dirty, || {
             metrics.size.with_label_values(&["ks", "idx"]).set(1.0);
         });
 
         assert!(metric_families_text(&metrics).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_refresh_leaves_alone_an_index_created_again_under_the_same_name() {
+        let metrics = Metrics::new();
+        drop(metrics.dirty_flag(&index_key("idx")));
+        let created_again = Mutex::new(None);
+
+        // While the refresh waits for the count of the index, the index is removed and created again
+        // under the same name. The count of the removed index comes back, and then the refresh
+        // fails.
+        metrics
+            .refresh_dirty_indexes(Duration::from_secs(1), |key, dirty| {
+                metrics.remove_index_labels("ks", "idx");
+                *created_again.lock().unwrap() = Some(metrics.dirty_flag(&key));
+                metrics.set_if_current(&key, &dirty, || {
+                    metrics.size.with_label_values(&["ks", "idx"]).set(1.0);
+                });
+                future::ready(false)
+            })
+            .await;
+
+        assert!(metric_families_text(&metrics).is_empty());
+        assert!(metrics.take_dirty_indexes().is_empty());
+
+        // A change to the new index marks it, and its refresh sets its gauges.
+        drop(created_again);
+        metrics
+            .refresh_dirty_indexes(Duration::from_secs(1), |key, dirty| {
+                metrics.set_if_current(&key, &dirty, || {
+                    metrics.size.with_label_values(&["ks", "idx"]).set(2.0);
+                });
+                future::ready(true)
+            })
+            .await;
+
+        assert!(
+            metric_families_text(&metrics)
+                .contains(r#"index_size{index_name="idx",keyspace="ks"} 2"#)
+        );
     }
 
     #[test]

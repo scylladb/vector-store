@@ -445,10 +445,12 @@ mod tests {
     ) {
         metrics.take_dirty_indexes();
         drop(in_progress);
-        assert_eq!(
-            metrics.take_dirty_indexes(),
-            std::slice::from_ref(index_key)
-        );
+        let dirty: Vec<_> = metrics
+            .take_dirty_indexes()
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+        assert_eq!(dirty, std::slice::from_ref(index_key));
     }
 
     #[tokio::test]
