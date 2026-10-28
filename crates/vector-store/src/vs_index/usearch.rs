@@ -1384,7 +1384,7 @@ mod tests {
                             partition_id,
                             id.into(),
                             vec![0.0f32; dimensions.get()].into(),
-                            AsyncInProgress::None,
+                            AsyncInProgress::none(),
                         )
                         .await
                         .unwrap();
@@ -1465,7 +1465,7 @@ mod tests {
                 partition_id,
                 1.into(),
                 vec![1., 1., 1.].into(),
-                AsyncInProgress::None,
+                AsyncInProgress::none(),
             )
             .await
             .unwrap();
@@ -1474,7 +1474,7 @@ mod tests {
                 partition_id,
                 2.into(),
                 vec![2., -2., 2.].into(),
-                AsyncInProgress::None,
+                AsyncInProgress::none(),
             )
             .await
             .unwrap();
@@ -1483,7 +1483,7 @@ mod tests {
                 partition_id,
                 3.into(),
                 vec![3., 3., 3.].into(),
-                AsyncInProgress::None,
+                AsyncInProgress::none(),
             )
             .await
             .unwrap();
@@ -1527,7 +1527,7 @@ mod tests {
         assert_eq!(primary_keys.first().unwrap(), &[CqlValue::Int(2)].into());
 
         modify
-            .remove_vector(partition_id, 3.into(), AsyncInProgress::None)
+            .remove_vector(partition_id, 3.into(), AsyncInProgress::none())
             .await
             .unwrap();
         wait_for_count(&search, index_key.clone(), 2).await.unwrap();
@@ -1536,7 +1536,7 @@ mod tests {
                 partition_id,
                 3.into(),
                 vec![2.1, -2.1, 2.1].into(),
-                AsyncInProgress::None,
+                AsyncInProgress::none(),
             )
             .await
             .unwrap();
@@ -1572,7 +1572,7 @@ mod tests {
         .unwrap();
 
         modify
-            .remove_vector(partition_id, 3.into(), AsyncInProgress::None)
+            .remove_vector(partition_id, 3.into(), AsyncInProgress::none())
             .await
             .unwrap();
 
@@ -1628,7 +1628,7 @@ mod tests {
                 partition_id,
                 1.into(),
                 vector.clone().into(),
-                AsyncInProgress::None,
+                AsyncInProgress::none(),
             )
             .await
             .unwrap();
@@ -1822,7 +1822,7 @@ mod tests {
                 partition_id,
                 1.into(),
                 vec![1., 1., 1.].into(),
-                AsyncInProgress::None,
+                AsyncInProgress::none(),
             )
             .await
             .unwrap();
@@ -1842,7 +1842,7 @@ mod tests {
                 partition_id,
                 1.into(),
                 vec![1., 1., 1.].into(),
-                AsyncInProgress::None,
+                AsyncInProgress::none(),
             )
             .await
             .unwrap();

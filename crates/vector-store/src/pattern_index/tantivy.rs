@@ -285,7 +285,7 @@ mod tests {
     async fn rm_doc(sender: &mpsc::Sender<PatternIndex>, primary: u64) {
         let (tx, mut rx) = mpsc::channel(1);
         sender
-            .remove_document(primary.into(), AsyncInProgress::Fullscan(tx))
+            .remove_document(primary.into(), AsyncInProgress::fullscan(tx))
             .await
             .unwrap();
         rx.recv().await;
@@ -304,7 +304,7 @@ mod tests {
                 .add_document(
                     primary.into(),
                     content.into(),
-                    AsyncInProgress::Fullscan(tx),
+                    AsyncInProgress::fullscan(tx),
                 )
                 .await
                 .unwrap();

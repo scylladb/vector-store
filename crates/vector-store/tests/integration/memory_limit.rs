@@ -113,7 +113,7 @@ async fn memory_limit_during_index_build() {
                                     .unwrap(),
                                 ),
                             },
-                            AsyncInProgress::Fullscan(tx_in_progress.clone()),
+                            AsyncInProgress::fullscan(tx_in_progress.clone()),
                         ))
                         .await
                         .unwrap();

@@ -11,13 +11,17 @@ use crate::wait_for;
 use httpclient::HttpClient;
 use scylla::cluster::metadata::NativeType;
 use scylla::value::CqlValue;
+use std::time::Duration;
 use tokio::sync::mpsc::Sender;
+use vector_store::Config;
 use vector_store::DbIndexPartitioning;
 use vector_store::IndexMetadata;
 use vector_store::Timestamp;
 use vector_store::node_state::NodeState;
 
-async fn setup_single_vector_index() -> (
+async fn setup_single_vector_index(
+    config: Config,
+) -> (
     IndexMetadata,
     HttpClient,
     DbBasic,
@@ -25,7 +29,7 @@ async fn setup_single_vector_index() -> (
     Sender<NodeState>,
 ) {
     vs_index::setup_store_and_wait_for_index(
-        vs_index::usearch_test_config(),
+        config,
         DbIndexPartitioning::Global,
         ["pk".into(), "ck".into()],
         1,
@@ -49,7 +53,8 @@ async fn setup_single_vector_index() -> (
 async fn index_labels_present_in_metrics_endpoint() {
     crate::enable_tracing();
 
-    let (index, client, _db, _server, _node_state) = setup_single_vector_index().await;
+    let (index, client, _db, _server, _node_state) =
+        setup_single_vector_index(vs_index::usearch_test_config()).await;
 
     let expected_labels = format!(
         r#"index_name="{}",keyspace="{}""#,
@@ -66,7 +71,8 @@ async fn index_labels_present_in_metrics_endpoint() {
 async fn deleted_index_labels_absent_from_metrics_endpoint() {
     crate::enable_tracing();
 
-    let (index, client, db, _server, _node_state) = setup_single_vector_index().await;
+    let (index, client, db, _server, _node_state) =
+        setup_single_vector_index(vs_index::usearch_test_config()).await;
 
     let expected_labels = format!(
         r#"index_name="{}",keyspace="{}""#,
@@ -144,4 +150,35 @@ async fn highlight_latency_recorded_under_highlight_operation() {
         )),
         "highlight must not be recorded under the bm25 operation:\n{metrics}"
     );
+}
+
+// Checks that index_size counts a vector that the index adds after a refresh of the gauges. The
+// usearch simulator adds the full scan's one vector 2s after the index receives it, and the gauges
+// are refreshed every second, so a refresh falls within those 2s. When the index was marked dirty
+// as the vector was handed to it, that refresh counted the index without the vector and took the
+// mark, and nothing refreshed index_size afterwards.
+#[tokio::test]
+async fn index_size_counts_a_vector_added_after_a_refresh() {
+    crate::enable_tracing();
+
+    // search, add or remove, reserve
+    let simulator = vec![Duration::ZERO, Duration::from_secs(2), Duration::ZERO];
+    let config = Config {
+        usearch_simulator: Some(simulator),
+        ..vs_index::usearch_test_config()
+    };
+    let (index, client, _db, _server, _node_state) = setup_single_vector_index(config).await;
+
+    let size_line = format!(
+        r#"index_size{{index_name="{}",keyspace="{}"}} 1"#,
+        index.index_name, index.keyspace_name,
+    );
+    wait_for(
+        || async {
+            let metrics = client.get_metrics_text().await;
+            metrics.lines().any(|metric| metric == size_line)
+        },
+        "Waiting for index_size to count the vector added after a refresh",
+    )
+    .await;
 }

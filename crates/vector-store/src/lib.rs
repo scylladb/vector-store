@@ -1030,6 +1030,7 @@ pub async fn run(
         config_receivers.config,
     )
     .await?;
+    metrics::spawn_refresh(Arc::clone(&metrics), engine.downgrade());
 
     let main = httpserver::new(
         node_state.clone(),
