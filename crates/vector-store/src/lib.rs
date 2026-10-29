@@ -628,8 +628,17 @@ impl FromStr for CaseSensitive {
 
 impl CaseSensitive {
     /// Returns `text` lowercased when letter case is not distinguished, and as it is otherwise.
-    pub(crate) fn fold(self, text: String) -> String {
-        if self.0 { text } else { text.to_lowercase() }
+    pub(crate) fn fold(self, mut text: String) -> String {
+        // Lowercases as tantivy's LowerCaser does. Unlike str::to_lowercase, it maps each character
+        // on its own, so a final 'Σ' becomes 'σ' as elsewhere and 'ΑΣ%' matches 'ασα'.
+        if self.0 {
+            text
+        } else if text.is_ascii() {
+            text.make_ascii_lowercase();
+            text
+        } else {
+            text.chars().flat_map(char::to_lowercase).collect()
+        }
     }
 }
 
