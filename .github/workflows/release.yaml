@@ -588,7 +588,7 @@ jobs:
             if grep -q 'slack-announcement' body.txt ; then
               echo "::warning::The release notes mention slack-announcement, but hold no block with text in it; posting the short announcement"
             fi
-            text="<!here> ScyllaDB Vector Store *${VECTOR_VERSION}* is released: <${url}|release notes>"
+            text="<!here> *ScyllaDB Vector Store ${VECTOR_VERSION}* is released: <${url}|release notes>"
           fi
           printf '%s\n' "${text}" > announcement.txt
 
