@@ -1,0 +1,311 @@
+//! Hybrid search workload - a vector index and a full-text index on one
+//! table, queried by RRF of ANN and BM25.
+//!
+//! Usage:
+//!   latte schema             latte/hybrid.rn <node> -P dimension=<n>
+//!   latte schema             latte/hybrid.rn <node> -P schema_cleanup=true  # drop table
+//!   latte schema             latte/hybrid.rn <node> -P drop_index=true      # drop both indexes
+//!   latte load               latte/hybrid.rn <node> --concurrency 10 \
+//!       -P 'hybrid_data_dir="<dir>/"' -P dimension=<n>
+//!   latte run -f build_index latte/hybrid.rn <node> -d 1 -P dimension=<n>
+//!   latte run -f search      latte/hybrid.rn <node> -d 60s --concurrency 32 \
+//!       -P 'hybrid_data_dir="<dir>/"' -P dimension=<n> \
+//!       --generate-report -o rrf.json
+//!
+//! The dataset is a full-text-search corpus plus one embedding per
+//! document and per query: record `i` of `document_vectors_file` is the
+//! embedding of line `i` of `documents_file`, and record `i` of
+//! `query_vectors_file` pairs with line `i` of `query_texts_file`. `prepare`
+//! fails when the counts differ.
+//!
+//! `search` orders by `RRF(ANN(..), BM25(..))`; `fts.rn` and `ann.rn`
+//! measure each leg alone. `highlight=true` also selects a
+//! `BM25_HIGHLIGHT()` excerpt.
+//!
+//! `load` indexes both files in `prepare` and reads one document and one
+//! embedding per cycle, so memory depends on the document count, not the
+//! corpus size. `search` preloads the (small) query, query-vector and qrels
+//! files: reading inside the measured path would add I/O to the latency.
+
+use latte::*;
+
+mod common {
+    pub mod fbin_dataset;
+    pub mod index_probe;
+    pub mod relevance_metrics;
+    pub mod search_queries;
+    pub mod tsv_dataset;
+}
+use common::fbin_dataset;
+use common::index_probe;
+use common::relevance_metrics;
+use common::search_queries;
+use common::tsv_dataset;
+
+// Schema / table
+const KEYSPACE = latte::param!("keyspace", "hybrid_bench");
+const TABLE = latte::param!("table", "documents");
+const TEXT_COLUMN = latte::param!("text_column", "body");
+const VECTOR_COLUMN = latte::param!("vector_column", "embedding");
+// Must match the fbin files; `prepare` checks it against the
+// `document_vectors_file` header.
+const DIMENSION = latte::param!("dimension", 4);
+const FTS_INDEX_NAME = latte::param!("fts_index_name", "documents_fts_idx");
+const ANN_INDEX_NAME = latte::param!("ann_index_name", "documents_ann_idx");
+const FTS_INDEX_OPTIONS = latte::param!("fts_index_options", "");
+const ANN_INDEX_OPTIONS = latte::param!("ann_index_options", "");
+const REPLICATION_FACTOR = latte::param!("replication_factor", 1);
+const SCHEMA_CLEANUP = latte::param!("schema_cleanup", false);
+const DROP_INDEX = latte::param!("drop_index", false);
+const MAX_INDEX_WAIT_SECS = latte::param!("max_index_wait_secs", 600);
+const MIN_SUCCESSFUL_PROBES = latte::param!("min_successful_probes", 3);
+
+// Dataset files
+const HYBRID_DATA_DIR = latte::param!("hybrid_data_dir", "./");
+const DOCUMENTS_FILE = latte::param!("documents_file", "documents.tsv");
+const DOCUMENT_VECTORS_FILE = latte::param!("document_vectors_file", "documents.fbin");
+const QUERY_TEXTS_FILE = latte::param!("query_texts_file", "queries_natural.tsv");
+const QUERY_VECTORS_FILE = latte::param!("query_vectors_file", "queries_natural.fbin");
+const QRELS_FILE = latte::param!("qrels_file", "qrels_natural.tsv");
+
+// Search
+const SEARCH_LIMIT = latte::param!("search_limit", 5);
+// Select a BM25_HIGHLIGHT() excerpt for each result.
+const HIGHLIGHT = latte::param!("highlight", false);
+// Off by default: the bundled embeddings are random, so the fused ranking
+// means nothing until the corpus carries real ones.
+const COMPUTE_ACCURACY = latte::param!("compute_accuracy", false);
+
+// Prepared statement names
+const INSERT = "insert";
+const FTS_PROBE = "fts_probe";
+const ANN_PROBE = "ann_probe";
+const SEARCH = "search";
+
+fn join_path(dir, name) {
+    if dir == "" || dir.ends_with("/") { dir + name } else { dir + "/" + name }
+}
+
+fn options_clause(options) {
+    if options == "" { "" } else { ` WITH OPTIONS = ${options}` }
+}
+
+/// Create both indexes if absent. Idempotent (IF NOT EXISTS).
+async fn create_indexes(db) {
+    db.execute(`CREATE CUSTOM INDEX IF NOT EXISTS ${FTS_INDEX_NAME} ON ${KEYSPACE}.${TABLE}(${TEXT_COLUMN}) \
+        USING 'fulltext_index'${options_clause(FTS_INDEX_OPTIONS)}`).await?;
+    db.execute(`CREATE CUSTOM INDEX IF NOT EXISTS ${ANN_INDEX_NAME} ON ${KEYSPACE}.${TABLE}(${VECTOR_COLUMN}) \
+        USING 'vector_index'${options_clause(ANN_INDEX_OPTIONS)}`).await?;
+    Ok(())
+}
+
+async fn drop_indexes(db) {
+    db.execute(`DROP INDEX IF EXISTS ${KEYSPACE}.${FTS_INDEX_NAME}`).await?;
+    db.execute(`DROP INDEX IF EXISTS ${KEYSPACE}.${ANN_INDEX_NAME}`).await?;
+    Ok(())
+}
+
+async fn create_table(db) {
+    db.execute(`CREATE KEYSPACE IF NOT EXISTS ${KEYSPACE} WITH REPLICATION = \
+        {'class': 'NetworkTopologyStrategy', 'replication_factor': '${REPLICATION_FACTOR}'}`).await?;
+    db.execute(`CREATE TABLE IF NOT EXISTS ${KEYSPACE}.${TABLE} (\
+        doc_id text PRIMARY KEY, ${TEXT_COLUMN} text, ${VECTOR_COLUMN} vector<float, ${DIMENSION}>)`).await?;
+    Ok(())
+}
+
+// A constant, non-zero vector for the ANN readiness probe (an all-zero vector
+// can be undefined under cosine distance).
+fn probe_vector() {
+    let v = [];
+    for _ in 0..DIMENSION {
+        v.push(0.1);
+    }
+    v
+}
+
+pub async fn schema(db) {
+    if SCHEMA_CLEANUP {
+        db.execute(`DROP TABLE IF EXISTS ${KEYSPACE}.${TABLE}`).await?;
+        return;
+    }
+    create_table(db).await?;
+    if DROP_INDEX {
+        drop_indexes(db).await?;
+    }
+}
+
+fn search_statement() {
+    let selection = if HIGHLIGHT {
+        `doc_id, BM25_HIGHLIGHT(${TEXT_COLUMN}, :q) AS excerpt`
+    } else {
+        "doc_id"
+    };
+    `SELECT ${selection} FROM ${KEYSPACE}.${TABLE} \
+        ORDER BY RRF(ANN(${VECTOR_COLUMN}, :v), BM25(${TEXT_COLUMN}, :q)) LIMIT ${SEARCH_LIMIT}`
+}
+
+pub async fn prepare(db) {
+    let has_load = false;
+    let has_build_index = false;
+    let has_search = false;
+
+    if !is_none(db.data.get("functions_to_invoke")) {
+        for item in db.data.functions_to_invoke {
+            let name = item.0;
+            if name == "load" { has_load = true; }
+            if name == "build_index" { has_build_index = true; }
+            if name == "search" { has_search = true; }
+        }
+    } else {
+        has_load = true;
+    }
+
+    if has_load {
+        create_table(db).await?;
+
+        db.data.documents_path = join_path(HYBRID_DATA_DIR, DOCUMENTS_FILE);
+        db.data.documents_index = tsv_dataset::index(db.data.documents_path)?;
+        db.data.document_vectors_path = join_path(HYBRID_DATA_DIR, DOCUMENT_VECTORS_FILE);
+        db.data.document_vectors_header = fbin_dataset::read_base_header(db.data.document_vectors_path)?;
+
+        let documents = tsv_dataset::document_count(db.data.documents_index);
+        let vectors = db.data.document_vectors_header.count;
+        if documents != vectors {
+            return Err(`${db.data.documents_path} has ${documents} documents but ${db.data.document_vectors_path} \
+                holds ${vectors} vectors; record i of the fbin must be the embedding of line i`);
+        }
+        if db.data.document_vectors_header.dimension != DIMENSION {
+            return Err(`${db.data.document_vectors_path} holds vectors of dimension \
+                ${db.data.document_vectors_header.dimension}, but dimension=${DIMENSION}`);
+        }
+        // `load` takes the cycle index modulo this, so zero would be a
+        // division by zero once per cycle.
+        if documents == 0 {
+            return Err(`${db.data.documents_path}: no documents (empty file?)`);
+        }
+        db.load_cycle_count = documents;
+        println!("Indexed {} documents in {} and {}, read one per cycle",
+                 documents, db.data.documents_path, db.data.document_vectors_path);
+        db.prepare(INSERT, `INSERT INTO ${KEYSPACE}.${TABLE} (doc_id, ${TEXT_COLUMN}, ${VECTOR_COLUMN}) \
+            VALUES (:doc_id, :body, :embedding)`).await?;
+    }
+
+    if has_build_index {
+        // Create only, as ann.rn does: a drop and recreate under the same
+        // names lets the probe pass against vector-store's old index until
+        // it notices the drop. Rebuild with `schema -P drop_index=true`.
+        create_indexes(db).await?;
+        db.data.index_build_start = latte::now_timestamp();
+        db.data.indexes_ready = false;
+        db.data.probe_vector = probe_vector();
+        db.prepare(FTS_PROBE, `SELECT doc_id FROM ${KEYSPACE}.${TABLE} WHERE BM25(${TEXT_COLUMN}, 'probe') > 0 \
+            ORDER BY BM25(${TEXT_COLUMN}, 'probe') LIMIT 1`).await?;
+        db.prepare(ANN_PROBE, `SELECT doc_id FROM ${KEYSPACE}.${TABLE} ORDER BY ${VECTOR_COLUMN} ANN OF :v LIMIT 1`).await?;
+    }
+
+    if has_search {
+        let queries_path = join_path(HYBRID_DATA_DIR, QUERY_TEXTS_FILE);
+        db.data.queries = search_queries::load_queries(queries_path)?;
+
+        let query_vectors_path = join_path(HYBRID_DATA_DIR, QUERY_VECTORS_FILE);
+        db.data.query_vectors = fbin_dataset::load_query_vectors(query_vectors_path).await?;
+        println!("Loaded {} query vectors from {}", db.data.query_vectors.len(), query_vectors_path);
+        if db.data.queries.len() == 0 {
+            return Err(`${queries_path}: no queries (empty file?)`);
+        }
+        if db.data.queries.len() != db.data.query_vectors.len() {
+            return Err(`${queries_path} has ${db.data.queries.len()} queries but ${query_vectors_path} \
+                holds ${db.data.query_vectors.len()} vectors; record i of the fbin must pair with line i`);
+        }
+
+        if COMPUTE_ACCURACY {
+            db.data.judgments = search_queries::load_judgments(
+                join_path(HYBRID_DATA_DIR, QRELS_FILE), db.data.queries)?;
+            relevance_metrics::declare_metrics(db);
+        }
+
+        db.prepare(SEARCH, search_statement()).await?;
+
+        db.set_report_field("dataset", HYBRID_DATA_DIR);
+        db.set_report_field("query_texts_file", QUERY_TEXTS_FILE);
+        db.set_report_field("highlight", `${HIGHLIGHT}`);
+        db.set_report_field("k", `${SEARCH_LIMIT}`);
+        db.set_report_field("dimension", `${DIMENSION}`);
+        db.set_report_field("fts_index_options", if FTS_INDEX_OPTIONS == "" { "server_defaults" } else { FTS_INDEX_OPTIONS });
+        db.set_report_field("ann_index_options", if ANN_INDEX_OPTIONS == "" { "server_defaults" } else { ANN_INDEX_OPTIONS });
+        db.set_report_field("compute_accuracy", `${COMPUTE_ACCURACY}`);
+
+        db.declare_metric("result_count", "higher");
+
+        db.data.failed_bitmap = [];
+        for _ in 0..db.data.queries.len() {
+            db.data.failed_bitmap.push(false);
+        }
+    }
+}
+
+// Runs once per worker thread, after `prepare`. Workers get ctx.data as a
+// serialized copy, so a file handle cannot be made in `prepare` and handed
+// over. Only the load phase sets the paths.
+pub async fn prepare_worker(db) {
+    if !is_none(db.data.get("documents_path")) {
+        db.data.documents_file = fs::open_binary(db.data.documents_path)?;
+        db.data.document_vectors_file = fs::open_binary(db.data.document_vectors_path)?;
+    }
+}
+
+pub async fn load(db, i) {
+    let index = db.data.documents_index;
+    let idx = i % tsv_dataset::document_count(index);
+    let doc = tsv_dataset::read_at(db.data.documents_file, index, idx)?;
+    // Packed little-endian f32 bytes bind to vector<float, N> directly.
+    let embedding = fbin_dataset::read_base_vector_packed_at(
+        db.data.document_vectors_file, db.data.document_vectors_header, idx)?;
+    db.execute_prepared(INSERT, #{ "doc_id": doc.id, "body": doc.body, "embedding": embedding }).await?;
+}
+
+/// Wait until both indexes are built, so `search` runs against complete
+/// indexes. Records no metric: each index's build time is measured by
+/// `fts.rn` and `ann.rn`, and building several indexes at
+/// once is out of scope here.
+pub async fn build_index(db, _i) {
+    if db.data.indexes_ready { // done in warmup
+        return Ok(());
+    }
+    let start = db.data.index_build_start;
+    index_probe::wait_until_ready(db, FTS_PROBE, #{}, start,
+        MAX_INDEX_WAIT_SECS, MIN_SUCCESSFUL_PROBES).await?;
+    index_probe::wait_until_ready(db, ANN_PROBE, #{ "v": db.data.probe_vector }, start,
+        MAX_INDEX_WAIT_SECS, MIN_SUCCESSFUL_PROBES).await?;
+    db.data.indexes_ready = true;
+    Ok(())
+}
+
+pub async fn search(db, i) {
+    let idx = latte::hash(i) % db.data.queries.len();
+    let query = db.data.queries[idx];
+    let params = #{ "q": query.text, "v": db.data.query_vectors[idx] };
+
+    match db.execute_prepared_with_result(SEARCH, params).await {
+        Err(e) => {
+            if !db.data.failed_bitmap[idx] {
+                println!("WARNING: query failed [idx={} id=\"{}\" text=\"{}\" error={}]",
+                         idx, query.id, query.text, e);
+                db.data.failed_bitmap[idx] = true;
+            }
+            return Ok(());
+        }
+        Ok(rows) => {
+            let returned_ids = [];
+            for row in rows {
+                returned_ids.push(row.doc_id);
+            }
+            db.record_metric("result_count", returned_ids.len() as f64);
+
+            if COMPUTE_ACCURACY {
+                relevance_metrics::record_metrics(db, db.data.judgments[idx], returned_ids, SEARCH_LIMIT);
+            }
+        }
+    }
+    Ok(())
+}

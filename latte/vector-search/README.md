@@ -11,30 +11,34 @@ latte is the load engine, these `.rn` files are the workload.
 
 ## Files
 
+The workload scripts live in `latte/`, beside the `common/` modules they share
+with the other workloads (see [../README.md](../README.md)):
+
 | File | Purpose |
 |---|---|
-| `text_dataset.rn` | dataset/query/ground-truth **text** loaders |
-| `fbin_dataset.rn` | dataset/query/ground-truth **binary** (big-ann fbin/ibin) loaders |
-| `fbin_dataset_test.rn` | smoke test for both loaders |
-| `metrics.rn` | quality metrics — the `recall_at_k` definition |
-| `recall.rn` | benchmark over the whole dataset (load → ANN search → recall/QPS/latency) |
-| `recall_buckets.rn` | one upload, queried as the full dataset or per size-stratum, for a recall/QPS-vs-index-size curve |
+| `latte/ann.rn` | benchmark over the whole dataset (load → ANN search → recall/QPS/latency) |
+| `latte/ann_buckets.rn` | one upload, queried as the full dataset or per size-stratum, for a recall/QPS-vs-index-size curve |
+| `latte/common/text_dataset.rn` | dataset/query/ground-truth **text** loaders |
+| `latte/common/fbin_dataset.rn` | dataset/query/ground-truth **binary** (big-ann fbin/ibin) loaders |
+| `latte/common/fbin_dataset_test.rn` | smoke test for both loaders |
+| `latte/common/ann_metrics.rn` | quality metrics — the `recall_at_k` definition |
+| `testdata/` | fixtures for the smoke test |
 
 ## Requirements
 
 - `scylladb/latte` **>= 0.50.0-scylladb**.
 - A running ScyllaDB + vector-store cluster.
 
-## Quick start (`recall.rn`)
+## Quick start (`ann.rn`)
 
 ```sh
 # string -P values are parsed as expressions, so quote paths
-latte schema             latte/vector-search/recall.rn <node>
-latte run -f load        latte/vector-search/recall.rn <node> -d <dataset_size> \
+latte schema             latte/ann.rn <node>
+latte run -f load        latte/ann.rn <node> -d <dataset_size> \
     -P load_data=true -P 'vector_data_dir="<dir>/"' --concurrency 64 \
     --threads <cores>
-latte run -f build_index latte/vector-search/recall.rn <node> -d 1 -P build_index=true
-latte run -f search      latte/vector-search/recall.rn <node> -d 60s --concurrency 32 \
+latte run -f build_index latte/ann.rn <node> -d 1 -P build_index=true
+latte run -f search      latte/ann.rn <node> -d 60s --concurrency 32 \
     -P 'vector_data_dir="<dir>/"' --generate-report -o report.json
 ```
 
@@ -61,11 +65,11 @@ a partial index and you must wait an unbounded delay before `search`).
 
 A dataset is three files - base vectors, query vectors, ground truth - in one
 of the following formats, selected with `-P 'dataset_format="..."'` on
-`recall.rn`:
+`ann.rn`:
 
-- **`text`** (default; format documented in `text_dataset.rn`) - prepared
+- **`text`** (default; format documented in `common/text_dataset.rn`) - prepared
   offline from the source parquet datasets.
-- **`fbin`** (format documented in `fbin_dataset.rn`) - the big-ann-benchmarks
+- **`fbin`** (format documented in `common/fbin_dataset.rn`) - the big-ann-benchmarks
   binary formats, read directly: big-ann datasets (e.g. deep1b) need no
   conversion at all.
 - **`fbin_packed`** - same fbin/ibin files, but the `load` phase binds each
@@ -75,7 +79,7 @@ of the following formats, selected with `-P 'dataset_format="..."'` on
 
 Default filenames — each overridable with the matching `-P` param:
 
-- `dataset_file` — `dataset.txt` for `recall.rn`, `dataset_buckets.txt` for `recall_buckets.rn`
+- `dataset_file` — `dataset.txt` for `ann.rn`, `dataset_buckets.txt` for `ann_buckets.rn`
 - `query_vectors_file` — `queries.txt`
 - `ground_truth_file` — `ground_truth.txt`
 
@@ -88,7 +92,7 @@ as the `dataset` field in the report metadata — if you renamed the dataset fil
 pass the same `-P dataset_file=...` to `search` too, or the report will record
 the default name.
 
-`recall_buckets.rn` additionally reads per-stratum files derived from the bucket
+`ann_buckets.rn` additionally reads per-stratum files derived from the bucket
 number (not params): `bucket/test_bucket<N>.txt`, `bucket/gt_bucket<N>.txt`.
 The bucketed workload is text-only (fbin has no bucket column).
 
@@ -104,16 +108,15 @@ fbin. Raise `--threads` until the server, not the client, is the limit.
 Each cycle reads from disk, synchronously, so load-phase latency percentiles
 measure the client too: read them as throughput, keep the dataset on fast local
 storage, and take latency from `search`, which does no file I/O.
-`recall_buckets.rn` reads its bucket into memory and still wants
+`ann_buckets.rn` reads its bucket into memory and still wants
 `--threads 1`.
 
 ## Smoke test
 
-`fbin_dataset_test.rn` checks both loaders against the fixtures in `testdata/`
-(regenerate with `testdata/gen_fbin_testdata.py`). It needs a CQL endpoint but
-no vector-store:
+`common/fbin_dataset_test.rn` checks both loaders against the fixtures in
+`testdata/` (regenerate with `testdata/gen_fbin_testdata.py`). It needs a CQL
+endpoint but no vector-store. From the repository root:
 
 ```sh
-cd latte/vector-search
-latte run -f smoke fbin_dataset_test.rn <node> -d 1
+latte run -f smoke latte/common/fbin_dataset_test.rn <node> -d 1
 ```

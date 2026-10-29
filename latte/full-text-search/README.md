@@ -39,7 +39,7 @@ Run the commands from the repository root. Set the values for the target
 cluster and dataset once:
 
 ```sh
-WORKLOAD=latte/full-text-search/fts.rn
+WORKLOAD=latte/fts.rn
 NODE=127.0.0.1
 DATA_DIR=latte/full-text-search/testdata/
 DOC_COUNT=10
@@ -180,21 +180,25 @@ All workload parameters are passed with Latte's `-P` flag.
 
 ## Smoke test
 
-`tsv_dataset_test.rn` checks the document loader against the fixtures in
-`testdata/` (regenerate with `testdata/gen_tsv_testdata.py`). It needs a CQL
-endpoint but no vector-store:
+`common/tsv_dataset_test.rn` checks the document loader against the fixtures
+in `testdata/` (regenerate with `testdata/gen_tsv_testdata.py`). It needs a CQL
+endpoint but no vector-store. From the repository root:
 
 ```sh
-cd latte/full-text-search
-latte run -f smoke tsv_dataset_test.rn <node> -d 1
+latte run -f smoke latte/common/tsv_dataset_test.rn <node> -d 1
 ```
 
 ## Project Layout
 
+The workload scripts live in `latte/`, beside the `common/` modules they share
+with the other workloads (see [../README.md](../README.md)):
+
 ```
-fts.rn              # Latte workload for schema, load, index build, and search
-tsv_dataset.rn      # Document-corpus loader
-tsv_dataset_test.rn # Smoke test for the loader
-metrics.rn          # IR accuracy metrics
-testdata/           # Smoke-test fixtures
+latte/fts.rn                        # Workload for schema, load, index build, and search
+latte/common/tsv_dataset.rn         # Document-corpus loader
+latte/common/tsv_dataset_test.rn    # Smoke test for the loader
+latte/common/relevance_metrics.rn   # Relevance metrics: recall, precision, MRR, nDCG
+latte/common/search_queries.rn      # Query and qrels loaders
+latte/common/index_probe.rn         # Index readiness probe for build_index
+latte/full-text-search/testdata/    # Smoke-test fixtures
 ```

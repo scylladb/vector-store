@@ -1,9 +1,10 @@
-// IR accuracy metrics for full-text search (BM25) workloads.
+// Relevance metrics for search workloads: results scored against relevance
+// judgments (qrels), as information-retrieval evaluation does.
 //
 // All metrics range from 0.0 (worst) to 1.0 (perfect). They compare what the
 // search returned against the ground-truth qrels (graded relevance judgments).
 //
-// Example from testdata/:
+// Example from full-text-search/testdata/:
 //   Query "where is the great barrier reef located" (q_008)
 //   qrels: doc_008 (grade 3), doc_001 (grade 1)
 //   BM25 returns: [doc_008, doc_001, ...] at k=100
@@ -220,4 +221,25 @@ pub fn ndcg_at_k(returned_ids, relevances, k) {
         return 0.0;
     }
     dcg / idcg
+}
+
+/// Declare the metrics `record_metrics` records.
+pub fn declare_metrics(db) {
+    db.declare_metric("recall", "higher");
+    db.declare_metric("precision", "higher");
+    db.declare_metric("mrr", "higher");
+    db.declare_metric("ndcg", "higher");
+}
+
+/// Record all four metrics for one query's results. `judgment` is
+/// `#{ relevant_ids, relevances }`, as `search_queries::load_judgments`
+/// builds it; a query without qrels records nothing.
+pub fn record_metrics(db, judgment, returned_ids, k) {
+    if judgment.relevances.len() == 0 {
+        return;
+    }
+    db.record_metric("recall", recall_at_k(returned_ids, judgment.relevant_ids, k));
+    db.record_metric("precision", precision_at_k(returned_ids, judgment.relevant_ids, k));
+    db.record_metric("mrr", reciprocal_rank(returned_ids, judgment.relevant_ids));
+    db.record_metric("ndcg", ndcg_at_k(returned_ids, judgment.relevances, k));
 }
