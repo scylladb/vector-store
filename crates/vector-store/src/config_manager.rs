@@ -542,6 +542,25 @@ pub async fn load_config(env: impl Fn(&str) -> anyhow::Result<String>) -> anyhow
         .transpose()?
         .map(|v| v.into());
 
+    if let Some(batch_size) = env("VECTOR_STORE_MODIFY_BATCH_SIZE")
+        .ok()
+        .map(|v| v.parse())
+        .transpose()?
+    {
+        config.modify_admission.batch_size = Some(batch_size);
+    }
+
+    if let Some(max_wait) = env("VECTOR_STORE_MODIFY_MAX_WAIT")
+        .ok()
+        .map(|v| v.parse::<humantime::Duration>())
+        .transpose()?
+    {
+        // a reload cannot unset a variable: 0 turns it off (and a set batch size cannot go back to
+        // the default: set the queue's depth instead)
+        config.modify_admission.max_wait =
+            Some(max_wait.into()).filter(|d: &Duration| !d.is_zero());
+    }
+
     config.cdc_fine_sleep_interval = env("VECTOR_STORE_CDC_FINE_SLEEP_INTERVAL")
         .ok()
         .map(|v| v.parse::<humantime::Duration>())
@@ -842,6 +861,41 @@ mod tests {
         )]));
         let config = load_config(env).await.unwrap();
         assert_eq!(config.memory_limit, Some(104857600));
+    }
+
+    #[tokio::test]
+    async fn load_config_modify_admission() {
+        let env = mock_env(HashMap::new());
+        let config = load_config(env).await.unwrap();
+        assert_eq!(config.modify_admission, crate::ModifyAdmission::default());
+
+        let env = mock_env(HashMap::from([
+            ("VECTOR_STORE_MODIFY_BATCH_SIZE", "16".into()),
+            ("VECTOR_STORE_MODIFY_MAX_WAIT", "250ms".into()),
+        ]));
+        let config = load_config(env).await.unwrap();
+        assert_eq!(config.modify_admission.batch_size, Some(16));
+        assert_eq!(
+            config.modify_admission.max_wait,
+            Some(Duration::from_millis(250))
+        );
+
+        // 0 takes one modification per gap, while a zero max wait turns it off
+        let env = mock_env(HashMap::from([
+            ("VECTOR_STORE_MODIFY_BATCH_SIZE", "0".into()),
+            ("VECTOR_STORE_MODIFY_MAX_WAIT", "0".into()),
+        ]));
+        let config = load_config(env).await.unwrap();
+        assert_eq!(config.modify_admission.batch_size, Some(0));
+        assert_eq!(config.modify_admission.max_wait, None);
+
+        for (key, value) in [
+            ("VECTOR_STORE_MODIFY_BATCH_SIZE", "many"),
+            ("VECTOR_STORE_MODIFY_MAX_WAIT", "soon"),
+        ] {
+            let env = mock_env(HashMap::from([(key, value.into())]));
+            assert!(load_config(env).await.is_err(), "{key}={value}");
+        }
     }
 
     #[tokio::test]
