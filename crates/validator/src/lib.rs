@@ -20,6 +20,7 @@ mod hybrid;
 mod index_create;
 mod index_modify;
 mod index_status;
+mod pattern;
 mod quantization_and_rescoring;
 mod reconnect;
 mod routing;
