@@ -127,7 +127,7 @@
   ],
   "variables": {
     "vector_version": "",
-    "vector_image_name": "vector-store-{{ user `vector_version` | replace_all \".\" \"-\" }}-{{ user `arch` }}-{{ isotime \"2006-01-02t03-04-05z\" }}",
+    "vector_image_name": "vector-store-{{ user `vector_version` | replace_all \".\" \"-\" }}-{{ user `arch` }}-{{ isotime \"2006-01-02t15-04-05z\" }}",
 
     "arch": "amd64",
     "swap_size": "0",
