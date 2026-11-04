@@ -13,11 +13,7 @@ use scylla::client::session::Session;
 use std::sync::Arc;
 use tracing::info;
 
-e2etest::group!(
-    name = coexisting_indexes,
-    fixtures = (Cluster, Fixture),
-    parent = crate::validator
-);
+e2etest::group!(name = coexisting_indexes, fixtures = (Cluster, Fixture));
 
 struct Cluster {
     actors: Arc<TestActors>,

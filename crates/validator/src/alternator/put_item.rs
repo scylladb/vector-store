@@ -149,11 +149,7 @@ async fn put_item_with_invalid_vector_is_not_indexed(actors: Arc<TestActors>) {
     info!("finished");
 }
 
-e2etest::group!(
-    name = put_item,
-    fixtures = (Fixture),
-    parent = alternator::alternator
-);
+e2etest::group!(name = put_item, fixtures = (Fixture));
 
 struct Fixture {
     actors: Arc<TestActors>,

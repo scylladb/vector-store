@@ -16,24 +16,7 @@ use tracing::info;
 
 const WAITING_FOR_DB_DISCOVERY: Duration = Duration::from_secs(5);
 
-e2etest::group!(name = auth, fixtures = (Fixture), parent = crate::validator);
-
-struct Fixture {
-    actors: Arc<TestActors>,
-}
-
-impl e2etest::Fixture for Fixture {
-    async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
-        let actors = setup.setup::<TestActors>().await?;
-        Some(Self { actors })
-    }
-
-    async fn teardown(self) {
-        cleanup(&self.actors).await;
-    }
-}
-
-#[e2etest::test(group = auth)]
+#[e2etest::test]
 async fn vs_doesnt_work_without_permission(actors: Arc<TestActors>) {
     info!("started");
 
@@ -91,7 +74,7 @@ async fn vs_doesnt_work_without_permission(actors: Arc<TestActors>) {
     info!("finished");
 }
 
-#[e2etest::test(group = auth)]
+#[e2etest::test]
 async fn vs_works_when_permission_granted(actors: Arc<TestActors>) {
     info!("started");
 
@@ -160,7 +143,7 @@ async fn vs_works_when_permission_granted(actors: Arc<TestActors>) {
     info!("finished");
 }
 
-#[e2etest::test(group = auth)]
+#[e2etest::test]
 async fn cdc_works_with_auth(actors: Arc<TestActors>) {
     info!("started");
 

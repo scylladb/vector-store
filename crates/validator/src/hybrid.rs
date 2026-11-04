@@ -14,11 +14,7 @@ use scylla::client::session::Session;
 use std::sync::Arc;
 use tracing::info;
 
-e2etest::group!(
-    name = hybrid,
-    fixtures = (Cluster),
-    parent = crate::validator
-);
+e2etest::group!(name = hybrid, fixtures = (Cluster));
 
 struct Cluster {
     actors: Arc<TestActors>,

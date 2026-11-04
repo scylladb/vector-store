@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use tracing::info;
 
-e2etest::group!(name = fts, fixtures = (Cluster), parent = crate::validator);
+e2etest::group!(name = fts, fixtures = (Cluster));
 
 struct Cluster {
     actors: Arc<TestActors>,

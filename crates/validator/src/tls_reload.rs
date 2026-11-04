@@ -18,12 +18,6 @@ use tracing::info;
 const TLS_FILE_CHECK_INTERVAL: &str = "100ms";
 const TLS_RELOAD_TIMEOUT: Duration = Duration::from_secs(30);
 
-e2etest::group!(
-    name = tls_reload,
-    fixtures = (Fixture),
-    parent = crate::validator
-);
-
 struct Fixture {
     actors: Arc<TestActors>,
 }
@@ -79,16 +73,18 @@ async fn https_status_ok(vs_ips: &[Ipv4Addr], cert_pem: &[u8]) -> bool {
     true
 }
 
-#[e2etest::test(group = tls_reload)]
-async fn reloads_tls_identity_after_cert_file_rotation(actors: Arc<TestActors>) {
+#[e2etest::test]
+async fn reloads_tls_identity_after_cert_file_rotation(fixture: Arc<Fixture>) {
     info!("started");
+
+    let actors = &fixture.actors;
 
     let cert_file = NamedTempFile::new().unwrap();
     let key_file = NamedTempFile::new().unwrap();
 
-    let scylla_configs = get_default_scylla_node_configs(&actors).await;
-    let mut vs_configs = get_default_vs_node_configs(&actors).await;
-    let vs_ips = get_default_vs_ips(&actors);
+    let scylla_configs = get_default_scylla_node_configs(actors).await;
+    let mut vs_configs = get_default_vs_node_configs(actors).await;
+    let vs_ips = get_default_vs_ips(actors);
 
     let cert_v1 = write_server_identity_pem(&cert_file, &key_file, &vs_ips);
 
@@ -107,7 +103,7 @@ async fn reloads_tls_identity_after_cert_file_rotation(actors: Arc<TestActors>) 
         );
     }
 
-    init_with_config(&actors, scylla_configs, vs_configs, true).await;
+    init_with_config(actors, scylla_configs, vs_configs, true).await;
 
     wait_for(
         || async { https_status_ok(&vs_ips, &cert_v1).await },

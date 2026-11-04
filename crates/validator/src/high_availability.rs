@@ -15,12 +15,6 @@ use scylla::statement::Statement;
 use std::sync::Arc;
 use tracing::info;
 
-e2etest::group!(
-    name = high_availability,
-    fixtures = (Fixture),
-    parent = crate::validator
-);
-
 struct Fixture {
     actors: Arc<TestActors>,
 }
@@ -36,11 +30,13 @@ impl e2etest::Fixture for Fixture {
     }
 }
 
-#[e2etest::test(group = high_availability)]
-async fn test_secondary_uri_works_correctly(actors: Arc<TestActors>) {
+#[e2etest::test]
+async fn test_secondary_uri_works_correctly(fixture: Arc<Fixture>) {
     info!("started");
 
-    let vs_urls = get_default_vs_urls(&actors).await;
+    let actors = &fixture.actors;
+
+    let vs_urls = get_default_vs_urls(actors).await;
     let vs_url = &vs_urls[0];
 
     let cert_path = actors.tls.cert_path().await;
@@ -50,7 +46,7 @@ async fn test_secondary_uri_works_correctly(actors: Arc<TestActors>) {
             db_ip: actors.services_subnet.ip(DB_OCTET_1),
             primary_vs_uris: vec![vs_url.clone()],
             secondary_vs_uris: vec![],
-            args: e2etest_scylla_cluster::default_scylla_args(),
+            args: default_scylla_args(),
             cert_path: Some(cert_path.clone()),
             key_path: Some(key_path.clone()),
             extra_config: Some(scylla_auth_config()),
@@ -59,7 +55,7 @@ async fn test_secondary_uri_works_correctly(actors: Arc<TestActors>) {
             db_ip: actors.services_subnet.ip(DB_OCTET_2),
             primary_vs_uris: vec![],
             secondary_vs_uris: vec![vs_url.clone()],
-            args: e2etest_scylla_cluster::default_scylla_args(),
+            args: default_scylla_args(),
             cert_path: Some(cert_path.clone()),
             key_path: Some(key_path.clone()),
             extra_config: Some(scylla_auth_config()),
@@ -68,7 +64,7 @@ async fn test_secondary_uri_works_correctly(actors: Arc<TestActors>) {
             db_ip: actors.services_subnet.ip(DB_OCTET_3),
             primary_vs_uris: vec![],
             secondary_vs_uris: vec![vs_url.clone()],
-            args: e2etest_scylla_cluster::default_scylla_args(),
+            args: default_scylla_args(),
             cert_path: Some(cert_path.clone()),
             key_path: Some(key_path.clone()),
             extra_config: Some(scylla_auth_config()),
@@ -91,10 +87,10 @@ async fn test_secondary_uri_works_correctly(actors: Arc<TestActors>) {
         user: Some(DEFAULT_DB_USER.to_string()),
         password: Some(DEFAULT_DB_PASSWORD.to_string()),
     }];
-    init_with_config(&actors, scylla_configs, vs_configs, true).await;
+    init_with_config(actors, scylla_configs, vs_configs, true).await;
 
     let vs_ips = vec![actors.services_subnet.ip(VS_OCTET_1)];
-    let (session, clients) = prepare_connection_with_custom_vs_ips(&actors, vs_ips).await;
+    let (session, clients) = prepare_connection_with_custom_vs_ips(actors, vs_ips).await;
 
     let keyspace = create_keyspace(&session).await;
     let table = create_table(&session, "pk INT PRIMARY KEY, v VECTOR<FLOAT, 3>", None).await;

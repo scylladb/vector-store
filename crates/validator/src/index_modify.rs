@@ -18,11 +18,7 @@ use scylla::serialize::row::SerializeRow;
 use std::sync::Arc;
 use tracing::info;
 
-e2etest::group!(
-    name = index_modify,
-    fixtures = (GroupFixture),
-    parent = crate::validator
-);
+e2etest::group!(name = index_modify, fixtures = (GroupFixture));
 
 struct GroupFixture {
     actors: Arc<TestActors>,
