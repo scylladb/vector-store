@@ -8,6 +8,7 @@ use crate::common;
 use crate::common::CreateIndexQuery;
 use crate::common::DEFAULT_OPERATION_TIMEOUT;
 use crate::common::TableName;
+use crate::common::unique_id;
 use async_backtrace::framed;
 use httpapi::IndexInfo;
 use httpapi::KeyspaceName;
@@ -36,14 +37,14 @@ impl e2etest::Fixture for GroupFixture {
     }
 }
 
-struct Fixture {
+struct Fixture<const ID: u64> {
     session: Arc<Session>,
     clients: Vec<HttpClient>,
     keyspace: KeyspaceName,
     table: TableName,
 }
 
-impl e2etest::Fixture for Fixture {
+impl<const ID: u64> e2etest::Fixture for Fixture<ID> {
     async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
         let actors = setup.setup::<TestActors>().await?;
 
@@ -77,7 +78,7 @@ impl e2etest::Fixture for Fixture {
     }
 }
 
-impl Fixture {
+impl<const ID: u64> Fixture<ID> {
     #[framed]
     async fn insert_row(&self, columns: &str, values: impl SerializeRow) {
         self.session
@@ -201,7 +202,7 @@ impl Fixture {
 }
 
 #[e2etest::test(group = index_modify)]
-async fn local_index_based_on_regular_column(fixture: Arc<Fixture>) {
+async fn local_index_based_on_regular_column(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture
@@ -261,7 +262,7 @@ async fn local_index_based_on_regular_column(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = index_modify)]
-async fn global_index_with_filtering_columns(fixture: Arc<Fixture>) {
+async fn global_index_with_filtering_columns(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture

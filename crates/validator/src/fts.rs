@@ -38,7 +38,7 @@ impl e2etest::Fixture for Cluster {
     }
 }
 
-struct Fixture {
+struct Fixture<const ID: u64> {
     session: Arc<Session>,
     keyspace: KeyspaceName,
     table: TableName,
@@ -46,7 +46,7 @@ struct Fixture {
     index: RwLock<Option<Arc<IndexInfo>>>,
 }
 
-impl e2etest::Fixture for Fixture {
+impl<const ID: u64> e2etest::Fixture for Fixture<ID> {
     async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
         let cluster = setup.setup::<Cluster>().await?;
         let (session, clients, keyspace, table) = Self::init_fts_table(&cluster.actors).await;
@@ -64,7 +64,7 @@ impl e2etest::Fixture for Fixture {
     }
 }
 
-impl Fixture {
+impl<const ID: u64> Fixture<ID> {
     #[framed]
     async fn insert_documents<S: Into<String>>(&self, docs: impl IntoIterator<Item = (i32, S)>) {
         let stmt = self
@@ -315,7 +315,7 @@ async fn fts_index_lifecycle(actors: Arc<TestActors>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn bm25_search_returns_matching_docs(fixture: Arc<Fixture>) {
+async fn bm25_search_returns_matching_docs(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture
@@ -337,7 +337,7 @@ async fn bm25_search_returns_matching_docs(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn bm25_boolean_and_query(fixture: Arc<Fixture>) {
+async fn bm25_boolean_and_query(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture
@@ -357,7 +357,7 @@ async fn bm25_boolean_and_query(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn bm25_boolean_or_query(fixture: Arc<Fixture>) {
+async fn bm25_boolean_or_query(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture
@@ -384,7 +384,7 @@ async fn bm25_boolean_or_query(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn bm25_boolean_not_query(fixture: Arc<Fixture>) {
+async fn bm25_boolean_not_query(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture
@@ -404,7 +404,7 @@ async fn bm25_boolean_not_query(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn bm25_phrase_query(fixture: Arc<Fixture>) {
+async fn bm25_phrase_query(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture
@@ -428,7 +428,7 @@ async fn bm25_phrase_query(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn fts_crud_insert(fixture: Arc<Fixture>) {
+async fn fts_crud_insert(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture.create_fts_index().await;
@@ -447,7 +447,7 @@ async fn fts_crud_insert(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn fts_crud_update(fixture: Arc<Fixture>) {
+async fn fts_crud_update(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture.create_fts_index().await;
@@ -477,7 +477,7 @@ async fn fts_crud_update(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn fts_crud_delete(fixture: Arc<Fixture>) {
+async fn fts_crud_delete(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture
@@ -502,7 +502,7 @@ async fn fts_crud_delete(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn bm25_empty_results_for_nonexistent_term(fixture: Arc<Fixture>) {
+async fn bm25_empty_results_for_nonexistent_term(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture
@@ -522,7 +522,7 @@ async fn bm25_empty_results_for_nonexistent_term(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn bm25_case_insensitive_search(fixture: Arc<Fixture>) {
+async fn bm25_case_insensitive_search(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture
@@ -554,7 +554,7 @@ async fn bm25_case_insensitive_search(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn bm25_stop_word_filtering(fixture: Arc<Fixture>) {
+async fn bm25_stop_word_filtering(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture
@@ -586,7 +586,7 @@ async fn bm25_stop_word_filtering(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn bm25_tokenizes_by_punctuation(fixture: Arc<Fixture>) {
+async fn bm25_tokenizes_by_punctuation(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture
@@ -606,7 +606,7 @@ async fn bm25_tokenizes_by_punctuation(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn bm25_relevance_ranking_order(fixture: Arc<Fixture>) {
+async fn bm25_relevance_ranking_order(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture
@@ -630,7 +630,7 @@ async fn bm25_relevance_ranking_order(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn bm25_limit_restricts_result_count(fixture: Arc<Fixture>) {
+async fn bm25_limit_restricts_result_count(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture
@@ -650,7 +650,7 @@ async fn bm25_limit_restricts_result_count(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn bm25_grouped_boolean_query(fixture: Arc<Fixture>) {
+async fn bm25_grouped_boolean_query(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture
@@ -678,7 +678,7 @@ async fn bm25_grouped_boolean_query(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn fts_recreate_index_serves_existing_data(fixture: Arc<Fixture>) {
+async fn fts_recreate_index_serves_existing_data(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     info!("Inserting documents");
@@ -704,7 +704,7 @@ async fn fts_recreate_index_serves_existing_data(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn fts_query_without_limit_returns_error(fixture: Arc<Fixture>) {
+async fn fts_query_without_limit_returns_error(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture
@@ -766,7 +766,7 @@ async fn fts_index_on_int_column_returns_error(actors: Arc<TestActors>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn fts_large_document_set(fixture: Arc<Fixture>) {
+async fn fts_large_document_set(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     let needle_pks = [1234, 5678, 9012];
@@ -837,7 +837,7 @@ async fn fts_large_document_set(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn fts_index_options_are_reported(fixture: Arc<Fixture>) {
+async fn fts_index_options_are_reported(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture
@@ -864,7 +864,7 @@ async fn fts_index_options_are_reported(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn fts_english_analyzer_stems_terms(fixture: Arc<Fixture>) {
+async fn fts_english_analyzer_stems_terms(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture
@@ -886,7 +886,7 @@ async fn fts_english_analyzer_stems_terms(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn fts_standard_analyzer_does_not_stem_terms(fixture: Arc<Fixture>) {
+async fn fts_standard_analyzer_does_not_stem_terms(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture
@@ -909,7 +909,7 @@ async fn fts_standard_analyzer_does_not_stem_terms(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn fts_whitespace_analyzer_keeps_case(fixture: Arc<Fixture>) {
+async fn fts_whitespace_analyzer_keeps_case(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture.insert_documents([(1, "Quick brown Fox")]).await;
@@ -932,7 +932,7 @@ async fn fts_whitespace_analyzer_keeps_case(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn fts_index_with_unsupported_options_returns_error(fixture: Arc<Fixture>) {
+async fn fts_index_with_unsupported_options_returns_error(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     for (option, value) in [("analyzer", "klingon"), ("positions", "sometimes")] {
@@ -955,7 +955,7 @@ async fn fts_index_with_unsupported_options_returns_error(fixture: Arc<Fixture>)
 }
 
 #[e2etest::test(group = fts)]
-async fn highlight_aligns_with_correct_row(fixture: Arc<Fixture>) {
+async fn highlight_aligns_with_correct_row(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture
@@ -984,7 +984,9 @@ async fn highlight_aligns_with_correct_row(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn highlight_marks_the_term_matched_by_each_or_branch(fixture: Arc<Fixture>) {
+async fn highlight_marks_the_term_matched_by_each_or_branch(
+    fixture: Arc<Fixture<{ unique_id!() }>>,
+) {
     info!("started");
 
     fixture
@@ -1032,7 +1034,7 @@ async fn highlight_marks_the_term_matched_by_each_or_branch(fixture: Arc<Fixture
 }
 
 #[e2etest::test(group = fts)]
-async fn highlight_row_order_follows_bm25_ranking(fixture: Arc<Fixture>) {
+async fn highlight_row_order_follows_bm25_ranking(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture
@@ -1059,7 +1061,7 @@ async fn highlight_row_order_follows_bm25_ranking(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn highlight_respects_limit(fixture: Arc<Fixture>) {
+async fn highlight_respects_limit(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture
@@ -1083,7 +1085,7 @@ async fn highlight_respects_limit(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn highlight_skips_deleted_documents(fixture: Arc<Fixture>) {
+async fn highlight_skips_deleted_documents(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture
@@ -1116,7 +1118,7 @@ async fn highlight_skips_deleted_documents(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn highlight_marks_terms_in_unicode_content(fixture: Arc<Fixture>) {
+async fn highlight_marks_terms_in_unicode_content(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture.insert_documents([(1, "zażółć gęślą jaźń")]).await;
@@ -1134,7 +1136,7 @@ async fn highlight_marks_terms_in_unicode_content(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn highlight_handles_queries_needing_json_escaping(fixture: Arc<Fixture>) {
+async fn highlight_handles_queries_needing_json_escaping(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture
@@ -1175,7 +1177,7 @@ async fn highlight_handles_queries_needing_json_escaping(fixture: Arc<Fixture>) 
 }
 
 #[e2etest::test(group = fts)]
-async fn highlight_escapes_content_for_json_and_html(fixture: Arc<Fixture>) {
+async fn highlight_escapes_content_for_json_and_html(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture
@@ -1194,7 +1196,7 @@ async fn highlight_escapes_content_for_json_and_html(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn highlight_of_boosted_query_returns_error(fixture: Arc<Fixture>) {
+async fn highlight_of_boosted_query_returns_error(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture.insert_documents([(1, "the quick brown fox")]).await;
@@ -1217,7 +1219,7 @@ async fn highlight_of_boosted_query_returns_error(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn highlight_aligns_with_clustering_rows(fixture: Arc<Fixture>) {
+async fn highlight_aligns_with_clustering_rows(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     let session = &fixture.session;
@@ -1263,7 +1265,7 @@ async fn highlight_aligns_with_clustering_rows(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn highlight_matches_selected_content_and_score(fixture: Arc<Fixture>) {
+async fn highlight_matches_selected_content_and_score(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture
@@ -1311,7 +1313,7 @@ async fn highlight_matches_selected_content_and_score(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn highlight_applies_index_analyzer(fixture: Arc<Fixture>) {
+async fn highlight_applies_index_analyzer(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture
@@ -1333,7 +1335,7 @@ async fn highlight_applies_index_analyzer(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn highlight_accepts_bound_search_term(fixture: Arc<Fixture>) {
+async fn highlight_accepts_bound_search_term(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture
@@ -1358,7 +1360,7 @@ async fn highlight_accepts_bound_search_term(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn highlight_returns_whole_result_in_one_page(fixture: Arc<Fixture>) {
+async fn highlight_returns_whole_result_in_one_page(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture
@@ -1394,7 +1396,9 @@ async fn highlight_returns_whole_result_in_one_page(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn highlight_handles_content_at_the_request_body_limit(fixture: Arc<Fixture>) {
+async fn highlight_handles_content_at_the_request_body_limit(
+    fixture: Arc<Fixture<{ unique_id!() }>>,
+) {
     info!("started");
 
     // The largest request the Vector Store accepts.
@@ -1414,7 +1418,9 @@ async fn highlight_handles_content_at_the_request_body_limit(fixture: Arc<Fixtur
 }
 
 #[e2etest::test(group = fts)]
-async fn highlight_of_content_over_the_request_body_limit_returns_error(fixture: Arc<Fixture>) {
+async fn highlight_of_content_over_the_request_body_limit_returns_error(
+    fixture: Arc<Fixture<{ unique_id!() }>>,
+) {
     info!("started");
 
     // One byte past the limit. The smallest request the Vector Store rejects.
@@ -1445,7 +1451,7 @@ async fn highlight_of_content_over_the_request_body_limit_returns_error(fixture:
 
 #[e2etest::test(group = fts)]
 async fn highlight_of_rows_over_the_request_body_limit_together_returns_error(
-    fixture: Arc<Fixture>,
+    fixture: Arc<Fixture<{ unique_id!() }>>,
 ) {
     info!("started");
 

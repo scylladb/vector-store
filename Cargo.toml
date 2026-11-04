@@ -29,6 +29,7 @@ bcrypt = "0.15"
 bigdecimal = "0.4"
 bytemuck = { version = "1.23.0", features = ["derive"] }
 bytes = "1.12.0"
+const-fnv1a-hash = "1.1.0"
 const-hex = "1.18.1"
 clap = { version = "4.5.40", features = ["derive"] }
 console-subscriber = "0.5.0"

@@ -17,6 +17,7 @@ aws-smithy-types.workspace = true
 bcrypt.workspace = true
 bytes.workspace = true
 clap.workspace = true
+const-fnv1a-hash.workspace = true
 derive_more.workspace = true
 e2etest.workspace = true
 e2etest-dns.workspace = true

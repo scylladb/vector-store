@@ -1054,3 +1054,18 @@ impl<'a> CreateIndexQuery<'a> {
         self
     }
 }
+
+macro_rules! unique_id {
+    () => {
+        ::const_fnv1a_hash::fnv1a_hash_str_64(concat!(
+            module_path!(),
+            ":",
+            file!(),
+            ":",
+            line!(),
+            ":",
+            column!()
+        ))
+    };
+}
+pub(crate) use unique_id;
