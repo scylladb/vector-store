@@ -11,11 +11,7 @@ use httpapi::KeyspaceName;
 use std::sync::Arc;
 use tracing::info;
 
-e2etest::group!(
-    name = index_status,
-    fixtures = (Fixture),
-    parent = crate::validator
-);
+e2etest::group!(name = index_status, fixtures = (Fixture));
 
 struct Fixture {
     actors: Arc<TestActors>,

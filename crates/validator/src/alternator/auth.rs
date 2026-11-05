@@ -234,11 +234,7 @@ async fn alternator_with_auth_enabled(actors: Arc<TestActors>) {
     info!("finished");
 }
 
-e2etest::group!(
-    name = alternator_auth,
-    fixtures = (Fixture),
-    parent = alternator::alternator
-);
+e2etest::group!(name = alternator_auth, fixtures = (Fixture));
 
 struct Fixture {
     actors: Arc<TestActors>,

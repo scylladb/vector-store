@@ -31,8 +31,6 @@ const FRAME_DELAY: Duration = Duration::from_millis(100);
 const DATASET_SIZE: i32 = 100;
 const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(12); // slightly more than default 10s
 
-e2etest::group!(name = reconnect, fixtures = (), parent = crate::validator);
-
 struct Fixture {
     actors: Arc<TestActors>,
     session: Arc<Session>,
@@ -220,7 +218,7 @@ impl Fixture {
     }
 }
 
-#[e2etest::test(group = reconnect)]
+#[e2etest::test]
 async fn reconnect_doesnt_break_fullscan(fixture: Arc<Fixture>) {
     info!("Restart internals counter for cdc handler errors");
     fixture.client().internals_clear_counters().await.unwrap();
@@ -308,7 +306,7 @@ async fn reconnect_doesnt_break_fullscan(fixture: Arc<Fixture>) {
     .await;
 }
 
-#[e2etest::test(group = reconnect)]
+#[e2etest::test]
 async fn restarting_one_node_doesnt_break_fullscan(fixture: Arc<Fixture>) {
     fixture.slow_db_proxy().await;
 
@@ -356,7 +354,7 @@ async fn restarting_one_node_doesnt_break_fullscan(fixture: Arc<Fixture>) {
         .expect("failed to query ANN search");
 }
 
-#[e2etest::test(group = reconnect)]
+#[e2etest::test]
 async fn restarting_all_nodes_doesnt_break_fullscan(fixture: Arc<Fixture>) {
     fixture.slow_db_proxy().await;
 
@@ -425,7 +423,7 @@ async fn restarting_all_nodes_doesnt_break_fullscan(fixture: Arc<Fixture>) {
         .expect("failed to query ANN search");
 }
 
-#[e2etest::test(group = reconnect)]
+#[e2etest::test]
 async fn test_restarting_vs_cluster_does_not_break_setup(fixture: Arc<Fixture>) {
     fixture.slow_db_proxy().await;
 

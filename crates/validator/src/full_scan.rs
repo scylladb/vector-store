@@ -21,12 +21,6 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::info;
 
-e2etest::group!(
-    name = full_scan,
-    fixtures = (Fixture),
-    parent = crate::validator
-);
-
 struct Fixture {
     actors: Arc<TestActors>,
 }
@@ -43,11 +37,13 @@ impl e2etest::Fixture for Fixture {
     }
 }
 
-#[e2etest::test(group = full_scan)]
-async fn full_scan_is_completed_when_responding_to_messages_concurrently(actors: Arc<TestActors>) {
+#[e2etest::test]
+async fn full_scan_is_completed_when_responding_to_messages_concurrently(fixture: Arc<Fixture>) {
     info!("started");
 
-    let (session, clients) = prepare_connection_single_vs_no_tls(&actors).await;
+    let actors = &fixture.actors;
+
+    let (session, clients) = prepare_connection_single_vs_no_tls(actors).await;
     let client = clients.first().unwrap();
 
     let keyspace = create_keyspace(&session).await;
@@ -138,11 +134,13 @@ async fn full_scan_is_completed_when_responding_to_messages_concurrently(actors:
     info!("finished");
 }
 
-#[e2etest::test(group = full_scan)]
-async fn full_scan_stops_when_index_is_dropped(actors: Arc<TestActors>) {
+#[e2etest::test]
+async fn full_scan_stops_when_index_is_dropped(fixture: Arc<Fixture>) {
     info!("started");
 
-    let (session, clients) = prepare_connection_single_vs_no_tls(&actors).await;
+    let actors = &fixture.actors;
+
+    let (session, clients) = prepare_connection_single_vs_no_tls(actors).await;
     let client = clients.first().unwrap();
 
     let keyspace = create_keyspace(&session).await;

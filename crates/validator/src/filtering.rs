@@ -15,11 +15,7 @@ use std::sync::Arc;
 use tracing::info;
 use uuid::Uuid;
 
-e2etest::group!(
-    name = filtering,
-    fixtures = (Fixture),
-    parent = crate::validator
-);
+e2etest::group!(name = filtering, fixtures = (Fixture));
 
 struct Fixture {
     actors: Arc<TestActors>,

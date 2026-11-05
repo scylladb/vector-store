@@ -14,11 +14,7 @@ use std::time::Duration;
 
 const CDC_WAIT: Duration = Duration::from_secs(10);
 
-e2etest::group!(
-    name = serde,
-    fixtures = (Fixture),
-    parent = crate::validator
-);
+e2etest::group!(name = serde, fixtures = (Fixture));
 
 struct Fixture {
     actors: Arc<TestActors>,

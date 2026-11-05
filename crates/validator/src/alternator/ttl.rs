@@ -188,11 +188,7 @@ async fn ttl_expiration_verified_via_search_vectors(actors: Arc<TestActors>) {
     info!("finished");
 }
 
-e2etest::group!(
-    name = ttl,
-    fixtures = (Fixture),
-    parent = alternator::alternator
-);
+e2etest::group!(name = ttl, fixtures = (Fixture));
 
 struct Fixture {
     actors: Arc<TestActors>,

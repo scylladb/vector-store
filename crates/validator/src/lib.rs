@@ -31,6 +31,8 @@ mod tls_reload;
 use clap::Parser;
 use clap::Subcommand;
 use e2etest::Config;
+use e2etest::ConfigInUnshare;
+use e2etest::UnshareInfo;
 use e2etest_dns::Dns;
 use e2etest_dns::DnsExt;
 use e2etest_firewall::Firewall;
@@ -45,9 +47,8 @@ use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
-use tokio::runtime::Handle;
+use sysinfo::System;
 use tokio::sync::mpsc;
-use tokio::time;
 use tracing::error;
 use tracing::info;
 use tracing::level_filters::LevelFilter;
@@ -83,8 +84,8 @@ struct RunArgs {
     base_ip: Ipv4Addr,
 
     /// Path to the ScyllaDB configuration file.
-    #[arg(short, long, default_value = "conf/scylla.yaml", value_name = "PATH")]
-    scylla_default_conf: PathBuf,
+    #[arg(short, long, value_name = "PATH")]
+    scylla_default_conf: Option<PathBuf>,
 
     /// Path to the base tmp directory.
     #[arg(short, long, default_value = "/tmp", value_name = "PATH")]
@@ -102,26 +103,23 @@ struct RunArgs {
     #[arg(long, default_value = "false")]
     duplicate_errors: bool,
 
-    /// Path to the ScyllaDB executable.
-    #[arg(value_name = "PATH")]
-    scylla: PathBuf,
+    /// ScyllaDB docker tag or path to the ScyllaDB executable.
+    #[arg(value_name = "SCYLLA-DOCKER-TAG-OR-PATH")]
+    scylla: String,
 
     /// Path to the Vector Store executable.
-    #[arg(value_name = "PATH")]
+    #[arg(value_name = "VECTOR-STORE-PATH")]
     vector_store: PathBuf,
 
     /// Filters to select specific tests to run.
-    /// The syntax is as follows:
-    ///     `<partially_matching_test_group_name>::<partially_matching_test_case_name>`
-    /// Wrap either side in double quotes to require an exact match, for example:
-    ///     `"crud"::`
-    ///     `::"simple_create"`
-    /// Without specifying `::`, the filter will try to match both the group and test names.
+    ///
+    /// The syntax is as follows: `<test_name>`. You can use `*` and `?` as wildcards to match
+    /// sequence of characters or a single one.
     #[arg(value_name = "FILTER")]
     filters: Vec<String>,
 }
 
-fn init(args: RunArgs) -> Config {
+fn init(args: &RunArgs) {
     let ansi = !args.disable_colors;
     let rust_log = if args.verbose {
         "info"
@@ -157,12 +155,37 @@ fn init(args: RunArgs) -> Config {
                 .with_writer(std::io::stdout),
         )
         .init();
+}
 
+fn available_memory() -> u64 {
+    let system_info = System::new_all();
+    let cgroup = system_info.cgroup_limits();
+
+    if let Some(cgroup) = cgroup {
+        cgroup.total_memory
+    } else {
+        system_info.total_memory()
+    }
+}
+
+fn available_cpu_cores() -> usize {
+    let system_info = System::new_all();
+    system_info.cpus().len()
+}
+
+fn config(args: RunArgs) -> Config {
+    const MEMORY_NEEDED: usize = 3 * 1024 * 1024 * 1024; // 3 GiB
     args.filters
-        .iter()
+        .into_iter()
         .fold(Config::default(), |acc, filter| acc.with_filter(filter))
+        .with_concurrency(available_memory() as usize / MEMORY_NEEDED)
+}
+
+fn config_in_unshare(args: RunArgs, unshare_info: UnshareInfo) -> ConfigInUnshare {
+    ConfigInUnshare::new(unshare_info)
         .with_permanent_fixture(args)
         .with_default_timeout(common::DEFAULT_TEST_TIMEOUT)
+        .with_concurrency(available_cpu_cores())
 }
 
 fn validate_different_subnet(dns_ip: Ipv4Addr, base_ip: Ipv4Addr) {
@@ -174,34 +197,26 @@ fn validate_different_subnet(dns_ip: Ipv4Addr, base_ip: Ipv4Addr) {
     );
 }
 
-e2etest::group!(name = validator, fixtures = (TestActors));
-
-pub async fn run() -> ExitCode {
+pub fn run() -> ExitCode {
     let args = Args::parse();
-    let root = validator();
-    let stats = match args.command {
+    let args = match args.command {
         Command::List => {
-            root.test_names().into_iter().for_each(|name| {
+            e2etest::test_names().into_iter().for_each(|name| {
                 println!("{name}");
             });
             return ExitCode::SUCCESS;
         }
-        Command::Run(args) => e2etest::run(init(args), root).await,
+        Command::Run(args) => args,
     };
 
-    info!("Waiting for all tasks to finish...");
-    if time::timeout(common::DEFAULT_TEST_TIMEOUT, async {
-        while Handle::current().metrics().num_alive_tasks() > 0 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .is_err()
-    {
-        error!("Timed out waiting for tasks to finish");
-    } else {
-        info!("All tasks finished");
-    }
+    init(&args);
+
+    if let Some(unshare_info) = e2etest::unshare_info() {
+        e2etest::run_in_unshare(config_in_unshare(args, unshare_info));
+        return ExitCode::SUCCESS;
+    };
+
+    let stats = e2etest::run(config(args));
 
     if !stats.is_success() {
         error!(

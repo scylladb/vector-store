@@ -10,11 +10,7 @@ use httpapi::IndexInfo;
 use std::sync::Arc;
 use tracing::info;
 
-e2etest::group!(
-    name = similarity_function,
-    fixtures = (Fixture),
-    parent = crate::validator
-);
+e2etest::group!(name = similarity_function, fixtures = (Fixture));
 
 struct Fixture {
     actors: Arc<TestActors>,

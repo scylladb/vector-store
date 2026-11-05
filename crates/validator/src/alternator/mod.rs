@@ -106,8 +106,6 @@ const MAX_ALTERNATOR_INDEX_NAME_LEN: usize = MAX_ALTERNATOR_TABLE_NAME_LEN;
 /// See <https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/HowItWorks.NamingRulesDataTypes.html>.
 const MAX_ALTERNATOR_ATTRIBUTE_NAME_LEN: usize = 255;
 
-e2etest::group!(name = alternator, fixtures = (), parent = crate::validator);
-
 /// In ScyllaDB Alternator, a DynamoDB table named `T` is stored under the CQL
 /// keyspace `alternator_T`. Vector Store discovers indexes by scanning
 /// `system_schema.indexes`, so the keyspace name is what VS uses to identify
