@@ -38,3 +38,10 @@ Repository skills live in `.claude/skills/`:
   a new one. Built to run unattended as a daily routine; `dry-run` writes
   nothing to Jira. `SKILL.md` holds the procedure; `reference.md` holds the
   reasoning and worked examples from past Daily failures.
+- `vector-store-release` — cut a release: check the cut point and CI, read the
+  PRs since the previous release and the release-relevant diffs PR
+  descriptions miss, write the release notes with the hidden Slack
+  announcement block, and after the user approves them tag, publish, watch
+  the release workflow and verify the Slack post, Docker Hub, release assets
+  and the siren PR. `dry-run` stops before anything is pushed. Ends with a
+  retrospective proposing improvements to the skill.
