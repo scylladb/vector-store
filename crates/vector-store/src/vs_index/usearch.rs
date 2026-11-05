@@ -64,6 +64,7 @@ use usearch::b1x8;
 pub struct UsearchIndexFactory {
     worker: async_channel::Sender<Worker>,
     memory: mpsc::Sender<Memory>,
+    config_rx: watch::Receiver<Arc<Config>>,
     mode: Mode,
 }
 
@@ -93,6 +94,7 @@ impl VsIndexFactory for UsearchIndexFactory {
                     table,
                     self.worker.clone(),
                     self.memory.clone(),
+                    self.config_rx.clone(),
                 )
             }
             Mode::Simulator { config, config_rx } => new(
@@ -107,6 +109,7 @@ impl VsIndexFactory for UsearchIndexFactory {
                 table,
                 self.worker.clone(),
                 self.memory.clone(),
+                self.config_rx.clone(),
             ),
         }
     }
@@ -128,6 +131,7 @@ pub fn new_usearch(
     Ok(UsearchIndexFactory {
         worker,
         memory,
+        config_rx: config_rx.clone(),
         mode: if config.usearch_simulator.is_none() {
             Mode::Usearch
         } else {
@@ -761,6 +765,7 @@ fn new<I: UsearchIndex + Send + Sync + 'static>(
     table: Arc<RwLock<impl TableSearch + Send + Sync + 'static>>,
     worker: async_channel::Sender<Worker>,
     memory: mpsc::Sender<Memory>,
+    config_rx: watch::Receiver<Arc<Config>>,
 ) -> anyhow::Result<(mpsc::Sender<VsIndexModify>, mpsc::Sender<VsIndexSearch>)> {
     let (tx_modify, mut rx_modify) = mpsc::channel(perf::channel_size().into());
     let (tx_search, mut rx_search) = mpsc::channel(perf::channel_size().into());
@@ -775,8 +780,9 @@ fn new<I: UsearchIndex + Send + Sync + 'static>(
 
                 let mut allocate_prev = Allocate::Can;
                 let allocate_rx = memory.subscribe_allocate().await;
+                let mut admission = vs_index::Admission::new(config_rx);
 
-                while let Some(msg) = vs_index::recv(&mut rx_search, &mut rx_modify).await {
+                while let Some(msg) = admission.recv(&mut rx_search, &mut rx_modify).await {
                     if !check_memory_allocation(&msg, &allocate_rx, &mut allocate_prev, &index_key)
                     {
                         continue;
@@ -1454,7 +1460,8 @@ mod tests {
             NonZeroUsize::new(3).unwrap().into(),
             Arc::clone(&table),
             worker::new(),
-            memory::new(internals_tx, config_rx),
+            memory::new(internals_tx, config_rx.clone()),
+            config_rx,
         )
         .unwrap();
 
@@ -1617,7 +1624,8 @@ mod tests {
             NonZeroUsize::new(vector.len()).unwrap().into(),
             Arc::clone(&table),
             worker::new(),
-            memory::new(internals_tx, config_rx),
+            memory::new(internals_tx, config_rx.clone()),
+            config_rx,
         )
         .unwrap();
 
@@ -1810,6 +1818,7 @@ mod tests {
             Arc::clone(&table),
             worker::new(),
             memory_tx,
+            watch::channel(Arc::new(Config::default())).1,
         )
         .unwrap();
         memory_respond.await.unwrap();
@@ -1876,7 +1885,8 @@ mod tests {
             dimensions.into(),
             Arc::clone(&table),
             worker::new(),
-            memory::new(internals_tx, config_rx),
+            memory::new(internals_tx, config_rx.clone()),
+            config_rx,
         )
         .unwrap();
 
