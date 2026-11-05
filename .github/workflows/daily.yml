@@ -4,6 +4,12 @@ on:
   schedule:
     - cron: '0 0 * * *' # every day at midnight
   workflow_dispatch:
+    inputs:
+      scylla-image:
+        description: 'ScyllaDB docker image to test against, e.g. scylladb/scylla:2026.4.0-rc1, or nightly for the latest scylla-nightly'
+        required: false
+        type: string
+        default: nightly
 
 permissions:
   contents: read
@@ -14,7 +20,9 @@ env:
   RUST_BACKTRACE: full
 
 jobs:
+  # A scheduled run has no inputs, so the input is defaulted again here.
   daily-get-scylla-nightly-digest:
+    if: ${{ (inputs.scylla-image || 'nightly') == 'nightly' }}
     uses: $/.github/workflows/get-scylla-nightly-digest.yml
     with:
       use-latest-scylla-nightly: true
@@ -60,12 +68,15 @@ jobs:
 
   daily-run-validator-tests:
     needs: ["daily-get-scylla-nightly-digest", "daily-build-vector-store", "daily-get-validator-test-list"]
+    # The digest job is skipped for a run against a chosen image; the matrix still runs.
+    if: ${{ !cancelled() && needs.daily-build-vector-store.result == 'success' && needs.daily-get-validator-test-list.result == 'success' && contains(fromJSON('["success", "skipped"]'), needs.daily-get-scylla-nightly-digest.result) }}
     uses: $/.github/workflows/run-validator-tests.yml
     with:
       os: ${{ matrix.os }}
       arch: ${{ matrix.arch }}
       testcase: ${{ matrix.testcase }}
       ref: ${{ github.sha }}
+      scylla-image: ${{ inputs.scylla-image || 'nightly' }}
     strategy:
       fail-fast: false
       matrix:
@@ -78,6 +89,8 @@ jobs:
             arch: arm64
 
   daily-save-scylla-nightly-digest:
+    # Only a run against scylla-nightly may mark a digest as valid.
+    if: ${{ (inputs.scylla-image || 'nightly') == 'nightly' }}
     needs: daily-run-validator-tests
     runs-on: ubuntu-latest
     steps:
