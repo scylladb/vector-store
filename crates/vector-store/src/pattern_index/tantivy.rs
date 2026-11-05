@@ -567,4 +567,16 @@ mod tests {
 
         assert_eq!(like_ids(&sender, pattern).await, [1, 2]);
     }
+
+    #[rstest]
+    #[timeout(Duration::from_secs(10))]
+    #[tokio::test]
+    async fn like_ignores_letter_case_of_greek_sigma_when_not_case_sensitive() {
+        let sender = make_case_insensitive_sender();
+        // Lowercase sigma depends on where it stands: 'ς' at the end of a word, 'σ' elsewhere.
+        add_docs(&sender, &[(1, "ασα")]).await;
+
+        // 'Σ' ends a word in the pattern but not in the value.
+        assert_eq!(like_ids(&sender, "ΑΣ%").await, [1]);
+    }
 }
