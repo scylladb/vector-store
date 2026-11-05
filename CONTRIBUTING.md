@@ -89,19 +89,45 @@ own ScyllaDB + Vector Store cluster and drives real CQL / Alternator workloads
 against it. This is the suite CI runs (see `.github/workflows/validator.yml`).
 
 Because the harness launches actual `scylla` and `vector-store` processes, it
-needs two release binaries plus a ScyllaDB image.
+needs two binaries plus a ScyllaDB binary or docker image. The harness
+runs the tests in separate linux namespaces.
 
-**1. Build the binaries with the release toolchain:**
-```sh
-./scripts/run-with-release-toolchain cargo build --release --bin vector-store
-./scripts/run-with-release-toolchain cargo build --release --bin vector-search-validator -p vector-search-validator
+**Additional setup for Ubuntu**
+
+In Ubuntu the user needs to register AppArmor profile for the binary with tests
+to allow unshare to work or disable AppArmor for restrictions on user namespace
+creation, or run the tests with sudo.
+
+The following command disables AppArmor for user namespace creation:
+
+```bash
+sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0
 ```
 
-Build with `run-with-release-toolchain` rather than a plain host `cargo build`.
-The script builds inside the frozen toolchain image `vector-store-toolchain`
-and writes to `target/<arch>/release/`, producing binaries whose glibc is
-compatible with the ScyllaDB container that runs them. Host-built binaries may
-link a newer glibc and fail to start inside the image.
+The following command registers the sample AppArmor profile:
+
+```bash
+cat <<'EOF' | sudo apparmor_parser -r
+abi <abi/4.0>,
+include <tunables/global>
+
+profile validator-bin /path/to/target/release/vector-search-validator flags=(unconfined) {
+  userns,
+}
+EOF
+```
+
+**1. Build the binaries:**
+```sh
+cargo build --release --bin vector-store
+cargo build --release --bin vector-search-validator -p vector-search-validator
+```
+
+You can build with `run-with-release-toolchain` script if you want to test the
+validator with the same toolchain as CI. The script builds inside the frozen
+toolchain image `vector-store-toolchain` and writes to
+`target/<arch>/release/`, producing binaries whose glibc is compatible with the
+ScyllaDB container that runs them.
 
 `<arch>` is the `TARGETARCH` the script builds for; it defaults to `amd64`
 (so the path is `target/amd64/release/`). It must match the architecture of the
@@ -114,48 +140,39 @@ TARGETARCH=arm64 ./scripts/run-with-release-toolchain cargo build --release --bi
 
 **2. Run the harness against a ScyllaDB image:**
 ```sh
-./scripts/run-validator-with-scylla-docker \
-    <scylla-image> \
-    target/<arch>/release/vector-store \
-    target/<arch>/release/vector-search-validator \
+cargo run --release -p vector-search-validator run \
+    <scylla-docker-tag> \
+    target/release/vector-store \
     [filters...] --verbose
 ```
 
-- `<scylla-image>` is a ScyllaDB docker tag, e.g. `scylladb/scylla-nightly:latest`.
-  CI runs against `scylla-nightly`; some tests exercise features that are only
-  available there.
-- Filters select test cases using `<group>::<test>` syntax. Partial matches work,
-  and wrapping either side in double quotes forces an exact match. Omit filters to
-  run everything. For example, `cdc_direct::` runs every group whose name contains
-  `cdc_direct`; to match that group exactly, keep the double quotes intact through
-  the shell with single quotes: `'"cdc_direct"::'`.
+- `<scylla-docker-tag>` is a ScyllaDB docker tag, e.g.
+  `scylladb/scylla-nightly:latest`. CI runs against `scylla-nightly`; some
+  tests exercise features that are only available there. This mode needs
+  a reachable docker daemon.
+- Filters select test cases using `<test>` syntax. Partial matches work using
+  wildcards `*` and `?`.
 
 **List available test cases:**
 ```sh
-./target/<arch>/release/vector-search-validator list
+cargo run --release -p vector-search-validator list
 ```
 
 **Using a locally built ScyllaDB:**
 
 The docker image is convenient, but not required. To run the harness against a
-locally built `scylla` binary instead of an image, use
-`run-validator-with-scylla-unshare`:
+locally built `scylla` binary instead of an image, use:
+
 ```sh
-./scripts/run-validator-with-scylla-unshare \
-    <path/to/scylla> \
-    target/<arch>/release/vector-store \
-    target/<arch>/release/vector-search-validator \
-    --scylla-default-conf <path/to/scylla.yaml> \
+cargo run --release -p vector-search-validator run \
+    <scylla-path> \
+    target/release/vector-store \
     [filters...] --verbose
 ```
-The script runs the harness as root inside a private network namespace (via
-`sudo unshare`), setting up the loopback addresses and DNS resolution it needs, so
-you do not have to configure any networking or grant extra privileges yourself
-(it will prompt for `sudo`). Point `--scylla-default-conf` at a ScyllaDB config
-file — the ScyllaDB source tree ships one at `conf/scylla.yaml`. Running against a
-local ScyllaDB build is especially useful when developing a feature that spans
-both ScyllaDB and Vector Store, where you want to test your own ScyllaDB changes
-rather than a published image.
+
+Running against a local ScyllaDB build is especially useful when developing a
+feature that spans both ScyllaDB and Vector Store, where you want to test your
+own ScyllaDB changes rather than a published image.
 
 ### Manual testing with the example docker-compose stacks
 

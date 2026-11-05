@@ -15,10 +15,6 @@ on:
         description: 'Test case to run'
         required: true
         type: string
-      ref:
-        description: 'Git reference to build from'
-        required: true
-        type: string
       scylla-image:
         description: 'ScyllaDB docker image to test against, or nightly for scylla-nightly at the digest artifact'
         required: false
@@ -33,13 +29,6 @@ jobs:
     runs-on: ${{ inputs.os }}
 
     steps:
-    - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      with:
-        sparse-checkout: |
-          scripts/run-validator-with-scylla-docker
-        sparse-checkout-cone-mode: false
-        ref: ${{ inputs.ref }}
-
     - name: Download scylla-nightly digest artifact
       if: ${{ inputs.scylla-image == 'nightly' }}
       uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -59,6 +48,9 @@ jobs:
     - name: Chmod a+x downloaded artifacts
       run: chmod a+x vector-store vector-search-validator
 
+    - name: Disable apparmor user namespace restrictions
+      run: sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0
+
     - name: Run the Validator tests for testcase ${{inputs.testcase}}
       env:
         testcase: ${{inputs.testcase}}
@@ -67,4 +59,4 @@ jobs:
         [[ "${scylla_image,,}" != nightly ]] || scylla_image=scylladb/scylla-nightly@$(cat scylla-nightly-digest)
         [[ "$scylla_image" =~ ^[A-Za-z0-9][A-Za-z0-9._/:@-]*$ ]] || { echo "invalid scylla image reference: '$scylla_image'"; exit 1; }
         echo "scylla image: $scylla_image"
-        ./scripts/run-validator-with-scylla-docker "$scylla_image" vector-store vector-search-validator "\"${testcase}\"::" --verbose
+        ./vector-search-validator run "$scylla_image" ./vector-store "${testcase}::*" --verbose

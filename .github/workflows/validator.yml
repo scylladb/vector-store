@@ -109,7 +109,6 @@ jobs:
       os: ${{ fromJSON(needs.validator-config.outputs.config).os }}
       arch: ${{ fromJSON(needs.validator-config.outputs.config).arch }}
       testcase: ${{ matrix.testcase }}
-      ref: ${{ github.sha }}
     strategy:
       fail-fast: false
       matrix:
