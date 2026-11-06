@@ -37,7 +37,6 @@ use opensearch::http::transport::TransportBuilder;
 use opensearch::indices::IndicesCreateParts;
 use serde_json::Value;
 use serde_json::json;
-use std::fmt::Display;
 use std::sync::Arc;
 use std::sync::RwLock;
 use tokio::sync::Notify;
@@ -78,14 +77,12 @@ impl OpenSearchIndexFactory {
     }
 }
 
-impl Display for SpaceType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Euclidean => write!(f, "l2"),
-            Self::Cosine => write!(f, "cosinesimil"),
-            Self::DotProduct => write!(f, "innerproduct"),
-            Self::Hamming => unimplemented!("Hamming distance is not supported"),
-        }
+fn space_type_to_string(space_type: SpaceType) -> &'static str {
+    match space_type {
+        SpaceType::Euclidean => "l2",
+        SpaceType::Cosine => "cosinesimil",
+        SpaceType::DotProduct => "innerproduct",
+        SpaceType::Hamming => unimplemented!("Hamming distance is not supported"),
     }
 }
 
@@ -176,7 +173,7 @@ async fn create_index(
                         "dimension": dimensions.0.get(),
                         "method": {
                             "name": "hnsw",
-                            "space_type": space_type.to_string(),
+                            "space_type": space_type_to_string(space_type),
                             "parameters": {
                                 "ef_search": if expansion_search.0 > 0 {
                                     expansion_search.0

@@ -89,6 +89,7 @@ use scylla::value::CqlValue;
 use scylla_cdc::CqlIdentifier;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::hash::Hash;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
@@ -501,7 +502,18 @@ impl FromStr for SpaceType {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
+impl Display for SpaceType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Euclidean => write!(f, "EUCLIDEAN"),
+            Self::Cosine => write!(f, "COSINE"),
+            Self::DotProduct => write!(f, "DOT_PRODUCT"),
+            Self::Hamming => write!(f, "HAMMING"),
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default, derive_more::Display)]
 /// Represents the quantization type for vectors.
 ///
 /// Quantization is a process that reduces the precision of floating-point numbers,
@@ -590,7 +602,17 @@ fn parse_bool_option(option: &str, value: &str) -> anyhow::Result<bool> {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, derive_more::AsRef, derive_more::From)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    derive_more::Display,
+    derive_more::AsRef,
+    derive_more::From,
+)]
 /// Whether a full-text index stores token positions, which are required by phrase queries.
 pub struct Positions(bool);
 
@@ -608,7 +630,17 @@ impl FromStr for Positions {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, derive_more::AsRef, derive_more::From)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    derive_more::Display,
+    derive_more::AsRef,
+    derive_more::From,
+)]
 /// Whether a pattern index distinguishes letter case. When false: values (documents) and
 /// patterns are lowercased.
 pub struct CaseSensitive(bool);
@@ -714,7 +746,7 @@ pub struct Filter {
     pub allow_filtering: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, derive_more::From)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, derive_more::Display, derive_more::From)]
 pub struct IndexVersion(Uuid);
 
 impl IndexVersion {
