@@ -66,7 +66,8 @@ async fn simple_create_search_delete_index() {
         ..usearch_test_config()
     })
     .await;
-    let (server, _mtls) = vector_store::run(Some(node_state), Some(db_actor), receivers)
+    let db_driver = vector_store::new_db_driver();
+    let (server, _mtls) = vector_store::run(Some(node_state), Some(db_actor), db_driver, receivers)
         .await
         .unwrap();
     let addr = (*server.address().await.borrow()).unwrap();
@@ -200,7 +201,8 @@ async fn ann_returns_requested_column_values() {
         ..usearch_test_config()
     })
     .await;
-    let (server, _mtls) = vector_store::run(Some(node_state), Some(db_actor), receivers)
+    let db_driver = vector_store::new_db_driver();
+    let (server, _mtls) = vector_store::run(Some(node_state), Some(db_actor), db_driver, receivers)
         .await
         .unwrap();
     let addr = (*server.address().await.borrow()).unwrap();
@@ -356,7 +358,8 @@ async fn ann_skips_stale_opensearch_hit() {
         ..usearch_test_config()
     })
     .await;
-    let (server, _mtls) = vector_store::run(Some(node_state), Some(db_actor), receivers)
+    let db_driver = vector_store::new_db_driver();
+    let (server, _mtls) = vector_store::run(Some(node_state), Some(db_actor), db_driver, receivers)
         .await
         .unwrap();
     let addr = (*server.address().await.borrow()).unwrap();

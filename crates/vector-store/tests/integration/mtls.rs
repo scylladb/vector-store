@@ -61,7 +61,8 @@ async fn run_server(enable_mtls: bool) -> MtlsTestServer {
 
     let (receivers, senders) = create_config_channels(config.clone()).await;
 
-    let (server, mtls) = vector_store::run(Some(node_state), Some(db_actor), receivers)
+    let db_driver = vector_store::new_db_driver();
+    let (server, mtls) = vector_store::run(Some(node_state), Some(db_actor), db_driver, receivers)
         .await
         .unwrap();
     let main_addr = (*server.address().await.borrow()).unwrap();

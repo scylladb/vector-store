@@ -1012,6 +1012,7 @@ pub fn block_on<Output>(threads: Option<usize>, f: impl AsyncFnOnce() -> Output)
 pub async fn run(
     node_state: Option<Sender<NodeState>>,
     db_actor: Option<Sender<Db>>,
+    db_driver: impl DbDriver,
     config_receivers: ConfigReceivers,
 ) -> anyhow::Result<(Sender<HttpServer>, Sender<HttpServer>)> {
     let node_state = if let Some(node_state) = node_state {
@@ -1024,7 +1025,6 @@ pub async fn run(
     let opensearch_addr = config_rx.borrow().opensearch_addr.clone();
     let diskann_backend = config_rx.borrow().diskann_backend;
 
-    let db_driver = db_driver::new_scylla();
     let internals = internals::new(db_driver.clone());
     let memory = memory::new(internals.clone(), config_rx.clone());
     let worker = worker::new();
@@ -1097,6 +1097,10 @@ pub async fn run(
     .await?;
 
     Ok((main, mtls))
+}
+
+pub fn new_db_driver() -> impl DbDriver {
+    db_driver::new_scylla()
 }
 
 pub async fn new_node_state() -> Sender<NodeState> {

@@ -241,7 +241,8 @@ async fn run_vector_store(
         mtls_http: mtls_http_rx,
     };
 
-    let (server, _mtls) = vector_store::run(Some(node_state), Some(db), receivers)
+    let db_driver = vector_store::new_db_driver();
+    let (server, _mtls) = vector_store::run(Some(node_state), Some(db), db_driver, receivers)
         .await
         .unwrap();
 

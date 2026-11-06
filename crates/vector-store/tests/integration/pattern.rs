@@ -126,9 +126,11 @@ async fn setup_pattern_store(
     let run = {
         let node_state = node_state.clone();
         async move {
-            let (server, _mtls) = vector_store::run(Some(node_state), Some(db_actor), receivers)
-                .await
-                .unwrap();
+            let db_driver = vector_store::new_db_driver();
+            let (server, _mtls) =
+                vector_store::run(Some(node_state), Some(db_actor), db_driver, receivers)
+                    .await
+                    .unwrap();
             let addr = (*server.address().await.borrow()).unwrap();
 
             (HttpClient::new(addr), server, senders)

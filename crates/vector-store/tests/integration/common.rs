@@ -153,7 +153,8 @@ pub(crate) async fn setup() -> (HttpClient, DbBasic, impl Sized) {
     let node_state = vector_store::new_node_state().await;
     let (db_actor, db) = db_basic::new(node_state.clone());
     let (receivers, senders) = create_config_channels(usearch_test_config()).await;
-    let (server, _mtls) = vector_store::run(Some(node_state), Some(db_actor), receivers)
+    let db_driver = vector_store::new_db_driver();
+    let (server, _mtls) = vector_store::run(Some(node_state), Some(db_actor), db_driver, receivers)
         .await
         .unwrap();
     let addr = (*server.address().await.borrow()).unwrap();
