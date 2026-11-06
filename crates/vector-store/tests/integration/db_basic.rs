@@ -6,15 +6,23 @@
 use anyhow::anyhow;
 use anyhow::bail;
 use futures::FutureExt;
+use futures::Stream;
 use futures::future::BoxFuture;
+use futures::future::RemoteHandle;
+use futures::stream;
+use itertools::Itertools;
+use scylla::cluster::metadata::ColumnKind;
 use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
 use scylla::frame::response::result::ColumnSpec;
 use scylla::frame::response::result::TableSpec;
+use scylla::response::query_result::ColumnSpecs;
 use scylla::routing::Token;
 use scylla::value::CqlTimeuuid;
 use scylla::value::CqlValue;
 use scylla::value::Row;
+use scylla_cdc::consumer::CDCRow;
+use scylla_cdc::consumer::CDCRowSchema;
 use scylla_cdc::consumer::OperationType;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -25,14 +33,23 @@ use std::sync::RwLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+use tokio::sync::Notify;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
+use tokio_stream::wrappers::ReceiverStream;
 use uuid::ContextV1;
 use uuid::Uuid;
 use vector_store::AsyncInProgress;
+use vector_store::CdcLogReaderConfig;
 use vector_store::ColumnName;
+use vector_store::Config;
+use vector_store::DbColumn;
 use vector_store::DbCustomIndex;
+use vector_store::DbDriver;
+use vector_store::DbIndexInfo;
 use vector_store::DbIndexKind;
+use vector_store::DbIndexPartitioning;
 use vector_store::DbIndexedOperation;
 use vector_store::DbIndexedRow;
 use vector_store::DbIndexedValue;
@@ -727,6 +744,734 @@ impl DbBasic {
 
     fn is_compatible_with(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+#[derive(Clone)]
+pub struct Session {
+    db: DbBasic,
+    _config: Arc<Config>,
+}
+
+impl Session {
+    fn is_compatible_with(&self, other: &Session) -> bool {
+        self.is_compatible_with_db(&other.db)
+    }
+
+    fn is_compatible_with_db(&self, db: &DbBasic) -> bool {
+        self.db.is_compatible_with(db)
+    }
+}
+
+enum StatementInternal {
+    LatestSchemaVersion,
+    GetIndexes,
+    GetIndexTargetType,
+    GetIndexOptions,
+    RangeScan { index_metadata: IndexMetadata },
+    FetchVector { index_metadata: IndexMetadata },
+    FetchRow { index_metadata: IndexMetadata },
+}
+
+pub struct Statement {
+    session: Session,
+    statement: StatementInternal,
+}
+
+impl Statement {
+    fn is_compatible_with(&self, session: &Session) -> bool {
+        self.session.is_compatible_with(session)
+    }
+}
+
+pub struct Cluster {
+    db: DbBasic,
+    tables: Vec<ClusterTable>,
+    token_ring: Vec<Token>,
+}
+
+impl Cluster {
+    fn new(db: DbBasic) -> Self {
+        let db_read = Arc::clone(&db.0);
+        let db_read = db_read.read().unwrap();
+        let tables = db_read
+            .keyspaces
+            .iter()
+            .flat_map(|(keyspace_name, keyspace)| {
+                keyspace.tables.iter().map(|(table_name, table)| {
+                    let partition_key = table
+                        .primary_keys
+                        .iter()
+                        .take(table.partition_key_count)
+                        .cloned()
+                        .collect_vec();
+                    let clustering_key = table
+                        .primary_keys
+                        .iter()
+                        .skip(table.partition_key_count)
+                        .cloned()
+                        .collect_vec();
+                    let columns = table
+                        .columns
+                        .iter()
+                        .map(|(column_name, typ)| {
+                            let kind = if partition_key.contains(column_name) {
+                                ColumnKind::PartitionKey
+                            } else if clustering_key.contains(column_name) {
+                                ColumnKind::Clustering
+                            } else {
+                                ColumnKind::Regular
+                            };
+                            (
+                                column_name.clone(),
+                                DbColumn {
+                                    typ: typ.clone(),
+                                    kind,
+                                },
+                            )
+                        })
+                        .chain(table.dimensions.iter().map(|(column_name, dimensions)| {
+                            (
+                                column_name.clone(),
+                                DbColumn {
+                                    typ: ColumnType::Vector {
+                                        typ: Box::new(ColumnType::Native(NativeType::Float)),
+                                        dimensions: dimensions.as_ref().get() as u16,
+                                    },
+                                    kind: ColumnKind::Regular,
+                                },
+                            )
+                        }))
+                        .collect();
+                    ClusterTable {
+                        keyspace_name: keyspace_name.clone(),
+                        table_name: table_name.clone(),
+                        partition_key,
+                        clustering_key,
+                        columns,
+                    }
+                })
+            })
+            .collect();
+        let token_ring = db_read.token_ring.clone();
+        Self {
+            db,
+            tables,
+            token_ring,
+        }
+    }
+    fn is_compatible_with(&self, db: &DbBasic) -> bool {
+        self.db.is_compatible_with(db)
+    }
+}
+
+pub struct ClusterTable {
+    keyspace_name: KeyspaceName,
+    table_name: TableName,
+    partition_key: Vec<ColumnName>,
+    clustering_key: Vec<ColumnName>,
+    columns: Vec<(ColumnName, DbColumn)>,
+}
+
+fn options_from_metadata(metadata: &IndexMetadata) -> BTreeMap<String, String> {
+    let mut options = BTreeMap::new();
+    let class_name = match &metadata.kind {
+        IndexKind::Vs(_vs) => "vector_index",
+        IndexKind::Fts(_fts) => "fulltext_index",
+        IndexKind::Pattern(_pattern) => "pattern_index",
+    };
+    options.insert("class_name".to_string(), class_name.to_string());
+    let tc = metadata.target_columns.first();
+    let pk = match &metadata.partitioning {
+        DbIndexPartitioning::Global => "[]".to_string(),
+        DbIndexPartitioning::Local(key) => format!(
+            "[{}]",
+            key.iter().map(|column| format!("\"{column}\"")).join(",")
+        ),
+    };
+    let fc = metadata
+        .filtering_columns
+        .iter()
+        .map(|column| format!("\"{column}\""))
+        .join(",");
+    options.insert(
+        "target".to_string(),
+        format!("{{\"tc\":\"{tc}\",\"pk\":{pk},\"fc\":[{fc}]}}"),
+    );
+    options.insert("index_version".to_string(), metadata.version.to_string());
+    match &metadata.kind {
+        IndexKind::Vs(vs) => {
+            options.insert(
+                "maximum_node_connections".to_string(),
+                vs.connectivity.to_string(),
+            );
+            options.insert(
+                "construction_beam_width".to_string(),
+                vs.expansion_add.to_string(),
+            );
+            options.insert(
+                "search_beam_width".to_string(),
+                vs.expansion_search.to_string(),
+            );
+            options.insert("similarity_function".to_string(), vs.space_type.to_string());
+            options.insert("quantization".to_string(), vs.quantization.to_string());
+        }
+        IndexKind::Fts(fts) => {
+            options.insert("analyzer".to_string(), fts.analyzer.to_string());
+            options.insert("positions".to_string(), fts.positions.to_string());
+        }
+        IndexKind::Pattern(pattern) => {
+            options.insert(
+                "case_sensitive".to_string(),
+                pattern.case_sensitive.to_string(),
+            );
+        }
+    }
+    options
+}
+
+fn target_type_from_table(table: &Table, column_name: &ColumnName) -> Option<String> {
+    if let Some(typ) = table.columns.get(column_name) {
+        return Some(match typ {
+            ColumnType::Native(NativeType::Int) => "int".to_string(),
+            ColumnType::Native(NativeType::BigInt) => "bigint".to_string(),
+            ColumnType::Native(NativeType::Float) => "float".to_string(),
+            ColumnType::Native(NativeType::Double) => "double".to_string(),
+            ColumnType::Native(NativeType::Boolean) => "boolean".to_string(),
+            ColumnType::Native(NativeType::Text) => "text".to_string(),
+            ColumnType::Native(NativeType::Blob) => "blob".to_string(),
+            ColumnType::Native(NativeType::Timestamp) => "timestamp".to_string(),
+            ColumnType::Native(NativeType::Uuid) => "uuid".to_string(),
+            ColumnType::Native(NativeType::Timeuuid) => "timeuuid".to_string(),
+            ColumnType::Native(NativeType::Inet) => "inet".to_string(),
+            ColumnType::Native(NativeType::Date) => "date".to_string(),
+            ColumnType::Native(NativeType::Time) => "time".to_string(),
+            ColumnType::Native(NativeType::SmallInt) => "smallint".to_string(),
+            ColumnType::Native(NativeType::TinyInt) => "tinyint".to_string(),
+            ColumnType::Native(NativeType::Decimal) => "decimal".to_string(),
+            ColumnType::Native(NativeType::Varint) => "varint".to_string(),
+            _ => panic!("unsupported native type: {typ:?}"),
+        });
+    }
+    table
+        .dimensions
+        .get(column_name)
+        .map(|dim| format!("vector<float, {dim}>"))
+}
+
+pub struct CdcLogReader {
+    notify: Arc<Notify>,
+    _task: JoinHandle<()>,
+}
+
+impl CdcLogReader {
+    pub async fn new(
+        db: &DbBasic,
+        mut config: CdcLogReaderConfig,
+    ) -> anyhow::Result<(Self, RemoteHandle<anyhow::Result<()>>)> {
+        let keyspace_name = config.keyspace.take().expect("keyspace must be set");
+        let index_name = config.index_name.take().expect("index_name must be set");
+        let safety_interval = config
+            .safety_interval
+            .take()
+            .expect("safety interval must be provided");
+
+        let (mut rx, column_specs) =
+            db.0.write()
+                .unwrap()
+                .keyspaces
+                .get_mut(&keyspace_name)
+                .and_then(|keyspace| keyspace.indexes.get_mut(&index_name))
+                .and_then(|index| index.cdcs.get_mut(&safety_interval))
+                .map(|(cdc_scan_fn, column_specs)| (cdc_scan_fn(), column_specs.clone()))
+                .unwrap_or_else(|| {
+                    let (_tx, rx) = mpsc::channel(1);
+                    (rx, vec![])
+                });
+
+        let consumer_factory = config
+            .consumer_factory
+            .take()
+            .expect("consumer factory must be provided");
+        let mut consumer = consumer_factory.new_consumer().await;
+        let notify = Arc::new(Notify::new());
+        let (remote, remote_handle) = {
+            let notify = Arc::clone(&notify);
+            async move {
+                let row_schema = CDCRowSchema::new(ColumnSpecs::new(&column_specs));
+                loop {
+                    tokio::select! {
+                        _ = notify.notified() => {
+                            break Ok(());
+                        }
+
+                        cdc_row = rx.recv() => {
+                            let Some(cdc_row) = cdc_row else {
+                                break Ok(());
+                            };
+                            let cdc_row = CDCRow::from_row(row_from(cdc_row), &row_schema);
+                            if let Err(err) = consumer.consume_cdc(cdc_row).await {
+                                break Err(err);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .remote_handle();
+        let task = tokio::spawn(remote);
+        Ok((
+            Self {
+                notify,
+                _task: task,
+            },
+            remote_handle,
+        ))
+    }
+
+    fn stop(&self) {
+        self.notify.notify_one();
+    }
+}
+
+impl DbDriver for DbBasic {
+    type Session = Session;
+    type Statement = Statement;
+    type Cluster = Cluster;
+    type Table = ClusterTable;
+    type CdcLogReader = CdcLogReader;
+    type Metrics = ();
+
+    async fn connect(&self, config: Arc<Config>) -> anyhow::Result<Self::Session> {
+        Ok(Session {
+            db: self.clone(),
+            _config: Arc::clone(&config),
+        })
+    }
+
+    async fn refresh_metadata(&self, session: &Self::Session) {
+        assert!(session.is_compatible_with_db(self));
+    }
+
+    async fn await_schema_agreement(&self, session: &Self::Session) -> anyhow::Result<Uuid> {
+        assert!(session.is_compatible_with_db(self));
+
+        let mut db_mock = self.0.write().unwrap();
+        if db_mock.next_await_schema_agreement_failed {
+            db_mock.next_await_schema_agreement_failed = false;
+            bail!("await_schema_agreement failed");
+        }
+        Ok(db_mock.schema_version)
+    }
+
+    async fn check_schema_agreement(
+        &self,
+        session: &Self::Session,
+    ) -> anyhow::Result<Option<Uuid>> {
+        assert!(session.is_compatible_with_db(self));
+        Ok(Some(self.0.read().unwrap().schema_version))
+    }
+
+    async fn prepare_latest_schema_version(
+        &self,
+        session: &Self::Session,
+    ) -> anyhow::Result<Self::Statement> {
+        assert!(session.is_compatible_with_db(self));
+        Ok(Statement {
+            session: session.clone(),
+            statement: StatementInternal::LatestSchemaVersion,
+        })
+    }
+
+    async fn execute_latest_schema_version(
+        &self,
+        session: &Self::Session,
+        statement: &Self::Statement,
+    ) -> anyhow::Result<Uuid> {
+        assert!(session.is_compatible_with_db(self));
+        assert!(statement.is_compatible_with(session));
+        assert!(matches!(
+            statement.statement,
+            StatementInternal::LatestSchemaVersion
+        ));
+        Ok(self.0.read().unwrap().schema_version)
+    }
+
+    async fn prepare_get_indexes(
+        &self,
+        session: &Self::Session,
+    ) -> anyhow::Result<Self::Statement> {
+        assert!(session.is_compatible_with_db(self));
+        Ok(Statement {
+            session: session.clone(),
+            statement: StatementInternal::GetIndexes,
+        })
+    }
+
+    async fn execute_get_indexes(
+        &self,
+        session: &Self::Session,
+        statement: &Self::Statement,
+    ) -> anyhow::Result<impl Stream<Item = anyhow::Result<DbIndexInfo>> + Send + 'static> {
+        assert!(session.is_compatible_with_db(self));
+        assert!(statement.is_compatible_with(session));
+        assert!(matches!(statement.statement, StatementInternal::GetIndexes));
+        if self
+            .0
+            .read()
+            .unwrap()
+            .simulate_endless_get_indexes_processing
+        {
+            tokio::time::sleep(std::time::Duration::MAX).await;
+        }
+        let indexes = self
+            .0
+            .read()
+            .unwrap()
+            .keyspaces
+            .values()
+            .flat_map(|keyspace| {
+                keyspace.indexes.values().map(|index| {
+                    Ok(DbIndexInfo {
+                        keyspace_name: index.metadata.keyspace_name.clone(),
+                        table_name: index.metadata.table_name.clone(),
+                        index_name: index.metadata.index_name.clone(),
+                        options: options_from_metadata(&index.metadata),
+                    })
+                })
+            })
+            .collect_vec();
+        Ok(stream::iter(indexes))
+    }
+
+    async fn prepare_get_index_target_type(
+        &self,
+        session: &Self::Session,
+    ) -> anyhow::Result<Self::Statement> {
+        assert!(session.is_compatible_with_db(self));
+        Ok(Statement {
+            session: session.clone(),
+            statement: StatementInternal::GetIndexTargetType,
+        })
+    }
+
+    async fn execute_get_index_target_type(
+        &self,
+        session: &Self::Session,
+        statement: &Self::Statement,
+        keyspace_name: &KeyspaceName,
+        table_name: &TableName,
+        column_name: &ColumnName,
+    ) -> anyhow::Result<Option<String>> {
+        assert!(session.is_compatible_with_db(self));
+        assert!(statement.is_compatible_with(session));
+        assert!(matches!(
+            statement.statement,
+            StatementInternal::GetIndexTargetType
+        ));
+        Ok(self
+            .0
+            .read()
+            .unwrap()
+            .keyspaces
+            .get(keyspace_name)
+            .and_then(|keyspace| keyspace.tables.get(table_name))
+            .and_then(|table| target_type_from_table(table, column_name)))
+    }
+
+    async fn prepare_get_index_options(
+        &self,
+        session: &Self::Session,
+    ) -> anyhow::Result<Self::Statement> {
+        assert!(session.is_compatible_with_db(self));
+        Ok(Statement {
+            session: session.clone(),
+            statement: StatementInternal::GetIndexOptions,
+        })
+    }
+
+    async fn execute_get_index_options(
+        &self,
+        session: &Self::Session,
+        statement: &Self::Statement,
+        keyspace_name: &KeyspaceName,
+        _: &TableName,
+        index_name: &IndexName,
+    ) -> anyhow::Result<Option<BTreeMap<String, String>>> {
+        assert!(session.is_compatible_with_db(self));
+        assert!(statement.is_compatible_with(session));
+        assert!(matches!(
+            statement.statement,
+            StatementInternal::GetIndexOptions
+        ));
+        Ok(self
+            .0
+            .read()
+            .unwrap()
+            .keyspaces
+            .get(keyspace_name)
+            .and_then(|keyspace| keyspace.indexes.get(index_name))
+            .map(|index| options_from_metadata(&index.metadata)))
+    }
+
+    async fn prepare_range_scan(
+        &self,
+        session: &Self::Session,
+        index: &IndexMetadata,
+    ) -> anyhow::Result<Self::Statement> {
+        assert!(session.is_compatible_with_db(self));
+        Ok(Statement {
+            session: session.clone(),
+            statement: StatementInternal::RangeScan {
+                index_metadata: index.clone(),
+            },
+        })
+    }
+
+    async fn execute_range_scan(
+        &self,
+        session: &Self::Session,
+        statement: &Self::Statement,
+        begin: Token,
+        end: Token,
+    ) -> anyhow::Result<impl Stream<Item = anyhow::Result<DbRow>> + Send + 'static> {
+        assert!(session.is_compatible_with_db(self));
+        assert!(statement.is_compatible_with(session));
+        let index_metadata = match &statement.statement {
+            StatementInternal::RangeScan { index_metadata } => index_metadata,
+            _ => panic!("expected RangeScan statement"),
+        };
+        Ok(ReceiverStream::new(
+            self.0
+                .write()
+                .unwrap()
+                .keyspaces
+                .get_mut(&index_metadata.keyspace_name)
+                .and_then(|keyspace| keyspace.indexes.get_mut(&index_metadata.index_name))
+                .and_then(|index| {
+                    index
+                        .range_scans
+                        .keys()
+                        .find(|&key| *key >= begin && *key <= end)
+                        .copied()
+                        .and_then(|key| index.range_scans.get_mut(&key))
+                })
+                .map(|range_scan_fn| range_scan_fn())
+                .unwrap_or_else(|| {
+                    let (_tx, rx) = mpsc::channel(1);
+                    rx
+                }),
+        ))
+    }
+
+    async fn prepare_fetch_vector(
+        &self,
+        session: &Self::Session,
+        index: &IndexMetadata,
+    ) -> anyhow::Result<Self::Statement> {
+        assert!(session.is_compatible_with_db(self));
+        Ok(Statement {
+            session: session.clone(),
+            statement: StatementInternal::FetchVector {
+                index_metadata: index.clone(),
+            },
+        })
+    }
+
+    async fn execute_fetch_vector(
+        &self,
+        session: &Self::Session,
+        statement: &Self::Statement,
+        primary_key: &PrimaryKey,
+    ) -> anyhow::Result<Option<Vector>> {
+        assert!(session.is_compatible_with_db(self));
+        assert!(statement.is_compatible_with(session));
+        let index_metadata = match &statement.statement {
+            StatementInternal::FetchVector { index_metadata } => index_metadata,
+            _ => panic!("expected FetchVector statement"),
+        };
+        let tx_fetch_vector = self
+            .0
+            .read()
+            .unwrap()
+            .keyspaces
+            .get(&index_metadata.keyspace_name)
+            .and_then(|keyspace| keyspace.indexes.get(&index_metadata.index_name))
+            .and_then(|index| index.fetch_vector.clone())
+            .expect("fetch_vector function should be set for the index");
+        let (tx, rx) = oneshot::channel();
+        let primary_key = primary_key.clone();
+        tx_fetch_vector
+            .send(FetchVector { primary_key, tx })
+            .await
+            .expect("failed to send fetch_vector request");
+        rx.await.expect("failed to receive fetch_vector response")
+    }
+
+    async fn prepare_fetch_row(
+        &self,
+        session: &Self::Session,
+        index: &IndexMetadata,
+    ) -> anyhow::Result<Self::Statement> {
+        assert!(session.is_compatible_with_db(self));
+        Ok(Statement {
+            session: session.clone(),
+            statement: StatementInternal::FetchRow {
+                index_metadata: index.clone(),
+            },
+        })
+    }
+
+    async fn execute_fetch_row(
+        &self,
+        session: &Self::Session,
+        statement: &Self::Statement,
+        primary_key: &PrimaryKey,
+    ) -> anyhow::Result<Option<DbRow>> {
+        assert!(session.is_compatible_with_db(self));
+        assert!(statement.is_compatible_with(session));
+        let index_metadata = match &statement.statement {
+            StatementInternal::FetchRow { index_metadata } => index_metadata,
+            _ => panic!("expected FetchRow statement"),
+        };
+        let tx_fetch_row = self
+            .0
+            .read()
+            .unwrap()
+            .keyspaces
+            .get(&index_metadata.keyspace_name)
+            .and_then(|keyspace| keyspace.indexes.get(&index_metadata.index_name))
+            .and_then(|index| index.fetch_row.clone())
+            .expect("fetch_row function should be set for the index");
+        let (tx, rx) = oneshot::channel();
+        let primary_key = primary_key.clone();
+        tx_fetch_row
+            .send(FetchRow { primary_key, tx })
+            .await
+            .expect("failed to send fetch_row request");
+        rx.await.expect("failed to receive fetch_row response")
+    }
+
+    fn cluster(&self, session: &Self::Session) -> Self::Cluster {
+        assert!(session.is_compatible_with_db(self));
+        Cluster::new(self.clone())
+    }
+
+    fn is_keyspace(&self, cluster: &Self::Cluster, keyspace_name: &KeyspaceName) -> bool {
+        assert!(cluster.is_compatible_with(self));
+        cluster
+            .tables
+            .iter()
+            .any(|cluster_table| &cluster_table.keyspace_name == keyspace_name)
+    }
+
+    fn is_table(
+        &self,
+        cluster: &Self::Cluster,
+        keyspace_name: &KeyspaceName,
+        table_name: &TableName,
+    ) -> bool {
+        assert!(cluster.is_compatible_with(self));
+        cluster.tables.iter().any(|cluster_table| {
+            &cluster_table.keyspace_name == keyspace_name && &cluster_table.table_name == table_name
+        })
+    }
+
+    fn is_cdc(
+        &self,
+        cluster: &Self::Cluster,
+        keyspace_name: &KeyspaceName,
+        table_name: &TableName,
+    ) -> bool {
+        assert!(cluster.is_compatible_with(self));
+        // We assume that cdc is enabled for DbBasic
+        cluster.tables.iter().any(|cluster_table| {
+            &cluster_table.keyspace_name == keyspace_name && &cluster_table.table_name == table_name
+        })
+    }
+
+    fn nr_shards(&self, cluster: &Self::Cluster) -> NonZeroUsize {
+        assert!(cluster.is_compatible_with(self));
+        cluster.db.0.read().unwrap().nr_shards
+    }
+
+    fn token_ring(&self, cluster: &Self::Cluster) -> impl Iterator<Item = Token> {
+        assert!(cluster.is_compatible_with(self));
+        cluster.token_ring.iter().copied()
+    }
+
+    fn table<'a>(
+        &self,
+        cluster: &'a Self::Cluster,
+        keyspace_name: &KeyspaceName,
+        table_name: &TableName,
+    ) -> Option<&'a Self::Table> {
+        assert!(cluster.is_compatible_with(self));
+        cluster
+            .tables
+            .iter()
+            .find(|table| &table.keyspace_name == keyspace_name && &table.table_name == table_name)
+    }
+
+    fn partition_key(&self, table: &Self::Table) -> impl Iterator<Item = ColumnName> {
+        table.partition_key.iter().cloned()
+    }
+
+    fn clustering_key(&self, table: &Self::Table) -> impl Iterator<Item = ColumnName> {
+        table.clustering_key.iter().cloned()
+    }
+
+    fn columns<'a>(
+        &self,
+        table: &'a Self::Table,
+    ) -> impl Iterator<Item = (ColumnName, DbColumn)> + 'a {
+        table.columns.iter().cloned()
+    }
+
+    fn column(&self, table: &Self::Table, column_name: &ColumnName) -> Option<DbColumn> {
+        table
+            .columns
+            .iter()
+            .find(|(name, _)| name == column_name)
+            .map(|(_, col)| col.clone())
+    }
+
+    async fn cdc_log_reader(
+        &self,
+        session: Self::Session,
+        config: CdcLogReaderConfig,
+    ) -> anyhow::Result<(Self::CdcLogReader, RemoteHandle<anyhow::Result<()>>)> {
+        assert!(session.is_compatible_with_db(self));
+        CdcLogReader::new(self, config).await
+    }
+
+    fn stop_cdc_log_reader(&self, cdc_log_reader: Self::CdcLogReader) {
+        cdc_log_reader.stop();
+    }
+
+    fn metrics(&self, _: &Self::Session) -> Self::Metrics {
+        tracing::error!("unimplemented: metrics");
+        unimplemented!()
+    }
+
+    fn total_connections(&self, _: &Self::Metrics) -> u64 {
+        tracing::error!("unimplemented: total_connections");
+        unimplemented!()
+    }
+
+    fn connection_timeouts(&self, _: &Self::Metrics) -> u64 {
+        tracing::error!("unimplemented: connection_timeouts");
+        unimplemented!()
+    }
+
+    #[cfg(feature = "in-progress")]
+    fn make_in_progress_guard(&self, primary_key: &PrimaryKey) -> Option<mpsc::Sender<()>> {
+        self.0
+            .read()
+            .unwrap()
+            .make_in_progress_guard
+            .as_ref()
+            .and_then(|fun| fun(primary_key))
     }
 }
 
