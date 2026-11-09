@@ -73,6 +73,14 @@ filter or collapse command output. One printed a blank line for empty
 output, so `git log A..B | wc -l` returned 1 when nothing had changed. That
 is why the skill checks emptiness with `git rev-list --count`.
 
+The procedure uses REST commands only. On 2026-11-09 the routine's
+`gh pr list --search` failed with 403 ("GitHub GraphQL is not available"),
+because the environment's proxy serves GitHub's REST API but not GraphQL.
+`gh pr list`, `gh pr view --json` and `gh search` all use GraphQL, while
+`gh run …` and `gh api` use REST and kept working. A PR search therefore goes
+through `gh api -X GET search/issues` with `is:pr` in the query, and a merge
+commit through `gh api repos/…/pulls/<n>`.
+
 ## Security
 
 What the skill can change, and so what a security review has to check:
@@ -82,8 +90,8 @@ What the skill can change, and so what a security review has to check:
   are given. Each script states this in its header. No script uses `curl`,
   `eval`, `sh -c`, `xargs` or any credential, so checking the claim is a
   `grep` over three short files.
-- **The procedure** runs read-only `git`, `gh pr`, `gh run` and
-  `gh api …/compare` commands. Its only writes are the Jira calls in
+- **The procedure** runs read-only `git`, `gh run` and `gh api` (compare,
+  pulls, search) commands. Its only writes are the Jira calls in
   step 6 (comments, new issues, links, the mention comment), plus the repair
   of the skill's own half-finished issues in step 5. It never edits,
   transitions or closes an issue, and `dry-run` removes all writes.

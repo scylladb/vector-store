@@ -44,6 +44,10 @@ deciding an ambiguous grouping or duplicate case.
 - **GitHub:** `gh`, always scoped with `-R scylladb/vector-store`. Also a
   clone with the `scylladb/vector-store` remote fetched. Below that remote
   is called `upstream`; run `git remote -v` to find its name.
+  - Use only REST commands: `gh run …` and `gh api …`. `gh pr list`,
+    `gh pr view --json` and `gh search` go through GraphQL, which some
+    routine environments block with 403. The commands below use the REST
+    equivalents. → [why](reference.md#helper-scripts)
 - **Jira:** the Atlassian MCP tools `searchJiraIssuesUsingJql`,
   `getJiraIssue`, `createJiraIssue`, `addCommentToJiraIssue` and
   `createIssueLink`. The prefix depends on how the connector is installed.
@@ -233,8 +237,8 @@ than a new deterministic failure.
 5. **Fix in flight.**
    - Commits after the run's SHA that touch the panic site or test files:
      `git log --oneline <run_sha>..upstream/master -- <paths>`.
-   - Pull requests:
-     `gh pr list -R scylladb/vector-store --state all --search "<test_fn> OR <distinctive words>" --limit 10`.
+   - Pull requests, open and closed:
+     `gh api -X GET search/issues -f q='repo:scylladb/vector-store is:pr <test_fn> OR <distinctive words>' --jq '.items[:10][] | [.number, .state, .title, .closed_at] | @tsv'`.
    - A later Daily run, including `workflow_dispatch`, on a SHA with the
      fix and on the **same or a newer** nightly digest. Its result decides
      the status:
@@ -305,7 +309,7 @@ recorded on VECTOR-935; fixed after run, not yet verified*.
 **Is the fix in the run's SHA?** First find the fix commit. Look for:
 
 - the "Closed via PR merge [title](url)" comment, then the PR's merge
-  commit: `gh pr view <n> -R scylladb/vector-store --json mergeCommit`;
+  commit: `gh api repos/scylladb/vector-store/pulls/<n> --jq .merge_commit_sha`;
 - or a commit that references the issue:
   `git log upstream/master --grep 'VECTOR-<n>'`.
 
