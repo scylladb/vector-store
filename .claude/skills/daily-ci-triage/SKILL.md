@@ -238,7 +238,7 @@ than a new deterministic failure.
    - Commits after the run's SHA that touch the panic site or test files:
      `git log --oneline <run_sha>..upstream/master -- <paths>`.
    - Pull requests, open and closed:
-     `gh api -X GET search/issues -f q='repo:scylladb/vector-store is:pr <test_fn> OR <distinctive words>' --jq '.items[:10][] | [.number, .state, .title, .closed_at] | @tsv'`.
+     `gh api -X GET search/issues -f advanced_search=true -f q='repo:scylladb/vector-store is:pr (<test_fn> OR <distinctive words>)' --jq '.items[:10][] | [.number, .state, .title, .closed_at] | @tsv'`.
    - A later Daily run, including `workflow_dispatch`, on a SHA with the
      fix and on the **same or a newer** nightly digest. Its result decides
      the status:
