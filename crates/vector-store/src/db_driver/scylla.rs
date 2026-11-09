@@ -17,6 +17,7 @@ use crate::TableIdentifier;
 use crate::TableName;
 use crate::Vector;
 use crate::db_driver::CdcLogReaderConfig;
+use crate::db_driver::DbColumn;
 use crate::db_driver::DbDriver;
 use crate::db_driver::DbIndexInfo;
 use crate::db_value::DbRow;
@@ -34,7 +35,6 @@ use scylla::client::session::Session;
 use scylla::client::session::TlsContext;
 use scylla::client::session_builder::SessionBuilder;
 use scylla::cluster::ClusterState;
-use scylla::cluster::metadata::Column;
 use scylla::cluster::metadata::Table;
 use scylla::observability::metrics::Metrics;
 use scylla::routing::Token;
@@ -554,15 +554,18 @@ impl DbDriver for ScyllaDriver {
     fn columns<'a>(
         &self,
         table: &'a Self::Table,
-    ) -> impl Iterator<Item = (ColumnName, &'a Column)> {
+    ) -> impl Iterator<Item = (ColumnName, DbColumn)> + 'a {
         table
             .columns
             .iter()
-            .map(|(name, column)| (ColumnName::from(name), column))
+            .map(|(name, column)| (ColumnName::from(name), column.into()))
     }
 
-    fn column<'a>(&self, table: &'a Self::Table, column: &ColumnName) -> Option<&'a Column> {
-        table.columns.get(column.as_ref())
+    fn column(&self, table: &Self::Table, column: &ColumnName) -> Option<DbColumn> {
+        table
+            .columns
+            .get(column.as_ref())
+            .map(|column| column.into())
     }
 
     async fn cdc_log_reader(

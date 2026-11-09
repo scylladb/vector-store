@@ -15,6 +15,8 @@ use crate::TableName;
 use crate::Vector;
 use crate::db_value::DbRow;
 use ::scylla::cluster::metadata::Column;
+use ::scylla::cluster::metadata::ColumnKind;
+use ::scylla::cluster::metadata::ColumnType;
 use ::scylla::routing::Token;
 use futures::Stream;
 use futures::future::RemoteHandle;
@@ -26,11 +28,27 @@ use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
+#[derive(Debug, Clone)]
 pub struct DbIndexInfo {
     pub keyspace_name: KeyspaceName,
     pub index_name: IndexName,
     pub table_name: TableName,
     pub options: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DbColumn {
+    pub typ: ColumnType<'static>,
+    pub kind: ColumnKind,
+}
+
+impl From<&Column> for DbColumn {
+    fn from(column: &Column) -> Self {
+        DbColumn {
+            typ: column.typ.clone(),
+            kind: column.kind.clone(),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -188,10 +206,12 @@ pub trait DbDriver: Clone + Send + Sync + 'static {
 
     fn clustering_key(&self, table: &Self::Table) -> impl Iterator<Item = ColumnName>;
 
-    fn columns<'a>(&self, table: &'a Self::Table)
-    -> impl Iterator<Item = (ColumnName, &'a Column)>;
+    fn columns<'a>(
+        &self,
+        table: &'a Self::Table,
+    ) -> impl Iterator<Item = (ColumnName, DbColumn)> + 'a;
 
-    fn column<'a>(&self, table: &'a Self::Table, column: &ColumnName) -> Option<&'a Column>;
+    fn column(&self, table: &Self::Table, column: &ColumnName) -> Option<DbColumn>;
 
     fn cdc_log_reader(
         &self,
@@ -448,11 +468,11 @@ pub(crate) mod tests {
         fn columns<'a>(
             &self,
             _: &'a Self::Table,
-        ) -> impl Iterator<Item = (ColumnName, &'a Column)> {
+        ) -> impl Iterator<Item = (ColumnName, DbColumn)> + 'a {
             iter::from_fn(|| unimplemented!())
         }
 
-        fn column<'a>(&self, _: &'a Self::Table, _: &ColumnName) -> Option<&'a Column> {
+        fn column(&self, _: &Self::Table, _: &ColumnName) -> Option<DbColumn> {
             unimplemented!()
         }
 

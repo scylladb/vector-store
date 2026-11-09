@@ -49,6 +49,7 @@ pub use crate::config_manager::ConfigReceivers;
 pub use crate::config_manager::HttpServerConfig;
 pub use crate::config_manager::load_config;
 pub use crate::db_driver::CdcLogReaderConfig;
+pub use crate::db_driver::DbColumn;
 pub use crate::db_driver::DbDriver;
 pub use crate::db_driver::DbIndexInfo;
 pub use crate::db_value::DbRow;
