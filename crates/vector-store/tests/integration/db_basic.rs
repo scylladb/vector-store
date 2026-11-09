@@ -8,7 +8,15 @@ use anyhow::bail;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use scylla::cluster::metadata::ColumnType;
+use scylla::cluster::metadata::NativeType;
+use scylla::frame::response::result::ColumnSpec;
+use scylla::frame::response::result::TableSpec;
+use scylla::routing::Token;
+use scylla::value::CqlTimeuuid;
 use scylla::value::CqlValue;
+use scylla::value::Row;
+use scylla_cdc::consumer::OperationType;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::iter;
 use std::num::NonZeroUsize;
@@ -16,7 +24,10 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
+use uuid::ContextV1;
 use uuid::Uuid;
 use vector_store::AsyncInProgress;
 use vector_store::ColumnName;
@@ -25,7 +36,9 @@ use vector_store::DbIndexKind;
 use vector_store::DbIndexedOperation;
 use vector_store::DbIndexedRow;
 use vector_store::DbIndexedValue;
+use vector_store::DbRow;
 use vector_store::DbUnsupportedIndex;
+use vector_store::DbValue;
 use vector_store::Dimensions;
 use vector_store::IndexKind;
 use vector_store::IndexMetadata;
@@ -50,6 +63,37 @@ pub(crate) type RxIndexedRow = mpsc::Receiver<(DbIndexedRow, AsyncInProgress)>;
 pub(crate) type TxIndexedRow = mpsc::Sender<(DbIndexedRow, AsyncInProgress)>;
 pub(crate) type ScanFn = Box<dyn FnOnce(TxIndexedRow) -> BoxFuture<'static, ()> + Send + Sync>;
 
+pub(crate) type RangeScanFn =
+    Box<dyn FnMut() -> mpsc::Receiver<anyhow::Result<DbRow>> + Send + Sync>;
+
+pub(crate) type CdcScanFn = Box<dyn FnMut() -> mpsc::Receiver<CdcRow> + Send + Sync>;
+
+pub(crate) type MakeInProgressGuardFn =
+    Box<dyn for<'a> Fn(&'a PrimaryKey) -> Option<mpsc::Sender<()>> + Send + Sync>;
+
+pub(crate) struct CdcRow {
+    pub(crate) primary_key: Vec<CqlValue>,
+    pub(crate) operation: OperationType,
+    pub(crate) timestamp_us: u64,
+}
+
+pub(crate) struct FetchRow {
+    pub(crate) primary_key: PrimaryKey,
+    pub(crate) tx: oneshot::Sender<anyhow::Result<Option<DbRow>>>,
+}
+
+pub(crate) struct FetchVector {
+    pub(crate) primary_key: PrimaryKey,
+    pub(crate) tx: oneshot::Sender<anyhow::Result<Option<Vector>>>,
+}
+
+const CDC_COLUMN_NAME_STREAM_ID: &str = "cdc$stream_id";
+const CDC_COLUMN_NAME_TIME: &str = "cdc$time";
+const CDC_COLUMN_NAME_OPERATION: &str = "cdc$operation";
+
+pub(crate) const TOKEN_MAX: i64 = i64::MAX;
+pub(crate) const TOKEN_MIN: i64 = -TOKEN_MAX;
+
 fn make_scan_fn(rows: impl Iterator<Item = DbIndexedRow> + Send + Sync + 'static) -> ScanFn {
     Box::new(move |tx| {
         async move {
@@ -68,36 +112,62 @@ fn make_scan_fn(rows: impl Iterator<Item = DbIndexedRow> + Send + Sync + 'static
     })
 }
 
-/// Whether the mock keeps the indexed vectors around, so that they can be read
-/// back from the base table via `DbIndex::GetVectors`. Off by default: only a
-/// backend that re-reads the vectors it indexed (the DiskANN Scylla one) needs
-/// them, and a mock that silently answers such a read hides the tests that
-/// should not depend on it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum StoreVectors {
-    #[default]
-    Disabled,
-    Enabled,
+pub(crate) fn make_range_scan_fn<I>(rows: I) -> RangeScanFn
+where
+    I: IntoIterator<Item = DbRow> + Send + Sync + 'static,
+    I::IntoIter: Send + Sync + 'static,
+{
+    let mut rows = Some(rows);
+    Box::new(move || {
+        let (tx, rx) = mpsc::channel(1);
+        let Some(rows) = rows.take() else {
+            return rx;
+        };
+        tokio::spawn(async move {
+            for row in rows.into_iter().map(Ok) {
+                if tx.send(row).await.is_err() {
+                    break;
+                }
+            }
+        });
+        rx
+    })
 }
 
-impl StoreVectors {
-    fn is_enabled(self) -> bool {
-        self == Self::Enabled
-    }
-}
-
-impl From<bool> for StoreVectors {
-    fn from(enabled: bool) -> Self {
-        if enabled {
-            Self::Enabled
-        } else {
-            Self::Disabled
-        }
-    }
+pub(crate) fn make_cdc_scan_fn<I>(rows: I) -> CdcScanFn
+where
+    I: IntoIterator<Item = CdcRow> + Send + Sync + 'static,
+    I::IntoIter: Send + Sync + 'static,
+{
+    let mut rows = Some(rows);
+    Box::new(move || {
+        let (tx, rx) = mpsc::channel(1);
+        let Some(rows) = rows.take() else {
+            return rx;
+        };
+        tokio::spawn(async move {
+            for row in rows.into_iter() {
+                if tx.send(row).await.is_err() {
+                    break;
+                }
+            }
+        });
+        rx
+    })
 }
 
 pub(crate) fn pending_scan_fn() -> ScanFn {
     Box::new(|_tx| std::future::pending::<()>().boxed())
+}
+
+pub(crate) fn pending_range_scan_fn() -> RangeScanFn {
+    Box::new(move || {
+        let (tx, rx) = mpsc::channel(1);
+        tokio::spawn(async move {
+            tx.closed().await;
+        });
+        rx
+    })
 }
 
 pub(crate) fn scan_fn_vectors<I>(items: I) -> ScanFn
@@ -134,6 +204,34 @@ where
     )
 }
 
+pub(crate) fn range_scan_fn_vectors<I, P, F>(items: I) -> RangeScanFn
+where
+    I: IntoIterator<Item = (P, Option<Vector>, F, i64)>,
+    I::IntoIter: Send + Sync + 'static,
+    P: IntoIterator<Item = CqlValue> + Send + Sync + 'static,
+    F: IntoIterator<Item = Option<CqlValue>> + Send + Sync + 'static,
+{
+    make_range_scan_fn(
+        items
+            .into_iter()
+            .map(|(primary_key, vector, filtering, timestamp)| DbRow {
+                columns: primary_key
+                    .into_iter()
+                    .map(|v| Some(DbValue::Value(v)))
+                    .chain(iter::once(vector.map(DbValue::Vector)))
+                    .chain(iter::once(Some(DbValue::Value(CqlValue::BigInt(
+                        timestamp,
+                    )))))
+                    .chain(filtering.into_iter().flat_map(|filtering| {
+                        iter::once(filtering.as_ref().map(|v| DbValue::Value(v.clone()))).chain(
+                            iter::once(Some(DbValue::Value(CqlValue::BigInt(timestamp)))),
+                        )
+                    }))
+                    .collect(),
+            }),
+    )
+}
+
 pub(crate) fn scan_fn_documents<I>(items: I) -> ScanFn
 where
     I: IntoIterator<Item = (PrimaryKey, Option<String>, Timestamp)>,
@@ -151,6 +249,176 @@ where
             ),
         }
     }))
+}
+
+pub(crate) fn range_scan_fn_documents<I, P>(items: I) -> RangeScanFn
+where
+    I: IntoIterator<Item = (P, Option<String>, i64)>,
+    I::IntoIter: Send + Sync + 'static,
+    P: IntoIterator<Item = CqlValue>,
+{
+    make_range_scan_fn(items.into_iter().map(|(primary_key, document, timestamp)| {
+        DbRow {
+            columns: primary_key
+                .into_iter()
+                .map(|v| Some(DbValue::Value(v)))
+                .chain(iter::once(
+                    document.map(|value| DbValue::Value(CqlValue::Text(value))),
+                ))
+                .chain(iter::once(Some(DbValue::Value(CqlValue::BigInt(
+                    timestamp,
+                )))))
+                .collect(),
+        }
+    }))
+}
+
+pub(crate) fn cdc_scan_fn<I, P>(items: I) -> CdcScanFn
+where
+    I: IntoIterator<Item = (P, OperationType, u64)>,
+    I::IntoIter: Send + Sync + 'static,
+    P: IntoIterator<Item = CqlValue> + Send + Sync + 'static,
+{
+    make_cdc_scan_fn(
+        items
+            .into_iter()
+            .map(|(primary_key, operation, timestamp_us)| CdcRow {
+                primary_key: primary_key.into_iter().collect(),
+                operation,
+                timestamp_us,
+            }),
+    )
+}
+
+pub(crate) fn cdc_column_specs(
+    keyspace_name: impl AsRef<str>,
+    table_name: impl AsRef<str>,
+    primary_key: impl IntoIterator<Item = (impl AsRef<str>, NativeType)>,
+    target_name: impl AsRef<str>,
+    target_type: ColumnType<'static>,
+) -> Vec<ColumnSpec<'static>> {
+    let table_spec = TableSpec::owned(keyspace_name.as_ref().into(), table_name.as_ref().into());
+
+    iter::once(ColumnSpec::owned(
+        CDC_COLUMN_NAME_STREAM_ID.to_string(),
+        ColumnType::Native(NativeType::Blob),
+        table_spec.clone(),
+    ))
+    .chain(iter::once(ColumnSpec::owned(
+        CDC_COLUMN_NAME_TIME.to_string(),
+        ColumnType::Native(NativeType::Timeuuid),
+        table_spec.clone(),
+    )))
+    .chain(iter::once(ColumnSpec::owned(
+        CDC_COLUMN_NAME_OPERATION.to_string(),
+        ColumnType::Native(NativeType::TinyInt),
+        table_spec.clone(),
+    )))
+    .chain(primary_key.into_iter().map(|(column, typ)| {
+        ColumnSpec::owned(
+            column.as_ref().into(),
+            ColumnType::Native(typ),
+            table_spec.clone(),
+        )
+    }))
+    .chain(iter::once(ColumnSpec::owned(
+        target_name.as_ref().into(),
+        target_type,
+        table_spec.clone(),
+    )))
+    .collect()
+}
+
+pub(crate) fn cdc_column_specs_vector(
+    keyspace_name: impl AsRef<str>,
+    table_name: impl AsRef<str>,
+    primary_key: impl IntoIterator<Item = (impl AsRef<str>, NativeType)>,
+    target_name: impl AsRef<str>,
+    dimensions: NonZeroUsize,
+) -> Vec<ColumnSpec<'static>> {
+    cdc_column_specs(
+        keyspace_name,
+        table_name,
+        primary_key,
+        target_name,
+        ColumnType::Vector {
+            typ: Box::new(ColumnType::Native(NativeType::Float)),
+            dimensions: dimensions.get() as u16,
+        },
+    )
+}
+
+fn timeuuid_from(timestamp_us: u64) -> CqlTimeuuid {
+    let context = ContextV1::new_random();
+    let seconds = timestamp_us / 1_000_000;
+    let nanos = (timestamp_us % 1_000_000) * 1_000;
+    let ts = uuid::timestamp::Timestamp::from_unix(&context, seconds, nanos as u32);
+    Uuid::new_v1(ts, &[0; 6]).into()
+}
+
+fn row_from(cdc_row: CdcRow) -> Row {
+    Row {
+        columns: iter::once(CqlValue::Blob(vec![0; 8]))
+            .chain(iter::once(CqlValue::Timeuuid(timeuuid_from(
+                cdc_row.timestamp_us,
+            ))))
+            .chain(iter::once(CqlValue::TinyInt(cdc_row.operation as i8)))
+            .chain(cdc_row.primary_key)
+            .map(Some)
+            .collect(),
+    }
+}
+
+pub(crate) fn fetch_row(
+    mut fetch_fn: impl FnMut(PrimaryKey) -> anyhow::Result<Option<DbRow>> + Send + 'static,
+) -> mpsc::Sender<FetchRow> {
+    let (tx, mut rx) = mpsc::channel::<FetchRow>(1);
+    tokio::spawn(async move {
+        while let Some(fetch) = rx.recv().await {
+            let _ = fetch.tx.send(fetch_fn(fetch.primary_key));
+        }
+    });
+    tx
+}
+
+pub(crate) fn fetch_vector(
+    mut fetch_fn: impl FnMut(PrimaryKey) -> anyhow::Result<Option<Vector>> + Send + 'static,
+) -> mpsc::Sender<FetchVector> {
+    let (tx, mut rx) = mpsc::channel::<FetchVector>(1);
+    tokio::spawn(async move {
+        while let Some(fetch) = rx.recv().await {
+            let _ = fetch.tx.send(fetch_fn(fetch.primary_key));
+        }
+    });
+    tx
+}
+
+/// Whether the mock keeps the indexed vectors around, so that they can be read
+/// back from the base table via `DbIndex::GetVectors`. Off by default: only a
+/// backend that re-reads the vectors it indexed (the DiskANN Scylla one) needs
+/// them, and a mock that silently answers such a read hides the tests that
+/// should not depend on it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum StoreVectors {
+    #[default]
+    Disabled,
+    Enabled,
+}
+
+impl StoreVectors {
+    fn is_enabled(self) -> bool {
+        self == Self::Enabled
+    }
+}
+
+impl From<bool> for StoreVectors {
+    fn from(enabled: bool) -> Self {
+        if enabled {
+            Self::Enabled
+        } else {
+            Self::Disabled
+        }
+    }
 }
 
 #[derive(Clone, derive_more::Debug)]
@@ -187,6 +455,10 @@ pub(crate) struct Table {
 
 pub(crate) struct Index {
     metadata: IndexMetadata,
+    range_scans: BTreeMap<Token, RangeScanFn>,
+    cdcs: BTreeMap<Duration, (CdcScanFn, Vec<ColumnSpec<'static>>)>,
+    fetch_row: Option<mpsc::Sender<FetchRow>>,
+    fetch_vector: Option<mpsc::Sender<FetchVector>>,
     fullscan_fn: Option<ScanFn>,
     cdc_fn: Option<ScanFn>,
 }
@@ -195,6 +467,10 @@ impl Index {
     pub(crate) fn new(metadata: IndexMetadata) -> Self {
         Self {
             metadata,
+            range_scans: BTreeMap::new(),
+            cdcs: BTreeMap::new(),
+            fetch_row: None,
+            fetch_vector: None,
             fullscan_fn: None,
             cdc_fn: None,
         }
@@ -210,6 +486,35 @@ impl Index {
     pub(crate) fn with_cdc(self, scan_fn: ScanFn) -> Self {
         Self {
             cdc_fn: Some(scan_fn),
+            ..self
+        }
+    }
+
+    pub(crate) fn with_range_scan(mut self, token: Token, range_scan_fn: RangeScanFn) -> Self {
+        self.range_scans.insert(token, range_scan_fn);
+        self
+    }
+
+    pub(crate) fn with_cdc_scan(
+        mut self,
+        duration: Duration,
+        scan_fn: CdcScanFn,
+        column_specs: Vec<ColumnSpec<'static>>,
+    ) -> Self {
+        self.cdcs.insert(duration, (scan_fn, column_specs));
+        self
+    }
+
+    pub(crate) fn with_fetch_row(self, tx: mpsc::Sender<FetchRow>) -> Self {
+        Self {
+            fetch_row: Some(tx),
+            ..self
+        }
+    }
+
+    pub(crate) fn with_fetch_vector(self, tx: mpsc::Sender<FetchVector>) -> Self {
+        Self {
+            fetch_vector: Some(tx),
             ..self
         }
     }
@@ -232,12 +537,16 @@ impl Keyspace {
 struct DbMock {
     schema_version: Uuid,
     keyspaces: HashMap<KeyspaceName, Keyspace>,
+    token_ring: Vec<Token>,
+    nr_shards: NonZeroUsize,
+    next_await_schema_agreement_failed: bool,
     next_get_db_index_failed: bool,
     next_full_scan_progress: Option<Progress>,
     simulate_endless_get_indexes_processing: bool,
     unsupported_indexes: Vec<DbUnsupportedIndex>,
     store_vectors: StoreVectors,
     vectors: HashMap<PrimaryKey, Vector>,
+    make_in_progress_guard: Option<MakeInProgressGuardFn>,
 }
 
 impl DbMock {
@@ -251,12 +560,16 @@ impl DbBasic {
         Self(Arc::new(RwLock::new(DbMock {
             schema_version: Uuid::new_v4(),
             keyspaces: HashMap::new(),
+            token_ring: vec![],
+            nr_shards: NonZeroUsize::new(1).unwrap(),
+            next_await_schema_agreement_failed: false,
             next_get_db_index_failed: false,
             next_full_scan_progress: None,
             simulate_endless_get_indexes_processing: false,
             unsupported_indexes: Vec::new(),
             store_vectors,
             vectors: HashMap::new(),
+            make_in_progress_guard: None,
         })))
     }
 
@@ -377,6 +690,18 @@ impl DbBasic {
         Ok(())
     }
 
+    pub(crate) fn set_token_ring(&self, token_ring: Vec<Token>) {
+        self.0.write().unwrap().token_ring = token_ring;
+    }
+
+    pub(crate) fn set_nr_shards(&self, nr_shards: NonZeroUsize) {
+        self.0.write().unwrap().nr_shards = nr_shards;
+    }
+
+    pub(crate) fn set_next_await_schema_agreement_failed(&self) {
+        self.0.write().unwrap().next_await_schema_agreement_failed = true;
+    }
+
     pub(crate) fn set_next_get_db_index_failed(&self) {
         self.0.write().unwrap().next_get_db_index_failed = true;
     }
@@ -390,6 +715,18 @@ impl DbBasic {
             .write()
             .unwrap()
             .simulate_endless_get_indexes_processing = true;
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn set_make_in_progress_guard(
+        &self,
+        make_in_progress_guard: Option<MakeInProgressGuardFn>,
+    ) {
+        self.0.write().unwrap().make_in_progress_guard = make_in_progress_guard;
+    }
+
+    fn is_compatible_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
     }
 }
 
