@@ -6,19 +6,21 @@
 use crate::create_config_channels;
 use crate::db_basic;
 use crate::db_basic::DbBasic;
-use crate::db_basic::ScanFn;
+use crate::db_basic::RangeScanFn;
 use crate::db_basic::Table;
 use crate::vs_index::usearch_test_config;
-use futures::FutureExt;
 use httpclient::HttpClient;
 use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
 use scylla::value::CqlValue;
+use std::iter;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use uuid::Uuid;
 use vector_store::ColumnName;
 use vector_store::DbIndexPartitioning;
+use vector_store::DbRow;
+use vector_store::DbValue;
 use vector_store::HttpServerExt;
 use vector_store::IndexKind;
 use vector_store::IndexMetadata;
@@ -26,7 +28,6 @@ use vector_store::IndexOptionsFts;
 use vector_store::IndexOptionsVs;
 use vector_store::NonemptyArc;
 use vector_store::NonemptyIteratorExt;
-use vector_store::Timestamp;
 
 pub(crate) fn ordered_timeuuid(time: u32) -> Uuid {
     let mut bytes = [0u8; 16];
@@ -36,20 +37,18 @@ pub(crate) fn ordered_timeuuid(time: u32) -> Uuid {
     Uuid::from_bytes(bytes)
 }
 
-/// A scan function that never completes, keeping the index bootstrapping.
-pub(crate) fn blocking_scan_fn() -> ScanFn {
-    Box::new(|_tx| std::future::pending::<()>().boxed())
-}
-
-pub(crate) fn single_row_scan(
+pub(crate) fn single_row_range_scan(
     pks: impl IntoIterator<Item = CqlValue> + Send + Sync + 'static,
-) -> ScanFn {
-    db_basic::scan_fn_vectors([(
-        pks.into_iter().collect::<Vec<_>>().into(),
-        Some(vec![1.0, 2.0, 3.0].into()),
-        [].into(),
-        Timestamp::from_millis(10),
-    )])
+) -> RangeScanFn {
+    db_basic::make_range_scan_fn([DbRow {
+        columns: pks
+            .into_iter()
+            .map(DbValue::Value)
+            .chain(iter::once(DbValue::Vector(vec![1.0, 2.0, 3.0].into())))
+            .chain(iter::once(DbValue::Value(CqlValue::BigInt(10))))
+            .map(Some)
+            .collect(),
+    }])
 }
 
 pub(crate) fn make_vs_index(
@@ -151,10 +150,9 @@ pub(crate) fn make_index_with_kind(
 
 pub(crate) async fn setup() -> (HttpClient, DbBasic, impl Sized) {
     let node_state = vector_store::new_node_state().await;
-    let (db_actor, db) = db_basic::new(node_state.clone());
+    let (_, db) = db_basic::new(node_state.clone());
     let (receivers, senders) = create_config_channels(usearch_test_config()).await;
-    let db_driver = vector_store::new_db_driver();
-    let (server, _mtls) = vector_store::run(Some(node_state), Some(db_actor), db_driver, receivers)
+    let (server, _mtls) = vector_store::run(Some(node_state), None, db.clone(), receivers)
         .await
         .unwrap();
     let addr = (*server.address().await.borrow()).unwrap();

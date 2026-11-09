@@ -40,7 +40,7 @@ impl MtlsTestServer {
 
 async fn run_server(enable_mtls: bool) -> MtlsTestServer {
     let node_state = vector_store::new_node_state().await;
-    let (db_actor, _db) = db_basic::new(node_state.clone());
+    let (_, db) = db_basic::new(node_state.clone());
 
     let mtls_addr = core::net::SocketAddr::from(([127, 0, 0, 1], 0));
 
@@ -61,8 +61,7 @@ async fn run_server(enable_mtls: bool) -> MtlsTestServer {
 
     let (receivers, senders) = create_config_channels(config.clone()).await;
 
-    let db_driver = vector_store::new_db_driver();
-    let (server, mtls) = vector_store::run(Some(node_state), Some(db_actor), db_driver, receivers)
+    let (server, mtls) = vector_store::run(Some(node_state), None, db, receivers)
         .await
         .unwrap();
     let main_addr = (*server.address().await.borrow()).unwrap();

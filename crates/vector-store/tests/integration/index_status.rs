@@ -3,22 +3,23 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
+use crate::common;
 use crate::common::add_table;
-use crate::common::blocking_scan_fn;
 use crate::common::make_vs_index;
 use crate::common::ordered_timeuuid;
 use crate::common::setup;
-use crate::common::single_row_scan;
+use crate::db_basic;
 use crate::db_basic::Index;
+use crate::db_basic::TOKEN_MAX;
+use crate::db_basic::TOKEN_MIN;
 use crate::wait_for;
 use httpapi::IndexStatus;
 use rstest::rstest;
 use scylla::cluster::metadata::NativeType;
+use scylla::routing::Token;
 use scylla::value::CqlValue;
 use std::time::Duration;
 use vector_store::DbIndexPartitioning;
-use vector_store::Percentage;
-use vector_store::Progress;
 
 // While the initial full table scan that backfills an index is paused (held
 // open via blocking_scan_fn, simulating a paused/slow scan), the index status
@@ -41,10 +42,6 @@ async fn index_status_reports_build_progress_while_bootstrapping() {
         ["embedding".into()],
     );
 
-    // Pin the reported full-scan progress to a partial value, then add an index
-    // whose scan never completes, keeping it bootstrapping at that progress.
-    db.set_next_full_scan_progress(Progress::InProgress(Percentage::try_from(37.0).unwrap()));
-
     let index = make_vs_index(
         "building",
         &["pk"],
@@ -54,8 +51,16 @@ async fn index_status_reports_build_progress_while_bootstrapping() {
         &[],
         ordered_timeuuid(1),
     );
-    db.add_index(Index::new(index.clone()).with_fullscan(blocking_scan_fn()))
-        .unwrap();
+    db.set_token_ring(vec![
+        Token::new(TOKEN_MIN / 2),
+        Token::new(0),
+        Token::new(TOKEN_MAX / 2),
+    ]);
+    db.add_index(
+        Index::new(index.clone())
+            .with_range_scan(Token::new(TOKEN_MIN), db_basic::pending_range_scan_fn()),
+    )
+    .unwrap();
 
     let ks = index.keyspace_name.as_ref().into();
     let idx = index.index_name.as_ref().into();
@@ -64,9 +69,9 @@ async fn index_status_reports_build_progress_while_bootstrapping() {
             client
                 .index_status(&ks, &idx)
                 .await
-                .is_ok_and(|s| s.status == IndexStatus::Bootstrapping && s.build_progress == 37.0)
+                .is_ok_and(|s| s.status == IndexStatus::Bootstrapping && s.build_progress == 75.0)
         },
-        "index to be bootstrapping with build_progress == 37%",
+        "index to be bootstrapping with build_progress == 75%",
     )
     .await;
 }
@@ -96,8 +101,11 @@ async fn index_status_reports_full_progress_when_serving() {
         &[],
         ordered_timeuuid(1),
     );
-    db.add_index(Index::new(index.clone()).with_fullscan(single_row_scan([CqlValue::Int(1)])))
-        .unwrap();
+    db.add_index(Index::new(index.clone()).with_range_scan(
+        Token::new(TOKEN_MIN),
+        common::single_row_range_scan([CqlValue::Int(1)]),
+    ))
+    .unwrap();
 
     let ks = index.keyspace_name.as_ref().into();
     let idx = index.index_name.as_ref().into();

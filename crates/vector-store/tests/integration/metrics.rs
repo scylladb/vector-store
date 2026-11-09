@@ -16,7 +16,6 @@ use tokio::sync::mpsc::Sender;
 use vector_store::Config;
 use vector_store::DbIndexPartitioning;
 use vector_store::IndexMetadata;
-use vector_store::Timestamp;
 use vector_store::node_state::NodeState;
 
 async fn setup_single_vector_index(
@@ -37,11 +36,11 @@ async fn setup_single_vector_index(
             ("pk".to_string().into(), NativeType::Int),
             ("ck".to_string().into(), NativeType::Text),
         ],
-        Some(db_basic::scan_fn_vectors([(
-            [CqlValue::Int(1), CqlValue::Text("one".to_string())].into(),
+        Some(db_basic::range_scan_fn_vectors([(
+            [CqlValue::Int(1), CqlValue::Text("one".to_string())],
             Some(vec![1., 1., 1.].into()),
-            [].into(),
-            Timestamp::from_millis(10),
+            [],
+            10,
         )])),
         None,
         Some(1),
