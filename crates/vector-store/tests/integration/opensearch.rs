@@ -38,7 +38,7 @@ use vector_store::SpaceType::Euclidean;
 async fn simple_create_search_delete_index() {
     crate::enable_tracing();
     let node_state = vector_store::new_node_state().await;
-    let (_, db) = db_basic::new(node_state.clone());
+    let db = db_basic::new();
 
     let index = IndexMetadata {
         keyspace_name: "vector".into(),
@@ -173,7 +173,7 @@ async fn simple_create_search_delete_index() {
 async fn ann_returns_requested_column_values() {
     crate::enable_tracing();
     let node_state = vector_store::new_node_state().await;
-    let (_, db) = db_basic::new(node_state.clone());
+    let db = db_basic::new();
 
     let index = IndexMetadata {
         keyspace_name: "vector".into(),
@@ -330,7 +330,7 @@ async fn ann_returns_requested_column_values() {
 async fn ann_skips_stale_opensearch_hit() {
     crate::enable_tracing();
     let node_state = vector_store::new_node_state().await;
-    let (_, db) = db_basic::new(node_state.clone());
+    let db = db_basic::new();
 
     let index = IndexMetadata {
         keyspace_name: "vector".into(),

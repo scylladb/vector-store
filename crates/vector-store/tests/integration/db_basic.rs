@@ -7,7 +7,6 @@ use anyhow::anyhow;
 use anyhow::bail;
 use futures::FutureExt;
 use futures::Stream;
-use futures::future::BoxFuture;
 use futures::future::RemoteHandle;
 use futures::stream;
 use itertools::Itertools;
@@ -30,8 +29,6 @@ use std::iter;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::RwLock;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::sync::mpsc;
@@ -40,19 +37,13 @@ use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::ContextV1;
 use uuid::Uuid;
-use vector_store::AsyncInProgress;
 use vector_store::CdcLogReaderConfig;
 use vector_store::ColumnName;
 use vector_store::Config;
 use vector_store::DbColumn;
-use vector_store::DbCustomIndex;
 use vector_store::DbDriver;
 use vector_store::DbIndexInfo;
-use vector_store::DbIndexKind;
 use vector_store::DbIndexPartitioning;
-use vector_store::DbIndexedOperation;
-use vector_store::DbIndexedRow;
-use vector_store::DbIndexedValue;
 use vector_store::DbRow;
 use vector_store::DbValue;
 use vector_store::Dimensions;
@@ -61,22 +52,9 @@ use vector_store::IndexMetadata;
 use vector_store::IndexName;
 use vector_store::KeyspaceName;
 use vector_store::NonemptyArc;
-use vector_store::NonemptyBox;
-use vector_store::Percentage;
 use vector_store::PrimaryKey;
-use vector_store::Progress;
 use vector_store::TableName;
-use vector_store::Timestamp;
-use vector_store::Timestamped;
 use vector_store::Vector;
-use vector_store::db::Db;
-use vector_store::db_index::DbIndex;
-use vector_store::node_state::Event;
-use vector_store::node_state::NodeState;
-
-pub(crate) type RxIndexedRow = mpsc::Receiver<(DbIndexedRow, AsyncInProgress)>;
-pub(crate) type TxIndexedRow = mpsc::Sender<(DbIndexedRow, AsyncInProgress)>;
-pub(crate) type ScanFn = Box<dyn FnOnce(TxIndexedRow) -> BoxFuture<'static, ()> + Send + Sync>;
 
 pub(crate) type RangeScanFn =
     Box<dyn FnMut() -> mpsc::Receiver<anyhow::Result<DbRow>> + Send + Sync>;
@@ -108,24 +86,6 @@ const CDC_COLUMN_NAME_OPERATION: &str = "cdc$operation";
 
 pub(crate) const TOKEN_MAX: i64 = i64::MAX;
 pub(crate) const TOKEN_MIN: i64 = -TOKEN_MAX;
-
-fn make_scan_fn(rows: impl Iterator<Item = DbIndexedRow> + Send + Sync + 'static) -> ScanFn {
-    Box::new(move |tx| {
-        async move {
-            let (tx_in_progress, mut rx_in_progress) = mpsc::channel(1);
-
-            for row in rows {
-                let _ = tx
-                    .send((row, AsyncInProgress::fullscan(tx_in_progress.clone())))
-                    .await;
-            }
-
-            drop(tx_in_progress);
-            while rx_in_progress.recv().await.is_some() {}
-        }
-        .boxed()
-    })
-}
 
 pub(crate) fn make_range_scan_fn<I>(rows: I) -> RangeScanFn
 where
@@ -171,10 +131,6 @@ where
     })
 }
 
-pub(crate) fn pending_scan_fn() -> ScanFn {
-    Box::new(|_tx| std::future::pending::<()>().boxed())
-}
-
 pub(crate) fn pending_range_scan_fn() -> RangeScanFn {
     Box::new(move || {
         let (tx, rx) = mpsc::channel(1);
@@ -183,40 +139,6 @@ pub(crate) fn pending_range_scan_fn() -> RangeScanFn {
         });
         rx
     })
-}
-
-pub(crate) fn scan_fn_vectors<I>(items: I) -> ScanFn
-where
-    I: IntoIterator<
-        Item = (
-            PrimaryKey,
-            Option<Vector>,
-            Box<[Option<CqlValue>]>,
-            Timestamp,
-        ),
-    >,
-    I::IntoIter: Send + Sync + 'static,
-{
-    make_scan_fn(
-        items
-            .into_iter()
-            .map(|(primary_key, vector, filtering, timestamp)| DbIndexedRow {
-                primary_key,
-                operation: DbIndexedOperation::Upsert(
-                    NonemptyBox::new(
-                        iter::once(vector)
-                            .map(|vector| vector.map(DbIndexedValue::Vector))
-                            .chain(
-                                filtering
-                                    .into_iter()
-                                    .map(|filtering| filtering.map(DbIndexedValue::Filtering)),
-                            )
-                            .map(|value| Timestamped::new(timestamp, value)),
-                    )
-                    .unwrap(),
-                ),
-            }),
-    )
 }
 
 pub(crate) fn range_scan_fn_vectors<I, P, F>(items: I) -> RangeScanFn
@@ -245,25 +167,6 @@ where
                     .collect(),
             }),
     )
-}
-
-pub(crate) fn scan_fn_documents<I>(items: I) -> ScanFn
-where
-    I: IntoIterator<Item = (PrimaryKey, Option<String>, Timestamp)>,
-    I::IntoIter: Send + Sync + 'static,
-{
-    make_scan_fn(items.into_iter().map(|(primary_key, document, timestamp)| {
-        DbIndexedRow {
-            primary_key,
-            operation: DbIndexedOperation::Upsert(
-                NonemptyBox::new([Timestamped::new(
-                    timestamp,
-                    document.map(DbIndexedValue::Document),
-                )])
-                .unwrap(),
-            ),
-        }
-    }))
 }
 
 pub(crate) fn range_scan_fn_documents<I, P>(items: I) -> RangeScanFn
@@ -408,57 +311,11 @@ pub(crate) fn fetch_vector(
     tx
 }
 
-/// Whether the mock keeps the indexed vectors around, so that they can be read
-/// back from the base table via `DbIndex::GetVectors`. Off by default: only a
-/// backend that re-reads the vectors it indexed (the DiskANN Scylla one) needs
-/// them, and a mock that silently answers such a read hides the tests that
-/// should not depend on it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum StoreVectors {
-    #[default]
-    Disabled,
-    Enabled,
-}
-
-impl StoreVectors {
-    fn is_enabled(self) -> bool {
-        self == Self::Enabled
-    }
-}
-
-impl From<bool> for StoreVectors {
-    fn from(enabled: bool) -> Self {
-        if enabled {
-            Self::Enabled
-        } else {
-            Self::Disabled
-        }
-    }
-}
-
 #[derive(Clone, derive_more::Debug)]
 pub(crate) struct DbBasic(#[debug(skip)] Arc<RwLock<DbMock>>);
 
-pub(crate) fn new(node_state: mpsc::Sender<NodeState>) -> (mpsc::Sender<Db>, DbBasic) {
-    new_with(node_state, StoreVectors::default())
-}
-
-/// [`new`], for a test that needs a non-default [`StoreVectors`].
-pub(crate) fn new_with(
-    node_state: mpsc::Sender<NodeState>,
-    store_vectors: StoreVectors,
-) -> (mpsc::Sender<Db>, DbBasic) {
-    let (tx, mut rx) = mpsc::channel(10);
-    let db = DbBasic::new(store_vectors);
-    tokio::spawn({
-        let db = db.clone();
-        async move {
-            while let Some(msg) = rx.recv().await {
-                process_db(&db, msg, node_state.clone());
-            }
-        }
-    });
-    (tx, db)
+pub(crate) fn new() -> DbBasic {
+    DbBasic::new()
 }
 
 pub(crate) struct Table {
@@ -474,8 +331,6 @@ pub(crate) struct Index {
     cdcs: BTreeMap<Duration, (CdcScanFn, Vec<ColumnSpec<'static>>)>,
     fetch_row: Option<mpsc::Sender<FetchRow>>,
     fetch_vector: Option<mpsc::Sender<FetchVector>>,
-    fullscan_fn: Option<ScanFn>,
-    cdc_fn: Option<ScanFn>,
 }
 
 impl Index {
@@ -486,22 +341,6 @@ impl Index {
             cdcs: BTreeMap::new(),
             fetch_row: None,
             fetch_vector: None,
-            fullscan_fn: None,
-            cdc_fn: None,
-        }
-    }
-
-    pub(crate) fn with_fullscan(self, scan_fn: ScanFn) -> Self {
-        Self {
-            fullscan_fn: Some(scan_fn),
-            ..self
-        }
-    }
-
-    pub(crate) fn with_cdc(self, scan_fn: ScanFn) -> Self {
-        Self {
-            cdc_fn: Some(scan_fn),
-            ..self
         }
     }
 
@@ -555,11 +394,7 @@ struct DbMock {
     token_ring: Vec<Token>,
     nr_shards: NonZeroUsize,
     next_await_schema_agreement_failed: bool,
-    next_get_db_index_failed: bool,
-    next_full_scan_progress: Option<Progress>,
     simulate_endless_get_indexes_processing: bool,
-    store_vectors: StoreVectors,
-    vectors: HashMap<PrimaryKey, Vector>,
     make_in_progress_guard: Option<MakeInProgressGuardFn>,
 }
 
@@ -570,45 +405,16 @@ impl DbMock {
 }
 
 impl DbBasic {
-    fn new(store_vectors: StoreVectors) -> Self {
+    fn new() -> Self {
         Self(Arc::new(RwLock::new(DbMock {
             schema_version: Uuid::new_v4(),
             keyspaces: HashMap::new(),
             token_ring: vec![],
             nr_shards: NonZeroUsize::new(1).unwrap(),
             next_await_schema_agreement_failed: false,
-            next_get_db_index_failed: false,
-            next_full_scan_progress: None,
             simulate_endless_get_indexes_processing: false,
-            store_vectors,
-            vectors: HashMap::new(),
             make_in_progress_guard: None,
         })))
-    }
-
-    fn record_row(&self, row: &DbIndexedRow) {
-        let mut db = self.0.write().unwrap();
-        match &row.operation {
-            DbIndexedOperation::Upsert(values) => match values.first().value() {
-                Some(DbIndexedValue::Vector(vector)) => {
-                    db.vectors.insert(row.primary_key.clone(), vector.clone());
-                }
-                None => {
-                    db.vectors.remove(&row.primary_key);
-                }
-                Some(_) => {}
-            },
-            DbIndexedOperation::Delete(_) => {
-                db.vectors.remove(&row.primary_key);
-            }
-        }
-    }
-
-    fn get_vectors(&self, keys: &[PrimaryKey]) -> Vec<Option<Vector>> {
-        let db = self.0.read().unwrap();
-        keys.iter()
-            .map(|key| db.vectors.get(key).cloned())
-            .collect()
     }
 
     pub(crate) fn add_table(
@@ -706,14 +512,6 @@ impl DbBasic {
 
     pub(crate) fn set_next_await_schema_agreement_failed(&self) {
         self.0.write().unwrap().next_await_schema_agreement_failed = true;
-    }
-
-    pub(crate) fn set_next_get_db_index_failed(&self) {
-        self.0.write().unwrap().next_get_db_index_failed = true;
-    }
-
-    pub(crate) fn set_next_full_scan_progress(&self, progress: Progress) {
-        self.0.write().unwrap().next_full_scan_progress = Some(progress);
     }
 
     pub(crate) fn simulate_endless_get_indexes_processing(&self) {
@@ -1462,372 +1260,4 @@ impl DbDriver for DbBasic {
             .as_ref()
             .and_then(|fun| fun(primary_key))
     }
-}
-
-fn process_db(db: &DbBasic, msg: Db, node_state: mpsc::Sender<NodeState>) {
-    match msg {
-        Db::GetDbIndex { metadata, tx } => tx
-            .send(new_db_index(db.clone(), metadata, node_state.clone()))
-            .map_err(|_| anyhow!("Db::GetDbIndex: unable to send response"))
-            .unwrap(),
-
-        Db::LatestSchemaVersion { tx } => tx
-            .send(Ok(db.0.read().unwrap().schema_version))
-            .map_err(|_| anyhow!("Db::LatestSchemaVersion: unable to send response"))
-            .unwrap(),
-
-        Db::GetIndexes { tx } => {
-            if db.0.read().unwrap().simulate_endless_get_indexes_processing {
-                tokio::spawn(async move {
-                    let _ = tx;
-                    tokio::time::sleep(std::time::Duration::MAX).await;
-                });
-            } else {
-                let response = {
-                    let db = db.0.read().unwrap();
-                    let indexes = db
-                        .keyspaces
-                        .iter()
-                        .flat_map(|(keyspace_name, keyspace)| {
-                            keyspace
-                                .indexes
-                                .iter()
-                                .map(|(index_name, index)| DbCustomIndex {
-                                    keyspace: keyspace_name.clone(),
-                                    index: index_name.clone(),
-                                    table: index.metadata.table_name.clone(),
-                                    primary_key_columns: keyspace
-                                        .tables
-                                        .get(&index.metadata.table_name)
-                                        .map(|table| table.primary_keys.clone())
-                                        .unwrap(),
-                                    partition_key_count: NonZeroUsize::new(
-                                        keyspace
-                                            .tables
-                                            .get(&index.metadata.table_name)
-                                            .map(|table| table.partition_key_count)
-                                            .unwrap(),
-                                    )
-                                    .unwrap(),
-                                    target_columns: index.metadata.target_columns.clone(),
-                                    partitioning: index.metadata.partitioning.clone(),
-                                    filtering_columns: index.metadata.filtering_columns.clone(),
-                                    alternator_attribute_types: index
-                                        .metadata
-                                        .alternator_attribute_types
-                                        .clone(),
-                                    kind: match index.metadata.kind {
-                                        IndexKind::Vs(_) => DbIndexKind::VectorSearch,
-                                        IndexKind::Fts(_) => DbIndexKind::FullTextSearch,
-                                        IndexKind::Pattern(_) => DbIndexKind::Pattern,
-                                    },
-                                })
-                        })
-                        .collect();
-                    (indexes, vec![])
-                };
-                tx.send(Ok(response))
-                    .map_err(|_| anyhow!("Db::GetIndexes: unable to send response"))
-                    .unwrap()
-            }
-        }
-        Db::GetIndexVersion {
-            keyspace,
-            table: _,
-            index,
-            tx,
-        } => {
-            let db = db.0.read().unwrap();
-            let version = db
-                .keyspaces
-                .get(&keyspace)
-                .and_then(|keyspace| keyspace.indexes.get(&index))
-                .map(|index| index.metadata.version.clone());
-            tx.send(Ok(version))
-                .map_err(|_| anyhow!("Db::GetIndexVersion: unable to send response"))
-                .unwrap()
-        }
-
-        Db::GetIndexTargetDimensions {
-            keyspace,
-            table,
-            target_column,
-            tx,
-            ..
-        } => tx
-            .send(Ok(db
-                .0
-                .read()
-                .unwrap()
-                .keyspaces
-                .get(&keyspace)
-                .and_then(|keyspace| keyspace.tables.get(&table))
-                .and_then(|table| table.dimensions.get(&target_column))
-                .cloned()))
-            .map_err(|_| anyhow!("Db::GetIndexTargetType: unable to send response"))
-            .unwrap(),
-
-        Db::GetVsIndexParams {
-            keyspace,
-            table: _,
-            index,
-            tx,
-        } => tx
-            .send(Ok(db
-                .0
-                .read()
-                .unwrap()
-                .keyspaces
-                .get(&keyspace)
-                .and_then(|keyspace| keyspace.indexes.get(&index))
-                .and_then(|index| {
-                    index.metadata.vs().map(|vs| {
-                        (
-                            vs.connectivity,
-                            vs.expansion_add,
-                            vs.expansion_search,
-                            vs.space_type,
-                            vs.quantization,
-                        )
-                    })
-                })))
-            .map_err(|_| anyhow!("Db::GetVsIndexParams: unable to send response"))
-            .unwrap(),
-
-        Db::GetFtsIndexParams {
-            keyspace,
-            table: _,
-            index,
-            tx,
-        } => tx
-            .send(Ok(db
-                .0
-                .read()
-                .unwrap()
-                .keyspaces
-                .get(&keyspace)
-                .and_then(|keyspace| keyspace.indexes.get(&index))
-                .and_then(|index| index.metadata.fts().copied())))
-            .map_err(|_| anyhow!("Db::GetFtsIndexParams: unable to send response"))
-            .unwrap(),
-
-        Db::GetPatternIndexParams {
-            keyspace,
-            table: _,
-            index,
-            tx,
-        } => tx
-            .send(Ok(db
-                .0
-                .read()
-                .unwrap()
-                .keyspaces
-                .get(&keyspace)
-                .and_then(|keyspace| keyspace.indexes.get(&index))
-                .and_then(|index| index.metadata.pattern().copied())))
-            .map_err(|_| anyhow!("Db::GetPatternIndexParams: unable to send response"))
-            .unwrap(),
-
-        Db::IsValidIndex { tx, .. } => tx
-            .send(true)
-            .map_err(|_| anyhow!("Db::IsValidIndex: unable to send response"))
-            .unwrap(),
-
-        Db::IsValidSchema { tx, .. } => tx
-            .send(true)
-            .map_err(|_| anyhow!("Db::IsValidSchema: unable to send response"))
-            .unwrap(),
-    }
-}
-
-pub(crate) fn new_db_index(
-    mut db: DbBasic,
-    metadata: IndexMetadata,
-    node_state: mpsc::Sender<NodeState>,
-) -> anyhow::Result<(mpsc::Sender<DbIndex>, RxIndexedRow)> {
-    if db.0.read().unwrap().next_get_db_index_failed {
-        db.0.write().unwrap().next_get_db_index_failed = false;
-        bail!("get_db_index failed");
-    }
-
-    let (tx_index, mut rx_index) = mpsc::channel(10);
-    let (tx_embeddings, rx_embeddings) = mpsc::channel(10);
-    let store_vectors = db.0.read().unwrap().store_vectors.is_enabled();
-    let tx_embeddings = if store_vectors && metadata.vs().is_some() {
-        record_streamed_vectors(db.clone(), tx_embeddings)
-    } else {
-        tx_embeddings
-    };
-    let fullscan_finished = Arc::new(AtomicBool::new(false));
-    tokio::spawn({
-        let fullscan_finished = fullscan_finished.clone();
-        async move {
-            let fullscan_fn = fullscan(&mut db, &metadata);
-            node_state
-                .send(NodeState::SendEvent(Event::FullScanStarted(
-                    metadata.clone(),
-                )))
-                .await
-                .unwrap();
-            let fullscan = {
-                let tx_embeddings = tx_embeddings.clone();
-                let fullscan_finished = fullscan_finished.clone();
-                async move {
-                    if let Some(fullscan_fn) = fullscan_fn {
-                        fullscan_fn(tx_embeddings).await;
-                    }
-                    fullscan_finished.store(true, Ordering::Release);
-                }
-                .shared()
-            };
-            while !rx_index.is_closed() {
-                tokio::select! {
-                    _ = fullscan.clone() => break,
-                    msg = rx_index.recv() => {
-                        let Some(msg) = msg else {
-                            break;
-                        };
-                        spawn_process_db_index(
-                            db.clone(),
-                            metadata.clone(),
-                            Arc::clone(&fullscan_finished),
-                            msg
-                        ).await;
-                    }
-                }
-            }
-            node_state
-                .send(NodeState::SendEvent(Event::FullScanFinished(
-                    metadata.clone(),
-                )))
-                .await
-                .unwrap();
-
-            let cdc_fn = cdc(&mut db, &metadata);
-            let cdc = {
-                let tx_embeddings = tx_embeddings.clone();
-                async move {
-                    if let Some(cdc_fn) = cdc_fn {
-                        cdc_fn(tx_embeddings).await;
-                    }
-                }
-                .shared()
-            };
-            while !rx_index.is_closed() {
-                tokio::select! {
-                    _ = cdc.clone() => break,
-                    msg = rx_index.recv() => {
-                        let Some(msg) = msg else {
-                            break;
-                        };
-                        spawn_process_db_index(
-                            db.clone(),
-                            metadata.clone(),
-                            Arc::clone(&fullscan_finished),
-                            msg
-                        ).await;
-                    }
-                }
-            }
-
-            while let Some(msg) = rx_index.recv().await {
-                spawn_process_db_index(
-                    db.clone(),
-                    metadata.clone(),
-                    Arc::clone(&fullscan_finished),
-                    msg,
-                )
-                .await;
-            }
-            drop(tx_embeddings);
-        }
-    });
-    Ok((tx_index, rx_embeddings))
-}
-
-fn record_streamed_vectors(db: DbBasic, tx: TxIndexedRow) -> TxIndexedRow {
-    let (tx_recorded, mut rx_recorded) = mpsc::channel(10);
-    tokio::spawn(async move {
-        while let Some((row, in_progress)) = rx_recorded.recv().await {
-            db.record_row(&row);
-            if tx.send((row, in_progress)).await.is_err() {
-                break;
-            }
-        }
-    });
-    tx_recorded
-}
-
-fn fullscan(db: &mut DbBasic, metadata: &IndexMetadata) -> Option<ScanFn> {
-    db.0.write()
-        .unwrap()
-        .keyspaces
-        .get_mut(&metadata.keyspace_name)
-        .and_then(|keyspace| keyspace.indexes.get_mut(&metadata.index_name))
-        .and_then(|index| index.fullscan_fn.take())
-}
-
-fn cdc(db: &mut DbBasic, metadata: &IndexMetadata) -> Option<ScanFn> {
-    db.0.write()
-        .unwrap()
-        .keyspaces
-        .get_mut(&metadata.keyspace_name)
-        .and_then(|keyspace| keyspace.indexes.get_mut(&metadata.index_name))
-        .and_then(|index| index.cdc_fn.take())
-}
-
-async fn spawn_process_db_index(
-    db: DbBasic,
-    metadata: IndexMetadata,
-    fullscan_finished: Arc<AtomicBool>,
-    msg: DbIndex,
-) {
-    tokio::spawn(async move {
-        match msg {
-            DbIndex::GetTableColumns { tx } => tx
-                .send(
-                    db.0.read()
-                        .unwrap()
-                        .keyspaces
-                        .get(&metadata.keyspace_name)
-                        .and_then(|keyspace| keyspace.tables.get(&metadata.table_name))
-                        .map(|table| {
-                            Arc::new(
-                                table
-                                    .columns
-                                    .iter()
-                                    .map(|(name, column)| {
-                                        let ColumnType::Native(column) = column else {
-                                            panic!("Expected native column type")
-                                        };
-                                        (name.clone(), column.clone())
-                                    })
-                                    .collect(),
-                            )
-                        })
-                        .unwrap_or_default(),
-                )
-                .map_err(|_| anyhow!("DbIndex::GetPrimaryKeyColumns: unable to send response"))
-                .unwrap(),
-
-            DbIndex::FullScanProgress { tx } => tx
-                .send({
-                    let db = db.0.read().unwrap();
-                    db.next_full_scan_progress.unwrap_or_else(|| {
-                        if fullscan_finished.load(Ordering::Acquire) {
-                            Progress::Done
-                        } else {
-                            Progress::InProgress(Percentage::try_from(0.0).unwrap())
-                        }
-                    })
-                })
-                .map_err(|_| anyhow!("DbIndex::GetTargetColumn: unable to send response"))
-                .unwrap(),
-
-            DbIndex::GetVectors { keys, tx } => tx
-                .send(Ok(db.get_vectors(&keys)))
-                .map_err(|_| anyhow!("DbIndex::GetVectors: unable to send response"))
-                .unwrap(),
-        }
-    });
 }

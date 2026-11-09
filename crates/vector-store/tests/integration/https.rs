@@ -21,7 +21,7 @@ async fn run_server(
     tls_key_path: Option<PathBuf>,
 ) -> (impl Sized, core::net::SocketAddr, impl Sized) {
     let node_state = vector_store::new_node_state().await;
-    let (_, db) = db_basic::new(node_state.clone());
+    let db = db_basic::new();
 
     let config = vector_store::Config {
         vector_store_addr: addr,

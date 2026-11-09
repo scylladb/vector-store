@@ -440,7 +440,7 @@ fn fullscan_insert(c: &mut Criterion) {
             let notify_stop = notify_stop.clone();
             async move {
                 let node_state = vector_store::new_node_state().await;
-                let (_, db) = db_basic::new(node_state.clone());
+                let db = db_basic::new();
                 setup_table(
                     &db,
                     &index_metadata,
@@ -540,7 +540,7 @@ fn search(c: &mut Criterion) {
             let index_metadata = index_metadata.clone();
             async move {
                 let node_state = vector_store::new_node_state().await;
-                let (_, db) = db_basic::new(node_state.clone());
+                let db = db_basic::new();
                 setup_table(
                     &db,
                     &index_metadata,
@@ -646,7 +646,7 @@ fn cdc_insert(c: &mut Criterion) {
             let notify_stop = notify_stop.clone();
             async move {
                 let node_state = vector_store::new_node_state().await;
-                let (_, db) = db_basic::new(node_state.clone());
+                let db = db_basic::new();
                 setup_table(
                     &db,
                     &index_metadata,
@@ -749,7 +749,7 @@ fn cdc_update(c: &mut Criterion) {
             let index_metadata = index_metadata.clone();
             async move {
                 let node_state = vector_store::new_node_state().await;
-                let (_, db) = db_basic::new(node_state.clone());
+                let db = db_basic::new();
                 setup_table(
                     &db,
                     &index_metadata,
@@ -878,7 +878,7 @@ fn cdc_delete(c: &mut Criterion) {
             let index_metadata = index_metadata.clone();
             async move {
                 let node_state = vector_store::new_node_state().await;
-                let (_, db) = db_basic::new(node_state.clone());
+                let db = db_basic::new();
                 setup_table(
                     &db,
                     &index_metadata,
@@ -1006,7 +1006,7 @@ fn search_while_updating(c: &mut Criterion) {
             let index_metadata = index_metadata.clone();
             async move {
                 let node_state = vector_store::new_node_state().await;
-                let (_, db) = db_basic::new(node_state.clone());
+                let db = db_basic::new();
 
                 setup_table(
                     &db,
@@ -1153,7 +1153,7 @@ fn search_while_inserting(c: &mut Criterion) {
             let index_metadata = index_metadata.clone();
             async move {
                 let node_state = vector_store::new_node_state().await;
-                let (_, db) = db_basic::new(node_state.clone());
+                let db = db_basic::new();
 
                 setup_table(
                     &db,
@@ -1280,7 +1280,7 @@ fn search_while_deleting(c: &mut Criterion) {
             let index_metadata = index_metadata.clone();
             async move {
                 let node_state = vector_store::new_node_state().await;
-                let (_, db) = db_basic::new(node_state.clone());
+                let db = db_basic::new();
 
                 setup_table(
                     &db,

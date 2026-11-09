@@ -40,7 +40,7 @@ impl MtlsTestServer {
 
 async fn run_server(enable_mtls: bool) -> MtlsTestServer {
     let node_state = vector_store::new_node_state().await;
-    let (_, db) = db_basic::new(node_state.clone());
+    let db = db_basic::new();
 
     let mtls_addr = core::net::SocketAddr::from(([127, 0, 0, 1], 0));
 

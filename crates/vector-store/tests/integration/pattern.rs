@@ -79,7 +79,7 @@ async fn setup_pattern_store(
     };
 
     let node_state = vector_store::new_node_state().await;
-    let (_, db) = db_basic::new(node_state.clone());
+    let db = db_basic::new();
 
     let columns: Arc<HashMap<_, _>> = Arc::new(
         columns

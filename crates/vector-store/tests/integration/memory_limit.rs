@@ -51,7 +51,7 @@ async fn memory_limit_during_index_build() {
 
     let node_state = vector_store::new_node_state().await;
 
-    let (_, db) = db_basic::new(node_state.clone());
+    let db = db_basic::new();
 
     let index = IndexMetadata {
         keyspace_name: "ksp".into(),
