@@ -642,3 +642,73 @@ async fn fts_highlight_not_serving_returns_503() {
 
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn fts_back_to_back_updates_keep_one_latest_document_per_row() {
+    crate::enable_tracing();
+
+    const ROWS: i32 = 300;
+    const VERSIONS: u64 = 3;
+    let rows = (0..ROWS).flat_map(|row| {
+        (0..VERSIONS).map(move |version| {
+            (
+                [CqlValue::Int(row)].into(),
+                Some(format!("r{row}v{version}")),
+                Timestamp::from_millis(10 + version),
+            )
+        })
+    });
+    let scan = db_basic::scan_fn_documents(rows);
+
+    let (run, index, _db, _node_state) = setup_fts_store(
+        ["pk".into()],
+        1,
+        [("pk".to_string().into(), NativeType::Int)],
+        Some(scan),
+        None,
+    )
+    .await;
+    let (client, _server, _config_tx) = run.await;
+    let keyspace_name = index.keyspace_name.clone().into();
+    let index_name = index.index_name.clone().into();
+
+    wait_for(
+        || async {
+            client
+                .index_status(&keyspace_name, &index_name)
+                .await
+                .is_ok_and(|status| status.status == IndexStatus::Serving)
+        },
+        "Waiting for FTS index to be serving",
+    )
+    .await;
+
+    let search = async |query: String| {
+        let (primary_keys, _) = client
+            .bm25(
+                &keyspace_name,
+                &index_name,
+                query,
+                NonZeroUsize::new(10).unwrap().into(),
+            )
+            .await;
+        primary_keys
+            .get(&"pk".into())
+            .unwrap()
+            .iter()
+            .map(|pk| pk.as_i64().unwrap())
+            .collect::<Vec<_>>()
+    };
+
+    let status = client
+        .index_status(&keyspace_name, &index_name)
+        .await
+        .unwrap();
+    assert_eq!(status.count, ROWS as usize);
+    for row in 0..ROWS as i64 {
+        assert_eq!(search(format!("r{row}v{}", VERSIONS - 1)).await, [row]);
+        for version in 0..VERSIONS - 1 {
+            assert!(search(format!("r{row}v{version}")).await.is_empty());
+        }
+    }
+}
