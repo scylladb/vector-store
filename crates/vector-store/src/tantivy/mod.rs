@@ -292,13 +292,13 @@ fn commit(index: &Index, key: &IndexKey) {
 }
 
 fn add_document(
-    index: &Index,
+    writer: &mut Writer,
+    schema: &Schema,
     primary_id: PrimaryId,
     document: String,
     in_progress: AsyncInProgress,
 ) -> usize {
-    let doc = create_doc(&index.schema, primary_id, &document);
-    let mut writer = index.writer.write().unwrap();
+    let doc = create_doc(schema, primary_id, &document);
     match writer.add_document(doc, in_progress) {
         Ok(pending) => pending,
         Err(err) => {
@@ -313,9 +313,14 @@ fn create_term(schema: &Schema, primary_id: PrimaryId) -> tantivy::Term {
     tantivy::Term::from_field_u64(primary_id_field, u64::from(primary_id))
 }
 
-fn remove_document(index: &Index, primary_id: PrimaryId, in_progress: AsyncInProgress) -> usize {
-    let term = create_term(&index.schema, primary_id);
-    index.writer.write().unwrap().rm_document(term, in_progress)
+fn remove_document(
+    writer: &mut Writer,
+    schema: &Schema,
+    primary_id: PrimaryId,
+    in_progress: AsyncInProgress,
+) -> usize {
+    let term = create_term(schema, primary_id);
+    writer.rm_document(term, in_progress)
 }
 
 enum Mutation {
@@ -330,41 +335,58 @@ enum Mutation {
     },
 }
 
-fn apply(index: &Index, key: &IndexKey, mutation: Mutation, commit_threshold: usize) {
-    let pending = match mutation {
-        Mutation::Add {
-            primary_id,
-            document,
-            in_progress,
-        } => add_document(index, primary_id, document, in_progress),
-        Mutation::Remove {
-            primary_id,
-            in_progress,
-        } => remove_document(index, primary_id, in_progress),
+fn apply(index: &Index, key: &IndexKey, mutations: Vec<Mutation>, commit_threshold: usize) {
+    let pending = {
+        let mut writer = index.writer.write().unwrap();
+        mutations
+            .into_iter()
+            .map(|mutation| match mutation {
+                Mutation::Add {
+                    primary_id,
+                    document,
+                    in_progress,
+                } => add_document(
+                    &mut writer,
+                    &index.schema,
+                    primary_id,
+                    document,
+                    in_progress,
+                ),
+                Mutation::Remove {
+                    primary_id,
+                    in_progress,
+                } => remove_document(&mut writer, &index.schema, primary_id, in_progress),
+            })
+            .last()
+            .unwrap_or(0)
     };
     if pending >= commit_threshold {
         commit(index, key);
     }
 }
 
-/// Spawns the task that applies the changes of the index one at a time, in the order they were
-/// sent. Tantivy stamps each change when it is applied and a delete removes only the documents
-/// stamped before it, so a remove and an add of the same row must not be reordered.
+/// Spawns the task that applies the changes of the index in the order they were sent. Tantivy
+/// stamps each change when it is applied and a delete removes only the documents stamped before
+/// it, so a remove and an add of the same row must not be reordered. The changes waiting in the
+/// queue are taken together and applied as one job on the worker.
 fn spawn_mutations(
     index: Arc<Index>,
     key: IndexKey,
     worker: async_channel::Sender<Worker>,
     commit_threshold: usize,
 ) -> mpsc::Sender<Mutation> {
-    let (tx, mut rx) = mpsc::channel(perf::channel_size().into());
+    let capacity = perf::channel_size().into();
+    let (tx, mut rx) = mpsc::channel(capacity);
     tokio::spawn(async move {
-        while let Some(mutation) = rx.recv().await {
+        let mut mutations = Vec::with_capacity(capacity);
+        while rx.recv_many(&mut mutations, capacity).await > 0 {
+            let batch = std::mem::replace(&mut mutations, Vec::with_capacity(capacity));
             let (done_tx, done_rx) = oneshot::channel();
             let index = Arc::clone(&index);
             let key = key.clone();
             worker
                 .spawn_blocking(move || {
-                    apply(&index, &key, mutation, commit_threshold);
+                    apply(&index, &key, batch, commit_threshold);
                     _ = done_tx.send(());
                 })
                 .await;
