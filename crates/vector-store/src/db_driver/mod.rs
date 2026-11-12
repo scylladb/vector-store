@@ -53,14 +53,15 @@ impl From<&Column> for DbColumn {
 
 #[derive(Default)]
 pub struct CdcLogReaderConfig {
-    keyspace: Option<KeyspaceName>,
-    table_name: Option<TableName>,
-    consumer_factory: Option<Arc<dyn ConsumerFactory>>,
-    start_timestamp: Option<Duration>,
-    safety_interval: Option<Duration>,
-    sleep_interval: Option<Duration>,
-    should_save_progress: Option<bool>,
-    checkpoint_saver: Option<Arc<dyn CDCCheckpointSaver>>,
+    pub keyspace: Option<KeyspaceName>,
+    pub table_name: Option<TableName>,
+    pub index_name: Option<IndexName>,
+    pub consumer_factory: Option<Arc<dyn ConsumerFactory>>,
+    pub start_timestamp: Option<Duration>,
+    pub safety_interval: Option<Duration>,
+    pub sleep_interval: Option<Duration>,
+    pub should_save_progress: Option<bool>,
+    pub checkpoint_saver: Option<Arc<dyn CDCCheckpointSaver>>,
 }
 
 pub trait DbDriver: Clone + Send + Sync + 'static {
@@ -243,6 +244,11 @@ impl CdcLogReaderConfig {
 
     pub fn table_name(mut self, table_name: TableName) -> Self {
         self.table_name = Some(table_name);
+        self
+    }
+
+    pub fn index_name(mut self, index_name: IndexName) -> Self {
+        self.index_name = Some(index_name);
         self
     }
 
