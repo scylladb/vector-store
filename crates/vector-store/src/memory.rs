@@ -19,10 +19,12 @@ use tracing::debug;
 use tracing::debug_span;
 use tracing::info;
 use tracing::trace;
+use tracing::warn;
 
 const MEMORY_SAFETY_BUFFER_RATIO: f64 = 0.01; // 1% of total RAM
 const MEMORY_SAFETY_BUFFER_MIN: u64 = 200 * 1024 * 1024; // 200 MB
 const MEMORY_INFO_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+const SWAP_MINIMUM: u64 = (50 * 1024 - 1) * 1024 * 1024; // 50 GiB - 1MiB for swap metadata
 
 #[derive(PartialEq, Clone, Copy, Debug)]
 pub enum Allocate {
@@ -66,6 +68,7 @@ pub(crate) fn new(
         let mut system_info = System::new_all();
         let mut memory_limit = calculate_memory_limit(available_memory(&system_info), &config);
         info!("Memory limit set to {memory_limit} bytes");
+        log_swap_memory(&system_info);
 
         let mut interval = tokio::time::interval(
             config
@@ -85,6 +88,7 @@ pub(crate) fn new(
                         memory_limit = calculate_memory_limit(
                             available_memory(&system_info), &config_new);
                         info!("Memory limit updated to {memory_limit} bytes");
+                        log_swap_memory(&system_info);
                     }
                     if config.memory_usage_check_interval != config_new.memory_usage_check_interval {
                         interval = tokio::time::interval(
@@ -99,9 +103,17 @@ pub(crate) fn new(
 
                 _ = interval.tick() => {
                     system_info.refresh_memory();
-                    let allocate = *allocate_tx.borrow();
-                    _ = allocate_tx.send(
-                        can_allocate(&internals, used_memory(&system_info), memory_limit, allocate).await);
+                    let old_allocate = *allocate_tx.borrow();
+                    let new_allocate = can_allocate(
+                        &internals,
+                        used_memory(&system_info),
+                        memory_limit,
+                        old_allocate
+                    ).await;
+                    _ = allocate_tx.send(new_allocate);
+                    if old_allocate == Allocate::Can && new_allocate == Allocate::Cannot {
+                        log_swap_memory(&system_info);
+                    }
                 }
 
                 msg = rx.recv() => {
@@ -133,6 +145,18 @@ fn available_memory(system_info: &System) -> u64 {
         cgroup.total_memory
     } else {
         system_info.total_memory()
+    }
+}
+
+fn log_swap_memory(system_info: &System) {
+    let total_swap = system_info.total_swap();
+    if total_swap < SWAP_MINIMUM {
+        warn!(
+            "Total swap memory is below recommended minimum of {SWAP_MINIMUM} bytes: \
+            {total_swap} bytes",
+        );
+    } else {
+        info!("Total swap memory: {total_swap} bytes");
     }
 }
 
@@ -174,7 +198,7 @@ async fn can_allocate(
         Allocate::Can
     } else {
         if current == Allocate::Can {
-            info!("Memory usage above limit ({used_memory}), cannot allocate more memory");
+            warn!("Memory usage above limit ({used_memory}), cannot allocate more memory");
             internals
                 .increment_counter("memory-usage-above-limit".to_string())
                 .await;
