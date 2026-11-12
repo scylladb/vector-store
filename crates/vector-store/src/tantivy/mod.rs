@@ -282,12 +282,82 @@ fn create_doc(schema: &Schema, primary_id: PrimaryId, document: &str) -> Tantivy
 }
 
 fn commit(index: &Index, key: &IndexKey) {
-    let result = index.writer.write().unwrap().commit();
+    #[cfg(feature = "bench-hooks")]
+    let started = std::time::Instant::now();
+    let mut writer = index.writer.write().unwrap();
+    #[cfg(feature = "bench-hooks")]
+    let locked = std::time::Instant::now();
+    let result = writer.commit();
+    #[cfg(feature = "bench-hooks")]
+    let committed = std::time::Instant::now();
+    drop(writer);
     match result {
-        Ok((commit_opstamp, guards)) => index
-            .reader
-            .drop_guards_when_searchable(commit_opstamp, guards),
+        Ok((commit_opstamp, guards)) => {
+            #[cfg(feature = "bench-hooks")]
+            bench_hooks::report(
+                index,
+                key,
+                locked - started,
+                committed - locked,
+                guards.len(),
+            );
+            index
+                .reader
+                .drop_guards_when_searchable(commit_opstamp, guards);
+        }
         Err(err) => error!("tantivy: failed to commit for {key}: {err}"),
+    }
+}
+
+/// Lets an in-process benchmark observe every writer commit.
+#[cfg(feature = "bench-hooks")]
+pub mod bench_hooks {
+    use super::Index;
+    use crate::IndexKey;
+    use std::sync::OnceLock;
+    use std::time::Duration;
+
+    pub struct Commit {
+        pub key: IndexKey,
+        /// Time spent waiting for the writer lock, held by the document adders.
+        pub lock_wait: Duration,
+        pub duration: Duration,
+        /// Documents added or removed by this commit.
+        pub operations: usize,
+        /// Searchable segments right after the commit, racing with background merges.
+        pub segments: usize,
+    }
+
+    type Observer = Box<dyn Fn(Commit) + Send + Sync>;
+
+    static OBSERVER: OnceLock<Observer> = OnceLock::new();
+
+    /// Sets the process-wide commit observer; returns false if one is already set.
+    pub fn observe_commits(observer: impl Fn(Commit) + Send + Sync + 'static) -> bool {
+        OBSERVER.set(Box::new(observer)).is_ok()
+    }
+
+    pub(super) fn report(
+        index: &Index,
+        key: &IndexKey,
+        lock_wait: Duration,
+        duration: Duration,
+        operations: usize,
+    ) {
+        let Some(observer) = OBSERVER.get() else {
+            return;
+        };
+        let segments = index
+            .index
+            .searchable_segment_metas()
+            .map_or(0, |metas| metas.len());
+        observer(Commit {
+            key: key.clone(),
+            lock_wait,
+            duration,
+            operations,
+            segments,
+        });
     }
 }
 

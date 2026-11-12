@@ -69,6 +69,9 @@ pub use crate::primary_key::PrimaryKey;
 pub use crate::similarity::SimilarityScore;
 pub use crate::table::PartitionId;
 pub use crate::table::PrimaryId;
+#[cfg(feature = "bench-hooks")]
+#[doc(hidden)]
+pub use crate::tantivy::bench_hooks;
 pub use crate::timestamp::Timestamp;
 pub use crate::timestamp::Timestamped;
 pub use crate::tracing_output::TracingOutput;
