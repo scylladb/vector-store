@@ -302,3 +302,77 @@ async fn pattern_like_search_ignores_letter_case_when_not_case_sensitive() {
     let response: PostIndexLikeResponse = response.json().await.unwrap();
     assert_eq!(response.primary_keys.get(&"pk".into()).unwrap(), &[1]);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn pattern_back_to_back_updates_keep_one_latest_document_per_row() {
+    crate::enable_tracing();
+
+    const ROWS: i32 = 300;
+    const VERSIONS: u64 = 3;
+    let rows = (0..ROWS).flat_map(|row| {
+        (0..VERSIONS).map(move |version| {
+            (
+                [CqlValue::Int(row)].into(),
+                Some(format!("r{row}v{version}")),
+                Timestamp::from_millis(10 + version),
+            )
+        })
+    });
+    let scan = db_basic::scan_fn_documents(rows);
+
+    let (run, index, _db, _node_state) = setup_pattern_store(
+        ["pk".into()],
+        1,
+        [("pk".to_string().into(), NativeType::Int)],
+        Some(scan),
+        None,
+        IndexOptionsPattern::default(),
+    )
+    .await;
+    let (client, _server, _config_tx) = run.await;
+    let keyspace_name = index.keyspace_name.clone().into();
+    let index_name = index.index_name.clone().into();
+
+    wait_for(
+        || async {
+            client
+                .index_status(&keyspace_name, &index_name)
+                .await
+                .is_ok_and(|status| status.status == IndexStatus::Serving)
+        },
+        "Waiting for pattern index to be serving",
+    )
+    .await;
+
+    let like = async |pattern: String| {
+        let response = client
+            .post_like(
+                &keyspace_name,
+                &index_name,
+                pattern,
+                NonZeroUsize::new(10).unwrap().into(),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response: PostIndexLikeResponse = response.json().await.unwrap();
+        response
+            .primary_keys
+            .get(&"pk".into())
+            .unwrap()
+            .iter()
+            .map(|pk| pk.as_i64().unwrap())
+            .collect::<Vec<_>>()
+    };
+
+    let status = client
+        .index_status(&keyspace_name, &index_name)
+        .await
+        .unwrap();
+    assert_eq!(status.count, ROWS as usize);
+    for row in 0..ROWS as i64 {
+        assert_eq!(like(format!("r{row}v{}", VERSIONS - 1)).await, [row]);
+        for version in 0..VERSIONS - 1 {
+            assert!(like(format!("r{row}v{version}")).await.is_empty());
+        }
+    }
+}

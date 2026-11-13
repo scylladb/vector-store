@@ -318,6 +318,67 @@ fn remove_document(index: &Index, primary_id: PrimaryId, in_progress: AsyncInPro
     index.writer.write().unwrap().rm_document(term, in_progress)
 }
 
+enum Mutation {
+    Add {
+        primary_id: PrimaryId,
+        document: String,
+        in_progress: AsyncInProgress,
+    },
+    Remove {
+        primary_id: PrimaryId,
+        in_progress: AsyncInProgress,
+    },
+}
+
+fn apply(index: &Index, key: &IndexKey, mutation: Mutation, commit_threshold: usize) {
+    let pending = match mutation {
+        Mutation::Add {
+            primary_id,
+            document,
+            in_progress,
+        } => add_document(index, primary_id, document, in_progress),
+        Mutation::Remove {
+            primary_id,
+            in_progress,
+        } => remove_document(index, primary_id, in_progress),
+    };
+    if pending >= commit_threshold {
+        commit(index, key);
+    }
+}
+
+/// Spawns the task that applies the changes of the index one at a time, in the order they were
+/// sent. Tantivy stamps each change when it is applied and a delete removes only the documents
+/// stamped before it, so a remove and an add of the same row must not be reordered.
+fn spawn_mutations(
+    index: Arc<Index>,
+    key: IndexKey,
+    worker: async_channel::Sender<Worker>,
+    commit_threshold: usize,
+) -> mpsc::Sender<Mutation> {
+    let (tx, mut rx) = mpsc::channel(perf::channel_size().into());
+    tokio::spawn(async move {
+        while let Some(mutation) = rx.recv().await {
+            let (done_tx, done_rx) = oneshot::channel();
+            let index = Arc::clone(&index);
+            let key = key.clone();
+            worker
+                .spawn_blocking(move || {
+                    apply(&index, &key, mutation, commit_threshold);
+                    _ = done_tx.send(());
+                })
+                .await;
+            _ = done_rx.await;
+        }
+    });
+    tx
+}
+
+struct IndexHandle {
+    index: Arc<Index>,
+    mutations: mpsc::Sender<Mutation>,
+}
+
 /// The tantivy indexes of one index key, one per index id.
 pub(crate) struct Indexes<T, F> {
     key: IndexKey,
@@ -325,7 +386,7 @@ pub(crate) struct Indexes<T, F> {
     worker: async_channel::Sender<Worker>,
     commit_interval: tokio::time::Interval,
     commit_threshold: usize,
-    indexes: BTreeMap<IndexId, Arc<Index>>,
+    indexes: BTreeMap<IndexId, IndexHandle>,
     allocate_rx: watch::Receiver<Allocate>,
     allocate_prev: Allocate,
     new_index: F,
@@ -367,22 +428,21 @@ where
         document: String,
         in_progress: AsyncInProgress,
     ) {
-        let Some(index) = self.get_or_create() else {
+        let Some(mutations) = self.get_or_create() else {
             return;
         };
         if !self.can_allocate_memory() {
             return;
         }
-        let key = self.key.clone();
-        let commit_threshold = self.commit_threshold;
-        self.worker
-            .spawn_blocking(move || {
-                let pending = add_document(&index, primary_id, document, in_progress);
-                if pending >= commit_threshold {
-                    commit(&index, &key);
-                }
-            })
-            .await;
+        self.send(
+            mutations,
+            Mutation::Add {
+                primary_id,
+                document,
+                in_progress,
+            },
+        )
+        .await;
     }
 
     pub(crate) async fn remove_document(
@@ -390,24 +450,30 @@ where
         primary_id: PrimaryId,
         in_progress: AsyncInProgress,
     ) {
-        let Some(index) = self.get_or_create() else {
+        let Some(mutations) = self.get_or_create() else {
             return;
         };
-        let key = self.key.clone();
-        let commit_threshold = self.commit_threshold;
-        self.worker
-            .spawn_blocking(move || {
-                let pending = remove_document(&index, primary_id, in_progress);
-                if pending >= commit_threshold {
-                    commit(&index, &key);
-                }
-            })
-            .await;
+        self.send(
+            mutations,
+            Mutation::Remove {
+                primary_id,
+                in_progress,
+            },
+        )
+        .await;
+    }
+
+    async fn send(&self, mutations: mpsc::Sender<Mutation>, mutation: Mutation) {
+        if mutations.send(mutation).await.is_err() {
+            error!("tantivy: failed to queue a change for {}", self.key);
+        }
     }
 
     pub(crate) fn get(&self, index_key: &IndexKey) -> Option<Arc<Index>> {
         let index_id = self.table.read().unwrap().index_id(index_key)?;
-        self.indexes.get(&index_id).cloned()
+        self.indexes
+            .get(&index_id)
+            .map(|handle| Arc::clone(&handle.index))
     }
 
     pub(crate) fn count(&self, index_key: &IndexKey) -> usize {
@@ -423,7 +489,7 @@ where
     /// Commits every index with uncommitted documents and requests a reload of every other index
     /// whose committed documents are not searchable yet.
     pub(crate) async fn commit_or_reload(&self) {
-        for index in self.indexes.values() {
+        for IndexHandle { index, .. } in self.indexes.values() {
             if index.writer.read().unwrap().has_uncommitted_docs() {
                 let index = Arc::clone(index);
                 let key = self.key.clone();
@@ -436,16 +502,28 @@ where
         }
     }
 
-    fn get_or_create(&mut self) -> Option<Arc<Index>> {
+    fn get_or_create(&mut self) -> Option<mpsc::Sender<Mutation>> {
         let index_id = self.table.read().unwrap().index_id(&self.key)?;
-        if let Some(index) = self.indexes.get(&index_id) {
-            return Some(Arc::clone(index));
+        if let Some(handle) = self.indexes.get(&index_id) {
+            return Some(handle.mutations.clone());
         }
         match (self.new_index)(&self.key, self.worker.clone()) {
             Ok(index) => {
                 let index = Arc::new(index);
-                self.indexes.insert(index_id, Arc::clone(&index));
-                Some(index)
+                let mutations = spawn_mutations(
+                    Arc::clone(&index),
+                    self.key.clone(),
+                    self.worker.clone(),
+                    self.commit_threshold,
+                );
+                self.indexes.insert(
+                    index_id,
+                    IndexHandle {
+                        index,
+                        mutations: mutations.clone(),
+                    },
+                );
+                Some(mutations)
             }
             Err(err) => {
                 error!("tantivy: failed to create index for {}: {err}", self.key);
