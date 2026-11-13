@@ -236,11 +236,7 @@ async fn batch_write_item_with_invalid_vector(actors: Arc<TestActors>) {
     info!("finished");
 }
 
-e2etest::group!(
-    name = batch_write_item,
-    fixtures = (Fixture),
-    parent = alternator::alternator
-);
+e2etest::group!(name = batch_write_item, fixtures = (Fixture));
 
 struct Fixture {
     actors: Arc<TestActors>,

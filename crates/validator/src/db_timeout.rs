@@ -18,12 +18,6 @@ use tokio::sync::watch;
 use tokio::time;
 use tracing::info;
 
-e2etest::group!(
-    name = db_timeout,
-    fixtures = (Fixture),
-    parent = crate::validator
-);
-
 struct Fixture {
     actors: Arc<TestActors>,
 }
@@ -53,10 +47,11 @@ impl e2etest::Fixture for Fixture {
 /// - Bring back simulator to normal operation.
 /// - Wait until vector-stores update indexes using CDC.
 /// - Drop the keyspace.
-#[e2etest::test(group = db_timeout)]
-async fn client_timeout_doesnt_stop_cdc(actors: Arc<TestActors>) {
+#[e2etest::test]
+async fn client_timeout_doesnt_stop_cdc(fixture: Arc<Fixture>) {
     info!("started");
-    let (session, clients) = prepare_connection_no_tls(&actors).await;
+    let actors = &fixture.actors;
+    let (session, clients) = prepare_connection_no_tls(actors).await;
     let keyspace = create_keyspace(&session).await;
     let table = create_table(
         &session,

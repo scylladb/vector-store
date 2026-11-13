@@ -388,11 +388,7 @@ async fn create_table_with_boundary_dimensions(actors: Arc<TestActors>) {
     info!("finished");
 }
 
-e2etest::group!(
-    name = create_table,
-    fixtures = (Fixture),
-    parent = alternator::alternator
-);
+e2etest::group!(name = create_table, fixtures = (Fixture));
 
 struct Fixture {
     actors: Arc<TestActors>,

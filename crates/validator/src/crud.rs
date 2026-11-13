@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::time;
 use tracing::info;
 
-e2etest::group!(name = crud, fixtures = (Fixture), parent = crate::validator);
+e2etest::group!(name = crud, fixtures = (Fixture));
 
 struct Fixture {
     actors: Arc<TestActors>,

@@ -223,6 +223,32 @@ pub fn get_default_db_proxy_ips(actors: &TestActors) -> Vec<Ipv4Addr> {
     ]
 }
 
+pub(crate) fn default_scylla_args() -> Vec<String> {
+    [
+        "--overprovisioned",
+        "--developer-mode=true",
+        "--smp=2",
+        "--memory=1G",
+        "--unsafe-bypass-fsync=on",
+        "--kernel-page-cache=on",
+        "--reactor-backend=io_uring",
+        "--rf-rack-valid-keyspaces=true",
+        "--collectd=0",
+        "--max-networking-io-control-blocks=1000",
+        "--commitlog-use-o-dsync=0",
+        "--flush-schema-tables-after-modification=false",
+        "--auto-snapshot=0",
+        "--logger-log-level=compaction=warn",
+        "--logger-log-level=migration_manager=warn",
+        "--shutdown-announce-in-ms=0",
+        "--tablets-mode-for-new-keyspaces=enabled",
+        "--alternator-ttl-period-in-seconds=0.5",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect()
+}
+
 /// Arguments enabling the Alternator (DynamoDB-compatible) endpoint on a node.
 ///
 /// NOTE: `--alternator-ttl-period-in-seconds` is already set in the default
@@ -246,7 +272,7 @@ pub async fn get_default_scylla_node_configs(actors: &TestActors) -> Vec<ScyllaN
         .enumerate()
         .map(|(i, &ip)| {
             let mut vs_urls = default_vs_urls.clone();
-            let mut args = e2etest_scylla_cluster::default_scylla_args();
+            let mut args = default_scylla_args();
             args.extend(default_alternator_args(ip));
             ScyllaNodeConfig {
                 db_ip: ip,
@@ -1028,3 +1054,18 @@ impl<'a> CreateIndexQuery<'a> {
         self
     }
 }
+
+macro_rules! unique_id {
+    () => {
+        ::const_fnv1a_hash::fnv1a_hash_str_64(concat!(
+            module_path!(),
+            ":",
+            file!(),
+            ":",
+            line!(),
+            ":",
+            column!()
+        ))
+    };
+}
+pub(crate) use unique_id;

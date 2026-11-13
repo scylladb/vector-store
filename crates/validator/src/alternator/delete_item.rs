@@ -79,11 +79,7 @@ async fn delete_item_updates_index(actors: Arc<TestActors>) {
     info!("finished");
 }
 
-e2etest::group!(
-    name = delete_item,
-    fixtures = (Fixture),
-    parent = alternator::alternator
-);
+e2etest::group!(name = delete_item, fixtures = (Fixture));
 
 struct Fixture {
     actors: Arc<TestActors>,

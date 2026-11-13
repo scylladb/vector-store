@@ -14,11 +14,7 @@ use scylla::client::session::Session;
 use std::sync::Arc;
 use tracing::info;
 
-e2etest::group!(
-    name = hybrid,
-    fixtures = (Cluster),
-    parent = crate::validator
-);
+e2etest::group!(name = hybrid, fixtures = (Cluster));
 
 struct Cluster {
     actors: Arc<TestActors>,
@@ -36,14 +32,14 @@ impl e2etest::Fixture for Cluster {
     }
 }
 
-struct Fixture {
+struct Fixture<const ID: u64> {
     session: Arc<Session>,
     keyspace: KeyspaceName,
     table: TableName,
     clients: Vec<HttpClient>,
 }
 
-impl e2etest::Fixture for Fixture {
+impl<const ID: u64> e2etest::Fixture for Fixture<ID> {
     async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
         let cluster = setup.setup::<Cluster>().await?;
         let (session, clients, keyspace, table) = Self::init_hybrid_table(&cluster.actors).await;
@@ -63,7 +59,7 @@ impl e2etest::Fixture for Fixture {
     }
 }
 
-impl Fixture {
+impl<const ID: u64> Fixture<ID> {
     #[framed]
     async fn insert_documents<'a>(&self, docs: impl IntoIterator<Item = (i32, [f32; 2], &'a str)>) {
         let stmt = self
@@ -168,7 +164,9 @@ impl Fixture {
 }
 
 #[e2etest::test(group = hybrid)]
-async fn rrf_returns_union_of_both_searches_in_fused_order(fixture: Arc<Fixture>) {
+async fn rrf_returns_union_of_both_searches_in_fused_order(
+    fixture: Arc<Fixture<{ unique_id!() }>>,
+) {
     info!("started");
 
     fixture
@@ -201,7 +199,7 @@ async fn rrf_returns_union_of_both_searches_in_fused_order(fixture: Arc<Fixture>
 }
 
 #[e2etest::test(group = hybrid)]
-async fn rrf_reports_rank_of_each_search(fixture: Arc<Fixture>) {
+async fn rrf_reports_rank_of_each_search(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture
@@ -245,7 +243,7 @@ async fn rrf_reports_rank_of_each_search(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = hybrid)]
-async fn rrf_preserves_raw_search_scores(fixture: Arc<Fixture>) {
+async fn rrf_preserves_raw_search_scores(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture
@@ -311,7 +309,7 @@ async fn rrf_preserves_raw_search_scores(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = hybrid)]
-async fn rrf_with_no_fulltext_match_follows_vector_order(fixture: Arc<Fixture>) {
+async fn rrf_with_no_fulltext_match_follows_vector_order(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture

@@ -19,11 +19,7 @@ use tracing::info;
 const DATASET_SIZE: i32 = 100;
 const OFFSET_F: i32 = DATASET_SIZE * 10;
 
-e2etest::group!(
-    name = index_create,
-    fixtures = (Fixture),
-    parent = crate::validator
-);
+e2etest::group!(name = index_create, fixtures = (Fixture));
 
 struct Fixture {
     actors: Arc<TestActors>,

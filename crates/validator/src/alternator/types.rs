@@ -178,11 +178,7 @@ async fn search_with_optimized_vector_type(actors: Arc<TestActors>) {
     info!("finished");
 }
 
-e2etest::group!(
-    name = types,
-    fixtures = (Fixture),
-    parent = alternator::alternator
-);
+e2etest::group!(name = types, fixtures = (Fixture));
 
 struct Fixture {
     actors: Arc<TestActors>,

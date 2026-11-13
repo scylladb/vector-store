@@ -15,11 +15,7 @@ use scylla::client::session::Session;
 use std::sync::Arc;
 use tracing::info;
 
-e2etest::group!(
-    name = pattern,
-    fixtures = (Cluster),
-    parent = crate::validator
-);
+e2etest::group!(name = pattern, fixtures = (Cluster));
 
 struct Cluster {
     actors: Arc<TestActors>,
@@ -37,14 +33,14 @@ impl e2etest::Fixture for Cluster {
     }
 }
 
-struct Fixture {
+struct Fixture<const ID: u64> {
     session: Arc<Session>,
     keyspace: KeyspaceName,
     table: TableName,
     clients: Vec<HttpClient>,
 }
 
-impl e2etest::Fixture for Fixture {
+impl<const ID: u64> e2etest::Fixture for Fixture<ID> {
     async fn setup(setup: &mut impl e2etest::Setup) -> Option<Self> {
         let cluster = setup.setup::<Cluster>().await?;
         let (session, clients) = prepare_connection(&cluster.actors).await;
@@ -63,7 +59,7 @@ impl e2etest::Fixture for Fixture {
     }
 }
 
-impl Fixture {
+impl<const ID: u64> Fixture<ID> {
     #[framed]
     async fn insert_documents(&self, docs: impl IntoIterator<Item = (i32, &str)>) {
         let stmt = self
@@ -129,7 +125,7 @@ impl Fixture {
 }
 
 #[e2etest::test(group = pattern)]
-async fn pattern_index_lifecycle(fixture: Arc<Fixture>) {
+async fn pattern_index_lifecycle(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     let index = fixture.create_pattern_index().await;
@@ -148,7 +144,9 @@ async fn pattern_index_lifecycle(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = pattern)]
-async fn like_matches_prefix_infix_underscore_escape_and_exact_patterns(fixture: Arc<Fixture>) {
+async fn like_matches_prefix_infix_underscore_escape_and_exact_patterns(
+    fixture: Arc<Fixture<{ unique_id!() }>>,
+) {
     info!("started");
 
     fixture
@@ -186,7 +184,7 @@ async fn like_matches_prefix_infix_underscore_escape_and_exact_patterns(fixture:
 }
 
 #[e2etest::test(group = pattern)]
-async fn like_matches_a_cjk_keyword(fixture: Arc<Fixture>) {
+async fn like_matches_a_cjk_keyword(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture
@@ -210,7 +208,7 @@ async fn like_matches_a_cjk_keyword(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = pattern)]
-async fn like_returns_an_inserted_row(fixture: Arc<Fixture>) {
+async fn like_returns_an_inserted_row(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture.create_pattern_index().await;
@@ -228,7 +226,7 @@ async fn like_returns_an_inserted_row(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = pattern)]
-async fn like_reflects_an_updated_value(fixture: Arc<Fixture>) {
+async fn like_reflects_an_updated_value(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture.insert_documents([(1, "AB-1024-XL")]).await;
@@ -251,7 +249,7 @@ async fn like_reflects_an_updated_value(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = pattern)]
-async fn like_skips_a_deleted_row(fixture: Arc<Fixture>) {
+async fn like_skips_a_deleted_row(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture
@@ -272,7 +270,7 @@ async fn like_skips_a_deleted_row(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = pattern)]
-async fn like_limit_restricts_result_count(fixture: Arc<Fixture>) {
+async fn like_limit_restricts_result_count(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture
@@ -293,7 +291,9 @@ async fn like_limit_restricts_result_count(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = pattern)]
-async fn like_underscore_does_not_match_the_indexed_empty_value(fixture: Arc<Fixture>) {
+async fn like_underscore_does_not_match_the_indexed_empty_value(
+    fixture: Arc<Fixture<{ unique_id!() }>>,
+) {
     info!("started");
 
     fixture
@@ -313,7 +313,7 @@ async fn like_underscore_does_not_match_the_indexed_empty_value(fixture: Arc<Fix
 }
 
 #[e2etest::test(group = pattern)]
-async fn like_ignores_letter_case_when_not_case_sensitive(fixture: Arc<Fixture>) {
+async fn like_ignores_letter_case_when_not_case_sensitive(fixture: Arc<Fixture<{ unique_id!() }>>) {
     info!("started");
 
     fixture
@@ -332,7 +332,9 @@ async fn like_ignores_letter_case_when_not_case_sensitive(fixture: Arc<Fixture>)
 }
 
 #[e2etest::test(group = pattern)]
-async fn like_matches_a_mark_character_in_the_pattern_only_in_the_value(fixture: Arc<Fixture>) {
+async fn like_matches_a_mark_character_in_the_pattern_only_in_the_value(
+    fixture: Arc<Fixture<{ unique_id!() }>>,
+) {
     info!("started");
 
     // Vector store uses '\u{2}' and '\u{3}' internally to mark the start and end of a value.

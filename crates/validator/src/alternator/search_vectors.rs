@@ -710,11 +710,7 @@ async fn search_with_filter_expression(actors: Arc<TestActors>) {
     info!("finished");
 }
 
-e2etest::group!(
-    name = search_vectors,
-    fixtures = (Fixture),
-    parent = alternator::alternator
-);
+e2etest::group!(name = search_vectors, fixtures = (Fixture));
 
 struct Fixture {
     actors: Arc<TestActors>,

@@ -75,7 +75,6 @@ jobs:
       os: ${{ matrix.os }}
       arch: ${{ matrix.arch }}
       testcase: ${{ matrix.testcase }}
-      ref: ${{ github.sha }}
       scylla-image: ${{ inputs.scylla-image || 'nightly' }}
     strategy:
       fail-fast: false

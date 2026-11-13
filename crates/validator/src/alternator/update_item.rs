@@ -467,11 +467,7 @@ async fn update_item_vector_element_operations(actors: Arc<TestActors>) {
     info!("finished");
 }
 
-e2etest::group!(
-    name = update_item,
-    fixtures = (Fixture),
-    parent = alternator::alternator
-);
+e2etest::group!(name = update_item, fixtures = (Fixture));
 
 struct Fixture {
     actors: Arc<TestActors>,

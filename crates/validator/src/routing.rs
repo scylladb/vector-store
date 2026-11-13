@@ -20,12 +20,6 @@ use tracing::info;
 const ANN_LIMIT: usize = 5;
 const FRAME_DELAY: Duration = Duration::from_millis(500);
 
-e2etest::group!(
-    name = routing,
-    fixtures = (Fixture),
-    parent = crate::validator
-);
-
 struct Fixture {
     actors: Arc<TestActors>,
 }
@@ -60,11 +54,13 @@ async fn wait_for_bootstrapping(client: &HttpClient, index: &IndexInfo) {
     .await;
 }
 
-#[e2etest::test(group = routing)]
-async fn ann_routes_to_serving_index_while_replacement_is_bootstrapping(actors: Arc<TestActors>) {
+#[e2etest::test]
+async fn ann_routes_to_serving_index_while_replacement_is_bootstrapping(fixture: Arc<Fixture>) {
     info!("started");
 
-    let (session, clients) = prepare_connection_single_vs_no_tls(&actors).await;
+    let actors = &fixture.actors;
+
+    let (session, clients) = prepare_connection_single_vs_no_tls(actors).await;
     let client = clients.first().expect("expected a single HTTP client");
 
     let keyspace = create_keyspace(&session).await;
@@ -146,13 +142,15 @@ async fn ann_routes_to_serving_index_while_replacement_is_bootstrapping(actors: 
     info!("finished");
 }
 
-#[e2etest::test(group = routing)]
+#[e2etest::test]
 async fn ann_does_not_route_between_columns_while_requested_index_is_bootstrapping(
-    actors: Arc<TestActors>,
+    fixture: Arc<Fixture>,
 ) {
     info!("started");
 
-    let (session, clients) = prepare_connection_single_vs_no_tls(&actors).await;
+    let actors = &fixture.actors;
+
+    let (session, clients) = prepare_connection_single_vs_no_tls(actors).await;
     let client = clients.first().expect("expected a single HTTP client");
 
     let keyspace = create_keyspace(&session).await;
@@ -220,11 +218,13 @@ async fn ann_does_not_route_between_columns_while_requested_index_is_bootstrappi
     info!("finished");
 }
 
-#[e2etest::test(group = routing)]
-async fn ann_returns_not_found_for_nonexistent_index(actors: Arc<TestActors>) {
+#[e2etest::test]
+async fn ann_returns_not_found_for_nonexistent_index(fixture: Arc<Fixture>) {
     info!("started");
 
-    let (session, _clients) = prepare_connection_single_vs_no_tls(&actors).await;
+    let actors = &fixture.actors;
+
+    let (session, _clients) = prepare_connection_single_vs_no_tls(actors).await;
 
     let keyspace = create_keyspace(&session).await;
     let table = create_table(
@@ -252,11 +252,13 @@ async fn ann_returns_not_found_for_nonexistent_index(actors: Arc<TestActors>) {
     info!("finished");
 }
 
-#[e2etest::test(group = routing)]
-async fn ann_returns_unavailable_when_only_index_is_bootstrapping(actors: Arc<TestActors>) {
+#[e2etest::test]
+async fn ann_returns_unavailable_when_only_index_is_bootstrapping(fixture: Arc<Fixture>) {
     info!("started");
 
-    let (session, clients) = prepare_connection_single_vs_no_tls(&actors).await;
+    let actors = &fixture.actors;
+
+    let (session, clients) = prepare_connection_single_vs_no_tls(actors).await;
     let client = clients.first().expect("expected a single HTTP client");
 
     let keyspace = create_keyspace(&session).await;
@@ -313,11 +315,13 @@ async fn ann_returns_unavailable_when_only_index_is_bootstrapping(actors: Arc<Te
     info!("finished");
 }
 
-#[e2etest::test(group = routing)]
-async fn ann_returns_not_found_after_index_is_dropped(actors: Arc<TestActors>) {
+#[e2etest::test]
+async fn ann_returns_not_found_after_index_is_dropped(fixture: Arc<Fixture>) {
     info!("started");
 
-    let (session, clients) = prepare_connection_single_vs_no_tls(&actors).await;
+    let actors = &fixture.actors;
+
+    let (session, clients) = prepare_connection_single_vs_no_tls(actors).await;
     let client = clients.first().expect("expected a single HTTP client");
 
     let keyspace = create_keyspace(&session).await;

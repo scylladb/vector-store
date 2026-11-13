@@ -26,11 +26,7 @@ const CDC_MAX_LATENCY: Duration = Duration::from_secs(60);
 const CDC_ACTOR_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const TTL_EXPIRATION_TIMEOUT: Duration = Duration::from_secs(10);
 
-e2etest::group!(
-    name = cdc_direct,
-    fixtures = (FixtureDirect),
-    parent = crate::validator
-);
+e2etest::group!(name = cdc_direct, fixtures = (FixtureDirect));
 
 struct FixtureDirect {
     actors: Arc<TestActors>,
@@ -47,12 +43,6 @@ impl e2etest::Fixture for FixtureDirect {
         cleanup(&self.actors).await;
     }
 }
-
-e2etest::group!(
-    name = cdc_proxy,
-    fixtures = (FixtureProxy),
-    parent = crate::validator
-);
 
 struct FixtureProxy {
     actors: Arc<TestActors>,
@@ -458,11 +448,13 @@ async fn cdc_lwt_delete_visible(actors: Arc<TestActors>) {
 /// DROP + CREATE of the same index), old CDC actors must terminate. If
 /// they are orphaned, the same index ends up with multiple CDC readers
 /// running concurrently, which is the symptom observed in the field.
-#[e2etest::test(group = cdc_direct)]
-async fn recreating_index_terminates_old_cdc_actors(actors: Arc<TestActors>) {
+#[e2etest::test]
+async fn recreating_index_terminates_old_cdc_actors(fixture: Arc<FixtureDirect>) {
     info!("started");
 
-    let (session, clients) = prepare_connection_single_vs(&actors).await;
+    let actors = &fixture.actors;
+
+    let (session, clients) = prepare_connection_single_vs(actors).await;
     let client = &clients[0];
 
     let keyspace = create_keyspace(&session).await;
@@ -1024,11 +1016,13 @@ async fn skip_null_target(actors: Arc<TestActors>) {
 /// 5. Wait for the CDC reader to stop and start again, indicating that it retried after the error.
 /// 6. Remove the error injection and wait for the index to be built successfully.
 /// 7. Drop the keyspace.
-#[e2etest::test(group = cdc_proxy)]
-async fn reader_retries_after_error(actors: Arc<TestActors>) {
+#[e2etest::test]
+async fn reader_retries_after_error(fixture: Arc<FixtureProxy>) {
     info!("started");
 
-    let (session, clients) = prepare_connection_single_vs_no_tls(&actors).await;
+    let actors = &fixture.actors;
+
+    let (session, clients) = prepare_connection_single_vs_no_tls(actors).await;
     let client = clients.first().unwrap();
 
     let keyspace = create_keyspace(&session).await;

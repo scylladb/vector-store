@@ -222,11 +222,7 @@ async fn delete_vector_index_via_update_table(actors: Arc<TestActors>) {
     info!("finished");
 }
 
-e2etest::group!(
-    name = update_table,
-    fixtures = (Fixture),
-    parent = alternator::alternator
-);
+e2etest::group!(name = update_table, fixtures = (Fixture));
 
 struct Fixture {
     actors: Arc<TestActors>,
