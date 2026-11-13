@@ -90,7 +90,36 @@ jobs:
       run: rustc --version
 
     - name: Run cargo-test checks
+      # Fails crates/cosine-kernels' tests if its AVX2 kernel did not run.
+      env:
+        COSINE_KERNELS_EXPECTED: haswell
       run: cargo test --features dev-tools,slow-test-hooks --verbose --all-targets --workspace
+
+  # The test job above runs on x86, so crates/cosine-kernels' tests of its
+  # aarch64 kernels, the ones Vector Store runs on Graviton, would skip them.
+  # (The validator builds and runs Vector Store on arm64, but does not compare
+  # the kernels with a reference.) This runner (Azure Cobalt 100, Neoverse N2:
+  # SVE2 and FEAT_FHM) runs all four; COSINE_KERNELS_EXPECTED fails the tests
+  # if one of them did not run, instead of letting them skip it.
+  cargo-test-arm64:
+    needs: ["rust-check-code-changes"]
+    if: needs.rust-check-code-changes.outputs.code-changed == 'true'
+    runs-on: ubuntu-24.04-arm
+    steps:
+    - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+    - name: Setup rust toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+
+    - name: Print rustc version and CPU features
+      run: |
+        rustc --version
+        grep -m1 Features /proc/cpuinfo
+
+    - name: Run cosine-kernels tests
+      env:
+        COSINE_KERNELS_EXPECTED: neon,sve,neonfhm,sve2
+      run: cargo test -p cosine-kernels --verbose -- --nocapture
 
   cargo-deny:
     needs: ["rust-check-code-changes"]
@@ -163,7 +192,7 @@ jobs:
         retention-days: 7
 
   rust-workflow-status:
-    needs: ["rust-check-code-changes", "cargo-clippy", "cargo-fmt", "cargo-test", "cargo-deny", "cargo-machete", "cargo-sbom"]
+    needs: ["rust-check-code-changes", "cargo-clippy", "cargo-fmt", "cargo-test", "cargo-test-arm64", "cargo-deny", "cargo-machete", "cargo-sbom"]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -190,6 +219,11 @@ jobs:
 
         if [[ "${{ needs.cargo-test.result }}" == "failure" ]]; then
           echo "cargo-test job failed"
+          return_code=1
+        fi
+
+        if [[ "${{ needs.cargo-test-arm64.result }}" == "failure" ]]; then
+          echo "cargo-test-arm64 job failed"
           return_code=1
         fi
 

@@ -1334,6 +1334,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
+name = "cosine-kernels"
+version = "0.0.0-dev"
+dependencies = [
+ "cc",
+ "usearch",
+]
+
+[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3674,7 +3682,8 @@ dependencies = [
 [[package]]
 name = "numkong"
 version = "7.8.6"
-source = "git+https://github.com/scylladb/NumKong.git?rev=2e43be7d77b5d136aebc38eaf28c340c7fa5bbd4#2e43be7d77b5d136aebc38eaf28c340c7fa5bbd4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b58336b841e22774e40a67f4d9645843f67aad64df1e3459ae55dabbfa8dc8a"
 dependencies = [
  "cc",
 ]
@@ -6101,6 +6110,7 @@ dependencies = [
  "clap",
  "console-subscriber",
  "const-hex",
+ "cosine-kernels",
  "criterion",
  "derive_more",
  "diskann",
