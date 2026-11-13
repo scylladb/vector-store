@@ -53,7 +53,7 @@ jobs:
       run: cargo clippy --all-targets --workspace -- -Dwarnings
 
     - name: Run cargo-clippy checks for test-hooks feature flag
-      run: cargo clippy --features slow-test-hooks --all-targets --workspace -- -Dwarnings
+      run: cargo clippy --features slow-test-hooks,bench-hooks --all-targets --workspace -- -Dwarnings
 
   cargo-fmt:
     needs: ["rust-check-code-changes"]
@@ -90,7 +90,7 @@ jobs:
       run: rustc --version
 
     - name: Run cargo-test checks
-      run: cargo test --features dev-tools,slow-test-hooks --verbose --all-targets --workspace
+      run: cargo test --features dev-tools,slow-test-hooks,bench-hooks --verbose --all-targets --workspace
 
   cargo-deny:
     needs: ["rust-check-code-changes"]
