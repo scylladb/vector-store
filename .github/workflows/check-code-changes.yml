@@ -66,17 +66,34 @@ jobs:
           check "$file" "$line" "$(resolve "$(dirname "$file")" "$path")"
         done <<< "$includes"
 
+        # The directory of the crate a file belongs to.
+        crate_dir() {
+          local dir
+          dir=$(dirname "$1")
+          while [[ $dir != . && ! -e $dir/Cargo.toml ]]; do
+            dir=$(dirname "$dir")
+          done
+          echo "$dir"
+        }
+
         # A literal is taken for a path when it has no whitespace, is not a
         # URL and has a / or an extension. As it may be relative to a crate
-        # or appended to one, it is resolved against the repository root, so
-        # any leading ../ is dropped. Include targets were checked above.
+        # or appended to one, it is resolved both against the crate and
+        # against the repository root, where any leading ../ is dropped.
+        # Only a path that exists is flagged, so text that merely looks like
+        # a path passes. Include targets were checked above.
         literals=$(matches -nPo '"\K[^"\s\\]+(?=")' -- 'crates/**.rs')
         while IFS=: read -r file line literal; do
           if [[ -z $file || -n ${included["$file:$line:$literal"]:-} || $literal == *://* ]] ||
             ! [[ $literal == */* || $literal =~ \.[A-Za-z0-9]+$ ]]; then
             continue
           fi
-          check "$file" "$line" "$(realpath -ms --relative-to=/ "/$literal")"
+          for path in "$(resolve "$(crate_dir "$file")" "$literal")" \
+            "$(realpath -ms --relative-to=/ "/$literal")"; do
+            if [[ -e $path ]]; then
+              check "$file" "$line" "$path"
+            fi
+          done
         done <<< "$literals"
 
         # A path key, also dotted (package.readme) or with a single-quoted value.
