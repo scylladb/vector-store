@@ -6,12 +6,45 @@
 import os
 import sys
 import shlex
+import shutil
+import hashlib
 import argparse
+import tempfile
 import subprocess
 
 HOME_DIR='/home/ubuntu'
 USER='ubuntu'
 COPY_OR_MOVE='mv'
+
+# Observability agents pre-installed for Siren, the Scylla Cloud control plane.
+# NOTE: "Vector" below is the Vector log shipper from vector.dev; it has nothing
+# to do with the Vector Store service this image is built for. vmagent is the
+# VictoriaMetrics metrics agent, shipped in the vmutils archive.
+#
+# Siren installs both agents on every cluster VM over SSH, but skips uploading
+# a binary that is already at the path below, reports exactly the pinned
+# version, and is owned by root with no group/world write bit on it or on any
+# parent directory. Only the binaries belong in the image: Siren creates the
+# configuration (/etc/vector must not exist), the users and the systemd units
+# per cluster. Keep these pins in sync with Siren; a bump is a change here only.
+VECTOR_VERSION = '0.58.0'
+VECTOR_TARGET = {'amd64': 'x86_64', 'arm64': 'aarch64'}
+VECTOR_SHA256 = {
+    'amd64': 'a4634bea859a7ad7064ff3dd6f6ad7eb0e8dd4493cc41657d84da8dd66f09d09',
+    'arm64': '06d9f9768feb0cb5c7cdfc12e0b737b22f1220967f5455f391a395361b5799e5',
+}
+VECTOR_URL = 'https://packages.timber.io/vector/{version}/vector-{version}-{target}-unknown-linux-gnu.tar.gz'
+VECTOR_DIR = '/opt/vector'
+VECTOR_BIN = VECTOR_DIR + '/bin/vector'
+
+VMAGENT_VERSION = 'v1.151.0'
+VMUTILS_SHA256 = {
+    'amd64': '1813b8c8f5c609b56ee01243e1c1213b302be9bbd1243e51fd67a06cb83e53d6',
+    'arm64': '5fdfe95bbd09cc4f0884feda725fda25f39aede9deef8cddb11070ecea494206',
+}
+VMUTILS_URL = 'https://github.com/VictoriaMetrics/VictoriaMetrics/releases/download/{version}/vmutils-linux-{arch}-{version}.tar.gz'
+VMUTILS_DIR = '/opt/vmutils'
+VMAGENT_BIN = VMUTILS_DIR + '/vmagent-prod'
 
 def run(template_cmd, shell=False):
     cmd = template_cmd.format(_HOME=HOME_DIR, _USER=USER)
@@ -67,6 +100,73 @@ def install_vector_store(version, arch):
     run('sudo -u {_USER} curl -fL --retry 3 --retry-delay 5 -o {_HOME}/vector-store.tar.gz  https://github.com/scylladb/vector-store/releases/download/{VERSION}/{NAME}.tar.gz'.format(VERSION=version, _HOME=HOME_DIR, _USER=USER, NAME=name))
     run('sudo -u {_USER} tar -xvf {_HOME}/vector-store.tar.gz -C {_HOME}/')
     run('sudo -u {_USER} {_COPY_OR_MOVE} {_HOME}/{NAME} {_HOME}/vector-store'.format(NAME=name, _HOME=HOME_DIR, _USER=USER, _COPY_OR_MOVE=COPY_OR_MOVE))
+
+def download_verified(url, dest, sha256):
+    # -f so an HTTP error fails here instead of saving the error page
+    run('curl -fsSL --retry 3 --retry-delay 5 -o {DEST} {URL}'.format(DEST=dest, URL=url))
+    if dry_run:
+        return
+    digest = hashlib.sha256()
+    with open(dest, 'rb') as f:
+        for chunk in iter(lambda: f.read(1 << 20), b''):
+            digest.update(chunk)
+    if digest.hexdigest() != sha256:
+        raise RuntimeError('sha256 mismatch for {URL}: expected {EXP}, got {GOT}'.format(URL=url, EXP=sha256, GOT=digest.hexdigest()))
+
+def check_trusted(path):
+    # The same check Siren runs before skipping the upload: the binary and every
+    # parent directory below / owned by root and not group- or world-writable
+    p = os.path.realpath(path)
+    while p != '/':
+        st = os.stat(p)
+        if st.st_uid != 0 or st.st_mode & 0o022:
+            raise RuntimeError('{PATH} is not trusted: uid {UID}, mode {MODE:o}'.format(PATH=p, UID=st.st_uid, MODE=st.st_mode & 0o7777))
+        p = os.path.dirname(p)
+
+def check_version_output(cmd, expected, prefix_only=False):
+    out = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True).stdout.decode()
+    if verbose:
+        print(out)
+    ok = out.startswith(expected) if prefix_only else expected in out
+    if not ok:
+        raise RuntimeError('{CMD} printed {OUT!r}, expected {EXP!r}'.format(CMD=' '.join(cmd), OUT=out, EXP=expected))
+
+def install_observability_agents(arch):
+    # Vector (vector.dev log shipper, not Vector Store) and vmagent binaries for
+    # Siren, see the constants above. Runs as root, not as USER: the binaries
+    # must be root-owned and must not live under the user's home. Any failure
+    # raises so the image build fails instead of shipping without the agents.
+    if arch not in VECTOR_TARGET:
+        raise ValueError('unsupported arch {ARCH}, expected one of {KNOWN}'.format(ARCH=arch, KNOWN=sorted(VECTOR_TARGET)))
+    tmp_dir = '/tmp/obs-agents' if dry_run else tempfile.mkdtemp(prefix='obs-agents-')
+    try:
+        vector_tar = os.path.join(tmp_dir, 'vector.tar.gz')
+        vmutils_tar = os.path.join(tmp_dir, 'vmutils.tar.gz')
+        download_verified(VECTOR_URL.format(version=VECTOR_VERSION, target=VECTOR_TARGET[arch]), vector_tar, VECTOR_SHA256[arch])
+        download_verified(VMUTILS_URL.format(version=VMAGENT_VERSION, arch=arch), vmutils_tar, VMUTILS_SHA256[arch])
+        # start from empty directories so the result is exactly the archives
+        run('rm -rf {V} {M}'.format(V=VECTOR_DIR, M=VMUTILS_DIR))
+        run('mkdir -p {V} {M}'.format(V=VECTOR_DIR, M=VMUTILS_DIR))
+        # archive layout is ./vector-<target>/bin/vector -> /opt/vector/bin/vector;
+        # --no-same-owner because tar run as root keeps the archive's uid/gid
+        # (the vmutils members belong to a "builder" user)
+        run('tar -xzf {TAR} --no-same-owner --strip-components=2 -C {V}'.format(TAR=vector_tar, V=VECTOR_DIR))
+        run('tar -xzf {TAR} --no-same-owner -C {M} vmagent-prod'.format(TAR=vmutils_tar, M=VMUTILS_DIR))
+        # do not rely on umask or on the modes stored in the archives
+        run('chown -R root:root {V} {M}'.format(V=VECTOR_DIR, M=VMUTILS_DIR))
+        run('chmod -R go-w {V} {M}'.format(V=VECTOR_DIR, M=VMUTILS_DIR))
+    finally:
+        if not dry_run:
+            shutil.rmtree(tmp_dir)
+    if dry_run:
+        return
+    # fail the build now rather than ship an image Siren would reinstall onto
+    check_version_output([VECTOR_BIN, '--version'], 'vector {V} '.format(V=VECTOR_VERSION), prefix_only=True)
+    check_version_output([VMAGENT_BIN, '-version'], VMAGENT_VERSION)
+    check_trusted(VECTOR_BIN)
+    check_trusted(VMAGENT_BIN)
+    if os.path.lexists('/etc/vector'):
+        raise RuntimeError('/etc/vector exists; Siren creates it and fails if it holds extra files')
 
 def install_node_exporter(arch):
     try:
@@ -135,6 +235,7 @@ if __name__ == '__main__':
     if args.do_not_move:
         COPY_OR_MOVE='cp'
     install_vector_store(args.version, args.arch)
+    install_observability_agents(args.arch)
     install_service()
     configure_journald()
     disable_syslog()
