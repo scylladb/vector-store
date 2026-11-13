@@ -54,8 +54,6 @@ def get_swap_scripts():
     run('chown {_USER}:{_USER} {_HOME}/scylla_product.py')
 
 def update_swap(size):
-    if size == 0:
-        return
     try:
         run('{_HOME}/scylla_swap_setup --swap-size {SIZE}'.format(_HOME=HOME_DIR, SIZE=size))
     except Exception as e:
@@ -142,6 +140,9 @@ if __name__ == '__main__':
     disable_syslog()
     install_pip_package(args.arch)
     get_swap_scripts()
-    update_swap(args.swap_size)
+    if args.swap_size > 0:
+        update_swap(args.swap_size)
+    else:
+        print("No swap will be created, as requested")
     install_node_exporter(arch=args.arch)
     install_process_exporter()
