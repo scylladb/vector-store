@@ -177,10 +177,16 @@ struct ThreadedUsearchIndex {
     space_type: usearch::MetricKind,
 }
 
-/// Logs the SIMD kernel usearch picked (e.g. "neon", "sve", "haswell", "serial") once per
-/// (quantization, metric) pair in the process: the choice depends on the build, the CPU and
-/// those two options, and a local index with many partitions must not repeat the line.
-fn log_hardware_acceleration(index: &usearch::Index, options: &IndexOptions) {
+/// Logs the SIMD kernel an index computes distances with once per (quantization, metric) pair in
+/// the process: Vector Store's own cosine kernel when `cosine_kernels::install` set one (e.g.
+/// "sve2"), otherwise the one usearch picked from numkong (e.g. "neon", "sve", "haswell",
+/// "serial"). The choice depends on the build, the CPU and those two options, and a local index
+/// with many partitions must not repeat the line.
+fn log_hardware_acceleration(
+    index: &usearch::Index,
+    options: &IndexOptions,
+    cosine_kernel: Option<&str>,
+) {
     static LOGGED: Mutex<Vec<(usearch::ScalarKind, usearch::MetricKind)>> = Mutex::new(Vec::new());
     let key = (options.quantization, options.metric);
     let mut logged = LOGGED
@@ -188,19 +194,24 @@ fn log_hardware_acceleration(index: &usearch::Index, options: &IndexOptions) {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if !logged.contains(&key) {
         logged.push(key);
+        let kernel = match cosine_kernel {
+            Some(kernel) => format!("{kernel}, Vector Store's cosine kernel"),
+            None => index.hardware_acceleration(),
+        };
         info!(
-            "usearch hardware acceleration: {} ({:?} {:?})",
-            index.hardware_acceleration(),
-            options.quantization,
-            options.metric
+            "usearch hardware acceleration: {kernel} ({:?} {:?})",
+            options.quantization, options.metric
         );
     }
 }
 
 impl ThreadedUsearchIndex {
     fn new(options: IndexOptions, threads: usize) -> anyhow::Result<Self> {
-        let inner = usearch::Index::new(&options)?;
-        log_hardware_acceleration(&inner, &options);
+        let mut inner = usearch::Index::new(&options)?;
+        // Replaces numkong's cosine kernel of an f32 or f16 index with Vector Store's, which
+        // accumulates in f32: see crates/cosine-kernels.
+        let cosine_kernel = cosine_kernels::install(&mut inner);
+        log_hardware_acceleration(&inner, &options, cosine_kernel);
         Ok(Self {
             inner,
             threads,
