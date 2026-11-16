@@ -17,7 +17,6 @@ use std::sync::RwLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::Sender;
 use uuid::Uuid;
 use vector_store::AsyncInProgress;
 use vector_store::ColumnName;
@@ -157,13 +156,13 @@ where
 #[derive(Clone, derive_more::Debug)]
 pub(crate) struct DbBasic(#[debug(skip)] Arc<RwLock<DbMock>>);
 
-pub(crate) fn new(node_state: Sender<NodeState>) -> (mpsc::Sender<Db>, DbBasic) {
+pub(crate) fn new(node_state: mpsc::Sender<NodeState>) -> (mpsc::Sender<Db>, DbBasic) {
     new_with(node_state, StoreVectors::default())
 }
 
 /// [`new`], for a test that needs a non-default [`StoreVectors`].
 pub(crate) fn new_with(
-    node_state: Sender<NodeState>,
+    node_state: mpsc::Sender<NodeState>,
     store_vectors: StoreVectors,
 ) -> (mpsc::Sender<Db>, DbBasic) {
     let (tx, mut rx) = mpsc::channel(10);
@@ -382,7 +381,7 @@ impl DbBasic {
     }
 }
 
-fn process_db(db: &DbBasic, msg: Db, node_state: Sender<NodeState>) {
+fn process_db(db: &DbBasic, msg: Db, node_state: mpsc::Sender<NodeState>) {
     match msg {
         Db::GetDbIndex { metadata, tx } => tx
             .send(new_db_index(db.clone(), metadata, node_state.clone()))
@@ -570,7 +569,7 @@ fn process_db(db: &DbBasic, msg: Db, node_state: Sender<NodeState>) {
 pub(crate) fn new_db_index(
     mut db: DbBasic,
     metadata: IndexMetadata,
-    node_state: Sender<NodeState>,
+    node_state: mpsc::Sender<NodeState>,
 ) -> anyhow::Result<(mpsc::Sender<DbIndex>, RxIndexedRow)> {
     if db.0.read().unwrap().next_get_db_index_failed {
         db.0.write().unwrap().next_get_db_index_failed = false;
