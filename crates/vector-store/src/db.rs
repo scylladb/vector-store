@@ -1314,7 +1314,7 @@ fn validate_primary_key_columns<T: DbDriver>(
         if !cql_types::is_supported(&column.typ) {
             return Err(UnsupportedPrimaryKeyType {
                 column: name,
-                typ: format!("{:?}", column.typ),
+                typ: column.typ.to_string(),
             });
         }
     }

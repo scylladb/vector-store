@@ -70,7 +70,7 @@ impl Column {
             NativeType::TinyInt => Self::TinyInt(ColumnVec::new()),
             NativeType::Uuid => Self::Uuid(ColumnVec::new()),
             NativeType::Varint => Self::Varint(ColumnVec::new()),
-            _ => bail!("Unsupported native type: {native_type:?}"),
+            _ => bail!("Unsupported native type: {native_type}"),
         })
     }
 
