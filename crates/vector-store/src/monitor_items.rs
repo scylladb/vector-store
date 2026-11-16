@@ -14,6 +14,7 @@ use crate::PrimaryKey;
 use crate::Timestamp;
 use crate::Timestamped;
 use crate::Vector;
+use crate::async_in_progress::Applied;
 use crate::fts_index::FtsIndex;
 use crate::fts_index::FtsIndexExt;
 use crate::metrics::OP_INSERT;
@@ -28,6 +29,7 @@ use crate::table::PrimaryId;
 use crate::table::TableModify;
 use crate::vs_index::VsIndexModify;
 use crate::vs_index::VsIndexModifyExt;
+use std::collections::HashSet;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -186,6 +188,46 @@ impl IndexDispatch for mpsc::Sender<PatternIndex> {
 
 pub(crate) enum MonitorItems {}
 
+/// The rows whose add an index has not applied yet. Changes of different rows run concurrently
+/// in the index, so the remove of a row waits here until its add is applied, or the add could
+/// run after it and survive.
+struct InFlight {
+    ids: HashSet<PrimaryId>,
+    tx: mpsc::UnboundedSender<PrimaryId>,
+    rx: mpsc::UnboundedReceiver<PrimaryId>,
+}
+
+impl InFlight {
+    fn new() -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
+        Self {
+            ids: HashSet::new(),
+            tx,
+            rx,
+        }
+    }
+
+    fn add(&mut self, primary_id: PrimaryId) -> Applied {
+        self.drain();
+        self.ids.insert(primary_id);
+        Applied::new(primary_id, self.tx.clone())
+    }
+
+    fn drain(&mut self) {
+        while let Ok(primary_id) = self.rx.try_recv() {
+            self.ids.remove(&primary_id);
+        }
+    }
+
+    async fn wait(&mut self, primary_id: PrimaryId) {
+        while self.ids.contains(&primary_id)
+            && let Some(applied) = self.rx.recv().await
+        {
+            self.ids.remove(&applied);
+        }
+    }
+}
+
 pub(crate) async fn new<T>(
     key: IndexKey,
     table: Arc<RwLock<impl TableModify + Send + Sync + 'static>>,
@@ -207,6 +249,7 @@ where
     tokio::spawn(perf::hotpath_async(
         async move {
             debug!("starting");
+            let mut in_flight = InFlight::new();
 
             while !rx.is_closed() {
                 tokio::select! {
@@ -218,19 +261,13 @@ where
                         // refresh of the gauges count it.
                         let in_progress = in_progress.marking(dirty.clone());
                         let primary_key = db_row.primary_key;
-                        match db_row.operation {
-                            DbIndexedOperation::Upsert(values) => {
-                                if upsert(&table, &index, primary_key, values, in_progress, &metrics, &key).await.is_dead() {
-                                    error!("Index for {key:?} disappeared while processing upsert");
-                                    break;
-                                }
-                            }
-                            DbIndexedOperation::Delete(timestamp) => {
-                                if delete(&table, &index, primary_key, timestamp, in_progress, &metrics, &key).await.is_dead() {
-                                    error!("Index for {key:?} disappeared while processing delete");
-                                    break;
-                                }
-                            }
+                        let operations = match db_row.operation {
+                            DbIndexedOperation::Upsert(values) => upsert(&table, primary_key, values, &key),
+                            DbIndexedOperation::Delete(timestamp) => delete(&table, primary_key, timestamp, &key),
+                        };
+                        if process_operations(operations, &index, &mut in_flight, in_progress, &metrics, &key).await.is_dead() {
+                            error!("Index for {key:?} disappeared while processing a row");
+                            break;
                         }
                     }
                     _ = rx.recv() => { }
@@ -244,53 +281,42 @@ where
     Ok(tx)
 }
 
-async fn upsert<I: IndexDispatch>(
+fn upsert(
     table: &Arc<RwLock<impl TableModify>>,
-    index: &I,
     primary_key: PrimaryKey,
     values: NonemptyBox<Timestamped<DbIndexedValue>>,
-    in_progress: AsyncInProgress,
-    metrics: &Metrics,
     index_key: &IndexKey,
-) -> IndexStatus {
-    let Ok(operations) = table
+) -> Vec<Operation> {
+    table
         .write()
         .unwrap()
         .upsert(index_key, primary_key, values)
         .inspect_err(|err| {
             error!("failed to upsert values to a table: {err}");
         })
-    else {
-        return IndexStatus::Live;
-    };
-    process_operations(operations, index, in_progress, metrics, index_key).await
+        .unwrap_or_default()
 }
 
-async fn delete<I: IndexDispatch>(
+fn delete(
     table: &Arc<RwLock<impl TableModify>>,
-    index: &I,
     primary_key: PrimaryKey,
     timestamp: Timestamp,
-    in_progress: AsyncInProgress,
-    metrics: &Metrics,
     index_key: &IndexKey,
-) -> IndexStatus {
-    let Ok(operations) = table
+) -> Vec<Operation> {
+    table
         .write()
         .unwrap()
         .delete(index_key, primary_key, timestamp)
         .inspect_err(|err| {
             error!("failed to delete row from a table: {err}");
         })
-    else {
-        return IndexStatus::Live;
-    };
-    process_operations(operations, index, in_progress, metrics, index_key).await
+        .unwrap_or_default()
 }
 
 async fn process_operations<I: IndexDispatch>(
     operations: Vec<Operation>,
     index: &I,
+    in_flight: &mut InFlight,
     mut in_progress: AsyncInProgress,
     metrics: &Metrics,
     index_key: &IndexKey,
@@ -306,7 +332,12 @@ async fn process_operations<I: IndexDispatch>(
             } => {
                 let op_label = if is_update { OP_UPDATE } else { OP_INSERT };
                 if index
-                    .add_vector(partition_id, primary_id, vector, in_progress.take())
+                    .add_vector(
+                        partition_id,
+                        primary_id,
+                        vector,
+                        in_progress.take().applying(in_flight.add(primary_id)),
+                    )
                     .await
                     .is_dead()
                 {
@@ -329,7 +360,12 @@ async fn process_operations<I: IndexDispatch>(
             } => {
                 let op_label = if is_update { OP_UPDATE } else { OP_INSERT };
                 if index
-                    .add_document(partition_id, primary_id, document, in_progress.take())
+                    .add_document(
+                        partition_id,
+                        primary_id,
+                        document,
+                        in_progress.take().applying(in_flight.add(primary_id)),
+                    )
                     .await
                     .is_dead()
                 {
@@ -348,6 +384,8 @@ async fn process_operations<I: IndexDispatch>(
                 primary_id,
                 partition_id,
             } => {
+                in_flight.wait(primary_id).await;
+
                 // The index applies the removal apart from the add, which may go to another
                 // partition, so the removal marks the index too.
                 if index
@@ -362,6 +400,8 @@ async fn process_operations<I: IndexDispatch>(
                 primary_id,
                 partition_id,
             } => {
+                in_flight.wait(primary_id).await;
+
                 if index
                     .remove_value(partition_id, primary_id, in_progress.take())
                     .await
@@ -403,6 +443,7 @@ mod tests {
     use anyhow::anyhow;
     use mockall::predicate::*;
     use scylla::value::CqlValue;
+    use std::time::Duration;
 
     // prometheus counter returns f64, so we need to compare with f64 values
     fn assert_modified_metric_counts(metrics: &Metrics, insert: f64, update: f64, remove: f64) {
@@ -739,6 +780,82 @@ mod tests {
         assert_marks_when_dropped(&metrics, &index_key, removal);
         assert_marks_when_dropped(&metrics, &index_key, in_progress);
         assert_modified_metric_counts(&metrics, 0., 1., 0.);
+    }
+
+    #[tokio::test]
+    async fn remove_waits_for_add_of_same_row() {
+        let (tx_db_rows, rx_db_rows) = mpsc::channel(10);
+        let (tx_index, mut rx_index) = mpsc::channel::<VsIndexModify>(10);
+        let table = Arc::new(RwLock::new(MockTableModify::new()));
+        let index_key = IndexKey::new(&"vector".to_string().into(), &"store".to_string().into());
+        let _actor = new(
+            index_key,
+            Arc::clone(&table),
+            rx_db_rows,
+            tx_index,
+            Arc::new(Metrics::new()),
+        )
+        .await
+        .unwrap();
+
+        table
+            .write()
+            .unwrap()
+            .expect_upsert()
+            .once()
+            .returning(|_, _, _| {
+                Ok(vec![Operation::AddVector {
+                    primary_id: 2.into(),
+                    partition_id: 3.into(),
+                    vector: vec![4.].into(),
+                    is_update: false,
+                }])
+            });
+        table
+            .write()
+            .unwrap()
+            .expect_delete()
+            .once()
+            .returning(|_, _, _| {
+                Ok(vec![Operation::RemoveValue {
+                    primary_id: 2.into(),
+                    partition_id: 3.into(),
+                }])
+            });
+        let values =
+            NonemptyBox::new([Timestamped::new(Timestamp::from_millis(10), None)]).unwrap();
+        for operation in [
+            DbIndexedOperation::Upsert(values),
+            DbIndexedOperation::Delete(Timestamp::from_millis(20)),
+        ] {
+            let row = DbIndexedRow {
+                primary_key: [CqlValue::Int(1)].into(),
+                operation,
+            };
+            tx_db_rows
+                .send((row, AsyncInProgress::none()))
+                .await
+                .unwrap();
+        }
+
+        let Some(VsIndexModify::AddVector {
+            mut in_progress, ..
+        }) = rx_index.recv().await
+        else {
+            unreachable!();
+        };
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), rx_index.recv())
+                .await
+                .is_err(),
+            "the remove must wait until its add is applied"
+        );
+
+        in_progress.applied();
+        let Some(VsIndexModify::RemoveVector { primary_id, .. }) = rx_index.recv().await else {
+            unreachable!();
+        };
+        assert_eq!(primary_id, 2.into());
     }
 
     #[tokio::test]
