@@ -35,7 +35,7 @@ packer build -var-file=variables.json -var vector_version="0.4.0" -var 'arch=arm
 ## Variables
 
 
-The ScyllaDB vector store Image uses default variables that are declared in the packer template file, for example `aws_source_ami`, `gcp_project_id` etc.
+The ScyllaDB vector store Image uses default variables that are declared in the packer template file, for example `aws_source_ami_filter_name_amd64`, `gcp_project_id` etc.
 You can override these default variables by creating a `variables.json` with the desired variable values, for example:
 
 ```json
