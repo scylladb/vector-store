@@ -10,6 +10,7 @@ import shutil
 import hashlib
 import argparse
 import tempfile
+import sysconfig
 import subprocess
 
 HOME_DIR='/home/ubuntu'
@@ -75,9 +76,16 @@ def chdir(template_dir):
         print('cd ', dir)
     os.chdir(dir)
 
-def install_pip_package(arch):
+def pip_externally_managed():
+    # PEP 668: a distribution marks its Python as externally managed with this
+    # file, and pip then refuses to install system-wide without
+    # --break-system-packages. Ubuntu ships the marker since 23.04, whose pip is
+    # also the first to know the flag, so pass it exactly when the marker exists.
+    return os.path.exists(os.path.join(sysconfig.get_path('stdlib'), 'EXTERNALLY-MANAGED'))
+
+def install_pip_package():
     try:
-        run('pip3 install {_BREAK_SYSTEM_PACKAGES} psutil traceback_with_variables'.format(_BREAK_SYSTEM_PACKAGES='--break-system-packages' if arch=='arm64' else ''))
+        run('pip3 install {_BREAK_SYSTEM_PACKAGES} psutil traceback_with_variables'.format(_BREAK_SYSTEM_PACKAGES='--break-system-packages' if pip_externally_managed() else ''))
     except Exception as e:
         print("pip3 install failed" + str(e))
         print(e.output)
@@ -239,7 +247,7 @@ if __name__ == '__main__':
     install_service()
     configure_journald()
     disable_syslog()
-    install_pip_package(args.arch)
+    install_pip_package()
     get_swap_scripts()
     if args.swap_size > 0:
         update_swap(args.swap_size)
