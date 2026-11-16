@@ -218,19 +218,13 @@ where
                         // refresh of the gauges count it.
                         let in_progress = in_progress.marking(dirty.clone());
                         let primary_key = db_row.primary_key;
-                        match db_row.operation {
-                            DbIndexedOperation::Upsert(values) => {
-                                if upsert(&table, &index, primary_key, values, in_progress, &metrics, &key).await.is_dead() {
-                                    error!("Index for {key:?} disappeared while processing upsert");
-                                    break;
-                                }
-                            }
-                            DbIndexedOperation::Delete(timestamp) => {
-                                if delete(&table, &index, primary_key, timestamp, in_progress, &metrics, &key).await.is_dead() {
-                                    error!("Index for {key:?} disappeared while processing delete");
-                                    break;
-                                }
-                            }
+                        let operations = match db_row.operation {
+                            DbIndexedOperation::Upsert(values) => upsert(&table, primary_key, values, &key),
+                            DbIndexedOperation::Delete(timestamp) => delete(&table, primary_key, timestamp, &key),
+                        };
+                        if process_operations(operations, &index, in_progress, &metrics, &key).await.is_dead() {
+                            error!("Index for {key:?} disappeared while processing a row");
+                            break;
                         }
                     }
                     _ = rx.recv() => { }
@@ -244,48 +238,36 @@ where
     Ok(tx)
 }
 
-async fn upsert<I: IndexDispatch>(
+fn upsert(
     table: &Arc<RwLock<impl TableModify>>,
-    index: &I,
     primary_key: PrimaryKey,
     values: NonemptyBox<Timestamped<DbIndexedValue>>,
-    in_progress: AsyncInProgress,
-    metrics: &Metrics,
     index_key: &IndexKey,
-) -> IndexStatus {
-    let Ok(operations) = table
+) -> Vec<Operation> {
+    table
         .write()
         .unwrap()
         .upsert(index_key, primary_key, values)
         .inspect_err(|err| {
             error!("failed to upsert values to a table: {err}");
         })
-    else {
-        return IndexStatus::Live;
-    };
-    process_operations(operations, index, in_progress, metrics, index_key).await
+        .unwrap_or_default()
 }
 
-async fn delete<I: IndexDispatch>(
+fn delete(
     table: &Arc<RwLock<impl TableModify>>,
-    index: &I,
     primary_key: PrimaryKey,
     timestamp: Timestamp,
-    in_progress: AsyncInProgress,
-    metrics: &Metrics,
     index_key: &IndexKey,
-) -> IndexStatus {
-    let Ok(operations) = table
+) -> Vec<Operation> {
+    table
         .write()
         .unwrap()
         .delete(index_key, primary_key, timestamp)
         .inspect_err(|err| {
             error!("failed to delete row from a table: {err}");
         })
-    else {
-        return IndexStatus::Live;
-    };
-    process_operations(operations, index, in_progress, metrics, index_key).await
+        .unwrap_or_default()
 }
 
 async fn process_operations<I: IndexDispatch>(
