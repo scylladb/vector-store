@@ -372,7 +372,7 @@ async fn index_with_unsupported_primary_key_type_is_reported_as_unsupported(
         .expect_err("Expected the ANN query on the unsupported index to fail")
         .to_string();
     assert!(
-        err.contains("column pk has type Tuple"),
+        err.contains("column pk has type frozen<tuple<int, int>>"),
         "Expected the reason in the query error, got: {err}"
     );
 

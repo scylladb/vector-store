@@ -419,9 +419,10 @@ async fn indexes_listing_reports_status_of_a_fulltext_index() {
     assert_eq!(entries[0].build_progress, 100.0);
 }
 
-const UNSUPPORTED_REASON: &str = "unsupported primary key column type: column pk has type Tuple";
+const UNSUPPORTED_REASON: &str =
+    "unsupported primary key column type: column pk has type frozen<tuple<int, int>>";
 const UNSUPPORTED_RESPONSE: &str = "index keyspace.idx cannot be served: \
-    unsupported primary key column type: column pk has type Tuple";
+    unsupported primary key column type: column pk has type frozen<tuple<int, int>>";
 
 async fn setup_unsupported_index(
     kind: DbIndexKind,

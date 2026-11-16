@@ -168,32 +168,39 @@ impl DbDriver for ScyllaDriver {
 
         let cluster_state = session.get_cluster_state();
 
-        let node = &cluster_state.get_nodes_info()[0];
+        let node = cluster_state
+            .get_nodes_info()
+            .iter()
+            .filter_map(|node| node.is_scylladb())
+            .max();
 
-        if !node.is_enabled() {
-            return Err(anyhow::anyhow!("Node is not enabled"));
-        }
-        // From docs: If the node is enabled and does not have a sharder, this means it's not a ScyllaDB node.
-        let connected_to_scylla = node.sharder().is_some();
-
-        if connected_to_scylla {
-            let version: (String,) = session
-                .query_unpaged(
-                    "SELECT version FROM system.versions WHERE key = 'local'",
-                    &[],
-                )
-                .await?
-                .into_rows_result()?
-                .single_row()?;
-            info!(
-                "Connected to ScyllaDB {} at {}",
-                version.0, config.scylladb_uri
-            );
-        } else {
-            warn!(
-                "No ScyllaDB node at {}, please verify the URI",
-                config.scylladb_uri
-            );
+        match node {
+            Some(true) => {
+                let version: (String,) = session
+                    .query_unpaged(
+                        "SELECT version FROM system.versions WHERE key = 'local'",
+                        &[],
+                    )
+                    .await?
+                    .into_rows_result()?
+                    .single_row()?;
+                info!(
+                    "Connected to ScyllaDB {} at {}",
+                    version.0, config.scylladb_uri
+                );
+            }
+            Some(false) => {
+                warn!(
+                    "No ScyllaDB node at {}, please verify the URI",
+                    config.scylladb_uri
+                );
+            }
+            None => {
+                return Err(anyhow!(
+                    "No node of the cluster at {} is enabled with open connections",
+                    config.scylladb_uri
+                ));
+            }
         }
         Ok(session)
     }

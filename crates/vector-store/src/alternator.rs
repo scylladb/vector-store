@@ -65,12 +65,12 @@ pub(crate) fn parse_alternator_scalar(
     if tag != expected_tag {
         bail!(
             "Alternator attribute value has type tag {tag:#04x}, but column is declared as \
-            {native_type:?} (expected tag {expected_tag:#04x})"
+            {native_type} (expected tag {expected_tag:#04x})"
         );
     }
     let column_type = ColumnType::Native(native_type.clone());
     CqlValue::deserialize(&column_type, Some(FrameSlice::new_borrowed(payload))).map_err(|err| {
-        anyhow!("failed to decode Alternator attribute value as {native_type:?}: {err}")
+        anyhow!("failed to decode Alternator attribute value as {native_type}: {err}")
     })
 }
 
