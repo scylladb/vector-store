@@ -148,7 +148,7 @@
     "aws_region": "us-east-1",
     "aws_regions": "us-west-2,eu-west-2,eu-west-1,eu-central-1,eu-north-1",
     "aws_source_ami_amd64": "ami-02a35bd020554f400",
-    "aws_instance_type_amd64": "c4.xlarge",
+    "aws_instance_type_amd64": "c5.xlarge",
     "aws_source_ami_arm64": "ami-026fccd88446aa0bf",
     "aws_instance_type_arm64": "c7g.xlarge",
 
