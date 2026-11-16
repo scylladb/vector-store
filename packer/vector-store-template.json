@@ -62,6 +62,7 @@
       "source_image_family": "{{ user (printf \"gcp_source_image_family_%s\" (user \"arch\")) }}",
       "image_storage_locations": ["{{user `gcp_image_storage_location`}}"],
       "machine_type": "{{user (printf \"gcp_instance_type_%s\" (user \"arch\")) }}",
+      "min_cpu_platform": "{{ user (printf \"gcp_min_cpu_platform_%s\" (user \"arch\")) }}",
       "ssh_username": "{{user `gcp_ssh_username`}}",
       "ssh_timeout": "6m",
       "metadata": { "block-project-ssh-keys": "TRUE" },
@@ -161,9 +162,11 @@
 
     "gcp_source_image_family_amd64": "ubuntu-minimal-2204-lts",
     "gcp_instance_type_amd64": "n1-standard-1",
+    "gcp_min_cpu_platform_amd64": "Intel Haswell",
 
     "gcp_source_image_family_arm64": "ubuntu-minimal-2204-lts-arm64",
     "gcp_instance_type_arm64": "t2a-standard-2",
+    "gcp_min_cpu_platform_arm64": "",
     "gcp_ssh_username": "ubuntu",
     "gcp_install_args": "--cloud gce --verbose --version {{ user `vector_version` }} --arch {{ user `arch` }} --swap-size {{ user `swap_size` }}"
   }
