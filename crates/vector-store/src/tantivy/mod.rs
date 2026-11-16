@@ -68,9 +68,10 @@ impl Writer {
     fn add_document(
         &mut self,
         doc: TantivyDocument,
-        in_progress: AsyncInProgress,
+        mut in_progress: AsyncInProgress,
     ) -> tantivy::Result<usize> {
         self.writer.add_document(doc)?;
+        in_progress.applied();
         self.uncommitted_docs_in_progress_guards.push(in_progress);
         Ok(self.uncommitted_docs())
     }
