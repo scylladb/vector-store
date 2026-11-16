@@ -384,6 +384,8 @@ async fn process<T, B>(
         Message::Modify(VsIndexModify::AddVector {
             primary_id,
             embedding,
+            // Must not be dropped before the insert is done, or a remove of the row may run first
+            // and leave the vector indexed.
             in_progress: _in_progress,
             ..
         }) => add_vector(backend.as_ref(), &partition, &size, primary_id, embedding).await,
