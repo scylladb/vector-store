@@ -94,6 +94,20 @@
     {
       "type": "shell",
       "inline": [
+        "set -eu",
+
+        "sudo systemctl stop unattended-upgrades || true",
+        "sudo systemctl stop apt-daily.service apt-daily-upgrade.service || true",
+        "sudo systemctl stop apt-daily.timer apt-daily-upgrade.timer || true",
+        "sudo systemctl mask apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service || true",
+
+        "sudo /home/ubuntu/wait_for_apt_locks",
+        "sudo env DEBIAN_FRONTEND=noninteractive dpkg --configure -a || true"
+      ]
+    },
+    {
+      "type": "shell",
+      "inline": [
         "sudo apt-get update --fix-missing -y",
         "sudo apt-get upgrade -y",
         "sudo apt-get install -y python3-setuptools",

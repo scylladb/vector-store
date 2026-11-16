@@ -1,0 +1,98 @@
+#!/usr/bin/python3
+
+# Copyright 2026-present ScyllaDB
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
+
+# Wait until no process holds the apt and dpkg locks.
+#
+# The image build runs apt-get right after the instance boots, when a package
+# job started by the base image (apt-daily, unattended-upgrades) may still be
+# running; apt-get then fails with "Could not get lock". Stopping those units
+# does not always end the job at once, so the packer template calls this
+# script before its first apt-get.
+#
+# The locks are looked up in /proc/locks, without fuser: psmisc, which ships
+# fuser, is not part of the Ubuntu minimal cloud images, and a loop built on a
+# missing fuser waits for nothing. Reading /proc/locks takes no lock, so an apt
+# run that starts while this script checks is not disturbed.
+
+import os
+import sys
+import time
+import argparse
+
+LOCK_FILES = [
+    '/var/lib/dpkg/lock-frontend',
+    '/var/lib/dpkg/lock',
+    '/var/lib/apt/lists/lock',
+    '/var/cache/apt/archives/lock',
+]
+# A package job releases one lock before it takes the next, so the locks must
+# stay free for this many checks in a row, CHECK_INTERVAL seconds apart
+QUIET_CHECKS = 3
+CHECK_INTERVAL = 1
+
+def locked_files():
+    # The files that have a lock in /proc/locks, as "MAJOR:MINOR:INODE" (the
+    # device numbers in hexadecimal, as the kernel writes them). apt and dpkg
+    # take fcntl record locks on the lock files, which /proc/locks lists as
+    # POSIX locks, or as OFDLCK for open file description locks; a process
+    # waiting for a lock is listed too, on a line with "->"
+    locked = set()
+    with open('/proc/locks') as f:
+        for line in f:
+            fields = line.split()
+            if '->' in fields:
+                continue
+            locked.update(field for field in fields if field.count(':') == 2)
+    return locked
+
+def lock_id(path):
+    st = os.stat(path)
+    return '{MAJ:02x}:{MIN:02x}:{INO}'.format(MAJ=os.major(st.st_dev), MIN=os.minor(st.st_dev), INO=st.st_ino)
+
+def held_locks():
+    # The lock files that a process holds a lock on. A file that does not exist
+    # is not locked
+    locked = locked_files()
+    busy = []
+    for path in LOCK_FILES:
+        try:
+            if lock_id(path) in locked:
+                busy.append(path)
+        except FileNotFoundError:
+            pass
+    return busy
+
+def wait_for_locks(timeout):
+    deadline = time.monotonic() + timeout
+    quiet = 0
+    reported = None
+    while quiet < QUIET_CHECKS:
+        busy = held_locks()
+        if busy:
+            quiet = 0
+            if time.monotonic() >= deadline:
+                return busy
+            if busy != reported:
+                print('Waiting for {LOCKS}'.format(LOCKS=', '.join(busy)), flush=True)
+                reported = busy
+        else:
+            quiet += 1
+        if quiet < QUIET_CHECKS:
+            time.sleep(CHECK_INTERVAL)
+    return []
+
+if __name__ == '__main__':
+    if os.getuid() > 0:
+        print('Requires root permission.')
+        sys.exit(1)
+    parser = argparse.ArgumentParser(description='Wait until the apt and dpkg locks are free')
+    parser.add_argument('--timeout', default=600, type=int, help='give up and fail after this many seconds')
+    args = parser.parse_args()
+
+    still_held = wait_for_locks(args.timeout)
+    if still_held:
+        print('Timed out after {T}s waiting for {LOCKS}'.format(T=args.timeout, LOCKS=', '.join(still_held)))
+        sys.exit(1)
+    print('The apt and dpkg locks are free')
