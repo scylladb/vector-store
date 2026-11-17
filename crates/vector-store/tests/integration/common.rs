@@ -11,6 +11,7 @@ use crate::db_basic::Table;
 use crate::vs_index::usearch_test_config;
 use futures::FutureExt;
 use httpclient::HttpClient;
+use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
 use scylla::value::CqlValue;
 use std::num::NonZeroUsize;
@@ -172,7 +173,12 @@ pub(crate) fn add_table(
         Table {
             primary_keys: primary_keys.into_iter().collect_nonempty_arc().unwrap(),
             partition_key_count,
-            columns: Arc::new(columns.into_iter().collect()),
+            columns: Arc::new(
+                columns
+                    .into_iter()
+                    .map(|(name, column)| (name, ColumnType::Native(column)))
+                    .collect(),
+            ),
             dimensions: vector_columns
                 .into_iter()
                 .map(|c| (c, NonZeroUsize::new(3).unwrap().into()))

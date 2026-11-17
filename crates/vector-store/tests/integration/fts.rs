@@ -14,6 +14,7 @@ use httpapi::IndexNotReadyReason;
 use httpapi::IndexStatus;
 use httpclient::HttpClient;
 use reqwest::StatusCode;
+use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
 use scylla::value::CqlValue;
 use std::collections::HashMap;
@@ -76,7 +77,12 @@ async fn setup_fts_store(
     let node_state = vector_store::new_node_state().await;
     let (db_actor, db) = db_basic::new(node_state.clone());
 
-    let columns: Arc<HashMap<_, _>> = Arc::new(columns.into_iter().collect());
+    let columns: Arc<HashMap<_, _>> = Arc::new(
+        columns
+            .into_iter()
+            .map(|(name, column)| (name, ColumnType::Native(column)))
+            .collect(),
+    );
     let index = fts_index_metadata(primary_keys);
 
     db.add_table(

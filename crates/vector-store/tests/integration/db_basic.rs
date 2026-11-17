@@ -7,7 +7,7 @@ use anyhow::anyhow;
 use anyhow::bail;
 use futures::FutureExt;
 use futures::future::BoxFuture;
-use scylla::cluster::metadata::NativeType;
+use scylla::cluster::metadata::ColumnType;
 use scylla::value::CqlValue;
 use std::collections::HashMap;
 use std::iter;
@@ -181,7 +181,7 @@ pub(crate) fn new_with(
 pub(crate) struct Table {
     pub(crate) primary_keys: NonemptyArc<ColumnName>,
     pub(crate) partition_key_count: usize,
-    pub(crate) columns: Arc<HashMap<ColumnName, NativeType>>,
+    pub(crate) columns: Arc<HashMap<ColumnName, ColumnType<'static>>>,
     pub(crate) dimensions: HashMap<ColumnName, Dimensions>,
 }
 
@@ -729,7 +729,20 @@ async fn spawn_process_db_index(
                         .keyspaces
                         .get(&metadata.keyspace_name)
                         .and_then(|keyspace| keyspace.tables.get(&metadata.table_name))
-                        .map(|table| table.columns.clone())
+                        .map(|table| {
+                            Arc::new(
+                                table
+                                    .columns
+                                    .iter()
+                                    .map(|(name, column)| {
+                                        let ColumnType::Native(column) = column else {
+                                            panic!("Expected native column type")
+                                        };
+                                        (name.clone(), column.clone())
+                                    })
+                                    .collect(),
+                            )
+                        })
                         .unwrap_or_default(),
                 )
                 .map_err(|_| anyhow!("DbIndex::GetPrimaryKeyColumns: unable to send response"))

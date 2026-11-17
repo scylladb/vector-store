@@ -11,6 +11,7 @@ use crate::vs_index::usearch_test_config;
 use futures::FutureExt;
 use httpapi::NodeStatus;
 use httpclient::HttpClient;
+use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
 use scylla::value::CqlValue;
 use std::num::NonZeroUsize;
@@ -82,7 +83,11 @@ async fn memory_limit_during_index_build() {
         Table {
             primary_keys: NonemptyArc::new(["pk"]).unwrap(),
             partition_key_count: 1,
-            columns: Arc::new([("pk".into(), NativeType::Int)].into_iter().collect()),
+            columns: Arc::new(
+                [("pk".into(), ColumnType::Native(NativeType::Int))]
+                    .into_iter()
+                    .collect(),
+            ),
             dimensions: [(
                 index.target_columns.first().clone(),
                 index.vs().unwrap().dimensions,

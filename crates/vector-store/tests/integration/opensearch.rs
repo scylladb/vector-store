@@ -15,6 +15,7 @@ use httpapi::PostIndexAnnRequest;
 use httpapi::PostIndexAnnResponse;
 use httpclient::HttpClient;
 use reqwest::StatusCode;
+use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
 use scylla::value::CqlValue;
 use serde_json::Value;
@@ -80,8 +81,8 @@ async fn simple_create_search_delete_index() {
             partition_key_count: 1,
             columns: Arc::new(
                 [
-                    ("pk".into(), NativeType::Int),
-                    ("ck".into(), NativeType::Text),
+                    ("pk".into(), ColumnType::Native(NativeType::Int)),
+                    ("ck".into(), ColumnType::Native(NativeType::Text)),
                 ]
                 .into_iter()
                 .collect(),
@@ -214,8 +215,8 @@ async fn ann_returns_requested_column_values() {
             partition_key_count: 1,
             columns: Arc::new(
                 [
-                    ("pk".into(), NativeType::Int),
-                    ("color".into(), NativeType::Text),
+                    ("pk".into(), ColumnType::Native(NativeType::Int)),
+                    ("color".into(), ColumnType::Native(NativeType::Text)),
                 ]
                 .into_iter()
                 .collect(),
@@ -368,7 +369,11 @@ async fn ann_skips_stale_opensearch_hit() {
         Table {
             primary_keys: NonemptyArc::new(["pk"]).unwrap(),
             partition_key_count: 1,
-            columns: Arc::new([("pk".into(), NativeType::Int)].into_iter().collect()),
+            columns: Arc::new(
+                [("pk".into(), ColumnType::Native(NativeType::Int))]
+                    .into_iter()
+                    .collect(),
+            ),
             dimensions: [(
                 index.target_columns.first().clone(),
                 index.vs().unwrap().dimensions,

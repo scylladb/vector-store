@@ -20,6 +20,7 @@ use futures::stream;
 use httpapi::IndexInfo;
 use httpapi::IndexStatus;
 use itertools::Itertools;
+use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
 use scylla::value::CqlValue;
 use std::cell::RefCell;
@@ -178,7 +179,12 @@ fn setup_table(
         Table {
             primary_keys: primary_keys.into_iter().collect_nonempty_arc().unwrap(),
             partition_key_count,
-            columns: Arc::new(columns.into_iter().collect()),
+            columns: Arc::new(
+                columns
+                    .into_iter()
+                    .map(|(name, column)| (name, ColumnType::Native(column)))
+                    .collect(),
+            ),
             dimensions: [(
                 index.target_columns.first().clone(),
                 index.vs().unwrap().dimensions,

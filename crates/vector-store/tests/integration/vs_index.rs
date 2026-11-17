@@ -22,6 +22,7 @@ use httpapi::PostIndexAnnRestriction;
 use httpclient::HttpClient;
 use reqwest::StatusCode;
 use rstest::rstest;
+use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
 use scylla::value::Counter;
 use scylla::value::CqlValue;
@@ -136,7 +137,12 @@ pub(crate) async fn setup_store_with_quantization(
     let (db_actor, db) = db_basic::new_with(node_state.clone(), store_vectors(&config));
 
     let primary_keys = primary_keys.into_iter().collect_nonempty_arc().unwrap();
-    let columns: Arc<HashMap<_, _>> = Arc::new(columns.into_iter().collect());
+    let columns: Arc<HashMap<_, _>> = Arc::new(
+        columns
+            .into_iter()
+            .map(|(name, column)| (name, ColumnType::Native(column)))
+            .collect(),
+    );
     let filtering_columns = columns
         .keys()
         .filter(|c| !primary_keys.contains(c))
@@ -404,8 +410,8 @@ async fn failed_db_index_create(#[case] config: Config) {
             partition_key_count: 1,
             columns: Arc::new(
                 [
-                    ("pk".into(), NativeType::Int),
-                    ("ck".into(), NativeType::Text),
+                    ("pk".into(), ColumnType::Native(NativeType::Int)),
+                    ("ck".into(), ColumnType::Native(NativeType::Text)),
                 ]
                 .into_iter()
                 .collect(),
@@ -2356,7 +2362,11 @@ async fn similarity_scores_are_decreasing_and_correctly_converted(#[case] config
         Table {
             primary_keys: NonemptyArc::new(["pk"]).unwrap(),
             partition_key_count: 1,
-            columns: Arc::new([("pk".into(), NativeType::Int)].into_iter().collect()),
+            columns: Arc::new(
+                [("pk".into(), ColumnType::Native(NativeType::Int))]
+                    .into_iter()
+                    .collect(),
+            ),
             dimensions: [(
                 index.target_columns.first().clone(),
                 index.vs().unwrap().dimensions,
