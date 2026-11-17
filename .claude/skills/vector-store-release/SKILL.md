@@ -234,7 +234,10 @@ Write `$W/notes-X.Y.Z.md`. → [why](reference.md#notes-format)
   the conditions that trigger a bug instead.
 - A claim you add beyond the PR text (a dependency is not shipped, a change
   needs no migration) must be checked first: `cargo tree`, `git show`, the
-  code.
+  code. A claim about which endpoint returns a value is checked against
+  `api/openapi.json` at the cut, e.g.
+  `git show <cut>:api/openapi.json | jq '.components.schemas.IndexInfo.properties | keys'`;
+  "shown by the API" in a PR does not say where.
 - Behaviour changes users act on (an error text, a log priority, a metric
   label, a default) say what to update.
 

@@ -155,6 +155,16 @@ the driver 1.9.0 index build only fell within the spread of earlier builds
 (#683), and full-text search on tantivy 0.27 was named as not measured.
 Without such a basis, say what was measured and what was not.
 
+Where a value shows in the API needs the same check as any other claim. A
+1.16.0 bullet said that `/indexes/{keyspace}/{index}` shows why an index is
+`UNSUPPORTED`. #703 had said only that the reason is "shown by the API",
+and the draft placed it where the 1.15.0 notes described the endpoint. The
+endpoint's `IndexInfo` schema has no such field: the reason is in the
+`422` answers of `/ann`, `/bm25`, `/highlight` and `/like`, in the CQL
+error and in the log. The error was found after publishing and corrected
+with `gh release edit`. `api/openapi.json` at the cut would have shown it
+before the gate.
+
 The Slack block is the only part most people read. It is written for someone
 deciding whether to upgrade: one line on the kind of release, the fixes that
 matter, a `:warning:` per change they must act on, and a recommendation. The
