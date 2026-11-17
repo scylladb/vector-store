@@ -255,7 +255,10 @@ Write `$W/notes-X.Y.Z.md`. → [why](reference.md#notes-format)
 Keep `*ScyllaDB Vector Store X.Y.Z*` in the first line bold. Leave
 security-related dependency updates out of the block: RUSTSEC advisories and
 the dependency bumps that resolve them go only in the notes' Security & CI
-section. A `:warning:` line is for what a user must check or change before
+section. A security fix in what the release ships beyond its Rust crates,
+such as the cloud images' kernel, gets a `:white_check_mark:` line of its own
+only when its severity is very high (remotely triggerable, as CVE-2026-98432
+in 1.16.0); otherwise it too stays in the notes. A `:warning:` line is for what a user must check or change before
 upgrading (a removed setting, a new status code, error or log text); a
 behaviour change they cannot act on goes only in the notes.
 → [why](reference.md#notes-format)

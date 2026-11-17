@@ -177,6 +177,14 @@ had a `:lock:` line for two RUSTSEC advisories in `rustls-webpki` and
 reported only in the notes' Security & CI section, not in the `@here`
 announcement.
 
+That rule was written for crates, and 1.16.0 asked about something else:
+its cloud images moved to Ubuntu 26.04 to ship a kernel with the fix for
+CVE-2026-98432, a remotely triggerable use-after-free in IPv4 TCP (#704).
+Asked at the gate, the user gave it a line of its own, and after the
+release set the rule: a security fix in what the release ships beyond its
+Rust crates is announced only when its severity is very high; others stay
+in the notes like the RUSTSEC updates.
+
 `:warning:` lines are for what a reader can check or change before upgrading.
 The 1.15.0 draft had a third one for tantivy 0.27's stemmer change; the user
 moved it to the notes only, since no setting or client change follows from
