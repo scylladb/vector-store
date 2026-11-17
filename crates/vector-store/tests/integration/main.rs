@@ -43,7 +43,7 @@ fn enable_tracing() {
     INIT_TRACING.call_once(|| {
         tracing_subscriber::registry()
             .with(EnvFilter::try_new("info").unwrap())
-            .with(fmt::layer().with_target(false))
+            .with(fmt::layer().with_test_writer().with_target(false))
             .init();
     });
 }
