@@ -9,6 +9,7 @@ use crate::CaseSensitive;
 use crate::ColumnName;
 use crate::Config;
 use crate::Connectivity;
+use crate::Credentials;
 use crate::DbCustomIndex;
 use crate::DbDriver;
 use crate::DbIndexKind;
@@ -388,13 +389,17 @@ pub(crate) async fn new<T: DbDriver>(
                                     node_state.send_event(Event::ConnectedToDb).await;
                                     internals.create_session(Some(Box::new(session.clone()))).await;
                                     session_tx.send(Some(session)).ok();
-                                    info!("Connected to ScyllaDB at {}", config.scylladb_uri);
+                                    info!(
+                                        "Connected to ScyllaDB at {} {}",
+                                        config.scylladb_uri,
+                                        CqlUser(config.credentials.as_ref())
+                                    );
                                 }
                                 Err(e) => {
                                     error!(
-                                        "Failed to connect to ScyllaDB (error: {}) at {}, retrying in {}s",
-                                        e,
+                                        "Failed to connect to ScyllaDB at {} {}, retrying in {}s: {e:#}",
                                         config.scylladb_uri,
+                                        CqlUser(config.credentials.as_ref()),
                                         RECONNECT_TIMEOUT.as_secs()
                                     );
                                     internals.create_session(None).await;
@@ -645,6 +650,19 @@ fn reconnect_reasons(old_config: &Config, new_config: &Config) -> Vec<&'static s
     }
 
     reasons
+}
+
+/// Describes, for log messages, the user a ScyllaDB session logs in as. When authentication fails,
+/// this is the first thing support needs to know. Never includes the password.
+struct CqlUser<'a>(Option<&'a Credentials>);
+
+impl std::fmt::Display for CqlUser<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0.and_then(|creds| creds.username.as_deref()) {
+            Some(username) => write!(f, "as user {username:?}"),
+            None => write!(f, "without a username"),
+        }
+    }
 }
 
 struct Statements<T: DbDriver> {
@@ -1637,6 +1655,34 @@ pub(crate) mod tests {
             vec!["ScyllaDB credentials"]
         );
         assert!(reconnect_reasons(&config("old_pass"), &config("old_pass")).is_empty());
+    }
+
+    #[test]
+    fn cql_user_names_the_username_but_not_the_password() {
+        let credentials = Credentials {
+            username: Some("vector_store".to_string()),
+            password: Some(secrecy::SecretString::new("s3ntinel-pa55word".into())),
+            certificate_path: None,
+        };
+
+        let description = CqlUser(Some(&credentials)).to_string();
+
+        assert_eq!(description, "as user \"vector_store\"");
+    }
+
+    #[test]
+    fn cql_user_without_a_username() {
+        let certificate_only = Credentials {
+            username: None,
+            password: None,
+            certificate_path: Some("/path/to/cert.pem".into()),
+        };
+
+        assert_eq!(CqlUser(None).to_string(), "without a username");
+        assert_eq!(
+            CqlUser(Some(&certificate_only)).to_string(),
+            "without a username"
+        );
     }
 
     #[test]
