@@ -94,6 +94,17 @@ rust-stemmers to frostem, which stems 165 of 73,604 English dictionary words
 differently (measured by stemming the word list with both); and `lru` 0.18.5
 fixed an advisory that `deny.toml` had been ignoring.
 
+Not every crate ships its changelog. In 1.16.0, #703 updated the Scylla
+Rust Driver to 1.10.0, and `scylla-1.10.0` in the cargo registry has no
+CHANGELOG.md; the driver publishes its notes as GitHub releases. Read
+against the code with `git grep`, they gave three changes the PR did not
+mention: the driver now warns when `VECTOR_STORE_CQL_PREFERRED_DATACENTER`
+or `VECTOR_STORE_CQL_PREFERRED_RACK` names a datacenter or rack the cluster
+does not have, reports its own version in `system.clients` instead of
+`scylla-cql`'s, and logs a response on an unexpected stream id as a
+warning. They also showed which entries do not reach Vector Store, which
+calls neither `use_keyspace` nor `get_token_endpoints` and sends no batches.
+
 ## Notes format
 
 The format follows the 1.12.0 and 1.13.0 notes, which the team reviewed: one

@@ -177,9 +177,11 @@ own.
      (tantivy, usearch, the scylla driver, opensearch, diskann) changes, even
      when its PR calls it a routine update: read the crate's changelog for the
      range (`~/.cargo/registry/src/*/<crate>-<version>/CHANGELOG.md`; run
-     `cargo fetch --manifest-path $W/cut/Cargo.toml` if it is missing), and
-     check with `git grep` at the cut which entries touch the APIs Vector
-     Store uses;
+     `cargo fetch --manifest-path $W/cut/Cargo.toml` if it is missing). A
+     crate that ships none, such as `scylla`, publishes its notes as GitHub
+     releases: read each version's in the range, e.g.
+     `gh release view v1.10.0 -R scylladb/scylla-rust-driver`. Check with
+     `git grep` at the cut which entries touch the APIs Vector Store uses;
    - RUSTSEC advisories fixed: titles from the local advisory database
      (`grep -rl RUSTSEC-YYYY-NNNN ~/.cargo/advisory-db*`) or rustsec.org.
 4. Also read `src.diff`, the diff of `crates/vector-store/src`, for
