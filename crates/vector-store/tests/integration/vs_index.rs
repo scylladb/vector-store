@@ -7,6 +7,7 @@ use crate::Duration;
 use crate::create_config_channels;
 use crate::db_basic;
 use crate::db_basic::DbBasic;
+use crate::db_basic::Index;
 use crate::db_basic::ScanFn;
 use crate::db_basic::StoreVectors;
 use crate::db_basic::Table;
@@ -33,6 +34,7 @@ use std::net::Ipv6Addr;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use tap::Pipe;
 use tokio::sync::mpsc::Sender;
 use uuid::Uuid;
 use vector_store::ColumnName;
@@ -178,7 +180,24 @@ pub(crate) async fn setup_store_with_quantization(
     )
     .unwrap();
 
-    db.add_index(index.clone(), fullscan_fn, cdc_fn).unwrap();
+    db.add_index(
+        Index::new(index.clone())
+            .pipe(|index| {
+                if let Some(fullscan_fn) = fullscan_fn {
+                    index.with_fullscan(fullscan_fn)
+                } else {
+                    index
+                }
+            })
+            .pipe(|index| {
+                if let Some(cdc_fn) = cdc_fn {
+                    index.with_cdc(cdc_fn)
+                } else {
+                    index
+                }
+            }),
+    )
+    .unwrap();
 
     let (receivers, senders) = create_config_channels(config).await;
 
@@ -400,7 +419,7 @@ async fn failed_db_index_create(#[case] config: Config) {
         },
     )
     .unwrap();
-    db.add_index(index.clone(), None, None).unwrap();
+    db.add_index(Index::new(index.clone())).unwrap();
 
     wait_for(
         || async { !client.indexes().await.is_empty() },
@@ -408,14 +427,10 @@ async fn failed_db_index_create(#[case] config: Config) {
     )
     .await;
 
-    db.add_index(
-        IndexMetadata {
-            index_name: "ann2".into(),
-            ..index.clone()
-        },
-        None,
-        None,
-    )
+    db.add_index(Index::new(IndexMetadata {
+        index_name: "ann2".into(),
+        ..index.clone()
+    }))
     .unwrap();
 
     wait_for(
@@ -430,14 +445,10 @@ async fn failed_db_index_create(#[case] config: Config) {
     assert!(names.contains(&"ann"));
     assert!(names.contains(&"ann2"));
 
-    db.add_index(
-        IndexMetadata {
-            index_name: "ann3".into(),
-            ..index.clone()
-        },
-        None,
-        None,
-    )
+    db.add_index(Index::new(IndexMetadata {
+        index_name: "ann3".into(),
+        ..index.clone()
+    }))
     .unwrap();
 
     wait_for(
@@ -1013,7 +1024,7 @@ async fn ann_fail_while_building_when_node_is_serving(#[case] config: Config) {
     )
     .unwrap();
     // Add second index that is Bootstrapping (pending_scan_fn). So now we have node Serving and this index Bootstrapping - a good state to test desired scenario.
-    db.add_index(index.clone(), Some(db_basic::pending_scan_fn()), None)
+    db.add_index(Index::new(index.clone()).with_fullscan(db_basic::pending_scan_fn()))
         .unwrap();
     db.set_next_full_scan_progress(vector_store::Progress::InProgress(
         Percentage::try_from(75.0).unwrap(),
@@ -2361,8 +2372,7 @@ async fn similarity_scores_are_decreasing_and_correctly_converted(#[case] config
     // squared distances are 0, 1, 9 respectively, and expected similarity
     // scores (using 1/(1+d)) are 1/(1+0)=1.0, 1/(1+1)=0.5, 1/(1+9)=0.1.
     db.add_index(
-        index.clone(),
-        Some(db_basic::scan_fn_vectors([
+        Index::new(index.clone()).with_fullscan(db_basic::scan_fn_vectors([
             (
                 [CqlValue::Int(1)].into(),
                 Some(vec![0.0_f32].into()),
@@ -2382,7 +2392,6 @@ async fn similarity_scores_are_decreasing_and_correctly_converted(#[case] config
                 Timestamp::from_millis(30),
             ),
         ])),
-        None,
     )
     .unwrap();
 

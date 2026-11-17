@@ -12,6 +12,7 @@ use crate::common::ordered_timeuuid;
 use crate::common::setup;
 use crate::common::single_row_scan;
 use crate::db_basic;
+use crate::db_basic::Index;
 use crate::wait_for;
 use crate::wait_for_value;
 use httpapi::DataType;
@@ -74,12 +75,8 @@ async fn index_info_reports_vector_index_options() {
             quantization: vector_store::Quantization::F16,
         }),
     );
-    db.add_index(
-        index.clone(),
-        Some(single_row_scan([CqlValue::Int(1)])),
-        None,
-    )
-    .unwrap();
+    db.add_index(Index::new(index.clone()).with_fullscan(single_row_scan([CqlValue::Int(1)])))
+        .unwrap();
 
     let ks = index.keyspace_name.as_ref().into();
     let idx = index.index_name.as_ref().into();
@@ -143,13 +140,11 @@ async fn index_info_reports_fulltext_index_options(
         options,
     );
     db.add_index(
-        index.clone(),
-        Some(db_basic::scan_fn_documents([(
+        Index::new(index.clone()).with_fullscan(db_basic::scan_fn_documents([(
             [CqlValue::Int(1)].into(),
             Some("hello world".to_string()),
             Timestamp::from_millis(10),
         )])),
-        None,
     )
     .unwrap();
 
@@ -208,9 +203,7 @@ async fn indexes_lists_all_indexes_with_options() {
         IndexKind::Vs(first_options.clone()),
     );
     db.add_index(
-        first_index.clone(),
-        Some(single_row_scan([CqlValue::Int(1)])),
-        None,
+        Index::new(first_index.clone()).with_fullscan(single_row_scan([CqlValue::Int(1)])),
     )
     .unwrap();
 
@@ -233,22 +226,18 @@ async fn indexes_lists_all_indexes_with_options() {
         IndexKind::Vs(second_options.clone()),
     );
     db.add_index(
-        second_index.clone(),
-        Some(single_row_scan([CqlValue::Int(1)])),
-        None,
+        Index::new(second_index.clone()).with_fullscan(single_row_scan([CqlValue::Int(1)])),
     )
     .unwrap();
 
     let fts_options = IndexOptionsFts::default();
     let fts_index = make_fts_index("third", &["pk"], 1, "content", ordered_timeuuid(3));
     db.add_index(
-        fts_index.clone(),
-        Some(db_basic::scan_fn_documents([(
+        Index::new(fts_index.clone()).with_fullscan(db_basic::scan_fn_documents([(
             [CqlValue::Int(1)].into(),
             Some("hello world".to_string()),
             Timestamp::from_millis(10),
         )])),
-        None,
     )
     .unwrap();
 
@@ -305,12 +294,8 @@ async fn indexes_listing_reports_status_and_progress_when_serving() {
         &[],
         ordered_timeuuid(1),
     );
-    db.add_index(
-        index.clone(),
-        Some(single_row_scan([CqlValue::Int(1)])),
-        None,
-    )
-    .unwrap();
+    db.add_index(Index::new(index.clone()).with_fullscan(single_row_scan([CqlValue::Int(1)])))
+        .unwrap();
 
     let entries = wait_for_value(
         async || {
@@ -357,7 +342,7 @@ async fn indexes_listing_reports_progress_of_bootstrapping_index() {
         &[],
         ordered_timeuuid(1),
     );
-    db.add_index(index.clone(), Some(blocking_scan_fn()), None)
+    db.add_index(Index::new(index.clone()).with_fullscan(blocking_scan_fn()))
         .unwrap();
 
     wait_for(
@@ -391,13 +376,11 @@ async fn indexes_listing_reports_status_of_a_fulltext_index() {
 
     let index = make_fts_index("fulltext", &["pk"], 1, "content", ordered_timeuuid(1));
     db.add_index(
-        index.clone(),
-        Some(db_basic::scan_fn_documents([(
+        Index::new(index.clone()).with_fullscan(db_basic::scan_fn_documents([(
             [CqlValue::Int(1)].into(),
             Some("hello world".to_string()),
             Timestamp::from_millis(10),
         )])),
-        None,
     )
     .unwrap();
 

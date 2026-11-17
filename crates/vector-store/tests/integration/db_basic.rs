@@ -185,11 +185,34 @@ pub(crate) struct Table {
     pub(crate) dimensions: HashMap<ColumnName, Dimensions>,
 }
 
-struct Index {
+pub(crate) struct Index {
     metadata: IndexMetadata,
-    version: IndexVersion,
     fullscan_fn: Option<ScanFn>,
     cdc_fn: Option<ScanFn>,
+}
+
+impl Index {
+    pub(crate) fn new(metadata: IndexMetadata) -> Self {
+        Self {
+            metadata,
+            fullscan_fn: None,
+            cdc_fn: None,
+        }
+    }
+
+    pub(crate) fn with_fullscan(self, scan_fn: ScanFn) -> Self {
+        Self {
+            fullscan_fn: Some(scan_fn),
+            ..self
+        }
+    }
+
+    pub(crate) fn with_cdc(self, scan_fn: ScanFn) -> Self {
+        Self {
+            cdc_fn: Some(scan_fn),
+            ..self
+        }
+    }
 }
 
 struct Keyspace {
@@ -303,38 +326,27 @@ impl DbBasic {
         Ok(())
     }
 
-    pub(crate) fn add_index(
-        &self,
-        metadata: IndexMetadata,
-        fullscan_fn: Option<ScanFn>,
-        cdc_fn: Option<ScanFn>,
-    ) -> anyhow::Result<()> {
+    pub(crate) fn add_index(&self, index: Index) -> anyhow::Result<()> {
         let mut db = self.0.write().unwrap();
 
-        let Some(keyspace) = db.keyspaces.get_mut(&metadata.keyspace_name) else {
+        let Some(keyspace) = db.keyspaces.get_mut(&index.metadata.keyspace_name) else {
             bail!(
                 "a keyspace {keyspace_name} does not exist",
-                keyspace_name = metadata.keyspace_name
+                keyspace_name = index.metadata.keyspace_name
             );
         };
-        if !keyspace.tables.contains_key(&metadata.table_name) {
-            bail!("a table {} does not exist", metadata.table_name);
+        if !keyspace.tables.contains_key(&index.metadata.table_name) {
+            bail!("a table {} does not exist", index.metadata.table_name);
         };
-        if keyspace.indexes.contains_key(&metadata.index_name) {
+        if keyspace.indexes.contains_key(&index.metadata.index_name) {
             bail!(
                 "an index {index_name} already exists",
-                index_name = metadata.index_name
+                index_name = index.metadata.index_name
             );
         }
-        keyspace.indexes.insert(
-            metadata.index_name.clone(),
-            Index {
-                version: metadata.version.clone(),
-                metadata,
-                fullscan_fn,
-                cdc_fn,
-            },
-        );
+        keyspace
+            .indexes
+            .insert(index.metadata.index_name.clone(), index);
 
         db.create_new_schema_version();
         Ok(())
@@ -459,7 +471,7 @@ fn process_db(db: &DbBasic, msg: Db, node_state: mpsc::Sender<NodeState>) {
                 .keyspaces
                 .get(&keyspace)
                 .and_then(|keyspace| keyspace.indexes.get(&index))
-                .map(|index| index.version.clone())
+                .map(|index| index.metadata.version.clone())
                 .or_else(|| {
                     db.unsupported_indexes
                         .iter()

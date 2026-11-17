@@ -71,6 +71,8 @@ use vector_store::Vector;
 use vector_store::db::Db;
 use vector_store::node_state::NodeState;
 
+use crate::db_basic::Index;
+
 const ENV_CONCURRENCY: &str = "BENCHES_CONCURRENCY";
 
 #[global_allocator]
@@ -194,7 +196,24 @@ fn setup_index(
     fullscan_fn: Option<ScanFn>,
     cdc_fn: Option<ScanFn>,
 ) {
-    db.add_index(index, fullscan_fn, cdc_fn).unwrap();
+    db.add_index(
+        Index::new(index)
+            .pipe(|index| {
+                if let Some(fullscan_fn) = fullscan_fn {
+                    index.with_fullscan(fullscan_fn)
+                } else {
+                    index
+                }
+            })
+            .pipe(|index| {
+                if let Some(cdc_fn) = cdc_fn {
+                    index.with_cdc(cdc_fn)
+                } else {
+                    index
+                }
+            }),
+    )
+    .unwrap();
 }
 
 fn delete_index(db: &DbBasic, index: &IndexMetadata) {

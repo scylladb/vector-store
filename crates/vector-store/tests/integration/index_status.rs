@@ -9,6 +9,7 @@ use crate::common::make_vs_index;
 use crate::common::ordered_timeuuid;
 use crate::common::setup;
 use crate::common::single_row_scan;
+use crate::db_basic::Index;
 use crate::wait_for;
 use httpapi::IndexStatus;
 use rstest::rstest;
@@ -53,7 +54,7 @@ async fn index_status_reports_build_progress_while_bootstrapping() {
         &[],
         ordered_timeuuid(1),
     );
-    db.add_index(index.clone(), Some(blocking_scan_fn()), None)
+    db.add_index(Index::new(index.clone()).with_fullscan(blocking_scan_fn()))
         .unwrap();
 
     let ks = index.keyspace_name.as_ref().into();
@@ -95,12 +96,8 @@ async fn index_status_reports_full_progress_when_serving() {
         &[],
         ordered_timeuuid(1),
     );
-    db.add_index(
-        index.clone(),
-        Some(single_row_scan([CqlValue::Int(1)])),
-        None,
-    )
-    .unwrap();
+    db.add_index(Index::new(index.clone()).with_fullscan(single_row_scan([CqlValue::Int(1)])))
+        .unwrap();
 
     let ks = index.keyspace_name.as_ref().into();
     let idx = index.index_name.as_ref().into();

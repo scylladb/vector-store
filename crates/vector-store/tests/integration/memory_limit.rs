@@ -5,6 +5,7 @@
 
 use crate::create_config_channels;
 use crate::db_basic;
+use crate::db_basic::Index;
 use crate::db_basic::Table;
 use crate::vs_index::usearch_test_config;
 use futures::FutureExt;
@@ -94,8 +95,7 @@ async fn memory_limit_during_index_build() {
 
     let (tx_outer, mut rx_outer) = mpsc::channel(1);
     db.add_index(
-        index.clone(),
-        Some(Box::new(move |tx_inner| {
+        Index::new(index.clone()).with_fullscan(Box::new(move |tx_inner| {
             async move {
                 let mut pk = 0;
                 while let Some(item) = rx_outer.recv().await {
@@ -124,7 +124,6 @@ async fn memory_limit_during_index_build() {
             }
             .boxed()
         })),
-        None,
     )
     .unwrap();
 

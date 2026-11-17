@@ -6,6 +6,7 @@
 use crate::create_config_channels;
 use crate::db_basic;
 use crate::db_basic::DbBasic;
+use crate::db_basic::Index;
 use crate::db_basic::ScanFn;
 use crate::db_basic::Table;
 use crate::wait_for;
@@ -19,6 +20,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use tap::Pipe;
 use tokio::sync::mpsc::Sender;
 use uuid::Uuid;
 use vector_store::ColumnName;
@@ -89,7 +91,24 @@ async fn setup_fts_store(
     )
     .unwrap();
 
-    db.add_index(index.clone(), fullscan_fn, cdc_fn).unwrap();
+    db.add_index(
+        Index::new(index.clone())
+            .pipe(|index| {
+                if let Some(fullscan_fn) = fullscan_fn {
+                    index.with_fullscan(fullscan_fn)
+                } else {
+                    index
+                }
+            })
+            .pipe(|index| {
+                if let Some(cdc_fn) = cdc_fn {
+                    index.with_cdc(cdc_fn)
+                } else {
+                    index
+                }
+            }),
+    )
+    .unwrap();
 
     let (receivers, senders) = create_config_channels(config).await;
 
@@ -384,7 +403,7 @@ async fn fts_bm25_search_returns_503_and_index_building_reason_when_index_is_bui
         index_name: "fts_idx_building".into(),
         ..fts_index_metadata([ColumnName::from("pk")])
     };
-    db.add_index(index.clone(), Some(db_basic::pending_scan_fn()), None)
+    db.add_index(Index::new(index.clone()).with_fullscan(db_basic::pending_scan_fn()))
         .unwrap();
     db.set_next_full_scan_progress(vector_store::Progress::InProgress(
         Percentage::try_from(75.0).unwrap(),

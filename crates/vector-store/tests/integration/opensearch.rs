@@ -5,6 +5,7 @@
 
 use crate::create_config_channels;
 use crate::db_basic;
+use crate::db_basic::Index;
 use crate::db_basic::Table;
 use crate::mock_opensearch;
 use crate::vs_index::usearch_test_config;
@@ -95,8 +96,7 @@ async fn simple_create_search_delete_index() {
     )
     .unwrap();
     db.add_index(
-        index.clone(),
-        Some(db_basic::scan_fn_vectors([
+        Index::new(index.clone()).with_fullscan(db_basic::scan_fn_vectors([
             (
                 [CqlValue::Int(1), CqlValue::Text("one".to_string())].into(),
                 Some(vec![1., 1., 1.].into()),
@@ -116,7 +116,6 @@ async fn simple_create_search_delete_index() {
                 Timestamp::from_millis(30),
             ),
         ])),
-        None,
     )
     .unwrap();
 
@@ -231,8 +230,7 @@ async fn ann_returns_requested_column_values() {
     )
     .unwrap();
     db.add_index(
-        index.clone(),
-        Some(db_basic::scan_fn_vectors([
+        Index::new(index.clone()).with_fullscan(db_basic::scan_fn_vectors([
             (
                 [CqlValue::Int(1)].into(),
                 Some(vec![1., 1., 1.].into()),
@@ -255,7 +253,6 @@ async fn ann_returns_requested_column_values() {
                 Timestamp::from_millis(30),
             ),
         ])),
-        None,
     )
     .unwrap();
 
@@ -382,14 +379,12 @@ async fn ann_skips_stale_opensearch_hit() {
     )
     .unwrap();
     db.add_index(
-        index.clone(),
-        Some(db_basic::scan_fn_vectors([(
+        Index::new(index.clone()).with_fullscan(db_basic::scan_fn_vectors([(
             [CqlValue::Int(1)].into(),
             Some(vec![1., 1., 1.].into()),
             [].into(),
             Timestamp::from_millis(10),
         )])),
-        None,
     )
     .unwrap();
 

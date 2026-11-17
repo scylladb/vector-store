@@ -6,6 +6,7 @@
 use crate::create_config_channels;
 use crate::db_basic;
 use crate::db_basic::DbBasic;
+use crate::db_basic::Index;
 use crate::db_basic::ScanFn;
 use crate::db_basic::Table;
 use crate::wait_for;
@@ -21,6 +22,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use tap::Pipe;
 use tokio::sync::mpsc::Sender;
 use uuid::Uuid;
 use vector_store::ColumnName;
@@ -94,7 +96,24 @@ async fn setup_pattern_store(
     )
     .unwrap();
 
-    db.add_index(index.clone(), fullscan_fn, cdc_fn).unwrap();
+    db.add_index(
+        Index::new(index.clone())
+            .pipe(|index| {
+                if let Some(fullscan_fn) = fullscan_fn {
+                    index.with_fullscan(fullscan_fn)
+                } else {
+                    index
+                }
+            })
+            .pipe(|index| {
+                if let Some(cdc_fn) = cdc_fn {
+                    index.with_cdc(cdc_fn)
+                } else {
+                    index
+                }
+            }),
+    )
+    .unwrap();
 
     let (receivers, senders) = create_config_channels(config).await;
 
