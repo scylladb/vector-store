@@ -13,6 +13,7 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
 use vector_store::ConfigManager;
+use vector_store::DotenvPrecedence;
 use vector_store::HttpServerExt;
 use vector_store::Info;
 use vector_store::TracingOutput;
@@ -64,7 +65,7 @@ fn main() -> anyhow::Result<()> {
         .install_default()
         .expect("install aws-lc-rs crypto provider");
 
-    _ = dotenvy::dotenv();
+    vector_store::load_dotenv(DotenvPrecedence::ProcessEnvironment);
 
     // Load configuration early to get disable_colors for logging setup
     let config_future = vector_store::load_config(dotenvy_to_std_var);

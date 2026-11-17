@@ -16,12 +16,97 @@ use secrecy::ExposeSecret;
 use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::num::NonZeroUsize;
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
 
 const DEFAULT_TLS_FILE_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 const TLS_FILE_CHECK_INTERVAL_ENV: &str = "VECTOR_STORE_TLS_FILE_CHECK_INTERVAL";
+
+/// Which value wins when the `.env` file sets a variable that is already set in the process
+/// environment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DotenvPrecedence {
+    /// The process environment wins: the `.env` file only fills in unset variables. Used at
+    /// startup.
+    ProcessEnvironment,
+    /// The `.env` file wins over the process environment. Used on a SIGHUP reload, so that
+    /// edits to the file take effect.
+    DotenvFile,
+}
+
+/// Loads the `.env` file from the working directory or the nearest of its parents, and logs
+/// which file was loaded.
+///
+/// Variables loaded from the `.env` file are set after exec, so they do not show up in
+/// `/proc/<pid>/environ`; this log is the only record of where the configuration came from.
+pub fn load_dotenv(precedence: DotenvPrecedence) {
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(err) => {
+            tracing::warn!(
+                "Failed to look for a .env file, cannot read the working directory: {err}"
+            );
+            return;
+        }
+    };
+    let path = match find_dotenv_file(&cwd) {
+        Ok(Some(path)) => path,
+        Ok(None) => {
+            tracing::info!("No .env file found in {cwd:?} or its parent directories");
+            return;
+        }
+        Err(err) => {
+            tracing::warn!(
+                "Failed to look for a .env file in {cwd:?} or its parent directories: {err}"
+            );
+            return;
+        }
+    };
+    let outcome = match precedence {
+        DotenvPrecedence::ProcessEnvironment => dotenvy::from_path(&path),
+        DotenvPrecedence::DotenvFile => dotenvy::from_path_override(&path),
+    };
+    log_dotenv_outcome(&path, &outcome, precedence);
+}
+
+/// Finds the `.env` file the way dotenvy does: in `dir` or the nearest of its parents, skipping
+/// entries that are not files. The file is resolved here, not by dotenvy, because dotenvy does
+/// not return its path when loading it fails part way, after some variables were already set.
+fn find_dotenv_file(dir: &Path) -> std::io::Result<Option<PathBuf>> {
+    for dir in dir.ancestors() {
+        let candidate = dir.join(".env");
+        match std::fs::metadata(&candidate) {
+            Ok(metadata) if metadata.is_file() => return Ok(Some(candidate)),
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(None)
+}
+
+fn log_dotenv_outcome(path: &Path, outcome: &dotenvy::Result<()>, precedence: DotenvPrecedence) {
+    match outcome {
+        Ok(()) => match precedence {
+            DotenvPrecedence::ProcessEnvironment => tracing::info!(
+                "Loaded .env file {path:?}; variables already set in the process environment \
+                 take precedence over it"
+            ),
+            DotenvPrecedence::DotenvFile => tracing::info!(
+                "Loaded .env file {path:?}; it overrides variables set in the process environment"
+            ),
+        },
+        // The error's own message quotes the offending line, which may hold a secret.
+        Err(dotenvy::Error::LineParse(_, index)) => tracing::warn!(
+            "Failed to parse .env file {path:?} at character {index} of a line; variables set \
+             before that line were loaded"
+        ),
+        Err(err) => tracing::warn!("Failed to load .env file {path:?}: {err}"),
+    }
+}
 
 fn tls_file_check_interval(env: &impl Fn(&str) -> anyhow::Result<String>) -> Duration {
     match env(TLS_FILE_CHECK_INTERVAL_ENV) {
@@ -271,9 +356,7 @@ impl ConfigManager {
                     tracing::info!("Received SIGHUP signal, reloading configuration...");
 
                     // Re-read the .env file to pick up any changes
-                    if let Err(e) = dotenvy::from_filename_override(".env") {
-                        tracing::debug!("No .env file found or error reading it: {}", e);
-                    }
+                    load_dotenv(DotenvPrecedence::DotenvFile);
 
                     match self.reload_config(&env).await {
                         Ok(()) => {
@@ -619,6 +702,88 @@ mod tests {
 
     fn path(file: &NamedTempFile) -> String {
         file.path().to_str().unwrap().into()
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn dotenv_logs_loaded_file_at_startup() {
+        let path = Path::new("/opt/vector-store/.env");
+
+        log_dotenv_outcome(path, &Ok(()), DotenvPrecedence::ProcessEnvironment);
+
+        assert!(logs_contain(
+            "Loaded .env file \"/opt/vector-store/.env\"; variables already set in the process \
+             environment take precedence over it"
+        ));
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn dotenv_logs_loaded_file_on_reload() {
+        let path = Path::new("/opt/vector-store/.env");
+
+        log_dotenv_outcome(path, &Ok(()), DotenvPrecedence::DotenvFile);
+
+        assert!(logs_contain(
+            "Loaded .env file \"/opt/vector-store/.env\"; it overrides variables set in the \
+             process environment"
+        ));
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn dotenv_parse_error_names_the_file_but_not_the_line() {
+        let path = Path::new("/opt/vector-store/.env");
+        let line = "VECTOR_STORE_SECRET='leaked-secret".to_string();
+
+        log_dotenv_outcome(
+            path,
+            &Err(dotenvy::Error::LineParse(line, 20)),
+            DotenvPrecedence::DotenvFile,
+        );
+
+        assert!(logs_contain(
+            "Failed to parse .env file \"/opt/vector-store/.env\" at character 20 of a line"
+        ));
+        assert!(!logs_contain("leaked-secret"));
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn dotenv_logs_other_errors_with_the_file() {
+        let path = Path::new("/opt/vector-store/.env");
+        let denied = dotenvy::Error::Io(std::io::ErrorKind::PermissionDenied.into());
+
+        log_dotenv_outcome(path, &Err(denied), DotenvPrecedence::ProcessEnvironment);
+
+        assert!(logs_contain(
+            "Failed to load .env file \"/opt/vector-store/.env\": permission denied"
+        ));
+    }
+
+    #[test]
+    fn find_dotenv_file_takes_the_nearest_file_in_a_parent_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("parent");
+        let cwd = parent.join("cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(root.path().join(".env"), "").unwrap();
+        std::fs::write(parent.join(".env"), "").unwrap();
+
+        assert_eq!(find_dotenv_file(&cwd).unwrap(), Some(parent.join(".env")));
+    }
+
+    #[test]
+    fn find_dotenv_file_skips_a_directory_named_dotenv() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("cwd");
+        std::fs::create_dir_all(cwd.join(".env")).unwrap();
+        std::fs::write(root.path().join(".env"), "").unwrap();
+
+        assert_eq!(
+            find_dotenv_file(&cwd).unwrap(),
+            Some(root.path().join(".env"))
+        );
     }
 
     #[tokio::test]
