@@ -9,7 +9,6 @@ use crate::CaseSensitive;
 use crate::ColumnName;
 use crate::Config;
 use crate::Connectivity;
-use crate::Credentials;
 use crate::DbCustomIndex;
 use crate::DbDriver;
 use crate::DbIndexKind;
@@ -32,6 +31,7 @@ use crate::Positions;
 use crate::Quantization;
 use crate::SpaceType;
 use crate::TableName;
+use crate::config_manager::credentials_changes;
 use crate::cql_types;
 use crate::db_driver::DbIndexInfo;
 use crate::db_index;
@@ -51,7 +51,6 @@ use itertools::Itertools;
 use regex::Regex;
 use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
-use secrecy::ExposeSecret;
 use std::collections::BTreeMap;
 use std::convert::identity;
 use std::num::NonZeroUsize;
@@ -615,7 +614,12 @@ fn reconnect_reasons(old_config: &Config, new_config: &Config) -> Vec<&'static s
     if new_config.scylladb_uri != old_config.scylladb_uri {
         reasons.push("ScyllaDB URI");
     }
-    if credentials_changed(&old_config.credentials, &new_config.credentials) {
+    if !credentials_changes(
+        old_config.credentials.as_ref(),
+        new_config.credentials.as_ref(),
+    )
+    .is_empty()
+    {
         reasons.push("ScyllaDB credentials");
     }
     if new_config.cql_connection_timeout != old_config.cql_connection_timeout {
@@ -641,27 +645,6 @@ fn reconnect_reasons(old_config: &Config, new_config: &Config) -> Vec<&'static s
     }
 
     reasons
-}
-
-fn credentials_changed(
-    old_credentials: &Option<Credentials>,
-    new_credentials: &Option<Credentials>,
-) -> bool {
-    match (old_credentials, new_credentials) {
-        (None, None) => false,
-        (Some(_), None) | (None, Some(_)) => true,
-        (Some(old_creds), Some(new_creds)) => {
-            old_creds.username != new_creds.username
-                || old_creds.certificate_path != new_creds.certificate_path
-                || match (&old_creds.password, &new_creds.password) {
-                    (None, None) => false,
-                    (Some(_), None) | (None, Some(_)) => true,
-                    (Some(old_pass), Some(new_pass)) => {
-                        old_pass.expose_secret() != new_pass.expose_secret()
-                    }
-                }
-        }
-    }
 }
 
 struct Statements<T: DbDriver> {
@@ -1636,6 +1619,24 @@ pub(crate) mod tests {
             reconnect_reasons(&old_config, &new_config),
             vec!["CQL preferred rack"]
         );
+    }
+
+    #[test]
+    fn reconnects_when_password_changes() {
+        let config = |password: &str| Config {
+            credentials: Some(crate::Credentials {
+                username: Some("vector_store".to_string()),
+                password: Some(secrecy::SecretString::new(password.into())),
+                certificate_path: None,
+            }),
+            ..Config::default()
+        };
+
+        assert_eq!(
+            reconnect_reasons(&config("old_pass"), &config("new_pass")),
+            vec!["ScyllaDB credentials"]
+        );
+        assert!(reconnect_reasons(&config("old_pass"), &config("old_pass")).is_empty());
     }
 
     #[test]
