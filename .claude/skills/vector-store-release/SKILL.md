@@ -10,7 +10,7 @@ the tag pushed, the release workflow finished, and everything it produces
 checked. [docs/releasing.md](../../../docs/releasing.md) describes the workflow
 and its recovery paths; this skill is how a release is driven through it.
 **[reference.md](reference.md)** holds the reasoning behind the rules and the
-worked example of 1.14.0. Read the matching section before overriding a rule.
+worked examples of past releases. Read the matching section before overriding a rule.
 
 Nothing is pushed or published before the user approves the cut point, the
 notes and the rendered Slack message (step 5). A tag push starts nothing by
@@ -25,7 +25,7 @@ not a pre-release or a draft) starts the workflow, and its last job posts to
 | Repository | `scylladb/vector-store`. Never use the checkout's `origin`, which may be a fork. |
 | Tag | annotated `X.Y.Z`, message `Release version X.Y.Z` |
 | Release title | `vector-store-X.Y.Z` |
-| Workflow | `.github/workflows/release.yaml`, started by publishing the release; about 45 min, of which `build-cloud-images` takes about 30 |
+| Workflow | `.github/workflows/release.yaml`, started by publishing the release; about 40 min (36–47 so far), of which `build-cloud-images` takes 23–30 |
 | Announcement | `#release-announce`, `@here`, from the notes' `<!-- slack-announcement` block |
 | siren | `scylladb/siren` PR `feat(vectorstore): add version X.Y.Z [automation]`, merged by someone with siren rights |
 

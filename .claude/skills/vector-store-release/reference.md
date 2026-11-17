@@ -252,3 +252,36 @@ older series must not be marked latest on GitHub either.
   crates, step 3.4 greps a saved diff, and step 5 asks the open judgment calls
   separately. The packer template names images with a 12-hour clock
   (`03` in its `isotime` layout), found while checking the siren PR.
+
+## Worked example: 1.16.0 (2026-11-17)
+
+- Previous release 1.15.0; cut `b41a969`, the head of master, merged the
+  same morning; 14 PRs. Rust and Validator (merge queue) green; the newest
+  Daily green on `78c1b45`, the commit before the cut, which added only the
+  packer change. Open PR mentioned, not waited for: #638 (tantivy indexes
+  marked dirty when the reader reloads).
+- Changes read from 14 PR descriptions, `lock-diff.txt` (hickory-proto and
+  hickory-net 0.26.3, validator only; scylla 1.10.0 and scylla-cql 3.0.0),
+  `release-files.txt` (the packer template's move to Ubuntu 26.04, a 50 GB
+  swap file, pre-installed Siren agents, a 24-hour clock in image names),
+  the driver's GitHub release notes and a full read of the source diff.
+- At the gate the user kept the performance statement as drafted (no code
+  on the vector search path changed; the 26.04 images A/B-measured with the
+  1.15.0 binary; #694 and the driver not measured), gave the kernel CVE its
+  own line, and kept only the swap WARN as a `:warning:` line; the
+  x86-64-v3 requirement of the amd64 images went to the notes only.
+- The workflow ran 36 minutes, 81 jobs, all green; `build-cloud-images`
+  took 23 minutes on its first run of the 26.04 template. Checks: the Slack
+  post was identical to the preview; six assets; `1.16.0` and `latest` with
+  the same digest on `linux/amd64` and `linux/arm64`; the siren PR
+  (scylladb/siren#16732) carried exactly the images `trigger-siren`
+  selected; kernel and sudo checks passed in all three image builds.
+- After publishing, two sentences of the notes were corrected with
+  `gh release edit`, which does not repost to Slack: where the API returns
+  the reason an index is `UNSUPPORTED`, and that the lab run of #704 used
+  images of the template carrying 1.15.0, not the 1.16.0 images.
+- Retrospective: SKILL.md lost its dollar-digit commands to the skill
+  argument substitution, `collect-changes.sh` writes the source diff and
+  its strings, step 3.3 reads GitHub releases of crates without a
+  changelog and covers `packer/`, `check-cloud-images.sh` checks the image
+  build, and API claims are checked against `api/openapi.json`.
