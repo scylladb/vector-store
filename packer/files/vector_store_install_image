@@ -58,6 +58,20 @@ VMAGENT_BIN = VMUTILS_DIR + '/vmagent-prod'
 KERNEL_FLAVOUR = {'aws': 'aws', 'gce': 'gcp'}
 MIN_KERNEL_VERSION = {'aws': '7.0.0-1017.18', 'gce': '7.0.0-1017.19'}
 
+# Siren, the Scylla Cloud control plane, runs its root scripts on every node as
+# `export NAME=value ...; sudo -E script`. Ubuntu 26.04 makes sudo-rs the
+# default sudo, and sudo-rs ignores -E ("preserving the entire environment is
+# not supported"), so those scripts would run without their variables: on a node
+# of this image Siren's OS users script stopped at "SUPPORT_PUBLIC_KEY: unbound
+# variable" and the node was never set up. Ubuntu still ships the classic sudo
+# as sudo.ws; use_classic_sudo() makes it the default, as update-alternatives
+# allows, and fails the build unless `sudo -E` then keeps the environment.
+# This is a stopgap that gives up sudo-rs: Siren is to pass its variables in a
+# way sudo-rs supports (`sudo env NAME=value ...`, CLOUD-5733), and the image is
+# then to go back to the default sudo (VECTOR-1209).
+CLASSIC_SUDO = '/usr/bin/sudo.ws'
+SUDO_ENV_PROBE = 'VECTOR_STORE_IMAGE_SUDO_PROBE'
+
 def run(template_cmd, shell=False):
     cmd = template_cmd.format(_HOME=HOME_DIR, _USER=USER)
     if dry_run:
@@ -196,6 +210,28 @@ def check_kernel(cloud):
             PKG=package, VER=version, EXP=expected, ALL=', '.join('{P} {V}'.format(P=p, V=v) for p, v in kernels)))
     print('kernel check passed: the newest installed kernel is {PKG} {VER}, the minimum is {MIN}'.format(PKG=package, VER=version, MIN=floor))
 
+def sudo_keeps_environment():
+    # what Siren relies on: a variable exported before `sudo -E` reaches the command
+    env = dict(os.environ, **{SUDO_ENV_PROBE: 'kept'})
+    res = subprocess.run(['sudo', '-E', 'printenv', SUDO_ENV_PROBE], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    return res.returncode == 0 and res.stdout.decode().strip() == 'kept', res.stdout.decode().strip()
+
+def use_classic_sudo():
+    # See CLASSIC_SUDO. An image whose sudo already keeps the environment (a base
+    # image with the classic sudo as its only sudo) is left as it is
+    if dry_run:
+        print('make {SUDO} the default sudo unless `sudo -E` already keeps the environment'.format(SUDO=CLASSIC_SUDO))
+        return
+    kept, _ = sudo_keeps_environment()
+    if not kept:
+        if not os.path.exists(CLASSIC_SUDO):
+            raise RuntimeError('`sudo -E` drops the environment and {SUDO} is not installed'.format(SUDO=CLASSIC_SUDO))
+        run('update-alternatives --set sudo {SUDO}'.format(SUDO=CLASSIC_SUDO))
+        kept, out = sudo_keeps_environment()
+        if not kept:
+            raise RuntimeError('`sudo -E` still drops the environment after switching to {SUDO}: {OUT!r}'.format(SUDO=CLASSIC_SUDO, OUT=out))
+    print('sudo check passed: `sudo -E` keeps the environment ({SUDO})'.format(SUDO=os.path.realpath(shutil.which('sudo'))))
+
 def install_observability_agents(arch):
     # Vector (vector.dev log shipper, not Vector Store) and vmagent binaries for
     # Siren, see the constants above. Runs as root, not as USER: the binaries
@@ -302,6 +338,7 @@ if __name__ == '__main__':
     # first in this script, before the downloads, so a build on a kernel
     # without the fix fails early
     check_kernel(args.cloud)
+    use_classic_sudo()
     install_vector_store(args.version, args.arch)
     install_observability_agents(args.arch)
     install_service()
