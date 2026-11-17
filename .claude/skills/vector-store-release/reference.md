@@ -23,7 +23,15 @@ was known before 1.14.0, and during 1.14.0 it did so for two `git diff`
 commands; empty output reads like "no changes". In 1.15.0 a
 `git diff … | grep` pipe printed nothing too, while the same `grep` on a saved
 diff found the removed `VECTOR_STORE_FULLTEXT_INDEXES` variable and a changed
-log line; step 3.4 therefore greps a file. The helpers
+log line; step 3.4 therefore greps a file. In 1.16.0 that was not enough:
+the same hook rewrites `grep` too, `command grep` included, and the string
+search over the saved `src.diff` printed 8 of the 42 lines it matched. The
+missing ones included the INFO-to-WARN change of "Memory usage above limit"
+and the new connect error. They turned up only in a second search and a full
+read of the 800-line diff, which also showed what no string carries: the
+connect check now asks every node instead of the first. `collect-changes.sh`
+now writes `src.diff` and its string lines itself, and step 3.4 reads the
+diff whole with the Read tool when it is short. The helpers
 call git with `-c core.pager=cat` from inside a script, which no hook rewrites,
 and write files that can be re-read. `collect-changes.sh` also fixes what is
 read: every PR body in full, not a truncated excerpt, which is where the

@@ -60,8 +60,9 @@ not a pre-release or a draft) starts the workflow, and its last job posts to
   interactive session. Prefer them, and `git -c core.pager=cat`, over bare
   `git log A..B`. → [why](reference.md#helpers)
   - `collect-changes.sh <previous-sha> <cut-sha> <out-dir>`: commits,
-    every PR's description, the `Cargo.lock` version diff and the diff of the
-    files that decide how the release is built (step 3).
+    every PR's description, the `Cargo.lock` version diff, the diff of the
+    files that decide how the release is built, and the diff of the service's
+    sources with its changed string lines (step 3).
   - `slack-preview.sh <notes-file> <version> [<cut>]`: the message the
     `announce` job will post, produced by running that job's compose step from
     the cut's `release.yaml`, with warnings for text Slack would misread
@@ -181,12 +182,14 @@ own.
      Store uses;
    - RUSTSEC advisories fixed: titles from the local advisory database
      (`grep -rl RUSTSEC-YYYY-NNNN ~/.cargo/advisory-db*`) or rustsec.org.
-4. Also search the diff of `crates/vector-store/src` for user-visible
-   changes: error message texts, metric names and labels, configuration keys
-   and defaults, log format. Save the diff and grep the file:
-   `git -c core.pager=cat diff <previous-sha> <cut-sha> -- crates/vector-store/src > $W/src.diff`,
-   then `grep -E '^[-+][^-+].*"' $W/src.diff` is a quick start. Piped straight
-   into `grep`, the diff can come out empty. → [why](reference.md#helpers)
+4. Also read `src.diff`, the diff of `crates/vector-store/src`, for
+   user-visible changes: error message texts, log lines and their levels,
+   metric names and labels, configuration keys and defaults. Start from
+   `src-strings.txt`, its changed lines that hold a string literal, numbered
+   as in `src.diff`. Then read `src.diff` whole when it is under about 1,500
+   lines (with the Read tool, not `grep` or `cat` in the shell, whose output a
+   hook can rewrite): a change in which node a check looks at, or in what
+   triggers a log line, shows only there. → [why](reference.md#helpers)
 5. Write down every PR and its section. Every first-parent commit must land
    in the notes or in an explicit skip list (with the reason) shown in step 5.
 
