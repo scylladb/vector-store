@@ -29,6 +29,19 @@ and write files that can be re-read. `collect-changes.sh` also fixes what is
 read: every PR body in full, not a truncated excerpt, which is where the
 measurements in the notes come from.
 
+SKILL.md itself is not read as written. When the skill is invoked with
+arguments, Claude Code replaces `$0`, `$1`, … in its text with those
+arguments, split on spaces and counted from 0. 1.16.0 was invoked as
+`let us  release version 1.16.0`, so the remote lookup arrived as
+`awk '… {print us}'` and the siren check's `f = $2 … v = $3` as
+`f = release … v = version`; the commands were retyped correctly by hand,
+but run as loaded they would have named a remote `us` and printed the words
+"release" and "version" instead of the siren fields. SKILL.md therefore
+holds no dollar sign followed by a digit: the remote lookup uses `sed` with
+`\1`, and the siren comparison moved into `check-cloud-images.sh`, where
+awk's fields are safe. Check a SKILL.md edit with
+`grep -nE '\$[0-9]' .claude/skills/vector-store-release/SKILL.md`.
+
 `slack-preview.sh` does not reimplement the `announce` job's parsing. It
 extracts the job's "Compose the Slack announcement" step from the workflow and
 runs it, with a stand-in `gh` that returns the notes file as the release body,

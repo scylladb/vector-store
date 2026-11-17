@@ -52,7 +52,7 @@ not a pre-release or a draft) starts the workflow, and its last job posts to
 
 - `gh`, always scoped with `-R scylladb/vector-store`, and a clone with the
   `scylladb/vector-store` remote. Below it is called `$UP`; find its name
-  with `git remote -v | awk '/[:\/]scylladb\/vector-store(\.git)? \(push\)$/ {print $1}' | head -1`.
+  with `git remote -v | sed -nE 's#^([^[:space:]]+)[[:space:]].*[:/]scylladb/vector-store(\.git)? \(push\)$#\1#p' | head -1`.
   → [why](reference.md#the-remote)
 - Helpers in this directory, run from the repository root by their path.
   They call git without a pager or aliases, so their output is complete
@@ -66,6 +66,14 @@ not a pre-release or a draft) starts the workflow, and its last job posts to
     `announce` job will post, produced by running that job's compose step from
     the cut's `release.yaml`, with warnings for text Slack would misread
     (step 4).
+  - `check-cloud-images.sh <X.Y.Z> <out-dir>`: the siren automation PR
+    compared with the images the release's packer manifest gives
+    `trigger-siren` (step 8.4).
+
+  This file holds no command with a dollar sign followed by a digit: Claude
+  Code replaces those with the skill's arguments when it loads the skill, so
+  awk fields and shell positional parameters live in the helpers.
+  → [why](reference.md#helpers)
 - Work directory: `W=<scratchpad or $TMPDIR>/vector-store-release/X.Y.Z`.
   Shell variables do not persist between tool calls; write paths in full.
 
@@ -321,19 +329,14 @@ Push only that tag, never `--tags`. For a patch on an older series, pass
 3. **Docker Hub:** `docker buildx imagetools inspect scylladb/vector-store:X.Y.Z`
    lists exactly `linux/amd64` and `linux/arm64`; for a newest-GA release,
    `scylladb/vector-store:latest` has the same digest.
-4. **siren:** `gh pr list -R scylladb/siren --search "add version X.Y.Z in:title" --state all`
-   shows the automation PR. It must carry exactly the images the `trigger-siren`
-   job took from the release's packer manifest, each in its architecture's
-   field: the `us-east-1` AMI of the last `amazon-ebs` build of amd64 in
-   `images.aws` and of arm64 in `images-arm64.aws`, and the last
-   `googlecompute` image in `images.gcp`. A re-run appends its builds to the
-   manifest, so an image of an earlier attempt is in it too and must not be
-   accepted. Save both, then compare:
-   `gh release download X.Y.Z -R scylladb/vector-store -p 'vector-store-cloud-images-X.Y.Z.json' -O $W/cloud-images.json`,
-   `gh pr diff <n> -R scylladb/siren > $W/siren.diff`,
-   `jq -r '([.builds[] | select(.builder_type=="amazon-ebs")] | group_by(.custom_data.arch)[] | last | .custom_data.arch + " aws " + (.artifact_id | split(",")[] | select(startswith("us-east-1:")) | sub("^us-east-1:"; ""))), ([.builds[] | select(.builder_type=="googlecompute")] | last | "amd64 gcp " + .artifact_id)' $W/cloud-images.json | sort > $W/siren-expected.txt`,
-   `awk '/^\+ *images:/ { a = "amd64" } /^\+ *images-arm64:/ { a = "arm64" } a && /^\+ *(aws|gcp): / { f = $2; sub(/:$/, "", f); v = $3; sub(/.*\//, "", v); print a, f, v }' $W/siren.diff | sort > $W/siren-actual.txt`,
-   and `diff $W/siren-expected.txt $W/siren-actual.txt` prints nothing. It
+4. **siren:** `check-cloud-images.sh X.Y.Z $W/images` finds the automation
+   PR, `feat(vectorstore): add version X.Y.Z [automation]`, and exits 0 when
+   it carries exactly the images the `trigger-siren` job took from the
+   release's packer manifest, each in its architecture's field: the
+   `us-east-1` AMI of the last `amazon-ebs` build of amd64 in `images.aws` and
+   of arm64 in `images-arm64.aws`, and the last `googlecompute` image in
+   `images.gcp`. A re-run appends its builds to the manifest, so an image of an
+   earlier attempt is in it too and must not be accepted. The PR
    needs a merge by someone with siren rights; say
    so in the report with its link. siren's workflow always moves
    `defaults.vectorstore` to the dispatched version, so for a patch on an older
