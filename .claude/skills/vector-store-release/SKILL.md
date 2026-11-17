@@ -67,9 +67,11 @@ not a pre-release or a draft) starts the workflow, and its last job posts to
     `announce` job will post, produced by running that job's compose step from
     the cut's `release.yaml`, with warnings for text Slack would misread
     (step 4).
-  - `check-cloud-images.sh <X.Y.Z> <out-dir>`: the siren automation PR
-    compared with the images the release's packer manifest gives
-    `trigger-siren` (step 8.4).
+  - `check-cloud-images.sh <X.Y.Z> <run-id> <out-dir>`: from the release
+    run's image build log, the base image, kernel and sudo checks of each
+    build and any provisioning command that failed without failing it; the
+    regions each AMI was copied to; and the siren automation PR compared with
+    the images the release's packer manifest gives `trigger-siren` (step 8.4).
 
   This file holds no command with a dollar sign followed by a digit: Claude
   Code replaces those with the skill's arguments when it loads the skill, so
@@ -166,6 +168,10 @@ own.
      `.cargo/config.toml`;
    - what the release workflow publishes or announces (Docker tags, assets,
      siren, Slack);
+   - `packer/`: the cloud images' base image and kernel, what they install
+     (swap, agents, sudo) and the instance types they need. The image build
+     runs only after the release is published, so a changed template gets
+     its first full run then → [why](reference.md#cloud-images);
    - `api/openapi.json`: a changed API version, endpoint or schema;
    - dependencies of the shipped binary: check with `cargo tree` on the cut's
      manifests and lockfile, not the checkout's, before writing that a crate
@@ -271,7 +277,12 @@ Show the user, in one message:
    and headlines if very long);
 3. the rendered Slack message from `$W/slack.txt`, exactly;
 4. the skipped commits with reasons, and anything found in step 3 that the
-   user should weigh (a toolchain change, an unmeasured risk).
+   user should weigh (a toolchain change, an unmeasured risk). When
+   `packer/` changed, say what its trial builds did not cover and what a
+   failed `build-cloud-images` job leaves: the release, the Docker images and
+   the assets published, but no siren PR and no Slack post, since
+   `trigger-siren` and `announce` need it. A transient failure is re-run; a
+   template bug needs a new release.
 
 Ask the calls the rules above leave open as separate questions, before the
 release question: how strong the performance statement is, and which changes
@@ -334,8 +345,15 @@ Push only that tag, never `--tags`. For a patch on an older series, pass
 3. **Docker Hub:** `docker buildx imagetools inspect scylladb/vector-store:X.Y.Z`
    lists exactly `linux/amd64` and `linux/arm64`; for a newest-GA release,
    `scylladb/vector-store:latest` has the same digest.
-4. **siren:** `check-cloud-images.sh X.Y.Z $W/images` finds the automation
-   PR, `feat(vectorstore): add version X.Y.Z [automation]`, and exits 0 when
+4. **Cloud images and siren:** `check-cloud-images.sh X.Y.Z <run-id> $W/images`
+   exits 0 when every check passes. It prints the base image of each build:
+   the template takes the newest published one, so put them in the report,
+   the only record of the GCP one. It checks that the kernel and sudo checks
+   of the install script passed in every build, that no provisioning command
+   failed while the build went on (the install script tolerates some, such
+   as the swap setup), and that each AMI was copied to every region of the
+   template. It finds the automation
+   PR, `feat(vectorstore): add version X.Y.Z [automation]`, and checks that
    it carries exactly the images the `trigger-siren` job took from the
    release's packer manifest, each in its architecture's field: the
    `us-east-1` AMI of the last `amazon-ebs` build of amd64 in `images.aws` and
@@ -352,7 +370,8 @@ Push only that tag, never `--tags`. For a patch on an older series, pass
 
 1. **Release:** version, link, cut SHA, previous release, number of PRs.
 2. **Workflow:** run link, duration, conclusion, failed or re-run jobs.
-3. **Checks:** one line each for Slack, assets, Docker Hub, siren.
+3. **Checks:** one line each for Slack, assets, Docker Hub, cloud images
+   (with their base images) and siren.
 4. **Needs a person:** the siren PR merge, anything unverified or failed.
 
 Then remove the cut worktree, if step 3 made one: `git worktree remove $W/cut`.

@@ -105,6 +105,37 @@ does not have, reports its own version in `system.clients` instead of
 warning. They also showed which entries do not reach Vector Store, which
 calls neither `use_keyspace` nor `get_token_endpoints` and sends no batches.
 
+## Cloud images
+
+The `build-cloud-images` job builds the AWS and GCP images with packer from
+the release's tarballs, so it runs only after the release is published. A
+template change gets its first full run there: in CI no job runs packer. If
+the job fails, the release, the Docker images and the assets are already
+out, while `trigger-siren` and `announce` never run, since both need it. The
+release is public, unannounced and missing from siren. A transient failure
+can be re-run; a template bug needs a new release with a corrected
+template.
+
+1.16.0 was the first release built on the Ubuntu 26.04 template (#704). Its
+trial builds had not covered the subnet filter, the region copies, image
+sharing or the GCP image family; the gate said so, and the release run
+passed. The template takes the newest Ubuntu 26.04 image Canonical
+publishes instead of a pinned one, so the base changes between releases
+without a change in the repository. An AMI records its base in its
+`source-ami` tags; a GCP image cannot, and the build log is the only
+record. 1.16.0's were `ami-0ba4e0699ab96b9fc` (amd64),
+`ami-04696b291c4b4032e` (arm64) and
+`ubuntu-minimal-2604-resolute-amd64-v20261107` (GCP).
+
+A green job does not mean every step worked. The install script catches
+the failure of some commands (the swap setup, pip, node_exporter,
+process_exporter), prints it and goes on, so an image can ship without
+swap while the job succeeds. Its `run()` prints `Error while running:` for
+every failed command, which is what `check-cloud-images.sh` looks for.
+The siren PR carries only the `us-east-1` AMIs, so a copy missing from
+another region would not show there either; the helper compares each AMI's
+regions with the template's.
+
 ## Notes format
 
 The format follows the 1.12.0 and 1.13.0 notes, which the team reviewed: one
