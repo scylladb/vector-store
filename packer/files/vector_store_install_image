@@ -10,6 +10,7 @@ import shutil
 import hashlib
 import argparse
 import tempfile
+import sysconfig
 import subprocess
 
 HOME_DIR='/home/ubuntu'
@@ -46,6 +47,31 @@ VMUTILS_URL = 'https://github.com/VictoriaMetrics/VictoriaMetrics/releases/downl
 VMUTILS_DIR = '/opt/vmutils'
 VMAGENT_BIN = VMUTILS_DIR + '/vmagent-prod'
 
+# Oldest kernel the image may ship, per cloud: the first Ubuntu 26.04 kernels
+# with the fix for CVE-2026-98432, a remotely triggerable use-after-free in
+# IPv4 TCP. The packer template's dist-upgrade is expected to install at least
+# these, and check_kernel() fails the build when it did not, for example
+# because the base image predates the fix and its kernel was left alone. The
+# versions are those of the linux-aws and linux-gcp source packages, which the
+# linux-image-<abi>-<flavour> packages share. Raise them when a later kernel
+# fix must not be missed; do not lower them.
+KERNEL_FLAVOUR = {'aws': 'aws', 'gce': 'gcp'}
+MIN_KERNEL_VERSION = {'aws': '7.0.0-1017.18', 'gce': '7.0.0-1017.19'}
+
+# Siren, the Scylla Cloud control plane, runs its root scripts on every node as
+# `export NAME=value ...; sudo -E script`. Ubuntu 26.04 makes sudo-rs the
+# default sudo, and sudo-rs ignores -E ("preserving the entire environment is
+# not supported"), so those scripts would run without their variables: on a node
+# of this image Siren's OS users script stopped at "SUPPORT_PUBLIC_KEY: unbound
+# variable" and the node was never set up. Ubuntu still ships the classic sudo
+# as sudo.ws; use_classic_sudo() makes it the default, as update-alternatives
+# allows, and fails the build unless `sudo -E` then keeps the environment.
+# This is a stopgap that gives up sudo-rs: Siren is to pass its variables in a
+# way sudo-rs supports (`sudo env NAME=value ...`, CLOUD-5733), and the image is
+# then to go back to the default sudo (VECTOR-1209).
+CLASSIC_SUDO = '/usr/bin/sudo.ws'
+SUDO_ENV_PROBE = 'VECTOR_STORE_IMAGE_SUDO_PROBE'
+
 def run(template_cmd, shell=False):
     cmd = template_cmd.format(_HOME=HOME_DIR, _USER=USER)
     if dry_run:
@@ -75,9 +101,16 @@ def chdir(template_dir):
         print('cd ', dir)
     os.chdir(dir)
 
-def install_pip_package(arch):
+def pip_externally_managed():
+    # PEP 668: a distribution marks its Python as externally managed with this
+    # file, and pip then refuses to install system-wide without
+    # --break-system-packages. Ubuntu ships the marker since 23.04, whose pip is
+    # also the first to know the flag, so pass it exactly when the marker exists.
+    return os.path.exists(os.path.join(sysconfig.get_path('stdlib'), 'EXTERNALLY-MANAGED'))
+
+def install_pip_package():
     try:
-        run('pip3 install {_BREAK_SYSTEM_PACKAGES} psutil traceback_with_variables'.format(_BREAK_SYSTEM_PACKAGES='--break-system-packages' if arch=='arm64' else ''))
+        run('pip3 install {_BREAK_SYSTEM_PACKAGES} psutil traceback_with_variables'.format(_BREAK_SYSTEM_PACKAGES='--break-system-packages' if pip_externally_managed() else ''))
     except Exception as e:
         print("pip3 install failed" + str(e))
         print(e.output)
@@ -130,6 +163,74 @@ def check_version_output(cmd, expected, prefix_only=False):
     ok = out.startswith(expected) if prefix_only else expected in out
     if not ok:
         raise RuntimeError('{CMD} printed {OUT!r}, expected {EXP!r}'.format(CMD=' '.join(cmd), OUT=out, EXP=expected))
+
+def installed_kernels():
+    # (package, version) of every installed kernel image, for example
+    # ('linux-image-7.0.0-1017-aws', '7.0.0-1017.18'). Metapackages such as
+    # linux-image-aws have no kernel version in their name and are skipped, and
+    # so are packages that were removed but left their configuration behind.
+    # Only the second status letter says what is on disk; the first is the
+    # wanted state, so a kernel on hold ('hi') still counts as installed.
+    # dpkg-query exits non-zero when nothing matches; that is an empty list
+    res = subprocess.run(['dpkg-query', '-W', '-f', '${db:Status-Abbrev}\\t${Package}\\t${Version}\\n', 'linux-image-*'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    kernels = []
+    for line in res.stdout.decode().splitlines():
+        status, package, version = line.split('\t')
+        abi = package[len('linux-image-'):]
+        if abi.startswith('unsigned-'):
+            abi = abi[len('unsigned-'):]
+        if status[1:2] == 'i' and abi[:1].isdigit():
+            kernels.append((package, version))
+    return kernels
+
+def dpkg_version_ge(version, other):
+    return subprocess.run(['dpkg', '--compare-versions', version, 'ge', other]).returncode == 0
+
+def check_kernel(cloud):
+    # The image boots the newest kernel that is installed, not the one this
+    # builder is running (the build never reboots), so look at the packages and
+    # not at uname. Fail the build rather than ship a kernel older than
+    # MIN_KERNEL_VERSION or of another flavour than the cloud's
+    flavour = KERNEL_FLAVOUR[cloud]
+    floor = MIN_KERNEL_VERSION[cloud]
+    expected = 'linux-image-*-{F} at version {MIN} or newer'.format(F=flavour, MIN=floor)
+    if dry_run:
+        print('check that the newest installed kernel is {EXP}'.format(EXP=expected))
+        return
+    kernels = installed_kernels()
+    if not kernels:
+        raise RuntimeError('no kernel image package is installed, expected {EXP}'.format(EXP=expected))
+    newest = kernels[0]
+    for kernel in kernels[1:]:
+        if dpkg_version_ge(kernel[1], newest[1]):
+            newest = kernel
+    package, version = newest
+    if not package.endswith('-' + flavour) or not dpkg_version_ge(version, floor):
+        raise RuntimeError('the newest installed kernel is {PKG} {VER}, expected {EXP}; installed kernels: {ALL}'.format(
+            PKG=package, VER=version, EXP=expected, ALL=', '.join('{P} {V}'.format(P=p, V=v) for p, v in kernels)))
+    print('kernel check passed: the newest installed kernel is {PKG} {VER}, the minimum is {MIN}'.format(PKG=package, VER=version, MIN=floor))
+
+def sudo_keeps_environment():
+    # what Siren relies on: a variable exported before `sudo -E` reaches the command
+    env = dict(os.environ, **{SUDO_ENV_PROBE: 'kept'})
+    res = subprocess.run(['sudo', '-E', 'printenv', SUDO_ENV_PROBE], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    return res.returncode == 0 and res.stdout.decode().strip() == 'kept', res.stdout.decode().strip()
+
+def use_classic_sudo():
+    # See CLASSIC_SUDO. An image whose sudo already keeps the environment (a base
+    # image with the classic sudo as its only sudo) is left as it is
+    if dry_run:
+        print('make {SUDO} the default sudo unless `sudo -E` already keeps the environment'.format(SUDO=CLASSIC_SUDO))
+        return
+    kept, _ = sudo_keeps_environment()
+    if not kept:
+        if not os.path.exists(CLASSIC_SUDO):
+            raise RuntimeError('`sudo -E` drops the environment and {SUDO} is not installed'.format(SUDO=CLASSIC_SUDO))
+        run('update-alternatives --set sudo {SUDO}'.format(SUDO=CLASSIC_SUDO))
+        kept, out = sudo_keeps_environment()
+        if not kept:
+            raise RuntimeError('`sudo -E` still drops the environment after switching to {SUDO}: {OUT!r}'.format(SUDO=CLASSIC_SUDO, OUT=out))
+    print('sudo check passed: `sudo -E` keeps the environment ({SUDO})'.format(SUDO=os.path.realpath(shutil.which('sudo'))))
 
 def install_observability_agents(arch):
     # Vector (vector.dev log shipper, not Vector Store) and vmagent binaries for
@@ -234,12 +335,16 @@ if __name__ == '__main__':
 
     if args.do_not_move:
         COPY_OR_MOVE='cp'
+    # first in this script, before the downloads, so a build on a kernel
+    # without the fix fails early
+    check_kernel(args.cloud)
+    use_classic_sudo()
     install_vector_store(args.version, args.arch)
     install_observability_agents(args.arch)
     install_service()
     configure_journald()
     disable_syslog()
-    install_pip_package(args.arch)
+    install_pip_package()
     get_swap_scripts()
     if args.swap_size > 0:
         update_swap(args.swap_size)

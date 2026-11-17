@@ -4,7 +4,13 @@
       "type": "amazon-ebs",
       "region": "{{user `aws_region`}}",
       "ami_name": "{{ user `vector_image_name` }}",
-      "source_ami": "{{ user (printf \"aws_source_ami_%s\" (user \"arch\")) }}",
+      "source_ami_filter": {
+        "filters": {
+          "name": "{{ user (printf \"aws_source_ami_filter_name_%s\" (user \"arch\")) }}"
+        },
+        "owners": ["099720109477"],
+        "most_recent": true
+      },
       "instance_type": "{{user (printf \"aws_instance_type_%s\" (user \"arch\")) }}",
       "ami_regions": "{{user `aws_regions`}}",
       "user_data_file": "files/user_data.txt",
@@ -40,7 +46,9 @@
       "tags": {
         "Name": "{{ user `vector_image_name` }}",
         "vector-store-version": "{{ user `vector_version`| clean_resource_name }}",
-        "arch": "{{ user `arch` }}"
+        "arch": "{{ user `arch` }}",
+        "source-ami": "{{ .SourceAMI }}",
+        "source-ami-name": "{{ .SourceAMIName }}"
       },
       "run_tags": {
         "Name": "packer-build-{{ user `vector_image_name` }}-builder",
@@ -62,6 +70,7 @@
       "source_image_family": "{{ user (printf \"gcp_source_image_family_%s\" (user \"arch\")) }}",
       "image_storage_locations": ["{{user `gcp_image_storage_location`}}"],
       "machine_type": "{{user (printf \"gcp_instance_type_%s\" (user \"arch\")) }}",
+      "min_cpu_platform": "{{ user (printf \"gcp_min_cpu_platform_%s\" (user \"arch\")) }}",
       "ssh_username": "{{user `gcp_ssh_username`}}",
       "ssh_timeout": "6m",
       "metadata": { "block-project-ssh-keys": "TRUE" },
@@ -94,10 +103,24 @@
     {
       "type": "shell",
       "inline": [
-        "sudo apt-get update --fix-missing -y",
-        "sudo apt-get upgrade -y",
-        "sudo apt-get install -y python3-setuptools",
-        "sudo apt-get install -y python3-pip"
+        "set -eu",
+
+        "sudo systemctl stop unattended-upgrades || true",
+        "sudo systemctl stop apt-daily.service apt-daily-upgrade.service || true",
+        "sudo systemctl stop apt-daily.timer apt-daily-upgrade.timer || true",
+        "sudo systemctl mask apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service || true",
+
+        "sudo /home/ubuntu/wait_for_apt_locks",
+        "sudo env DEBIAN_FRONTEND=noninteractive dpkg --configure -a || true"
+      ]
+    },
+    {
+      "type": "shell",
+      "inline": [
+        "sudo env DEBIAN_FRONTEND=noninteractive apt-get update --fix-missing -y",
+        "sudo env DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confdef dist-upgrade -y",
+        "sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y python3-setuptools",
+        "sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y python3-pip"
       ]
     },
     {
@@ -133,9 +156,9 @@
     "swap_size": "50",
     "aws_region": "us-east-1",
     "aws_regions": "us-west-2,eu-west-2,eu-west-1,eu-central-1,eu-north-1",
-    "aws_source_ami_amd64": "ami-02a35bd020554f400",
-    "aws_instance_type_amd64": "c4.xlarge",
-    "aws_source_ami_arm64": "ami-026fccd88446aa0bf",
+    "aws_source_ami_filter_name_amd64": "ubuntu-minimal/images/hvm-ssd-gp3/ubuntu-resolute-26.04-amd64*",
+    "aws_instance_type_amd64": "c5.xlarge",
+    "aws_source_ami_filter_name_arm64": "ubuntu-minimal/images/hvm-ssd-gp3/ubuntu-resolute-26.04-arm64*",
     "aws_instance_type_arm64": "c7g.xlarge",
 
     "aws_ssh_username": "ubuntu",
@@ -145,11 +168,13 @@
     "gcp_zone": "europe-west1-b",
     "gcp_image_storage_location": "europe-west1",
 
-    "gcp_source_image_family_amd64": "ubuntu-minimal-2204-lts",
+    "gcp_source_image_family_amd64": "ubuntu-minimal-2604-lts-amd64",
     "gcp_instance_type_amd64": "n1-standard-1",
+    "gcp_min_cpu_platform_amd64": "Intel Haswell",
 
-    "gcp_source_image_family_arm64": "ubuntu-minimal-2204-lts-arm64",
+    "gcp_source_image_family_arm64": "ubuntu-minimal-2604-lts-arm64",
     "gcp_instance_type_arm64": "t2a-standard-2",
+    "gcp_min_cpu_platform_arm64": "",
     "gcp_ssh_username": "ubuntu",
     "gcp_install_args": "--cloud gce --verbose --version {{ user `vector_version` }} --arch {{ user `arch` }} --swap-size {{ user `swap_size` }}"
   }
