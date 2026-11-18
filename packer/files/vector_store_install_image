@@ -325,6 +325,15 @@ def wait_for_nic_before_cloud_init():
     with open('{dir}/wait-for-nic.conf'.format(dir=conf_dir), 'w') as f:
         f.write('[Unit]\nWants=sys-subsystem-net-devices-ens5.device\nAfter=sys-subsystem-net-devices-ens5.device\n')
 
+def clean_image():
+    # an instance of the image boots as a new machine: cloud-init sets it up
+    # again with the instance's own SSH key, and systemd makes a new machine-id
+    run('cloud-init clean --logs')
+    # empty, not 'uninitialized': the next boot must not be systemd's first
+    # boot, which runs preset-all and enables the disabled services
+    run('truncate -s 0 /etc/machine-id')
+    run('rm -f {_HOME}/.ssh/authorized_keys /root/.ssh/authorized_keys')
+
 if __name__ == '__main__':
     if os.getuid() > 0:
         print('Requires root permission.')
@@ -363,3 +372,4 @@ if __name__ == '__main__':
     install_process_exporter()
     if args.cloud == 'aws':
         wait_for_nic_before_cloud_init()
+        clean_image()
