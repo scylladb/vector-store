@@ -6116,7 +6116,7 @@ dependencies = [
  "hotpath",
  "httpapi",
  "httpclient",
- "humantime",
+ "human-duration",
  "itertools 0.14.0",
  "mimalloc",
  "mockall",
