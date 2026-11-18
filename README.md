@@ -41,6 +41,24 @@ service supports also `.env` files.
 | `VECTOR_STORE_DISKANN_MAX_POINTS`          | Maximum number of vectors a single DiskANN partition index can hold. | `1M (1_000_000)`                    |
 | `VECTOR_STORE_ALTER_INDEX_SIMULATOR`       | Enable simulator for missing `ALTER INDEX`. When enable indexes aren't deleted and their version is not checked.                                                                     | `false`                  |
 
+### Duration values
+
+Duration variables take values such as `100ms`, `30s`, `1m 30s`, `1h30m` or
+`2days`: a number and a unit, repeated with the units in descending order. A
+day is 24 hours and a week is 7 days. Since the parser moved from `humantime`
+to `jiff`, these forms are rejected and need to be rewritten:
+
+| Rejected form                     | Example           | Write instead   |
+|-----------------------------------|-------------------|-----------------|
+| Units out of order or repeated    | `30s 1m`, `1s 1s` | `1m 30s`, `2s`  |
+| A bare zero                       | `0`               | `0s`            |
+| Fractional days or weeks          | `0.5d`            | `12h`           |
+| Months or years                   | `1M`, `1y`        | `30d`, `365d`   |
+
+An invalid value makes Vector Store fail at startup with an `invalid duration`
+error naming the value. The exception is `VECTOR_STORE_TLS_FILE_CHECK_INTERVAL`,
+which falls back to its default.
+
 ## Development builds
 
 You need to install [Rust

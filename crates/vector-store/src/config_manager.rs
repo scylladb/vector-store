@@ -11,7 +11,7 @@ use crate::tls;
 use crate::tls::TlsServerConfig;
 use anyhow::anyhow;
 use anyhow::bail;
-use itertools::Itertools;
+use human_duration::ParseDuration;
 use secrecy::ExposeSecret;
 use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
@@ -25,8 +25,8 @@ const TLS_FILE_CHECK_INTERVAL_ENV: &str = "VECTOR_STORE_TLS_FILE_CHECK_INTERVAL"
 
 fn tls_file_check_interval(env: &impl Fn(&str) -> anyhow::Result<String>) -> Duration {
     match env(TLS_FILE_CHECK_INTERVAL_ENV) {
-        Ok(interval_str) => match interval_str.parse::<humantime::Duration>() {
-            Ok(interval) => interval.into(),
+        Ok(interval_str) => match interval_str.parse_duration() {
+            Ok(interval) => interval,
             Err(err) => {
                 tracing::warn!(
                     "Failed to parse {TLS_FILE_CHECK_INTERVAL_ENV}={interval_str:?}: {err}. Using default {:?}",
@@ -422,10 +422,10 @@ pub async fn load_config(env: impl Fn(&str) -> anyhow::Result<String>) -> anyhow
 
     if let Some(memory_usage_check_interval) = env("VECTOR_STORE_MEMORY_USAGE_CHECK_INTERVAL")
         .ok()
-        .map(|v| v.parse::<humantime::Duration>())
+        .map(|v| v.parse_duration())
         .transpose()?
     {
-        config.memory_usage_check_interval = Some(memory_usage_check_interval.into());
+        config.memory_usage_check_interval = Some(memory_usage_check_interval);
     }
 
     if let Ok(opensearch_addr) = env("VECTOR_STORE_OPENSEARCH_URI") {
@@ -434,7 +434,7 @@ pub async fn load_config(env: impl Fn(&str) -> anyhow::Result<String>) -> anyhow
 
     config.usearch_simulator = env("VECTOR_STORE_USEARCH_SIMULATOR")
         .ok()
-        .map(|v| v.split(':').map(|s| s.parse::<humantime::Duration>()).map_ok(|v| v.into()).collect::<Result<Vec<_>, _>>().map_err(|err| {
+        .map(|v| v.split(':').map(ParseDuration::parse_duration).collect::<Result<Vec<_>, _>>().map_err(|err| {
             anyhow!("Unable to parse VECTOR_STORE_USEARCH_SIMULATOR env (search_us:add_us:delete_us:...): {err}")
         })).transpose()?;
 
@@ -502,63 +502,53 @@ pub async fn load_config(env: impl Fn(&str) -> anyhow::Result<String>) -> anyhow
 
     config.cql_connection_timeout = env("VECTOR_STORE_CQL_CONNECTION_TIMEOUT")
         .ok()
-        .map(|v| v.parse::<humantime::Duration>())
-        .transpose()?
-        .map(|v| v.into());
+        .map(|v| v.parse_duration())
+        .transpose()?;
 
     config.cql_keepalive_interval = env("VECTOR_STORE_CQL_KEEPALIVE_INTERVAL")
         .ok()
-        .map(|v| v.parse::<humantime::Duration>())
-        .transpose()?
-        .map(|v| v.into());
+        .map(|v| v.parse_duration())
+        .transpose()?;
 
     config.cql_keepalive_timeout = env("VECTOR_STORE_CQL_KEEPALIVE_TIMEOUT")
         .ok()
-        .map(|v| v.parse::<humantime::Duration>())
-        .transpose()?
-        .map(|v| v.into());
+        .map(|v| v.parse_duration())
+        .transpose()?;
 
     config.cql_tcp_keepalive_interval = env("VECTOR_STORE_CQL_TCP_KEEPALIVE_INTERVAL")
         .ok()
-        .map(|v| v.parse::<humantime::Duration>())
-        .transpose()?
-        .map(|v| v.into());
+        .map(|v| v.parse_duration())
+        .transpose()?;
 
     config.cdc_safety_interval = env("VECTOR_STORE_CDC_SAFETY_INTERVAL")
         .ok()
-        .map(|v| v.parse::<humantime::Duration>())
-        .transpose()?
-        .map(|v| v.into());
+        .map(|v| v.parse_duration())
+        .transpose()?;
 
     config.cdc_sleep_interval = env("VECTOR_STORE_CDC_SLEEP_INTERVAL")
         .ok()
-        .map(|v| v.parse::<humantime::Duration>())
-        .transpose()?
-        .map(|v| v.into());
+        .map(|v| v.parse_duration())
+        .transpose()?;
 
     config.cdc_fine_safety_interval = env("VECTOR_STORE_CDC_FINE_SAFETY_INTERVAL")
         .ok()
-        .map(|v| v.parse::<humantime::Duration>())
-        .transpose()?
-        .map(|v| v.into());
+        .map(|v| v.parse_duration())
+        .transpose()?;
 
     config.cdc_fine_sleep_interval = env("VECTOR_STORE_CDC_FINE_SLEEP_INTERVAL")
         .ok()
-        .map(|v| v.parse::<humantime::Duration>())
-        .transpose()?
-        .map(|v| v.into());
+        .map(|v| v.parse_duration())
+        .transpose()?;
 
     config.monitor_indexes_interval = env("VECTOR_STORE_MONITOR_INDEXES_INTERVAL")
         .ok()
-        .map(|v| v.parse::<humantime::Duration>())
-        .transpose()?
-        .map(|v| v.into());
+        .map(|v| v.parse_duration())
+        .transpose()?;
 
     config.engine_status_update_interval = env("VECTOR_STORE_INDEX_STATUS_UPDATE_INTERVAL")
         .ok()
-        .map(|v| v.parse::<humantime::Duration>())
-        .transpose()?
-        .map(|v| v.into());
+        .map(|v| v.parse_duration())
+        .transpose()?;
 
     config.cql_uri_translation_map = env("VECTOR_STORE_CQL_URI_TRANSLATION_MAP")
         .ok()
