@@ -51,8 +51,10 @@ hotpath = { version = "0.15.0", features = ["tokio", "futures", "async-channel"]
 http = "1.4.0"
 httpapi = { path = "crates/httpapi" }
 httpclient = { path = "crates/httpclient" }
+human-duration = { path = "crates/human-duration" }
 humantime = "2.2.0"
 itertools = "0.14.0"
+jiff = { version = "0.2.38", default-features = false, features = ["std"] }
 linkme = "0.3.36"
 macros = { path = "crates/macros" }
 mimalloc = { version = "0.1.48", features = ["override"] }
