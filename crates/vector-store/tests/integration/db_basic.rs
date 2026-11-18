@@ -54,13 +54,11 @@ use vector_store::DbIndexedOperation;
 use vector_store::DbIndexedRow;
 use vector_store::DbIndexedValue;
 use vector_store::DbRow;
-use vector_store::DbUnsupportedIndex;
 use vector_store::DbValue;
 use vector_store::Dimensions;
 use vector_store::IndexKind;
 use vector_store::IndexMetadata;
 use vector_store::IndexName;
-use vector_store::IndexVersion;
 use vector_store::KeyspaceName;
 use vector_store::NonemptyArc;
 use vector_store::NonemptyBox;
@@ -560,7 +558,6 @@ struct DbMock {
     next_get_db_index_failed: bool,
     next_full_scan_progress: Option<Progress>,
     simulate_endless_get_indexes_processing: bool,
-    unsupported_indexes: Vec<DbUnsupportedIndex>,
     store_vectors: StoreVectors,
     vectors: HashMap<PrimaryKey, Vector>,
     make_in_progress_guard: Option<MakeInProgressGuardFn>,
@@ -583,7 +580,6 @@ impl DbBasic {
             next_get_db_index_failed: false,
             next_full_scan_progress: None,
             simulate_endless_get_indexes_processing: false,
-            unsupported_indexes: Vec::new(),
             store_vectors,
             vectors: HashMap::new(),
             make_in_progress_guard: None,
@@ -680,13 +676,6 @@ impl DbBasic {
 
         db.create_new_schema_version();
         Ok(())
-    }
-
-    /// Adds an index that discovery skips as unsupported.
-    pub(crate) fn add_unsupported_index(&self, index: DbUnsupportedIndex) {
-        let mut db = self.0.write().unwrap();
-        db.unsupported_indexes.push(index);
-        db.create_new_schema_version();
     }
 
     pub(crate) fn del_index(
@@ -1535,7 +1524,7 @@ fn process_db(db: &DbBasic, msg: Db, node_state: mpsc::Sender<NodeState>) {
                                 })
                         })
                         .collect();
-                    (indexes, db.unsupported_indexes.clone())
+                    (indexes, vec![])
                 };
                 tx.send(Ok(response))
                     .map_err(|_| anyhow!("Db::GetIndexes: unable to send response"))
@@ -1553,16 +1542,7 @@ fn process_db(db: &DbBasic, msg: Db, node_state: mpsc::Sender<NodeState>) {
                 .keyspaces
                 .get(&keyspace)
                 .and_then(|keyspace| keyspace.indexes.get(&index))
-                .map(|index| index.metadata.version.clone())
-                .or_else(|| {
-                    db.unsupported_indexes
-                        .iter()
-                        .any(|unsupported| {
-                            unsupported.index.keyspace == keyspace
-                                && unsupported.index.index == index
-                        })
-                        .then(|| IndexVersion::from(Uuid::new_v4()))
-                });
+                .map(|index| index.metadata.version.clone());
             tx.send(Ok(version))
                 .map_err(|_| anyhow!("Db::GetIndexVersion: unable to send response"))
                 .unwrap()
