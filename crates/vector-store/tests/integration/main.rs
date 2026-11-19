@@ -7,6 +7,7 @@ mod common;
 mod db_basic;
 mod fts;
 mod https;
+mod index_build;
 mod index_info;
 mod index_status;
 mod info;
