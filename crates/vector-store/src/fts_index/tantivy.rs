@@ -170,20 +170,20 @@ fn make_query(
         .and_then(|mut ast| {
             check_regexes(&ast)?;
             // The query parser applies its default fields to terms and phrases, not to regexes.
-            set_regex_field(&mut ast, index.schema().get_field_name(text_field));
+            set_default_field(&mut ast, index.schema().get_field_name(text_field));
             query_parser.build_query_from_user_input_ast(ast)
         })
         .map_err(|e| QueryError(format!("fts: failed to parse query: {e}")).into())
 }
 
-fn set_regex_field(ast: &mut UserInputAst, field: &str) {
+fn set_default_field(ast: &mut UserInputAst, field: &str) {
     match ast {
         UserInputAst::Clause(clauses) => {
             for (_, clause) in clauses {
-                set_regex_field(clause, field);
+                set_default_field(clause, field);
             }
         }
-        UserInputAst::Boost(boosted, _) => set_regex_field(boosted, field),
+        UserInputAst::Boost(boosted, _) => set_default_field(boosted, field),
         UserInputAst::Leaf(leaf) => {
             if let UserInputLeaf::Regex {
                 field: regex_field @ None,
