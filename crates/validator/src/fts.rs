@@ -1490,3 +1490,51 @@ async fn bm25_regex_query(fixture: Arc<Fixture>) {
 
     info!("finished");
 }
+
+#[e2etest::test(group = fts)]
+async fn bm25_range_query(fixture: Arc<Fixture>) {
+    info!("started");
+
+    fixture
+        .insert_documents([
+            (1, "the quick brown fox jumps over the lazy dog"),
+            (2, "a slow turtle walks through the garden"),
+            (3, "the fox runs across the meadow"),
+        ])
+        .await;
+    fixture.create_fts_index().await;
+
+    let mut pks = fixture.bm25_search_pks("[f TO g]").await;
+    pks.sort();
+
+    // pks 1 and 3 have `fox`, and `garden` in pk 2 sorts after `g`.
+    assert_eq!(pks, vec![1, 3], "expected pks 1 and 3 for range '[f TO g]'");
+
+    info!("finished");
+}
+
+#[e2etest::test(group = fts)]
+async fn bm25_set_query(fixture: Arc<Fixture>) {
+    info!("started");
+
+    fixture
+        .insert_documents([
+            (1, "the quick brown fox jumps over the lazy dog"),
+            (2, "a slow turtle walks through the garden"),
+            (3, "the fox runs across the meadow"),
+        ])
+        .await;
+    fixture.create_fts_index().await;
+
+    let mut pks = fixture.bm25_search_pks("IN [dog turtle]").await;
+    pks.sort();
+
+    // pk 1 has `dog` and pk 2 has `turtle`.
+    assert_eq!(
+        pks,
+        vec![1, 2],
+        "expected pks 1 and 2 for set 'IN [dog turtle]'"
+    );
+
+    info!("finished");
+}

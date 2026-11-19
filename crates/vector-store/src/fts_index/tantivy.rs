@@ -169,7 +169,7 @@ fn make_query(
         .map_err(|_| QueryParserError::SyntaxError(query_str.to_string()))
         .and_then(|mut ast| {
             check_regexes(&ast)?;
-            // The query parser applies its default fields to terms and phrases, not to regexes.
+            // The query parser applies its default fields only to terms and phrases.
             set_default_field(&mut ast, index.schema().get_field_name(text_field));
             query_parser.build_query_from_user_input_ast(ast)
         })
@@ -186,11 +186,19 @@ fn set_default_field(ast: &mut UserInputAst, field: &str) {
         UserInputAst::Boost(boosted, _) => set_default_field(boosted, field),
         UserInputAst::Leaf(leaf) => {
             if let UserInputLeaf::Regex {
-                field: regex_field @ None,
+                field: leaf_field @ None,
+                ..
+            }
+            | UserInputLeaf::Range {
+                field: leaf_field @ None,
+                ..
+            }
+            | UserInputLeaf::Set {
+                field: leaf_field @ None,
                 ..
             } = leaf.as_mut()
             {
-                *regex_field = Some(field.to_string());
+                *leaf_field = Some(field.to_string());
             }
         }
     }
@@ -1485,5 +1493,116 @@ mod tests {
             err.to_string(),
             "fts: failed to parse query: Unsupported query: a query can have at most 3 regexes"
         );
+    }
+
+    #[rstest]
+    #[timeout(Duration::from_secs(10))]
+    #[tokio::test]
+    async fn range_query_matches_terms_in_the_range() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+
+        add_doc(&sender, 1, "bear").await;
+        add_doc(&sender, 2, "cat").await;
+        add_doc(&sender, 3, "dog").await;
+        add_doc(&sender, 4, "apple").await;
+
+        let (mut keys, _) = sender
+            .search(
+                make_index_key(),
+                "[b TO d]".into(),
+                Limit::from(std::num::NonZeroUsize::new(10).unwrap()),
+            )
+            .await
+            .unwrap();
+        keys.sort();
+
+        // `bear` and `cat` are in the range, `apple` sorts before `b` and `dog` after `d`.
+        assert_eq!(
+            keys,
+            vec![
+                PrimaryKey::from(vec![CqlValue::BigInt(1)]),
+                PrimaryKey::from(vec![CqlValue::BigInt(2)]),
+            ]
+        );
+    }
+
+    #[rstest]
+    #[timeout(Duration::from_secs(10))]
+    #[tokio::test]
+    async fn set_query_matches_any_of_the_terms() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+
+        add_doc(&sender, 1, "quick fox").await;
+        add_doc(&sender, 2, "lazy dog").await;
+        add_doc(&sender, 3, "quick foxes").await;
+
+        let (mut keys, _) = sender
+            .search(
+                make_index_key(),
+                "IN [fox dog]".into(),
+                Limit::from(std::num::NonZeroUsize::new(10).unwrap()),
+            )
+            .await
+            .unwrap();
+        keys.sort();
+
+        // pk 1 has `fox` and pk 2 has `dog`, but `foxes` in pk 3 is another term.
+        assert_eq!(
+            keys,
+            vec![
+                PrimaryKey::from(vec![CqlValue::BigInt(1)]),
+                PrimaryKey::from(vec![CqlValue::BigInt(2)]),
+            ]
+        );
+    }
+
+    #[rstest]
+    #[timeout(Duration::from_secs(10))]
+    #[tokio::test]
+    async fn range_query_gives_all_hits_the_same_score() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+
+        add_doc(&sender, 1, "bear").await;
+        add_doc(&sender, 2, "bear cat bear cat lazy dog").await;
+
+        let (_, scores) = sender
+            .search(
+                make_index_key(),
+                "[b TO d]".into(),
+                Limit::from(std::num::NonZeroUsize::new(10).unwrap()),
+            )
+            .await
+            .unwrap();
+
+        // Both hits score 1.0, although pk 2 is longer and repeats two terms in the range.
+        assert!((scores[0] - 1.0).abs() < 0.01, "scores: {scores:?}");
+        assert!((scores[1] - 1.0).abs() < 0.01, "scores: {scores:?}");
+    }
+
+    #[rstest]
+    #[timeout(Duration::from_secs(10))]
+    #[tokio::test]
+    async fn set_query_gives_all_hits_the_same_score() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+
+        add_doc(&sender, 1, "fox").await;
+        add_doc(&sender, 2, "fox dog fox runs far away").await;
+
+        let (_, scores) = sender
+            .search(
+                make_index_key(),
+                "IN [fox dog]".into(),
+                Limit::from(std::num::NonZeroUsize::new(10).unwrap()),
+            )
+            .await
+            .unwrap();
+
+        // Both hits score 1.0, although pk 2 is longer and has both terms, `fox` twice.
+        assert!((scores[0] - 1.0).abs() < 0.01, "scores: {scores:?}");
+        assert!((scores[1] - 1.0).abs() < 0.01, "scores: {scores:?}");
     }
 }
