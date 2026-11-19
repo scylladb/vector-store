@@ -11,6 +11,8 @@ use std::time::Duration;
 use anyhow::anyhow;
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
+use tantivy::query::QueryParserError;
+use tantivy::query_grammar;
 use tantivy::schema::IndexRecordOption;
 use tantivy::schema::TextFieldIndexing;
 use tantivy::schema::TextOptions;
@@ -159,8 +161,9 @@ fn make_query(
     query_str: &str,
 ) -> anyhow::Result<Box<dyn tantivy::query::Query>> {
     let query_parser = QueryParser::for_index(index, vec![text_field]);
-    query_parser
-        .parse_query(query_str)
+    query_grammar::parse_query(query_str)
+        .map_err(|_| QueryParserError::SyntaxError(query_str.to_string()))
+        .and_then(|ast| query_parser.build_query_from_user_input_ast(ast))
         .map_err(|e| QueryError(format!("fts: failed to parse query: {e}")).into())
 }
 
