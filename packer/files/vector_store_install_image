@@ -316,6 +316,24 @@ def disable_syslog():
     # journald already keeps every log; rsyslog would just duplicate it into /var/log files.
     run('apt-get remove --purge -y rsyslog')
 
+def wait_for_nic_before_cloud_init():
+    # cloud-init gives up on the EC2 datasource when no NIC exists yet, and
+    # the ENA driver sometimes creates ens5 after cloud-init-local starts
+    # (https://github.com/canonical/cloud-init/issues/6697)
+    conf_dir = '/etc/systemd/system/cloud-init-local.service.d'
+    os.makedirs(conf_dir, exist_ok=True)
+    with open('{dir}/wait-for-nic.conf'.format(dir=conf_dir), 'w') as f:
+        f.write('[Unit]\nWants=sys-subsystem-net-devices-ens5.device\nAfter=sys-subsystem-net-devices-ens5.device\n')
+
+def clean_image():
+    # an instance of the image boots as a new machine: cloud-init sets it up
+    # again with the instance's own SSH key, and systemd makes a new machine-id
+    run('cloud-init clean --logs')
+    # empty, not 'uninitialized': the next boot must not be systemd's first
+    # boot, which runs preset-all and enables the disabled services
+    run('truncate -s 0 /etc/machine-id')
+    run('rm -f {_HOME}/.ssh/authorized_keys /root/.ssh/authorized_keys')
+
 if __name__ == '__main__':
     if os.getuid() > 0:
         print('Requires root permission.')
@@ -352,3 +370,6 @@ if __name__ == '__main__':
         print("No swap will be created, as requested")
     install_node_exporter(arch=args.arch)
     install_process_exporter()
+    if args.cloud == 'aws':
+        wait_for_nic_before_cloud_init()
+        clean_image()
