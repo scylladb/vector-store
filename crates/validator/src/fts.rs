@@ -1538,3 +1538,37 @@ async fn bm25_set_query(fixture: Arc<Fixture>) {
 
     info!("finished");
 }
+
+#[e2etest::test(group = fts)]
+async fn bm25_field_prefix_returns_error(fixture: Arc<Fixture>) {
+    info!("started");
+
+    fixture
+        .insert_documents([
+            (1, "the quick brown fox jumps over the lazy dog"),
+            (2, "a slow turtle walks through the garden"),
+        ])
+        .await;
+    fixture.create_fts_index().await;
+
+    // The range covers every internal primary id.
+    let query = "primary_id:[0 TO 18446744073709551615]";
+    let err = fixture
+        .session
+        .query_unpaged(fixture.bm25_select_query(query, 100), ())
+        .await
+        .expect_err(&format!("BM25 query '{query}' should fail"))
+        .to_string();
+
+    // The Vector Store rejects the query instead of matching every row.
+    assert!(
+        err.contains("HTTP status 400"),
+        "unexpected error message: {err}"
+    );
+    assert!(
+        err.contains("Field prefixes are not supported"),
+        "unexpected error message: {err}"
+    );
+
+    info!("finished");
+}

@@ -16,6 +16,7 @@ use tantivy::query::QueryParserError;
 use tantivy::query_grammar;
 use tantivy::query_grammar::UserInputAst;
 use tantivy::query_grammar::UserInputLeaf;
+use tantivy::query_grammar::UserInputLiteral;
 use tantivy::schema::IndexRecordOption;
 use tantivy::schema::TextFieldIndexing;
 use tantivy::schema::TextOptions;
@@ -168,6 +169,7 @@ fn make_query(
     query_grammar::parse_query(query_str)
         .map_err(|_| QueryParserError::SyntaxError(query_str.to_string()))
         .and_then(|mut ast| {
+            reject_field_prefixes(&ast)?;
             check_regexes(&ast)?;
             // The query parser applies its default fields only to terms and phrases.
             set_default_field(&mut ast, index.schema().get_field_name(text_field));
@@ -201,6 +203,32 @@ fn set_default_field(ast: &mut UserInputAst, field: &str) {
                 *leaf_field = Some(field.to_string());
             }
         }
+    }
+}
+
+fn reject_field_prefixes(ast: &UserInputAst) -> Result<(), QueryParserError> {
+    match ast {
+        UserInputAst::Clause(clauses) => clauses
+            .iter()
+            .try_for_each(|(_, clause)| reject_field_prefixes(clause)),
+        UserInputAst::Boost(boosted, _) => reject_field_prefixes(boosted),
+        UserInputAst::Leaf(leaf) => match leaf.as_ref() {
+            UserInputLeaf::Literal(UserInputLiteral {
+                field_name: Some(_),
+                ..
+            })
+            | UserInputLeaf::Range { field: Some(_), .. }
+            | UserInputLeaf::Set { field: Some(_), .. }
+            | UserInputLeaf::Regex { field: Some(_), .. }
+            | UserInputLeaf::Exists { .. } => Err(QueryParserError::UnsupportedQuery(
+                "Field prefixes are not supported".to_string(),
+            )),
+            UserInputLeaf::Literal(_)
+            | UserInputLeaf::All
+            | UserInputLeaf::Range { .. }
+            | UserInputLeaf::Set { .. }
+            | UserInputLeaf::Regex { .. } => Ok(()),
+        },
     }
 }
 
@@ -1604,5 +1632,68 @@ mod tests {
         // Both hits score 1.0, although pk 2 is longer and has both terms, `fox` twice.
         assert!((scores[0] - 1.0).abs() < 0.01, "scores: {scores:?}");
         assert!((scores[1] - 1.0).abs() < 0.01, "scores: {scores:?}");
+    }
+
+    #[rstest]
+    #[case::internal_field_range("primary_id:[0 TO 18446744073709551615]")]
+    #[case::text_field("text:fox")]
+    #[case::text_field_exists("text:*")]
+    #[case::unknown_field("foo:bar")]
+    #[case::set("text: IN [fox]")]
+    #[case::regex("text:/fo.*/")]
+    #[case::boosted_inside_a_conjunction("quick AND text:fox^2")]
+    #[timeout(Duration::from_secs(10))]
+    #[tokio::test]
+    async fn field_prefix_is_rejected(#[case] query: &str) {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+
+        add_doc(&sender, 1, "quick fox").await;
+        add_doc(&sender, 2, "lazy dog").await;
+
+        let err = sender
+            .search(
+                make_index_key(),
+                query.into(),
+                Limit::from(std::num::NonZeroUsize::new(10).unwrap()),
+            )
+            .await
+            .unwrap_err();
+
+        // A QueryError is what makes the endpoint answer 400 rather than 500.
+        assert!(
+            err.downcast_ref::<QueryError>().is_some(),
+            "expected a query error, got: {err}"
+        );
+        // The error says which syntax is not supported.
+        assert_eq!(
+            err.to_string(),
+            "fts: failed to parse query: Unsupported query: Field prefixes are not supported"
+        );
+    }
+
+    #[rstest]
+    #[case::quoted(r#""foo:bar""#)]
+    #[case::escaped(r"foo\:bar")]
+    #[timeout(Duration::from_secs(10))]
+    #[tokio::test]
+    async fn quoted_or_escaped_colon_is_not_a_field_prefix(#[case] query: &str) {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+
+        add_doc(&sender, 1, "foo bar").await;
+        add_doc(&sender, 2, "lazy dog").await;
+
+        let (keys, _) = sender
+            .search(
+                make_index_key(),
+                query.into(),
+                Limit::from(std::num::NonZeroUsize::new(10).unwrap()),
+            )
+            .await
+            .unwrap();
+
+        // The colon is part of the text, which matches `foo bar` in pk 1.
+        assert_eq!(keys, vec![PrimaryKey::from(vec![CqlValue::BigInt(1)])]);
     }
 }
