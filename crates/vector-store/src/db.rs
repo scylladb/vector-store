@@ -32,6 +32,7 @@ use crate::Positions;
 use crate::Quantization;
 use crate::SpaceType;
 use crate::TableName;
+use crate::config_manager::credentials_changes;
 use crate::cql_types;
 use crate::db_driver::DbIndexInfo;
 use crate::db_index;
@@ -51,7 +52,6 @@ use itertools::Itertools;
 use regex::Regex;
 use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
-use secrecy::ExposeSecret;
 use std::collections::BTreeMap;
 use std::convert::identity;
 use std::num::NonZeroUsize;
@@ -389,13 +389,17 @@ pub(crate) async fn new<T: DbDriver>(
                                     node_state.send_event(Event::ConnectedToDb).await;
                                     internals.create_session(Some(Box::new(session.clone()))).await;
                                     session_tx.send(Some(session)).ok();
-                                    info!("Connected to ScyllaDB at {}", config.scylladb_uri);
+                                    info!(
+                                        "Connected to ScyllaDB at {} {}",
+                                        config.scylladb_uri,
+                                        CqlUser(config.credentials.as_ref())
+                                    );
                                 }
                                 Err(e) => {
                                     error!(
-                                        "Failed to connect to ScyllaDB (error: {}) at {}, retrying in {}s",
-                                        e,
+                                        "Failed to connect to ScyllaDB at {} {}, retrying in {}s: {e:#}",
                                         config.scylladb_uri,
+                                        CqlUser(config.credentials.as_ref()),
                                         RECONNECT_TIMEOUT.as_secs()
                                     );
                                     internals.create_session(None).await;
@@ -615,7 +619,12 @@ fn reconnect_reasons(old_config: &Config, new_config: &Config) -> Vec<&'static s
     if new_config.scylladb_uri != old_config.scylladb_uri {
         reasons.push("ScyllaDB URI");
     }
-    if credentials_changed(&old_config.credentials, &new_config.credentials) {
+    if !credentials_changes(
+        old_config.credentials.as_ref(),
+        new_config.credentials.as_ref(),
+    )
+    .is_empty()
+    {
         reasons.push("ScyllaDB credentials");
     }
     if new_config.cql_connection_timeout != old_config.cql_connection_timeout {
@@ -643,23 +652,15 @@ fn reconnect_reasons(old_config: &Config, new_config: &Config) -> Vec<&'static s
     reasons
 }
 
-fn credentials_changed(
-    old_credentials: &Option<Credentials>,
-    new_credentials: &Option<Credentials>,
-) -> bool {
-    match (old_credentials, new_credentials) {
-        (None, None) => false,
-        (Some(_), None) | (None, Some(_)) => true,
-        (Some(old_creds), Some(new_creds)) => {
-            old_creds.username != new_creds.username
-                || old_creds.certificate_path != new_creds.certificate_path
-                || match (&old_creds.password, &new_creds.password) {
-                    (None, None) => false,
-                    (Some(_), None) | (None, Some(_)) => true,
-                    (Some(old_pass), Some(new_pass)) => {
-                        old_pass.expose_secret() != new_pass.expose_secret()
-                    }
-                }
+/// Describes, for log messages, the user a ScyllaDB session logs in as. When authentication fails,
+/// this is the first thing support needs to know. Never includes the password.
+struct CqlUser<'a>(Option<&'a Credentials>);
+
+impl std::fmt::Display for CqlUser<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0.and_then(|creds| creds.username.as_deref()) {
+            Some(username) => write!(f, "as user {username:?}"),
+            None => write!(f, "without a username"),
         }
     }
 }
@@ -1635,6 +1636,52 @@ pub(crate) mod tests {
         assert_eq!(
             reconnect_reasons(&old_config, &new_config),
             vec!["CQL preferred rack"]
+        );
+    }
+
+    #[test]
+    fn reconnects_when_password_changes() {
+        let config = |password: &str| Config {
+            credentials: Some(crate::Credentials {
+                username: Some("vector_store".to_string()),
+                password: Some(secrecy::SecretString::new(password.into())),
+                certificate_path: None,
+            }),
+            ..Config::default()
+        };
+
+        assert_eq!(
+            reconnect_reasons(&config("old_pass"), &config("new_pass")),
+            vec!["ScyllaDB credentials"]
+        );
+        assert!(reconnect_reasons(&config("old_pass"), &config("old_pass")).is_empty());
+    }
+
+    #[test]
+    fn cql_user_names_the_username_but_not_the_password() {
+        let credentials = Credentials {
+            username: Some("vector_store".to_string()),
+            password: Some(secrecy::SecretString::new("s3ntinel-pa55word".into())),
+            certificate_path: None,
+        };
+
+        let description = CqlUser(Some(&credentials)).to_string();
+
+        assert_eq!(description, "as user \"vector_store\"");
+    }
+
+    #[test]
+    fn cql_user_without_a_username() {
+        let certificate_only = Credentials {
+            username: None,
+            password: None,
+            certificate_path: Some("/path/to/cert.pem".into()),
+        };
+
+        assert_eq!(CqlUser(None).to_string(), "without a username");
+        assert_eq!(
+            CqlUser(Some(&certificate_only)).to_string(),
+            "without a username"
         );
     }
 
