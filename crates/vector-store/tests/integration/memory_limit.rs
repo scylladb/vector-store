@@ -49,8 +49,6 @@ use vector_store::SpaceType;
 async fn memory_limit_during_index_build() {
     crate::enable_tracing();
 
-    let node_state = vector_store::new_node_state().await;
-
     let db = db_basic::new();
 
     let index = IndexMetadata {
@@ -146,10 +144,7 @@ async fn memory_limit_during_index_build() {
 
     let (receivers, senders) = create_config_channels(config.clone()).await;
 
-    let node_state = node_state.clone();
-    let (server, _mtls) = vector_store::run(Some(node_state), None, db, receivers)
-        .await
-        .unwrap();
+    let (server, _mtls) = vector_store::run(db, receivers).await.unwrap();
     let addr = (*server.address().await.borrow()).unwrap();
 
     let client = HttpClient::new(addr);

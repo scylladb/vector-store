@@ -37,7 +37,6 @@ use vector_store::SpaceType::Euclidean;
 #[tokio::test]
 async fn simple_create_search_delete_index() {
     crate::enable_tracing();
-    let node_state = vector_store::new_node_state().await;
     let db = db_basic::new();
 
     let index = IndexMetadata {
@@ -67,9 +66,7 @@ async fn simple_create_search_delete_index() {
         ..usearch_test_config()
     })
     .await;
-    let (server, _mtls) = vector_store::run(Some(node_state), None, db.clone(), receivers)
-        .await
-        .unwrap();
+    let (server, _mtls) = vector_store::run(db.clone(), receivers).await.unwrap();
     let addr = (*server.address().await.borrow()).unwrap();
 
     let client = HttpClient::new(addr);
@@ -172,7 +169,6 @@ async fn simple_create_search_delete_index() {
 #[tokio::test]
 async fn ann_returns_requested_column_values() {
     crate::enable_tracing();
-    let node_state = vector_store::new_node_state().await;
     let db = db_basic::new();
 
     let index = IndexMetadata {
@@ -202,9 +198,7 @@ async fn ann_returns_requested_column_values() {
         ..usearch_test_config()
     })
     .await;
-    let (server, _mtls) = vector_store::run(Some(node_state), None, db.clone(), receivers)
-        .await
-        .unwrap();
+    let (server, _mtls) = vector_store::run(db.clone(), receivers).await.unwrap();
     let addr = (*server.address().await.borrow()).unwrap();
 
     let client = HttpClient::new(addr);
@@ -329,7 +323,6 @@ async fn ann_returns_requested_column_values() {
 #[tokio::test]
 async fn ann_skips_stale_opensearch_hit() {
     crate::enable_tracing();
-    let node_state = vector_store::new_node_state().await;
     let db = db_basic::new();
 
     let index = IndexMetadata {
@@ -359,9 +352,7 @@ async fn ann_skips_stale_opensearch_hit() {
         ..usearch_test_config()
     })
     .await;
-    let (server, _mtls) = vector_store::run(Some(node_state), None, db.clone(), receivers)
-        .await
-        .unwrap();
+    let (server, _mtls) = vector_store::run(db.clone(), receivers).await.unwrap();
     let addr = (*server.address().await.borrow()).unwrap();
 
     let client = HttpClient::new(addr);

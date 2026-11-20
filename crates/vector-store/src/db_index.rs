@@ -91,7 +91,7 @@ impl From<u64> for Progress {
     }
 }
 
-pub enum DbIndex {
+pub(crate) enum DbIndex {
     GetTableColumns {
         tx: oneshot::Sender<GetTableColumnsR>,
     },

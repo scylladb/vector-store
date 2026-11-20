@@ -12,21 +12,13 @@ use httpclient::HttpClient;
 use scylla::cluster::metadata::NativeType;
 use scylla::value::CqlValue;
 use std::time::Duration;
-use tokio::sync::mpsc::Sender;
 use vector_store::Config;
 use vector_store::DbIndexPartitioning;
 use vector_store::IndexMetadata;
-use vector_store::node_state::NodeState;
 
 async fn setup_single_vector_index(
     config: Config,
-) -> (
-    IndexMetadata,
-    HttpClient,
-    DbBasic,
-    impl Sized,
-    Sender<NodeState>,
-) {
+) -> (IndexMetadata, HttpClient, DbBasic, impl Sized) {
     vs_index::setup_store_and_wait_for_index(
         config,
         DbIndexPartitioning::Global,
@@ -52,7 +44,7 @@ async fn setup_single_vector_index(
 async fn index_labels_present_in_metrics_endpoint() {
     crate::enable_tracing();
 
-    let (index, client, _db, _server, _node_state) =
+    let (index, client, _db, _server) =
         setup_single_vector_index(vs_index::usearch_test_config()).await;
 
     let expected_labels = format!(
@@ -70,7 +62,7 @@ async fn index_labels_present_in_metrics_endpoint() {
 async fn deleted_index_labels_absent_from_metrics_endpoint() {
     crate::enable_tracing();
 
-    let (index, client, db, _server, _node_state) =
+    let (index, client, db, _server) =
         setup_single_vector_index(vs_index::usearch_test_config()).await;
 
     let expected_labels = format!(
@@ -166,7 +158,7 @@ async fn index_size_counts_a_vector_added_after_a_refresh() {
         usearch_simulator: Some(simulator),
         ..vs_index::usearch_test_config()
     };
-    let (index, client, _db, _server, _node_state) = setup_single_vector_index(config).await;
+    let (index, client, _db, _server) = setup_single_vector_index(config).await;
 
     let size_line = format!(
         r#"index_size{{index_name="{}",keyspace="{}"}} 1"#,

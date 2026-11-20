@@ -46,7 +46,7 @@ async fn quantization_is_effectively_applied() {
     ) -> httpapi::Distance {
         let values = [([CqlValue::Int(1)], Some(add_vector.into()), [], 10)];
         let values_len = values.len();
-        let (run, index, _db, _node_state) = setup_store_with_quantization(
+        let (run, index, _db) = setup_store_with_quantization(
             usearch_test_config(),
             DbIndexPartitioning::Global,
             ["pk".into()],
@@ -127,7 +127,7 @@ async fn quantization_is_returned_as_index_data_type() {
         (Quantization::I8, DataType::I8),
         (Quantization::B1, DataType::B1),
     ] {
-        let (run, index, _db, _node_state) = setup_store_with_quantization(
+        let (run, index, _db) = setup_store_with_quantization(
             usearch_test_config(),
             DbIndexPartitioning::Global,
             ["pk".into()],
@@ -177,7 +177,7 @@ async fn search_with_quantization(quantization: Quantization, filter: Option<Pos
         10,
     )];
 
-    let (run, index, _db, _node_state) = setup_store_with_quantization(
+    let (run, index, _db) = setup_store_with_quantization(
         usearch_test_config(),
         DbIndexPartitioning::Global,
         [pk_column.clone()],
@@ -297,7 +297,7 @@ async fn binary_quantization_with_non_divisible_by_8_dimensions() {
         10,
     )];
 
-    let (run, index, _db, _node_state) = setup_store_with_quantization(
+    let (run, index, _db) = setup_store_with_quantization(
         usearch_test_config(),
         DbIndexPartitioning::Global,
         [pk_column.clone()],

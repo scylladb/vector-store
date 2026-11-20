@@ -18,7 +18,7 @@ use tracing::error;
 use tracing::info;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NodeStatus {
+pub(crate) enum NodeStatus {
     Initializing,
     ConnectingToDb,
     DiscoveringIndexes,
@@ -27,13 +27,13 @@ pub enum NodeStatus {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum IndexStatus {
+pub(crate) enum IndexStatus {
     Initializing,
     FullScanning,
     Serving,
 }
 
-pub enum Event {
+pub(crate) enum Event {
     ConnectingToDb,
     ConnectedToDb,
     DiscoveringIndexes,
@@ -42,7 +42,7 @@ pub enum Event {
     FullScanFinished(IndexMetadata),
 }
 
-pub enum NodeState {
+pub(crate) enum NodeState {
     SendEvent(Event),
     GetStatus(oneshot::Sender<NodeStatus>),
     GetIndexStatus(oneshot::Sender<Option<IndexStatus>>, String, String),

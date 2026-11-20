@@ -25,7 +25,6 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
-use tokio::sync::mpsc::Sender;
 use uuid::Uuid;
 use vector_store::ColumnName;
 use vector_store::Config;
@@ -36,7 +35,6 @@ use vector_store::IndexMetadata;
 use vector_store::IndexOptionsPattern;
 use vector_store::NonemptyArc;
 use vector_store::NonemptyIteratorExt;
-use vector_store::node_state::NodeState;
 
 fn pattern_index_metadata(
     primary_key_columns: impl IntoIterator<Item = ColumnName>,
@@ -71,14 +69,12 @@ async fn setup_pattern_store(
     impl std::future::Future<Output = (HttpClient, impl Sized, impl Sized)>,
     IndexMetadata,
     DbBasic,
-    Sender<NodeState>,
 ) {
     let config = Config {
         vector_store_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
         ..Default::default()
     };
 
-    let node_state = vector_store::new_node_state().await;
     let db = db_basic::new();
 
     let columns: Arc<HashMap<_, _>> = Arc::new(
@@ -107,19 +103,16 @@ async fn setup_pattern_store(
     let (receivers, senders) = create_config_channels(config).await;
 
     let run = {
-        let node_state = node_state.clone();
         let db = db.clone();
         async move {
-            let (server, _mtls) = vector_store::run(Some(node_state), None, db, receivers)
-                .await
-                .unwrap();
+            let (server, _mtls) = vector_store::run(db, receivers).await.unwrap();
             let addr = (*server.address().await.borrow()).unwrap();
 
             (HttpClient::new(addr), server, senders)
         }
     };
 
-    (run, index, db, node_state)
+    (run, index, db)
 }
 
 pub(crate) async fn setup_pattern_and_wait(
@@ -138,7 +131,7 @@ pub(crate) async fn setup_pattern_and_wait(
         .map(|(pk, doc, ts)| (pk, Some(doc.to_string()), ts))
         .collect();
 
-    let (run, index, db, node_state) = setup_pattern_store(
+    let (run, index, db) = setup_pattern_store(
         ["pk".into()],
         1,
         [
@@ -167,13 +160,7 @@ pub(crate) async fn setup_pattern_and_wait(
     )
     .await;
 
-    (
-        client,
-        keyspace_name,
-        index_name,
-        db,
-        (server, config_tx, node_state),
-    )
+    (client, keyspace_name, index_name, db, (server, config_tx))
 }
 
 #[tokio::test]
@@ -208,7 +195,7 @@ async fn pattern_index_visible_in_indexes() {
 async fn pattern_index_returns_proper_count() {
     crate::enable_tracing();
 
-    let (run, index, _db, _node_state) = setup_pattern_store(
+    let (run, index, _db) = setup_pattern_store(
         ["pk".into(), "ck".into()],
         1,
         [
@@ -325,7 +312,7 @@ async fn pattern_back_to_back_updates_keep_one_latest_document_per_row() {
     });
     let scan = db_basic::range_scan_fn_documents(rows);
 
-    let (run, index, _db, _node_state) = setup_pattern_store(
+    let (run, index, _db) = setup_pattern_store(
         ["pk".into()],
         1,
         [

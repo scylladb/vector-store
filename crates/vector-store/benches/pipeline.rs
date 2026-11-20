@@ -73,7 +73,6 @@ use vector_store::NonemptyIteratorExt;
 use vector_store::Quantization;
 use vector_store::SpaceType;
 use vector_store::Vector;
-use vector_store::node_state::NodeState;
 
 const ENV_CONCURRENCY: &str = "BENCHES_CONCURRENCY";
 const CDC_SAFETY_INTERVAL: Duration = Duration::from_millis(1);
@@ -265,7 +264,6 @@ fn delete_index(db: &DbBasic, index: &IndexMetadata) {
 
 async fn run_vector_store(
     config: watch::Receiver<Arc<Config>>,
-    node_state: mpsc::Sender<NodeState>,
     db: DbBasic,
 ) -> (impl Sized, Arc<TestClient>) {
     let addr = config.borrow().vector_store_addr;
@@ -277,9 +275,7 @@ async fn run_vector_store(
         mtls_http: mtls_http_rx,
     };
 
-    let (server, _mtls) = vector_store::run(Some(node_state), None, db, receivers)
-        .await
-        .unwrap();
+    let (server, _mtls) = vector_store::run(db, receivers).await.unwrap();
 
     let client = Arc::new(TestClient::new(server.router().await.unwrap()));
     ((http_tx, server), client)
@@ -439,7 +435,6 @@ fn fullscan_insert(c: &mut Criterion) {
             let index_metadata = index_metadata.clone();
             let notify_stop = notify_stop.clone();
             async move {
-                let node_state = vector_store::new_node_state().await;
                 let db = db_basic::new();
                 setup_table(
                     &db,
@@ -449,7 +444,7 @@ fn fullscan_insert(c: &mut Criterion) {
                     [("id".into(), NativeType::BigInt)],
                 );
                 let (_config_tx, config_rx) = watch::channel(default_config().await);
-                let (_server, client) = run_vector_store(config_rx, node_state, db.clone()).await;
+                let (_server, client) = run_vector_store(config_rx, db.clone()).await;
 
                 let (tx, rx) = mpsc::channel(concurrency);
 
@@ -539,7 +534,6 @@ fn search(c: &mut Criterion) {
             let notify_stop = notify_stop.clone();
             let index_metadata = index_metadata.clone();
             async move {
-                let node_state = vector_store::new_node_state().await;
                 let db = db_basic::new();
                 setup_table(
                     &db,
@@ -550,7 +544,7 @@ fn search(c: &mut Criterion) {
                 );
                 setup_index(&db, &index_metadata, Some(range_scan_fn_mpsc(rx)), None);
                 let (_config_tx, config_rx) = watch::channel(default_config().await);
-                let (_server, client) = run_vector_store(config_rx, node_state, db.clone()).await;
+                let (_server, client) = run_vector_store(config_rx, db.clone()).await;
 
                 let (tx_in_progress, mut rx_in_progress) = Guard::receiver(&db);
                 for it in 0..100000 {
@@ -645,7 +639,6 @@ fn cdc_insert(c: &mut Criterion) {
             let index_metadata = index_metadata.clone();
             let notify_stop = notify_stop.clone();
             async move {
-                let node_state = vector_store::new_node_state().await;
                 let db = db_basic::new();
                 setup_table(
                     &db,
@@ -655,7 +648,7 @@ fn cdc_insert(c: &mut Criterion) {
                     [("id".into(), NativeType::BigInt)],
                 );
                 let (_config_tx, config_rx) = watch::channel(default_config().await);
-                let (_server, client) = run_vector_store(config_rx, node_state, db.clone()).await;
+                let (_server, client) = run_vector_store(config_rx, db.clone()).await;
 
                 let (tx, rx) = mpsc::channel(concurrency);
 
@@ -748,7 +741,6 @@ fn cdc_update(c: &mut Criterion) {
             let notify_stop = notify_stop.clone();
             let index_metadata = index_metadata.clone();
             async move {
-                let node_state = vector_store::new_node_state().await;
                 let db = db_basic::new();
                 setup_table(
                     &db,
@@ -764,7 +756,7 @@ fn cdc_update(c: &mut Criterion) {
                     Some((cdc_scan_fn_mpsc(rx_cdc), DIMENSIONS)),
                 );
                 let (_config_tx, config_rx) = watch::channel(default_config().await);
-                let (_server, client) = run_vector_store(config_rx, node_state, db.clone()).await;
+                let (_server, client) = run_vector_store(config_rx, db.clone()).await;
 
                 let (tx_in_progress, mut rx_in_progress) = Guard::receiver(&db);
                 for it in 0..INDEX_SIZE {
@@ -877,7 +869,6 @@ fn cdc_delete(c: &mut Criterion) {
             let notify_stop = notify_stop.clone();
             let index_metadata = index_metadata.clone();
             async move {
-                let node_state = vector_store::new_node_state().await;
                 let db = db_basic::new();
                 setup_table(
                     &db,
@@ -893,7 +884,7 @@ fn cdc_delete(c: &mut Criterion) {
                     Some((cdc_scan_fn_mpsc(rx_cdc), DIMENSIONS)),
                 );
                 let (_config_tx, config_rx) = watch::channel(default_config().await);
-                let (_server, client) = run_vector_store(config_rx, node_state, db.clone()).await;
+                let (_server, client) = run_vector_store(config_rx, db.clone()).await;
 
                 let (tx_in_progress, mut rx_in_progress) = Guard::receiver(&db);
                 for it in 0..INDEX_SIZE {
@@ -1005,7 +996,6 @@ fn search_while_updating(c: &mut Criterion) {
             let notify_stop = notify_stop.clone();
             let index_metadata = index_metadata.clone();
             async move {
-                let node_state = vector_store::new_node_state().await;
                 let db = db_basic::new();
 
                 setup_table(
@@ -1023,7 +1013,7 @@ fn search_while_updating(c: &mut Criterion) {
                 );
 
                 let (config_tx, config_rx) = watch::channel(default_config().await);
-                let (_server, client) = run_vector_store(config_rx, node_state, db.clone()).await;
+                let (_server, client) = run_vector_store(config_rx, db.clone()).await;
 
                 let (tx_in_progress, mut rx_in_progress) = Guard::receiver(&db);
                 for it in 0..INDEX_SIZE {
@@ -1152,7 +1142,6 @@ fn search_while_inserting(c: &mut Criterion) {
             let notify_stop = notify_stop.clone();
             let index_metadata = index_metadata.clone();
             async move {
-                let node_state = vector_store::new_node_state().await;
                 let db = db_basic::new();
 
                 setup_table(
@@ -1170,7 +1159,7 @@ fn search_while_inserting(c: &mut Criterion) {
                 );
 
                 let (config_tx, config_rx) = watch::channel(default_config().await);
-                let (_server, client) = run_vector_store(config_rx, node_state, db.clone()).await;
+                let (_server, client) = run_vector_store(config_rx, db.clone()).await;
 
                 let keyspace_name = index_metadata.keyspace_name.clone().into();
                 let index_name = index_metadata.index_name.clone().into();
@@ -1279,7 +1268,6 @@ fn search_while_deleting(c: &mut Criterion) {
             let notify_stop = notify_stop.clone();
             let index_metadata = index_metadata.clone();
             async move {
-                let node_state = vector_store::new_node_state().await;
                 let db = db_basic::new();
 
                 setup_table(
@@ -1297,7 +1285,7 @@ fn search_while_deleting(c: &mut Criterion) {
                 );
 
                 let (config_tx, config_rx) = watch::channel(default_config().await);
-                let (_server, client) = run_vector_store(config_rx, node_state, db.clone()).await;
+                let (_server, client) = run_vector_store(config_rx, db.clone()).await;
 
                 // build the index with a fullscan before starting the benchmark
                 let (tx_in_progress, mut rx_in_progress) = Guard::receiver(&db);

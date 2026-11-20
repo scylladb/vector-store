@@ -149,12 +149,9 @@ pub(crate) fn make_index_with_kind(
 }
 
 pub(crate) async fn setup() -> (HttpClient, DbBasic, impl Sized) {
-    let node_state = vector_store::new_node_state().await;
     let db = db_basic::new();
     let (receivers, senders) = create_config_channels(usearch_test_config()).await;
-    let (server, _mtls) = vector_store::run(Some(node_state), None, db.clone(), receivers)
-        .await
-        .unwrap();
+    let (server, _mtls) = vector_store::run(db.clone(), receivers).await.unwrap();
     let addr = (*server.address().await.borrow()).unwrap();
     (HttpClient::new(addr), db, (server, senders))
 }

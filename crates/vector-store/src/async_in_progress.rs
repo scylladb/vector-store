@@ -52,7 +52,7 @@ impl Drop for Applied {
 
 /// The guard of a change sent to an index, which the index drops once it has applied the change.
 #[derive(Debug)]
-pub struct AsyncInProgress {
+pub(crate) struct AsyncInProgress {
     // Dropped first: the index is marked dirty before a full scan sees the change applied.
     _dirty: Option<DirtyFlag>,
     _state: State,
@@ -62,7 +62,8 @@ pub struct AsyncInProgress {
 }
 
 impl AsyncInProgress {
-    pub fn none() -> Self {
+    #[cfg(test)]
+    pub(crate) fn none() -> Self {
         Self {
             _dirty: None,
             _state: State::None,
@@ -72,7 +73,7 @@ impl AsyncInProgress {
         }
     }
 
-    pub fn fullscan(tx: mpsc::Sender<()>) -> Self {
+    pub(crate) fn fullscan(tx: mpsc::Sender<()>) -> Self {
         Self {
             _dirty: None,
             _state: State::Fullscan(tx),

@@ -16,11 +16,11 @@ use uuid::Uuid;
 /// Internally it is a number of 100-nanoseconds since the UNIX epoch (January 1, 1970).
 /// The MSB is reserved for internal use, so the maximum timestamp value is 2^63 - 1 nanoseconds,
 /// which corresponds to approximately 29 thousands years.
-pub struct Timestamp(u64);
+pub(crate) struct Timestamp(u64);
 
 impl Timestamp {
-    pub const MIN: Timestamp = Timestamp(0);
-    pub const MAX: Timestamp = Timestamp(Self::MAX_100_NANOS);
+    pub(crate) const MIN: Timestamp = Timestamp(0);
+    pub(crate) const MAX: Timestamp = Timestamp(Self::MAX_100_NANOS);
 
     const MAX_100_NANOS: u64 = u64::MAX >> 1;
 
@@ -31,7 +31,7 @@ impl Timestamp {
     const MAX_SECONDS: u64 = Self::MAX_MILLIS / 1_000;
 
     /// Creates a new `Timestamp` from a number of 100-nanoseconds since the UNIX epoch.
-    pub const fn from_100_nanos(timestamp: u64) -> Self {
+    pub(crate) const fn from_100_nanos(timestamp: u64) -> Self {
         let timestamp = if timestamp > Self::MAX_100_NANOS {
             Self::MAX_100_NANOS
         } else {
@@ -41,7 +41,7 @@ impl Timestamp {
     }
 
     /// Creates a new `Timestamp` from a number of microseconds since the UNIX epoch.
-    pub const fn from_micros(timestamp: u64) -> Self {
+    pub(crate) const fn from_micros(timestamp: u64) -> Self {
         let timestamp = if timestamp > Self::MAX_MICROS {
             Self::MAX_MICROS
         } else {
@@ -50,8 +50,9 @@ impl Timestamp {
         Timestamp(timestamp * 10)
     }
 
+    #[cfg(test)]
     /// Creates a new `Timestamp` from a number of milliseconds since the UNIX epoch.
-    pub const fn from_millis(timestamp: u64) -> Self {
+    pub(crate) const fn from_millis(timestamp: u64) -> Self {
         let timestamp = if timestamp > Self::MAX_MILLIS {
             Self::MAX_MILLIS
         } else {
@@ -61,7 +62,7 @@ impl Timestamp {
     }
 
     /// Creates a new `Timestamp` from a number of seconds since the UNIX epoch.
-    pub const fn from_seconds(timestamp: u64) -> Self {
+    pub(crate) const fn from_seconds(timestamp: u64) -> Self {
         let timestamp = if timestamp > Self::MAX_SECONDS {
             Self::MAX_SECONDS
         } else {
@@ -71,7 +72,7 @@ impl Timestamp {
     }
 
     /// Returns the current time in UTC.
-    pub fn now() -> Self {
+    pub(crate) fn now() -> Self {
         let offset_100_ns =
             (OffsetDateTime::now_utc() - OffsetDateTime::UNIX_EPOCH).whole_nanoseconds() / 100;
         if offset_100_ns < 0 {
@@ -87,7 +88,7 @@ impl Timestamp {
     ///
     /// Returns [`Duration::ZERO`] when this timestamp lies in the future, which
     /// can happen due to clock skew between ScyllaDB and the vector store.
-    pub fn elapsed(&self) -> Duration {
+    pub(crate) fn elapsed(&self) -> Duration {
         let now = Self::now();
         if self.0 > now.0 {
             Duration::ZERO
@@ -116,7 +117,7 @@ impl TryFrom<Uuid> for Timestamp {
 ///
 /// It stores the timestamp of the value, a flag indicating whether the value is tombstone, and
 /// the value itself.
-pub struct Timestamped<T> {
+pub(crate) struct Timestamped<T> {
     timestamp: u64,
     value: MaybeUninit<T>,
 }
@@ -126,7 +127,7 @@ impl<T> Timestamped<T> {
     const TIMESTAMP_MASK: u64 = !Self::DELETED_FLAG;
 
     /// Creates a new `Timestamped` value with the given timestamp and optional value.
-    pub fn new(timestamp: Timestamp, value: Option<T>) -> Self {
+    pub(crate) fn new(timestamp: Timestamp, value: Option<T>) -> Self {
         let mut timestamp = timestamp.0;
 
         let value = if let Some(value) = value {
@@ -141,22 +142,22 @@ impl<T> Timestamped<T> {
     }
 
     /// Returns true if the value is valid (not a tombstone).
-    pub const fn is_valid(&self) -> bool {
+    pub(crate) const fn is_valid(&self) -> bool {
         (self.timestamp & Self::DELETED_FLAG) == 0
     }
 
     /// Returns true if the value is a tombstone (deleted).
-    pub const fn is_tombstone(&self) -> bool {
+    pub(crate) const fn is_tombstone(&self) -> bool {
         !self.is_valid()
     }
 
     /// Returns the timestamp of the value.
-    pub const fn timestamp(&self) -> Timestamp {
+    pub(crate) const fn timestamp(&self) -> Timestamp {
         Timestamp(self.timestamp & Self::TIMESTAMP_MASK)
     }
 
     /// Returns a reference to the value if it is valid, or None if it is a tombstone.
-    pub fn value(&self) -> Option<&T> {
+    pub(crate) fn value(&self) -> Option<&T> {
         (self.is_valid()).then_some(
             // SAFETY: value is initialized if and only if the deleted flag is not set
             unsafe { self.value.assume_init_ref() },
@@ -165,7 +166,7 @@ impl<T> Timestamped<T> {
 
     /// Consumes the `Timestamped` value and returns the inner value if it is valid, or None if it
     /// is a tombstone.
-    pub fn into_value(mut self) -> Option<T> {
+    pub(crate) fn into_value(mut self) -> Option<T> {
         if self.is_valid() {
             // We are moving the value out of self and mark self.value as delete to avoid dropping
             // uninitialized value in the Drop implementation
@@ -179,8 +180,9 @@ impl<T> Timestamped<T> {
         }
     }
 
+    #[cfg(test)]
     /// Sets the value and timestamp of the `Timestamped` value.
-    pub fn set(&mut self, timestamp: Timestamp, value: Option<T>) {
+    pub(crate) fn set(&mut self, timestamp: Timestamp, value: Option<T>) {
         // We are setting a new value, so the old value will be dropped
         self.drop_if_valid();
 
@@ -199,7 +201,7 @@ impl<T> Timestamped<T> {
     }
 
     /// Remove the value and set the tombstone flag.
-    pub fn set_tombstone(&mut self) {
+    pub(crate) fn set_tombstone(&mut self) {
         self.drop_if_valid();
 
         self.timestamp |= Self::DELETED_FLAG;

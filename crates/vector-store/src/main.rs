@@ -87,7 +87,7 @@ fn main() -> anyhow::Result<()> {
         config_manager.start(dotenvy_to_std_var);
 
         let db_driver = vector_store::new_db_driver();
-        let (server, _mtls) = vector_store::run(None, None, db_driver, config_receivers).await?;
+        let (server, _mtls) = vector_store::run(db_driver, config_receivers).await?;
         let addr = (*server.address().await.borrow())
             .ok_or_else(|| anyhow!("failed to get server address"))?;
         tracing::info!("listening on {addr}");

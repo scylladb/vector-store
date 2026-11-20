@@ -40,7 +40,6 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tap::Pipe;
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::Sender;
 use uuid::Uuid;
 use vector_store::ColumnName;
 use vector_store::Config;
@@ -58,7 +57,6 @@ use vector_store::NonemptyArc;
 use vector_store::NonemptyIteratorExt;
 use vector_store::Quantization;
 use vector_store::SpaceType;
-use vector_store::node_state::NodeState;
 
 pub(crate) fn usearch_test_config() -> Config {
     Config {
@@ -95,7 +93,6 @@ pub(crate) async fn setup_store(
     impl std::future::Future<Output = (HttpClient, impl Sized, impl Sized)>,
     IndexMetadata,
     DbBasic,
-    Sender<NodeState>,
 ) {
     setup_store_with_quantization(
         config,
@@ -126,10 +123,7 @@ pub(crate) async fn setup_store_with_quantization(
     impl std::future::Future<Output = (HttpClient, impl Sized, impl Sized)>,
     IndexMetadata,
     DbBasic,
-    Sender<NodeState>,
 ) {
-    let node_state = vector_store::new_node_state().await;
-
     let db = db_basic::new();
 
     let primary_keys = primary_keys.into_iter().collect_nonempty_arc().unwrap();
@@ -204,19 +198,16 @@ pub(crate) async fn setup_store_with_quantization(
     let (receivers, senders) = create_config_channels(config).await;
 
     let run = {
-        let node_state = node_state.clone();
         let db = db.clone();
         async move {
-            let (server, _mtls) = vector_store::run(Some(node_state), None, db, receivers)
-                .await
-                .unwrap();
+            let (server, _mtls) = vector_store::run(db, receivers).await.unwrap();
             let addr = (*server.address().await.borrow()).unwrap();
 
             (HttpClient::new(addr), server, senders)
         }
     };
 
-    (run, index, db, node_state)
+    (run, index, db)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -229,14 +220,8 @@ pub(crate) async fn setup_store_and_wait_for_index(
     range_scan_fn: Option<RangeScanFn>,
     fetch_vector: Option<mpsc::Sender<FetchVector>>,
     expected_count: Option<usize>,
-) -> (
-    IndexMetadata,
-    HttpClient,
-    DbBasic,
-    impl Sized,
-    Sender<NodeState>,
-) {
-    let (run, index, db, node_state) = setup_store(
+) -> (IndexMetadata, HttpClient, DbBasic, impl Sized) {
+    let (run, index, db) = setup_store(
         config,
         partitioning,
         primary_keys,
@@ -265,7 +250,7 @@ pub(crate) async fn setup_store_and_wait_for_index(
     )
     .await;
 
-    (index, client, db, (server, _config_tx), node_state)
+    (index, client, db, (server, _config_tx))
 }
 
 #[rstest]
@@ -276,7 +261,7 @@ pub(crate) async fn setup_store_and_wait_for_index(
 async fn simple_create_search_delete_index(#[case] config: Config) {
     crate::enable_tracing();
 
-    let (run, index, db, _node_state) = setup_store(
+    let (run, index, db) = setup_store(
         config,
         DbIndexPartitioning::Global,
         ["pk".into(), "ck".into()],
@@ -370,7 +355,6 @@ async fn simple_create_search_delete_index(#[case] config: Config) {
 async fn failed_db_index_create(#[case] config: Config) {
     crate::enable_tracing();
 
-    let node_state = vector_store::new_node_state().await;
     let db = db_basic::new();
 
     let index = IndexMetadata {
@@ -395,9 +379,7 @@ async fn failed_db_index_create(#[case] config: Config) {
     };
 
     let (receivers, _senders) = create_config_channels(config).await;
-    let (server, _mtls) = vector_store::run(Some(node_state), None, db.clone(), receivers)
-        .await
-        .unwrap();
+    let (server, _mtls) = vector_store::run(db.clone(), receivers).await.unwrap();
     let addr = (*server.address().await.borrow()).unwrap();
 
     let client = HttpClient::new(addr);
@@ -495,7 +477,7 @@ async fn failed_db_index_create(#[case] config: Config) {
 async fn ann_returns_requested_column_values(#[case] config: Config) {
     crate::enable_tracing();
 
-    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+    let (index, client, _db, _server) = setup_store_and_wait_for_index(
         config,
         DbIndexPartitioning::Global,
         ["pk".into()],
@@ -584,7 +566,7 @@ async fn ann_returns_requested_column_values(#[case] config: Config) {
 async fn ann_return_columns_null_for_column_not_tracked_by_index(#[case] config: Config) {
     crate::enable_tracing();
 
-    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+    let (index, client, _db, _server) = setup_store_and_wait_for_index(
         config,
         DbIndexPartitioning::Global,
         ["pk".into()],
@@ -637,7 +619,7 @@ async fn ann_return_columns_null_for_column_not_tracked_by_index(#[case] config:
 async fn ann_return_columns_includes_target_vector() {
     crate::enable_tracing();
 
-    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+    let (index, client, _db, _server) = setup_store_and_wait_for_index(
         usearch_test_config(),
         DbIndexPartitioning::Global,
         ["pk".into()],
@@ -687,7 +669,7 @@ async fn ann_return_columns_includes_target_vector() {
 async fn ann_return_columns_target_vector_unsupported(#[case] config: Config) {
     crate::enable_tracing();
 
-    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+    let (index, client, _db, _server) = setup_store_and_wait_for_index(
         config,
         DbIndexPartitioning::Global,
         ["pk".into()],
@@ -733,7 +715,7 @@ async fn ann_return_columns_target_vector_unsupported(#[case] config: Config) {
 async fn ann_filtered_ann_returns_requested_column_values() {
     crate::enable_tracing();
 
-    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+    let (index, client, _db, _server) = setup_store_and_wait_for_index(
         usearch_test_config(),
         DbIndexPartitioning::Global,
         ["pk".into()],
@@ -809,7 +791,7 @@ async fn ann_filtered_ann_returns_requested_column_values() {
 async fn ann_filtered_ann_returns_empty_column_values_for_partition_with_no_rows() {
     crate::enable_tracing();
 
-    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+    let (index, client, _db, _server) = setup_store_and_wait_for_index(
         usearch_test_config(),
         DbIndexPartitioning::Local(NonemptyArc::new(["pk"]).unwrap()),
         ["pk".into()],
@@ -864,7 +846,7 @@ async fn ann_returns_bad_request_when_provided_vector_size_is_not_eq_index_dimen
     #[case] config: Config,
 ) {
     crate::enable_tracing();
-    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+    let (index, client, _db, _server) = setup_store_and_wait_for_index(
         config,
         DbIndexPartitioning::Global,
         ["pk".into(), "ck".into()],
@@ -905,7 +887,7 @@ async fn ann_returns_bad_request_when_filtering_required_but_not_allowed() {
 
     let pk_column: ColumnName = "pk".into();
     let ck_column: ColumnName = "ck".into();
-    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+    let (index, client, _db, _server) = setup_store_and_wait_for_index(
         usearch_test_config(),
         DbIndexPartitioning::Global,
         [pk_column.clone(), ck_column.clone()],
@@ -951,7 +933,7 @@ async fn ann_returns_bad_request_when_filtering_required_but_not_allowed() {
 #[tokio::test]
 async fn ann_fail_while_building_when_node_is_bootstrapping(#[case] config: Config) {
     crate::enable_tracing();
-    let (run, index, _db, _node_state) = setup_store(
+    let (run, index, _db) = setup_store(
         config,
         DbIndexPartitioning::Global,
         ["pk".into(), "ck".into()],
@@ -1003,7 +985,7 @@ async fn ann_fail_while_building_when_node_is_bootstrapping(#[case] config: Conf
 async fn ann_fail_while_building_when_node_is_serving(#[case] config: Config) {
     crate::enable_tracing();
 
-    let (serving_index, client, db, _server, _node_state) = setup_store_and_wait_for_index(
+    let (serving_index, client, db, _server) = setup_store_and_wait_for_index(
         config,
         DbIndexPartitioning::Global,
         ["pk".into()],
@@ -1096,7 +1078,7 @@ async fn ann_fail_while_building_when_node_is_serving(#[case] config: Config) {
 #[tokio::test]
 async fn index_omits_vectors_with_wrong_number_of_primary_keys(#[case] config: Config) {
     crate::enable_tracing();
-    let (_, _, _db, _server, _node_state) = setup_store_and_wait_for_index(
+    let (_, _, _db, _server) = setup_store_and_wait_for_index(
         config,
         DbIndexPartitioning::Global,
         vec!["pk".into()],
@@ -1130,7 +1112,7 @@ async fn index_omits_vectors_with_wrong_number_of_primary_keys(#[case] config: C
 #[tokio::test]
 async fn ann_returns_inet_primary_key(#[case] config: Config) {
     crate::enable_tracing();
-    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+    let (index, client, _db, _server) = setup_store_and_wait_for_index(
         config,
         DbIndexPartitioning::Global,
         vec!["addr".into()],
@@ -1191,7 +1173,7 @@ async fn ann_returns_inet_primary_key(#[case] config: Config) {
 #[tokio::test]
 async fn ann_filter_inet_eq() {
     crate::enable_tracing();
-    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+    let (index, client, _db, _server) = setup_store_and_wait_for_index(
         usearch_test_config(),
         DbIndexPartitioning::Global,
         vec!["addr".into()],
@@ -1250,7 +1232,7 @@ async fn ann_filter_inet_eq() {
 #[tokio::test]
 async fn ann_returns_error_for_unsupported_primary_key_type() {
     crate::enable_tracing();
-    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+    let (index, client, _db, _server) = setup_store_and_wait_for_index(
         usearch_test_config(),
         DbIndexPartitioning::Global,
         vec!["pk".into()],
@@ -1294,8 +1276,7 @@ async fn ann_returns_error_for_unsupported_primary_key_type() {
 async fn ann_filter_partition_key_int_eq() {
     crate::enable_tracing();
 
-    let (index, client, pk_column, ck_column, _, _db, _server, _node_state) =
-        setup_int_int_store().await;
+    let (index, client, pk_column, ck_column, _, _db, _server) = setup_int_int_store().await;
 
     let pk_column_http: httpapi::ColumnName = pk_column.into();
     let ck_column_http: httpapi::ColumnName = ck_column.into();
@@ -1352,8 +1333,7 @@ async fn ann_filter_partition_key_int_eq() {
 async fn ann_filter_clustering_key_int_eq() {
     crate::enable_tracing();
 
-    let (index, client, pk_column, ck_column, _, _db, _server, _node_state) =
-        setup_int_int_store().await;
+    let (index, client, pk_column, ck_column, _, _db, _server) = setup_int_int_store().await;
 
     let pk_column_http: httpapi::ColumnName = pk_column.into();
     let ck_column_http: httpapi::ColumnName = ck_column.into();
@@ -1410,8 +1390,7 @@ async fn ann_filter_clustering_key_int_eq() {
 async fn ann_filter_partition_key_int_in() {
     crate::enable_tracing();
 
-    let (index, client, pk_column, ck_column, _, _db, _server, _node_state) =
-        setup_int_int_store().await;
+    let (index, client, pk_column, ck_column, _, _db, _server) = setup_int_int_store().await;
 
     let pk_column_http: httpapi::ColumnName = pk_column.into();
     let ck_column_http: httpapi::ColumnName = ck_column.into();
@@ -1472,8 +1451,7 @@ async fn ann_filter_partition_key_int_in() {
 async fn ann_filter_clustering_key_int_in() {
     crate::enable_tracing();
 
-    let (index, client, pk_column, ck_column, _, _db, _server, _node_state) =
-        setup_int_int_store().await;
+    let (index, client, pk_column, ck_column, _, _db, _server) = setup_int_int_store().await;
 
     let pk_column_http: httpapi::ColumnName = pk_column.into();
     let ck_column_http: httpapi::ColumnName = ck_column.into();
@@ -1534,8 +1512,7 @@ async fn ann_filter_clustering_key_int_in() {
 async fn ann_filter_primary_key_int_eq_tuple() {
     crate::enable_tracing();
 
-    let (index, client, pk_column, ck_column, _, _db, _server, _node_state) =
-        setup_int_int_store().await;
+    let (index, client, pk_column, ck_column, _, _db, _server) = setup_int_int_store().await;
 
     let pk_column_http: httpapi::ColumnName = pk_column.into();
     let ck_column_http: httpapi::ColumnName = ck_column.into();
@@ -1562,8 +1539,7 @@ async fn ann_filter_primary_key_int_eq_tuple() {
 async fn ann_filter_primary_key_int_in_tuple() {
     crate::enable_tracing();
 
-    let (index, client, pk_column, ck_column, _, _db, _server, _node_state) =
-        setup_int_int_store().await;
+    let (index, client, pk_column, ck_column, _, _db, _server) = setup_int_int_store().await;
 
     let pk_column_http: httpapi::ColumnName = pk_column.into();
     let ck_column_http: httpapi::ColumnName = ck_column.into();
@@ -1596,12 +1572,11 @@ async fn setup_int_int_store() -> (
     ColumnName,
     DbBasic,
     impl Sized,
-    Sender<NodeState>,
 ) {
     let pk_column: ColumnName = "pk".into();
     let ck_column: ColumnName = "ck".into();
     let f_column: ColumnName = "f".into();
-    let (index, client, db, server, node_state) = setup_store_and_wait_for_index(
+    let (index, client, db, server) = setup_store_and_wait_for_index(
         usearch_test_config(),
         DbIndexPartitioning::Global,
         [pk_column.clone(), ck_column.clone()],
@@ -1626,9 +1601,7 @@ async fn setup_int_int_store() -> (
     )
     .await;
 
-    (
-        index, client, pk_column, ck_column, f_column, db, server, node_state,
-    )
+    (index, client, pk_column, ck_column, f_column, db, server)
 }
 
 /// Runs an ANN query with the given restrictions and returns a HashSet of (pk, ck) values.
@@ -1695,8 +1668,7 @@ fn assert_pk_ck_combinations(
 async fn ann_filter_clustering_key_int_lt() {
     crate::enable_tracing();
 
-    let (index, client, pk_column, ck_column, _, _db, _server, _node_state) =
-        setup_int_int_store().await;
+    let (index, client, pk_column, ck_column, _, _db, _server) = setup_int_int_store().await;
 
     let pk_column = pk_column.into();
     let ck_column = ck_column.into();
@@ -1736,8 +1708,7 @@ async fn ann_filter_clustering_key_int_lt() {
 async fn ann_filter_clustering_key_int_lte() {
     crate::enable_tracing();
 
-    let (index, client, pk_column, ck_column, _, _db, _server, _node_state) =
-        setup_int_int_store().await;
+    let (index, client, pk_column, ck_column, _, _db, _server) = setup_int_int_store().await;
 
     let pk_column = pk_column.into();
     let ck_column = ck_column.into();
@@ -1777,8 +1748,7 @@ async fn ann_filter_clustering_key_int_lte() {
 async fn ann_filter_clustering_key_int_gt() {
     crate::enable_tracing();
 
-    let (index, client, pk_column, ck_column, _, _db, _server, _node_state) =
-        setup_int_int_store().await;
+    let (index, client, pk_column, ck_column, _, _db, _server) = setup_int_int_store().await;
 
     let pk_column = pk_column.into();
     let ck_column = ck_column.into();
@@ -1818,8 +1788,7 @@ async fn ann_filter_clustering_key_int_gt() {
 async fn ann_filter_clustering_key_int_gte() {
     crate::enable_tracing();
 
-    let (index, client, pk_column, ck_column, _, _db, _server, _node_state) =
-        setup_int_int_store().await;
+    let (index, client, pk_column, ck_column, _, _db, _server) = setup_int_int_store().await;
 
     let pk_column = pk_column.into();
     let ck_column = ck_column.into();
@@ -1859,8 +1828,7 @@ async fn ann_filter_clustering_key_int_gte() {
 async fn ann_filter_clustering_key_int_range() {
     crate::enable_tracing();
 
-    let (index, client, pk_column, ck_column, _, _db, _server, _node_state) =
-        setup_int_int_store().await;
+    let (index, client, pk_column, ck_column, _, _db, _server) = setup_int_int_store().await;
 
     let pk_column = pk_column.into();
     let ck_column = ck_column.into();
@@ -1906,8 +1874,7 @@ async fn ann_filter_clustering_key_int_range() {
 async fn ann_filter_primary_key_int_lt_tuple() {
     crate::enable_tracing();
 
-    let (index, client, pk_column, ck_column, _, _db, _server, _node_state) =
-        setup_int_int_store().await;
+    let (index, client, pk_column, ck_column, _, _db, _server) = setup_int_int_store().await;
 
     let pk_column = pk_column.into();
     let ck_column = ck_column.into();
@@ -1955,8 +1922,7 @@ async fn ann_filter_primary_key_int_lt_tuple() {
 async fn ann_filter_primary_key_int_lte_tuple() {
     crate::enable_tracing();
 
-    let (index, client, pk_column, ck_column, _, _db, _server, _node_state) =
-        setup_int_int_store().await;
+    let (index, client, pk_column, ck_column, _, _db, _server) = setup_int_int_store().await;
 
     let pk_column = pk_column.into();
     let ck_column = ck_column.into();
@@ -2005,8 +1971,7 @@ async fn ann_filter_primary_key_int_lte_tuple() {
 async fn ann_filter_primary_key_int_gt_tuple() {
     crate::enable_tracing();
 
-    let (index, client, pk_column, ck_column, _, _db, _server, _node_state) =
-        setup_int_int_store().await;
+    let (index, client, pk_column, ck_column, _, _db, _server) = setup_int_int_store().await;
 
     let pk_column = pk_column.into();
     let ck_column = ck_column.into();
@@ -2053,8 +2018,7 @@ async fn ann_filter_primary_key_int_gt_tuple() {
 async fn ann_filter_primary_key_int_gte_tuple() {
     crate::enable_tracing();
 
-    let (index, client, pk_column, ck_column, _, _db, _server, _node_state) =
-        setup_int_int_store().await;
+    let (index, client, pk_column, ck_column, _, _db, _server) = setup_int_int_store().await;
 
     let pk_column = pk_column.into();
     let ck_column = ck_column.into();
@@ -2106,7 +2070,7 @@ async fn ann_filter_partition_key_text_gt() {
     let ck_column: ColumnName = "ck".into();
     let pk_column_http: httpapi::ColumnName = pk_column.clone().into();
     let ck_column_http: httpapi::ColumnName = ck_column.clone().into();
-    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+    let (index, client, _db, _server) = setup_store_and_wait_for_index(
         usearch_test_config(),
         DbIndexPartitioning::Global,
         [pk_column.clone(), ck_column.clone()],
@@ -2189,8 +2153,7 @@ async fn ann_filter_partition_key_text_gt() {
 async fn ann_filter_filtering_columns_int_eq() {
     crate::enable_tracing();
 
-    let (index, client, pk_column, ck_column, f_column, _db, _server, _node_state) =
-        setup_int_int_store().await;
+    let (index, client, pk_column, ck_column, f_column, _db, _server) = setup_int_int_store().await;
 
     let pk_column_http: httpapi::ColumnName = pk_column.into();
     let ck_column_http: httpapi::ColumnName = ck_column.into();
@@ -2225,7 +2188,7 @@ async fn http_server_is_responsive_when_index_add_hangs() {
         ]),
         ..usearch_test_config()
     };
-    let (run, _index, _db, _node_state) = setup_store(
+    let (run, _index, _db) = setup_store(
         config,
         DbIndexPartitioning::Global,
         ["pk".into(), "ck".into()],
@@ -2268,7 +2231,7 @@ async fn http_server_is_responsive_when_index_add_hangs() {
 async fn null_vector_is_not_indexed(#[case] config: Config) {
     crate::enable_tracing();
 
-    let (run, index, _db, _node_state) = setup_store(
+    let (run, index, _db) = setup_store(
         config,
         DbIndexPartitioning::Global,
         ["pk".into()],
@@ -2316,7 +2279,6 @@ async fn null_vector_is_not_indexed(#[case] config: Config) {
 async fn similarity_scores_are_decreasing_and_correctly_converted(#[case] config: Config) {
     crate::enable_tracing();
 
-    let node_state = vector_store::new_node_state().await;
     let db = db_basic::new();
 
     // Use a 1-D Euclidean index so distances are easy to predict.
@@ -2386,9 +2348,7 @@ async fn similarity_scores_are_decreasing_and_correctly_converted(#[case] config
     .unwrap();
 
     let (receivers, _senders) = create_config_channels(config).await;
-    let (server, _mtls) = vector_store::run(Some(node_state), None, db, receivers)
-        .await
-        .unwrap();
+    let (server, _mtls) = vector_store::run(db, receivers).await.unwrap();
     let addr = (*server.address().await.borrow()).unwrap();
     let client = HttpClient::new(addr);
 
@@ -2457,7 +2417,7 @@ async fn similarity_scores_are_decreasing_and_correctly_converted(#[case] config
 async fn empty_index_has_zero_count(#[case] config: Config) {
     crate::enable_tracing();
 
-    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+    let (index, client, _db, _server) = setup_store_and_wait_for_index(
         config,
         DbIndexPartitioning::Global,
         ["pk".into()],
@@ -2488,7 +2448,7 @@ async fn empty_index_has_zero_count(#[case] config: Config) {
 async fn empty_index_returns_empty_ann_results(#[case] config: Config) {
     crate::enable_tracing();
 
-    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+    let (index, client, _db, _server) = setup_store_and_wait_for_index(
         config,
         DbIndexPartitioning::Global,
         ["pk".into()],
