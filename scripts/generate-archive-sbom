@@ -11,6 +11,11 @@ vector_store_version=$(./scripts/run-with-release-toolchain cargo info vector-st
 
 archs="${*:-amd64 arm64}"
 
+# a published SBOM that does not parse is worse than none: scanners reject it
+validate_sbom() {
+    python3 -c 'import json, sys; json.load(open(sys.argv[1]))' "$1" || { echo "error: $1 is not valid JSON"; exit 1; }
+}
+
 for arch in $archs ; do
     echo build the tar archive for $arch
     vector_store_dir=vector-store-$vector_store_version-$arch
@@ -31,6 +36,7 @@ trap - EXIT
 cargo_sbom=crates/vector-store/vector-store.cdx.json
 [[ -f $cargo_sbom ]] || { echo "error: SBOM was not generated at $cargo_sbom"; exit 1; }
 mv $cargo_sbom vector-store-$vector_store_version.cdx.json
+validate_sbom vector-store-$vector_store_version.cdx.json
 echo "Cargo SBOM: vector-store-$vector_store_version.cdx.json"
 
 for arch in $archs ; do
@@ -39,5 +45,6 @@ for arch in $archs ; do
     docker_tag=scylladb/vector-store:$vector_store_version-$arch
     syft $docker_tag -o cyclonedx-json > $docker_sbom
     [[ -s $docker_sbom ]] || { echo "error: Docker SBOM is empty at $docker_sbom"; exit 1; }
+    validate_sbom $docker_sbom
     echo "Docker SBOM: $docker_sbom"
 done

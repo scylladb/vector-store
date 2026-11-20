@@ -145,9 +145,19 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: vector-store-sboms-${{ env.VECTOR_VERSION }}-${{ matrix.arch }}
-          path: |
-            vector-store-${{ env.VECTOR_VERSION }}.cdx.json
-            vector-store-docker-${{ env.VECTOR_VERSION }}-${{ matrix.arch }}.cdx.json
+          path: vector-store-docker-${{ env.VECTOR_VERSION }}-${{ matrix.arch }}.cdx.json
+          if-no-files-found: warn
+
+      # Both legs write vector-store-<version>.cdx.json. If both upload it,
+      # the merge-multiple downloads below extract two copies to the same path
+      # at the same time and can leave a file that is not valid JSON (the
+      # 1.15.0 and 1.16.1 release assets are). Only the amd64 leg uploads it.
+      - name: Upload the Cargo SBOM as artifact
+        if: matrix.arch == 'amd64'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vector-store-sboms-${{ env.VECTOR_VERSION }}-cargo
+          path: vector-store-${{ env.VECTOR_VERSION }}.cdx.json
           if-no-files-found: warn
 
   # Push the per-arch images built by the build job (no rebuild) and combine
@@ -286,8 +296,8 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          # both arch legs generate the same Cargo SBOM, so merge-multiple
-          # leaves a single copy of it beside the per-arch tarballs and docker
+          # the Cargo SBOM comes from the amd64 leg only (see "Upload the
+          # Cargo SBOM as artifact"), beside the per-arch tarballs and docker
           # SBOMs
           assets=("assets/vector-store-${VECTOR_VERSION}.cdx.json")
           for arch in amd64 arm64 ; do
@@ -299,6 +309,10 @@ jobs:
           for asset in "${assets[@]}" ; do
             if [[ ! -f "${asset}" ]] ; then
               echo "::error::${asset} is missing from the build artifacts"
+              exit 1
+            fi
+            if [[ "${asset}" == *.cdx.json ]] && ! python3 -c 'import json, sys; json.load(open(sys.argv[1]))' "${asset}" ; then
+              echo "::error::${asset} is not valid JSON"
               exit 1
             fi
           done
