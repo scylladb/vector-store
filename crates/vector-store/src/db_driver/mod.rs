@@ -227,6 +227,12 @@ pub trait DbDriver: Clone + Send + Sync + 'static {
     fn total_connections(&self, metrics: &Self::Metrics) -> u64;
 
     fn connection_timeouts(&self, metrics: &Self::Metrics) -> u64;
+
+    #[cfg(feature = "in-progress")]
+    fn make_in_progress_guard(
+        &self,
+        primary_key: &PrimaryKey,
+    ) -> Option<tokio::sync::mpsc::Sender<()>>;
 }
 
 impl CdcLogReaderConfig {
@@ -497,6 +503,11 @@ pub(crate) mod tests {
         }
 
         fn connection_timeouts(&self, _: &Self::Metrics) -> u64 {
+            unimplemented!()
+        }
+
+        #[cfg(feature = "in-progress")]
+        fn make_in_progress_guard(&self, _: &PrimaryKey) -> Option<tokio::sync::mpsc::Sender<()>> {
             unimplemented!()
         }
     }

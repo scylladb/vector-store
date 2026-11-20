@@ -596,6 +596,8 @@ impl<T: DbDriver> Statements<T> {
     ) -> anyhow::Result<()> {
         let ranges = self.fullscan_ranges().await?;
         let concurrency = self.nr_parallel_queries().await?;
+        #[cfg(feature = "in-progress")]
+        let db_driver = self.db_driver.clone();
         scan_ranges(
             ranges,
             concurrency,
@@ -608,6 +610,8 @@ impl<T: DbDriver> Statements<T> {
             },
             tx,
             completed_scan_length,
+            #[cfg(feature = "in-progress")]
+            db_driver,
         )
         .await
     }
@@ -742,6 +746,7 @@ async fn scan_ranges(
     rows: impl AsyncFn(Token, Token) -> RangeScanResult,
     tx: mpsc::Sender<(DbIndexedRow, AsyncInProgress)>,
     completed_scan_length: Arc<AtomicU64>,
+    #[cfg(feature = "in-progress")] db_driver: impl DbDriver,
 ) -> anyhow::Result<()> {
     let semaphore_capacity = concurrency.get();
     let semaphore = Arc::new(Semaphore::new(semaphore_capacity));
@@ -754,16 +759,25 @@ async fn scan_ranges(
         let range_rows = rows(begin, end).await?;
         let tx = tx.clone();
         let scan_length = completed_scan_length.clone();
+        #[cfg(feature = "in-progress")]
+        let db_driver = db_driver.clone();
         range_tasks.spawn(async move {
             let (tx_in_progress, mut rx_in_progress) = mpsc::channel(1);
             range_rows
                 .for_each(move |row| {
                     let tx = tx.clone();
                     let tx_in_progress = tx_in_progress.clone();
+                    #[cfg(feature = "in-progress")]
+                    let db_driver = db_driver.clone();
                     async move {
-                        _ = tx
-                            .send((row, AsyncInProgress::fullscan(tx_in_progress)))
-                            .await;
+                        let async_in_progress = AsyncInProgress::fullscan(tx_in_progress);
+
+                        #[cfg(feature = "in-progress")]
+                        let async_in_progress = async_in_progress.with_in_progress_guard(
+                            db_driver.make_in_progress_guard(&row.primary_key),
+                        );
+
+                        _ = tx.send((row, async_in_progress)).await;
                     }
                 })
                 .await;
@@ -1005,9 +1019,11 @@ mod tests {
     use crate::IndexOptionsVs;
     use crate::Quantization;
     use crate::SpaceType;
+    #[cfg(not(feature = "in-progress"))]
     use futures::stream;
     use rstest::rstest;
     use std::assert_matches;
+    #[cfg(not(feature = "in-progress"))]
     use tokio::task;
     use uuid::Uuid;
 
@@ -1439,8 +1455,10 @@ mod tests {
         assert_eq!(&*decode_types, &[None, Some(NativeType::Decimal)]);
     }
 
+    #[cfg(not(feature = "in-progress"))]
     type Rx = mpsc::Receiver<(DbIndexedRow, AsyncInProgress)>;
 
+    #[cfg(not(feature = "in-progress"))]
     fn row(i: i64) -> DbIndexedRow {
         DbIndexedRow {
             primary_key: PrimaryKey::from(vec![CqlValue::Int(i as i32)]),
@@ -1452,18 +1470,22 @@ mod tests {
         (Token::new(begin), Token::new(end))
     }
 
+    #[cfg(not(feature = "in-progress"))]
     fn single_token_ranges(count: usize) -> impl Iterator<Item = (Token, Token)> {
         (0..count as i64).map(|i| token_range(i, i))
     }
 
+    #[cfg(not(feature = "in-progress"))]
     fn single_row_range(begin: Token) -> RangeScanResult {
         Ok(stream::iter([row(begin.value())]).boxed())
     }
 
+    #[cfg(not(feature = "in-progress"))]
     fn concurrency(n: usize) -> NonZeroUsize {
         NonZeroUsize::new(n).unwrap()
     }
 
+    #[cfg(not(feature = "in-progress"))]
     fn spawn_consumer_acking_immediately(mut rx: Rx) -> task::JoinHandle<usize> {
         tokio::spawn(async move {
             let mut received = 0;
@@ -1479,6 +1501,7 @@ mod tests {
     /// releases its permit once its rows are sent, not once they are acknowledged. If a range held
     /// its permit until the acknowledgement, the `AsyncInProgress` guards of the next ranges would
     /// never arrive and the test would fail on the timeout.
+    #[cfg(not(feature = "in-progress"))]
     #[rstest]
     #[timeout(Duration::from_secs(5))]
     #[tokio::test]
@@ -1505,6 +1528,7 @@ mod tests {
         assert_eq!(completed.load(Ordering::Relaxed), 0);
     }
 
+    #[cfg(not(feature = "in-progress"))]
     #[rstest]
     #[timeout(Duration::from_secs(5))]
     #[tokio::test]
@@ -1534,6 +1558,7 @@ mod tests {
         assert_eq!(completed.load(Ordering::Relaxed), 10 + 20 + 30 + 40 + 50);
     }
 
+    #[cfg(not(feature = "in-progress"))]
     #[rstest]
     #[timeout(Duration::from_secs(5))]
     #[tokio::test]
@@ -1559,6 +1584,7 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(consumer.await.unwrap(), 1);
     }
+
     #[rstest]
     #[case::single_token(token_range(7, 7), 1)]
     #[case::positive(token_range(0, 9), 10)]

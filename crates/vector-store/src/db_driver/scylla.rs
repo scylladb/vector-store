@@ -647,6 +647,11 @@ impl DbDriver for ScyllaDriver {
         metrics.get_total_connections()
     }
 
+    #[cfg(feature = "in-progress")]
+    fn make_in_progress_guard(&self, _: &PrimaryKey) -> Option<tokio::sync::mpsc::Sender<()>> {
+        unimplemented!()
+    }
+
     fn connection_timeouts(&self, metrics: &Self::Metrics) -> u64 {
         metrics.get_connection_timeouts()
     }
