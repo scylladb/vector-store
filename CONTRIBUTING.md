@@ -11,6 +11,7 @@ Before submitting a pull request (PR), ensure your contribution meets these requ
 - **Issue Closing Reference** If a PR fixes/closes a Jira issue, add a `Fixes: VECTOR-XYZ` line at the end of the PR. If you need you can also add it to the commit message.
 - **Issue References:** For related issues or discussions that are not directly fixed by the PR, add a `Refs: VECTOR-XYZ` line at the end of the PR message. If you need you can also add it to the commit message.
 - **Testing:** All new features and bug fixes must include appropriate tests.
+- **Coding Conventions:** Before opening the PR, go through the Quality Checklist of [docs/rust_instructions.md](docs/rust_instructions.md) on its diff, and fix what it finds.
 - **PR Checks:** Every PR must pass all CI checks, including compilation, test execution, formatting, and static code analysis.
 - **PR Description:** Clearly explain the motivation and reasoning behind your changes in the PR description.
 

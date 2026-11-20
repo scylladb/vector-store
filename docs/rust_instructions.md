@@ -47,7 +47,7 @@ These instructions are based on [The Rust Book](https://doc.rust-lang.org/book/)
 - Don't rely on global mutable state—use dependency injection or thread-safe containers.
 - Avoid deeply nested logic—refactor with functions or combinators.
 - Don't ignore warnings—treat them as errors during CI.
-- Avoid `unsafe` unless required and fully documented.
+- Avoid `unsafe` unless required and fully documented (see [Unsafe Code and FFI](#unsafe-code-and-ffi)).
 - Don't overuse `clone()`, use borrowing instead of cloning unless ownership transfer is needed.
 - Avoid premature `collect()`, keep iterators lazy until you actually need the collection.
 - Avoid unnecessary allocations—prefer borrowing and zero-copy operations.
@@ -95,11 +95,32 @@ Eagerly implement common traits where appropriate:
 - Functions should validate their arguments
 - All public types must implement `Debug`
 
+### Public API
+
+- A crate's public (`pub`) items are the ones other crates use. Everything else is `pub(crate)` or private, including the types a public function uses internally.
+- Don't make an item `pub` so that a test in `tests/` can reach it: a test that needs internal items is a unit test in the module it tests.
+
+## Unsafe Code and FFI
+
+- Keep `unsafe` code in one module per crate. Put `extern` declarations in a private module (e.g. `ffi`) and expose them through safe functions there, so that the rest of the crate has no `unsafe` code.
+- A safe function that wraps `unsafe` code establishes every precondition itself, e.g. slice lengths or the CPU features detected at run time, rather than trusting its caller for them.
+- Give every `unsafe` block a `// SAFETY:` comment that says why its preconditions hold.
+
+## Supported Targets
+
+- Vector Store supports x86_64 and aarch64, the architectures CI tests and the releases ship, built with GCC or Clang. MSVC and other architectures are not supported.
+- Code that cannot work on another target fails the build there, with the reason: a `compile_error!` under a `cfg` for that target in Rust, or a `panic!` in `build.rs`. Don't add a fallback, i.e. a `cfg` branch that makes the code build or run on an unsupported target.
+
+## Code From Other Projects
+
+- Code copied or derived from another project, e.g. C kernels taken from a library, keeps the upstream names and text, so that it can be compared with later upstream releases. Guard our changes (`#if`/`#ifdef` in C, `cfg` in Rust), or put them in functions of their own, and say at the top of the file which upstream version and commits it comes from and what we changed.
+- Keep its license and copyright notice, with the license text next to the code.
+
 ## Testing and Documentation
 
 - Write comprehensive unit tests using `#[cfg(test)]` modules and `#[test]` annotations.
-- Use test modules alongside the code they test (`mod tests { ... }`).
-- Write integration tests in `tests/` directory with descriptive filenames.
+- Put a file's unit tests in a `#[cfg(test)] mod tests { ... }` block at the end of that file, not in a separate file (`mod tests;` with a `tests.rs`): every crate in this repository does so.
+- Write integration tests in `tests/` directory with descriptive filenames. They use only the crate's public API (see [Public API](#public-api)).
 - Write clear and concise comments for each function, struct, enum, and complex logic.
 - Ensure functions have descriptive names and include comprehensive documentation.
 - Document all public APIs with rustdoc (`///` comments) following the [API Guidelines](https://rust-lang.github.io/api-guidelines/).
@@ -129,8 +150,11 @@ Before publishing or reviewing Rust code, ensure:
 
 ### Safety and Quality
 
-- [ ] **Safety**: No unnecessary `unsafe` code, proper error handling
+- [ ] **Safety**: No unnecessary `unsafe` code, proper error handling; `unsafe` and FFI in one module, behind safe functions
 - [ ] **Performance**: Efficient use of iterators, minimal allocations
-- [ ] **API Design**: Functions are predictable, flexible, and type-safe
+- [ ] **API Design**: Functions are predictable, flexible, and type-safe; only what other crates use is `pub`
 - [ ] **Future Proofing**: Private fields in structs, sealed traits where appropriate
+- [ ] **Targets**: An unsupported target (MSVC, an architecture other than x86_64 and aarch64) fails the build
+- [ ] **Tests**: Unit tests in a `mod tests { ... }` block of the file they test
+- [ ] **Code from other projects**: Upstream names and text kept, our changes guarded, origin and license recorded
 - [ ] **Tooling**: Code passes `cargo fmt`, `cargo clippy`, and `cargo test`

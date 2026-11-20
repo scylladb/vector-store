@@ -1,0 +1,10 @@
+# CodeRabbit settings of this repository, on top of the organization's (inheritance: without it,
+# this file would be the only source of settings).
+inheritance: true
+knowledge_base:
+  code_guidelines:
+    filePatterns:
+      # The coding conventions the review checks Rust and C changes against. A plain pattern would
+      # apply the file only to the directory it is in (docs/), hence `files` with `applyTo`.
+      - files: "docs/rust_instructions.md"
+        applyTo: "**/*.{rs,c,h}"
