@@ -19,12 +19,18 @@ required-features = ["dev-tools"]
 name = "pipeline"
 harness = false
 
+[[bench]]
+name = "fts_indexing"
+harness = false
+required-features = ["bench-hooks"]
+
 [features]
 default = []
 dev-tools = []
 hotpath = ["hotpath/hotpath"]
 console = ["console-subscriber"]
 slow-test-hooks = []
+bench-hooks = []
 
 [dependencies]
 anyhow.workspace = true

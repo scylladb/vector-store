@@ -14,3 +14,21 @@ the cluster by hand instead, see
 [latte](https://github.com/scylladb/latte) workloads that benchmark vector
 search over CQL, recall included, stay in this repository:
 [latte](../latte/README.md).
+
+## In-process FTS indexing
+
+`crates/vector-store/benches/fts_indexing.rs` feeds a synthetic corpus to the
+full-text indexes through a mocked full scan, with no ScyllaDB cluster, and
+prints one row per configuration: documents per second until all are
+searchable, commits and operations per commit, commit latency, writer lock
+wait, segments after each commit and memory at each commit. It runs every
+combination of runtime threads (1, 2, 4, 8) and index counts (1, 100), each in
+its own process:
+
+```sh
+cargo bench -p vector-store --features bench-hooks --bench fts_indexing
+```
+
+`FTS_BENCH_THREADS` and `FTS_BENCH_INDEXES` take comma-separated lists,
+`FTS_BENCH_DOCS` sets the total number of documents and `FTS_BENCH_SEED` the
+corpus seed. Run it on two builds with the same settings to compare them.
