@@ -105,7 +105,10 @@ kind of release it is, a `:warning:` line for each change in behaviour, defaults
 or performance they should check first, the fixes that matter grouped into a
 line or two, and a recommendation on who should upgrade. Leave the rest to the
 release notes, including security-related dependency updates such as RUSTSEC
-advisories: they are listed in the notes, not announced.
+advisories: they are listed in the notes, not announced. The exception is a
+fix of very high severity in what the release ships beyond its Rust
+dependencies, such as the remotely triggerable kernel flaw fixed in the 1.16.0
+cloud images: it gets a `:white_check_mark:` line of its own.
 
 The job reads the notes when it runs, not from the release event, so to correct
 a block before the announcement goes out, edit the release notes. If the job
