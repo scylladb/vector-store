@@ -20,6 +20,7 @@ use crate::distance;
 use crate::engine::Engine;
 use crate::fts_index::FtsIndex;
 use crate::fts_index::FtsIndexExt;
+use crate::fts_index::HighlightDocument;
 use crate::indexes;
 use crate::indexes::Indexes;
 use crate::info::Info;
@@ -74,6 +75,7 @@ use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::RwLock;
+use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tower_http::trace::TraceLayer;
 use tracing::debug;
@@ -1305,9 +1307,7 @@ async fn post_index_highlight(
         }
     };
 
-    let result = fts_sender
-        .highlight(index_key, request.query, request.documents)
-        .await;
+    let result = highlight_documents(&fts_sender, index_key, request).await;
 
     timer.observe_duration();
 
@@ -1328,6 +1328,39 @@ async fn post_index_highlight(
         )
             .into_response(),
     }
+}
+
+/// Highlights the documents of `request` through the FTS index, in their order.
+async fn highlight_documents(
+    fts_sender: &Sender<FtsIndex>,
+    index_key: IndexKey,
+    request: httpapi::PostIndexHighlightRequest,
+) -> anyhow::Result<Vec<Option<String>>> {
+    let count = request.documents.len();
+    let (documents_tx, documents) = mpsc::channel(count.max(1));
+    for document in request.documents {
+        let document: HighlightDocument = Box::new(document);
+        // The channel holds every document, so this doesn't wait for the index.
+        documents_tx
+            .send(document)
+            .await
+            .map_err(|_| anyhow::anyhow!("the FTS index stopped taking documents"))?;
+    }
+    drop(documents_tx);
+
+    let mut excerpts = fts_sender
+        .highlight(index_key, Box::new(request.query), documents)
+        .await?;
+    let mut highlights = Vec::with_capacity(count);
+    while let Some(excerpt) = excerpts.recv().await {
+        highlights.push(excerpt);
+    }
+    anyhow::ensure!(
+        highlights.len() == count,
+        "highlighted {} of {count} documents",
+        highlights.len()
+    );
+    Ok(highlights)
 }
 
 #[utoipa::path(
