@@ -320,7 +320,7 @@ pub(crate) fn fullscan_insert(c: &mut Criterion) {
 
     let next_pk = Arc::new(AtomicI64::new(0));
     group.bench_with_input(
-        BenchmarkId::new("fullscan-insert", concurrency),
+        BenchmarkId::new("ann-fullscan-insert", concurrency),
         &concurrency,
         |b, concurrency| {
             let fixture = fixture.borrow();
@@ -431,7 +431,7 @@ pub(crate) fn search(c: &mut Criterion) {
     });
 
     group.bench_with_input(
-        BenchmarkId::new("search", concurrency),
+        BenchmarkId::new("ann-search", concurrency),
         &concurrency,
         |b, concurrency| {
             let fixture = fixture.borrow();
@@ -529,7 +529,7 @@ pub(crate) fn cdc_insert(c: &mut Criterion) {
 
     let next_pk = Arc::new(AtomicI64::new(0));
     group.bench_with_input(
-        BenchmarkId::new("cdc-insert", concurrency),
+        BenchmarkId::new("ann-cdc-insert", concurrency),
         &concurrency,
         |b, concurrency| {
             let fixture = fixture.borrow();
@@ -646,7 +646,7 @@ pub(crate) fn cdc_update(c: &mut Criterion) {
     // We start the next timestamp at 2, because the fullscan inserts used timestamp 1.
     let next_timestamp = Arc::new(AtomicU64::new(2));
     group.bench_with_input(
-        BenchmarkId::new("cdc-update", concurrency),
+        BenchmarkId::new("ann-cdc-update", concurrency),
         &concurrency,
         |b, concurrency| {
             let fixture = fixture.borrow();
@@ -774,7 +774,7 @@ pub(crate) fn cdc_delete(c: &mut Criterion) {
     // We start the next timestamp at 2, because the fullscan inserts used timestamp 1.
     let next_timestamp = Arc::new(AtomicU64::new(2));
     group.bench_with_input(
-        BenchmarkId::new("cdc-delete", concurrency),
+        BenchmarkId::new("ann-cdc-delete", concurrency),
         &concurrency,
         |b, concurrency| {
             let fixture = fixture.borrow();
@@ -932,7 +932,7 @@ pub(crate) fn search_while_updating(c: &mut Criterion) {
     });
 
     group.bench_with_input(
-        BenchmarkId::new("search-while-updating", concurrency),
+        BenchmarkId::new("ann-search-while-updating", concurrency),
         &concurrency,
         |b, concurrency| {
             let fixture = fixture.borrow();
@@ -1056,7 +1056,7 @@ pub(crate) fn search_while_inserting(c: &mut Criterion) {
     });
 
     group.bench_with_input(
-        BenchmarkId::new("search-while-inserting", concurrency),
+        BenchmarkId::new("ann-search-while-inserting", concurrency),
         &concurrency,
         |b, concurrency| {
             let fixture = fixture.borrow();
@@ -1205,7 +1205,7 @@ pub(crate) fn search_while_deleting(c: &mut Criterion) {
     });
 
     group.bench_with_input(
-        BenchmarkId::new("search-while-deleting", concurrency),
+        BenchmarkId::new("ann-search-while-deleting", concurrency),
         &concurrency,
         |b, concurrency| {
             let fixture = fixture.borrow();
