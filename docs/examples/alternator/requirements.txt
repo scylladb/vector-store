@@ -1,3 +1,3 @@
-# Vector search support is only available on the alternator-client main branch
-# for now; the 1.0.0 PyPI release does not include it yet.
-alternator-client @ git+https://github.com/scylladb/alternator-client-python.git@main
+# 1.43.64 is the first boto3 release that models DynamoDB's vector search API
+# (VectorIndexes, SearchVectors).
+boto3>=1.43.64

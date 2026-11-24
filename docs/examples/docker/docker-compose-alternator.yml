@@ -7,7 +7,9 @@
 
 services:
   scylla:
-    image: scylladb/scylla:2026.2.2
+    # Alternator implements DynamoDB's vector search API (SearchVectors)
+    # starting with ScyllaDB 2026.4.
+    image: scylladb/scylla:2026.4.0-rc3
     container_name: scylla-alternator
     command: >
       --smp 2
