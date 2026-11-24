@@ -236,6 +236,7 @@ impl ConfigManager {
                 config.highlight_memory_budget,
                 config.highlight_max_requests,
                 config.highlight_busy_wait,
+                config.highlight_receive_timeout,
                 config.highlight_receive_idle_timeout,
             )
         };
@@ -622,6 +623,9 @@ pub async fn load_config(env: impl Fn(&str) -> anyhow::Result<String>) -> anyhow
         .transpose()?;
 
     config.highlight_busy_wait = positive_duration(&env, "VECTOR_STORE_HIGHLIGHT_BUSY_WAIT")?;
+
+    config.highlight_receive_timeout =
+        positive_duration(&env, "VECTOR_STORE_HIGHLIGHT_RECEIVE_TIMEOUT")?;
 
     config.highlight_receive_idle_timeout =
         positive_duration(&env, "VECTOR_STORE_HIGHLIGHT_RECEIVE_IDLE_TIMEOUT")?;
@@ -1034,12 +1038,17 @@ mod tests {
             ("VECTOR_STORE_HIGHLIGHT_MEMORY_BUDGET", "1048576".into()),
             ("VECTOR_STORE_HIGHLIGHT_MAX_REQUESTS", "8".into()),
             ("VECTOR_STORE_HIGHLIGHT_BUSY_WAIT", "1s".into()),
+            ("VECTOR_STORE_HIGHLIGHT_RECEIVE_TIMEOUT", "1m".into()),
             ("VECTOR_STORE_HIGHLIGHT_RECEIVE_IDLE_TIMEOUT", "10s".into()),
         ]));
         let config = load_config(env).await.unwrap();
         assert_eq!(config.highlight_memory_budget, NonZeroUsize::new(1_048_576));
         assert_eq!(config.highlight_max_requests, NonZeroUsize::new(8));
         assert_eq!(config.highlight_busy_wait, Some(Duration::from_secs(1)));
+        assert_eq!(
+            config.highlight_receive_timeout,
+            Some(Duration::from_secs(60))
+        );
         assert_eq!(
             config.highlight_receive_idle_timeout,
             Some(Duration::from_secs(10))
@@ -1064,14 +1073,12 @@ mod tests {
                 (MAX_HIGHLIGHT_REQUESTS + 1).to_string(),
             ),
             ("VECTOR_STORE_HIGHLIGHT_BUSY_WAIT", "0s".to_string()),
+            ("VECTOR_STORE_HIGHLIGHT_RECEIVE_TIMEOUT", "0s".to_string()),
             (
                 "VECTOR_STORE_HIGHLIGHT_RECEIVE_IDLE_TIMEOUT",
                 "0s".to_string(),
             ),
-            (
-                "VECTOR_STORE_HIGHLIGHT_RECEIVE_IDLE_TIMEOUT",
-                "soon".to_string(),
-            ),
+            ("VECTOR_STORE_HIGHLIGHT_RECEIVE_TIMEOUT", "soon".to_string()),
         ] {
             let result = load_config(mock_env(HashMap::from([(name, value.clone())]))).await;
             let error = result.expect_err(&format!("{name}={value} must be rejected"));

@@ -57,6 +57,7 @@ pub(crate) struct HighlightLimits {
     pub(crate) max_requests: usize,
     /// The longest wait for memory or a place, before answering 503.
     pub(crate) busy_wait: Duration,
+    pub(crate) receive_timeout: Duration,
     pub(crate) receive_idle_timeout: Duration,
     pub(crate) drain_timeout: Duration,
 }
@@ -77,6 +78,7 @@ impl Default for HighlightLimits {
             memory_budget_bytes: 512 * MIB,
             max_requests: 64,
             busy_wait: Duration::from_secs(5),
+            receive_timeout: Duration::from_secs(120),
             receive_idle_timeout: Duration::from_secs(30),
             // As long as a whole body may take to arrive.
             drain_timeout: Duration::from_secs(120),
@@ -102,6 +104,12 @@ impl HighlightLimits {
                 .highlight_max_requests
                 .map_or(default.max_requests, NonZeroUsize::get),
             busy_wait: config.highlight_busy_wait.unwrap_or(default.busy_wait),
+            receive_timeout: config
+                .highlight_receive_timeout
+                .unwrap_or(default.receive_timeout),
+            drain_timeout: config
+                .highlight_receive_timeout
+                .unwrap_or(default.drain_timeout),
             receive_idle_timeout: config
                 .highlight_receive_idle_timeout
                 .unwrap_or(default.receive_idle_timeout),
@@ -224,7 +232,9 @@ pub(crate) struct LimitedBody<S> {
     state: Arc<ReceiveState>,
     idle_timeout: Duration,
     idle: Pin<Box<tokio::time::Sleep>>,
-    waiting: bool,
+    time_left: Duration,
+    /// Set while the client is waited for.
+    waiting_since: Option<tokio::time::Instant>,
 }
 
 impl<S> LimitedBody<S> {
@@ -236,7 +246,8 @@ impl<S> LimitedBody<S> {
             state: Arc::default(),
             idle_timeout: limits.receive_idle_timeout,
             idle: Box::pin(tokio::time::sleep(limits.receive_idle_timeout)),
-            waiting: false,
+            time_left: limits.receive_timeout,
+            waiting_since: None,
         }
     }
 
@@ -267,12 +278,24 @@ where
             return Poll::Ready(Some(Err(failure.into())));
         }
         // Only time waiting for the client counts, not pauses of the server.
-        if !self.waiting {
-            let idle_end = tokio::time::Instant::now() + self.idle_timeout;
-            self.idle.as_mut().reset(idle_end);
+        if self.time_left.is_zero() {
+            return Poll::Ready(Some(Err(self.time_out())));
         }
+        let waiting_since = match self.waiting_since {
+            Some(since) => since,
+            None => {
+                let now = tokio::time::Instant::now();
+                let idle_end = now + self.idle_timeout.min(self.time_left);
+                self.idle.as_mut().reset(idle_end);
+                self.waiting_since = Some(now);
+                now
+            }
+        };
         let chunk = self.inner.poll_next_unpin(cx);
-        self.waiting = chunk.is_pending();
+        if chunk.is_ready() {
+            self.waiting_since = None;
+            self.time_left = self.time_left.saturating_sub(waiting_since.elapsed());
+        }
         match chunk {
             Poll::Ready(Some(Ok(chunk))) => {
                 self.received += chunk.len() as u64;
@@ -1259,17 +1282,21 @@ mod tests {
         assert_eq!(unset.memory_budget_bytes, default.memory_budget_bytes);
         assert_eq!(unset.max_requests, default.max_requests);
         assert_eq!(unset.busy_wait, default.busy_wait);
+        assert_eq!(unset.receive_timeout, default.receive_timeout);
 
         let set = HighlightLimits::from_config(&Config {
             highlight_memory_budget: NonZeroUsize::new(1000),
             highlight_max_requests: NonZeroUsize::new(2),
             highlight_busy_wait: Some(Duration::from_secs(1)),
+            highlight_receive_timeout: Some(Duration::from_secs(3)),
             highlight_receive_idle_timeout: Some(Duration::from_secs(2)),
             ..Config::default()
         });
         assert_eq!(set.memory_budget_bytes, 1000);
         assert_eq!(set.max_requests, 2);
         assert_eq!(set.busy_wait, Duration::from_secs(1));
+        assert_eq!(set.receive_timeout, Duration::from_secs(3));
+        assert_eq!(set.drain_timeout, Duration::from_secs(3));
         assert_eq!(set.receive_idle_timeout, Duration::from_secs(2));
         assert_eq!(set.max_text_bytes, 1000 / TEXTS_HELD_AT_ONCE);
         assert_eq!(set.max_query_bytes, 1000 / TEXTS_HELD_AT_ONCE);
@@ -1279,6 +1306,65 @@ mod tests {
             ..Config::default()
         });
         assert_eq!(large.max_text_bytes, default.max_text_bytes);
+    }
+
+    #[tokio::test]
+    async fn pauses_of_the_server_do_not_count_toward_the_receive_timeout() {
+        let (chunks_tx, chunks_rx) = mpsc::channel::<io::Result<Bytes>>(1);
+        let mut body = LimitedBody::new(
+            tokio_stream_from(chunks_rx),
+            &HighlightLimits {
+                receive_idle_timeout: Duration::from_millis(100),
+                receive_timeout: Duration::from_millis(300),
+                ..limits()
+            },
+        );
+        tokio::spawn(async move {
+            for _ in 0..5 {
+                chunks_tx.send(Ok(Bytes::from_static(b" "))).await.unwrap();
+            }
+        });
+
+        for _ in 0..5 {
+            assert!(body.next().await.unwrap().is_ok());
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(body.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_body_trickling_in_past_the_receive_timeout_fails() {
+        let (chunks_tx, chunks_rx) = mpsc::channel::<io::Result<Bytes>>(1);
+        let mut body = LimitedBody::new(
+            tokio_stream_from(chunks_rx),
+            &HighlightLimits {
+                receive_idle_timeout: Duration::from_secs(1),
+                receive_timeout: Duration::from_millis(300),
+                ..limits()
+            },
+        );
+        tokio::spawn(async move {
+            while chunks_tx.send(Ok(Bytes::from_static(b" "))).await.is_ok() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        });
+
+        let started = tokio::time::Instant::now();
+        let failure = loop {
+            match body.next().await {
+                Some(Ok(_)) => continue,
+                Some(Err(err)) => break err,
+                None => panic!("the body ended"),
+            }
+        };
+
+        assert_eq!(failure.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() >= Duration::from_millis(300));
+        assert!(
+            body.state()
+                .error()
+                .is_some_and(|err| matches!(err, BodyError::Timeout))
+        );
     }
 
     fn tokio_stream_from(

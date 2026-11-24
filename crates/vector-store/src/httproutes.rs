@@ -1257,7 +1257,7 @@ If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
         ),
         (
             status = 408,
-            description = "Request timeout. No part of the body arrived for `VECTOR_STORE_HIGHLIGHT_RECEIVE_IDLE_TIMEOUT` (30 s by default).",
+            description = "Request timeout. No part of the body arrived for `VECTOR_STORE_HIGHLIGHT_RECEIVE_IDLE_TIMEOUT` (30 s by default), or the whole body took longer than `VECTOR_STORE_HIGHLIGHT_RECEIVE_TIMEOUT` (120 s by default).",
             content_type = "application/json",
             body = ErrorMessage
         ),

@@ -251,6 +251,7 @@ pub struct Config {
     pub highlight_memory_budget: Option<NonZeroUsize>,
     pub highlight_max_requests: Option<NonZeroUsize>,
     pub highlight_busy_wait: Option<Duration>,
+    pub highlight_receive_timeout: Option<Duration>,
     pub highlight_receive_idle_timeout: Option<Duration>,
 }
 
@@ -290,6 +291,7 @@ impl Default for Config {
             highlight_memory_budget: None,
             highlight_max_requests: None,
             highlight_busy_wait: None,
+            highlight_receive_timeout: None,
             highlight_receive_idle_timeout: None,
         }
     }
