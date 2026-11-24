@@ -383,7 +383,7 @@ fn fullscan_insert(c: &mut Criterion) {
                 let tx = tx.clone();
                 let next_pk = Arc::clone(&next_pk);
                 async move {
-                    run_with_concurrency(*concurrency, iters, move |it| {
+                    run_with_concurrency(*concurrency, iters, move |_, it| {
                         let tx = tx.clone();
                         let pk = next_pk.fetch_add(1, Ordering::Relaxed);
                         async move {
@@ -495,7 +495,7 @@ fn search(c: &mut Criterion) {
                 let index_metadata = index_metadata.clone();
                 let client = client.clone();
                 async move {
-                    run_with_concurrency(*concurrency, iters, move |it| {
+                    run_with_concurrency(*concurrency, iters, move |_, it| {
                         let keyspace_name = index_metadata.keyspace_name.clone().into();
                         let index_name = index_metadata.index_name.clone().into();
                         let client = client.clone();
@@ -588,7 +588,7 @@ fn cdc_insert(c: &mut Criterion) {
                 let tx = tx.clone();
                 let next_pk = Arc::clone(&next_pk);
                 async move {
-                    run_with_concurrency(*concurrency, iters, move |it| {
+                    run_with_concurrency(*concurrency, iters, move |_, it| {
                         let tx = tx.clone();
                         let pk = next_pk.fetch_add(1, Ordering::Relaxed);
                         async move {
@@ -709,7 +709,7 @@ fn cdc_update(c: &mut Criterion) {
                 let next_timestamp = Arc::clone(&next_timestamp);
                 let tx_cdc = tx_cdc.clone();
                 async move {
-                    run_with_concurrency(*concurrency, iters, move |it| {
+                    run_with_concurrency(*concurrency, iters, move |_, it| {
                         let next_timestamp = Arc::clone(&next_timestamp);
                         let tx_cdc = tx_cdc.clone();
                         async move {
@@ -836,7 +836,7 @@ fn cdc_delete(c: &mut Criterion) {
                 let next_timestamp = Arc::clone(&next_timestamp);
                 let tx_cdc = tx_cdc.clone();
                 async move {
-                    run_with_concurrency(*concurrency, iters, move |_| {
+                    run_with_concurrency(*concurrency, iters, move |_, _| {
                         let next_timestamp = Arc::clone(&next_timestamp);
                         let tx_cdc = tx_cdc.clone();
                         async move {
@@ -998,7 +998,7 @@ fn search_while_updating(c: &mut Criterion) {
                 let index_metadata = index_metadata.clone();
                 let client = client.clone();
                 async move {
-                    run_with_concurrency(*concurrency, iters, move |it| {
+                    run_with_concurrency(*concurrency, iters, move |_, it| {
                         let keyspace_name = index_metadata.keyspace_name.clone().into();
                         let index_name = index_metadata.index_name.clone().into();
                         let client = client.clone();
@@ -1130,7 +1130,7 @@ fn search_while_inserting(c: &mut Criterion) {
                 let index_metadata = index_metadata.clone();
                 let client = client.clone();
                 async move {
-                    run_with_concurrency(*concurrency, iters, move |it| {
+                    run_with_concurrency(*concurrency, iters, move |_, it| {
                         let keyspace_name = index_metadata.keyspace_name.clone().into();
                         let index_name = index_metadata.index_name.clone().into();
                         let client = client.clone();
@@ -1282,7 +1282,7 @@ fn search_while_deleting(c: &mut Criterion) {
                 let index_metadata = index_metadata.clone();
                 let client = client.clone();
                 async move {
-                    run_with_concurrency(*concurrency, iters, move |it| {
+                    run_with_concurrency(*concurrency, iters, move |_, it| {
                         let keyspace_name = index_metadata.keyspace_name.clone().into();
                         let index_name = index_metadata.index_name.clone().into();
                         let client = client.clone();
@@ -1320,12 +1320,12 @@ fn search_while_deleting(c: &mut Criterion) {
 #[hotpath::measure]
 async fn run_with_concurrency<F, Fut>(concurrency: usize, iters: u64, f: F) -> Duration
 where
-    F: Fn(u64) -> Fut + Clone + Send + Sync + 'static,
+    F: Fn(usize, u64) -> Fut + Clone + Send + Sync + 'static,
     Fut: std::future::Future<Output = Duration> + Send + 'static,
 {
     let counter = Arc::new(AtomicU64::new(0));
     let tasks = (0..concurrency)
-        .map(|_| {
+        .map(|concurrency| {
             let counter = Arc::clone(&counter);
             let f = f.clone();
             tokio::spawn(async move {
@@ -1335,7 +1335,7 @@ where
                     if it >= iters {
                         break;
                     }
-                    let duration = f(it).await;
+                    let duration = f(concurrency, it).await;
                     durations.push(duration);
                 }
                 durations.into_iter().fold(Duration::ZERO, |acc, x| acc + x)
