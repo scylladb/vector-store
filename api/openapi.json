@@ -363,7 +363,7 @@
         "tags": [
           "scylla-vector-store-index"
         ],
-        "description": "Computes a highlighted excerpt (snippet) for each of the supplied document texts. The index is used only to analyze the query and to weight its terms by their document frequency, prioritizing rarer terms when picking which fragment of a long text to show. Highlights are returned in the same order as the requested documents. A document that matches no query term yields `null`. The body is read as a stream, one document at a time, so it has no overall size limit beyond 640 MiB; the query may be at most 2 MiB and each document 100 MiB, and a request may carry at most 1000 documents. `query` has to come before `documents`, so that highlighting can start at the first document. If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
+        "description": "Computes a highlighted excerpt (snippet) for each of the supplied document texts. The index is used only to analyze the query and to weight its terms by their document frequency, prioritizing rarer terms when picking which fragment of a long text to show. Highlights are returned in the same order as the requested documents. A document that matches no query term yields `null`. The body is read as a stream, one document at a time, so it has no overall size limit beyond 640 MiB; the query may be at most 2 MiB and each document 100 MiB, and a request may carry at most 1000 documents. `query` has to come before `documents`, so that highlighting can start at the first document. When too many highlight requests are in progress, or the memory for their documents is used up, for over 5 s, the request fails with 503 and a plain-text message. If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
         "operationId": "post_index_highlight",
         "parameters": [
           {
@@ -428,6 +428,16 @@
           },
           "404": {
             "description": "Index not found. Possible causes: index does not exist, or is not discovered yet.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "Request timeout. No part of the body arrived for 30 s.",
             "content": {
               "application/json": {
                 "schema": {

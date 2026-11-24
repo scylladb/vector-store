@@ -11,6 +11,7 @@ use bytes::Bytes;
 use futures::Stream;
 use futures::StreamExt;
 use std::cell::Cell;
+use std::future::Future;
 use std::io;
 use std::io::Read;
 use std::pin::Pin;
@@ -25,11 +26,14 @@ use struson::reader::JsonStreamReader;
 use struson::reader::ReaderError;
 use struson::reader::ReaderSettings;
 use struson::reader::ValueType;
+use tokio::sync::OwnedSemaphorePermit;
+use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tracing::debug;
 
 const MIB: usize = 1024 * 1024;
+
 /// Limits of a `/highlight` request.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct HighlightLimits {
@@ -41,6 +45,14 @@ pub(crate) struct HighlightLimits {
     pub(crate) max_documents: usize,
     /// struson reads a field name whole.
     pub(crate) max_name_bytes: usize,
+    /// Shared by all requests: bounds the text they hold, counted by the capacity of its
+    /// buffers. The rest of their memory, such as the excerpts, is small next to it.
+    pub(crate) memory_budget_bytes: usize,
+    /// Each request holds a blocking thread while it reads its body.
+    pub(crate) max_requests: usize,
+    /// The longest wait for memory or a place, before answering 503.
+    pub(crate) busy_wait: Duration,
+    pub(crate) receive_idle_timeout: Duration,
     pub(crate) drain_timeout: Duration,
 }
 
@@ -57,15 +69,49 @@ impl Default for HighlightLimits {
             // The largest LIMIT of a BM25 query.
             max_documents: 1000,
             max_name_bytes: 4096,
+            memory_budget_bytes: 512 * MIB,
+            max_requests: 64,
+            busy_wait: Duration::from_secs(5),
+            receive_idle_timeout: Duration::from_secs(30),
             // As long as a whole body may take to arrive.
             drain_timeout: Duration::from_secs(120),
         }
     }
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct HighlightShared {
+    pub(crate) limits: HighlightLimits,
+    pub(crate) budget: Arc<Semaphore>,
+    pub(crate) requests: Arc<Semaphore>,
+}
+
+impl HighlightShared {
+    pub(crate) fn new(limits: HighlightLimits) -> Self {
+        Self {
+            limits,
+            budget: Arc::new(Semaphore::new(limits.memory_budget_bytes)),
+            requests: Arc::new(Semaphore::new(limits.max_requests)),
+        }
+    }
+}
+
+/// Text read from the body, with its share of the memory budget.
+#[derive(Debug)]
+pub(crate) struct Text {
+    text: String,
+    _memory: Option<OwnedSemaphorePermit>,
+}
+
+impl AsRef<str> for Text {
+    fn as_ref(&self) -> &str {
+        &self.text
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct BodyParts {
-    pub(crate) query: oneshot::Sender<String>,
+    pub(crate) query: oneshot::Sender<Text>,
     pub(crate) documents: mpsc::Sender<HighlightDocument>,
 }
 
@@ -83,8 +129,12 @@ pub(crate) enum BodyError {
     NameTooLong { max: usize },
     #[error("the highlight request body is too large")]
     BodyTooLarge,
+    #[error("the memory for highlight documents is used up")]
+    Busy,
     #[error("failed to receive the request body")]
     Receive,
+    #[error("the highlight request body did not arrive in time")]
+    Timeout,
     #[error("the request was answered before its body was read")]
     Cancelled,
 }
@@ -92,6 +142,7 @@ pub(crate) enum BodyError {
 #[derive(Clone, Copy, Debug)]
 enum ReceiveFailure {
     TooLarge,
+    TimedOut,
     Failed,
 }
 
@@ -99,6 +150,7 @@ impl From<ReceiveFailure> for BodyError {
     fn from(failure: ReceiveFailure) -> Self {
         match failure {
             ReceiveFailure::TooLarge => BodyError::BodyTooLarge,
+            ReceiveFailure::TimedOut => BodyError::Timeout,
             ReceiveFailure::Failed => BodyError::Receive,
         }
     }
@@ -106,7 +158,11 @@ impl From<ReceiveFailure> for BodyError {
 
 impl From<ReceiveFailure> for io::Error {
     fn from(failure: ReceiveFailure) -> Self {
-        io::Error::other(BodyError::from(failure))
+        let kind = match failure {
+            ReceiveFailure::TimedOut => io::ErrorKind::TimedOut,
+            ReceiveFailure::TooLarge | ReceiveFailure::Failed => io::ErrorKind::Other,
+        };
+        io::Error::new(kind, BodyError::from(failure))
     }
 }
 
@@ -135,6 +191,9 @@ pub(crate) struct LimitedBody<S> {
     received: u64,
     limit: u64,
     state: Arc<ReceiveState>,
+    idle_timeout: Duration,
+    idle: Pin<Box<tokio::time::Sleep>>,
+    waiting: bool,
 }
 
 impl<S> LimitedBody<S> {
@@ -144,6 +203,9 @@ impl<S> LimitedBody<S> {
             received: 0,
             limit: limits.max_body_bytes,
             state: Arc::default(),
+            idle_timeout: limits.receive_idle_timeout,
+            idle: Box::pin(tokio::time::sleep(limits.receive_idle_timeout)),
+            waiting: false,
         }
     }
 
@@ -154,6 +216,11 @@ impl<S> LimitedBody<S> {
     /// The body without its limits, for discarding the rest of it.
     pub(crate) fn into_inner(self) -> S {
         self.inner
+    }
+
+    fn time_out(&self) -> io::Error {
+        self.state.record(ReceiveFailure::TimedOut);
+        ReceiveFailure::TimedOut.into()
     }
 }
 
@@ -168,7 +235,14 @@ where
         if let Some(failure) = self.state.failure() {
             return Poll::Ready(Some(Err(failure.into())));
         }
-        match self.inner.poll_next_unpin(cx) {
+        // Only time waiting for the client counts, not pauses of the server.
+        if !self.waiting {
+            let idle_end = tokio::time::Instant::now() + self.idle_timeout;
+            self.idle.as_mut().reset(idle_end);
+        }
+        let chunk = self.inner.poll_next_unpin(cx);
+        self.waiting = chunk.is_pending();
+        match chunk {
             Poll::Ready(Some(Ok(chunk))) => {
                 self.received += chunk.len() as u64;
                 if self.received > self.limit {
@@ -182,7 +256,10 @@ where
                 Poll::Ready(Some(Err(io::Error::other(err))))
             }
             Poll::Ready(None) => Poll::Ready(None),
-            Poll::Pending => Poll::Pending,
+            Poll::Pending => match self.idle.as_mut().poll(cx) {
+                Poll::Ready(()) => Poll::Ready(Some(Err(self.time_out()))),
+                Poll::Pending => Poll::Pending,
+            },
         }
     }
 }
@@ -190,20 +267,20 @@ where
 /// Discards the rest of a body after an early answer, so that a client sending the whole
 /// body before reading the answer gets it instead of a reset (RFC 9112 section 9.6).
 /// Whatever limit stopped the read, the client may still be sending, and discarding holds no
-/// memory, so only time end it.
+/// memory, so only time, and a pause as long as the idle timeout end it.
 pub(crate) async fn drain<S, E>(mut body: S, limits: HighlightLimits)
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
 {
     let mut discarded: u64 = 0;
     let drained = tokio::time::timeout(limits.drain_timeout, async {
-        while let Some(chunk) = body.next().await {
-            let Ok(chunk) = chunk else {
-                return false;
-            };
-            discarded += chunk.len() as u64;
+        loop {
+            match tokio::time::timeout(limits.receive_idle_timeout, body.next()).await {
+                Ok(Some(Ok(chunk))) => discarded += chunk.len() as u64,
+                Ok(None) => return true,
+                Ok(Some(Err(_))) | Err(_) => return false,
+            }
         }
-        true
     })
     .await;
     if drained != Ok(true) {
@@ -216,6 +293,7 @@ pub(crate) fn read_body(
     body: impl Read,
     limits: &HighlightLimits,
     received: &ReceiveState,
+    budget: &Arc<Semaphore>,
     parts: BodyParts,
 ) -> Result<usize, BodyError> {
     let guard = Rc::new(ReadGuard::default());
@@ -237,6 +315,7 @@ pub(crate) fn read_body(
         guard,
         limits,
         received,
+        budget,
         query: Some(parts.query),
         documents: parts.documents,
         chunk: vec![0; 64 * 1024],
@@ -296,7 +375,8 @@ struct BodyReader<'a, R: Read> {
     guard: Rc<ReadGuard>,
     limits: &'a HighlightLimits,
     received: &'a ReceiveState,
-    query: Option<oneshot::Sender<String>>,
+    budget: &'a Arc<Semaphore>,
+    query: Option<oneshot::Sender<Text>>,
     documents: mpsc::Sender<HighlightDocument>,
     chunk: Vec<u8>,
 }
@@ -366,7 +446,7 @@ impl<R: Read> BodyReader<'_, R> {
         Ok(count)
     }
 
-    fn read_text(&mut self, max_text_bytes: usize) -> Result<String, BodyError> {
+    fn read_text(&mut self, max_text_bytes: usize) -> Result<Text, BodyError> {
         let value_type = self.json.peek().map_err(|err| self.error(err))?;
         if value_type != ValueType::String {
             return Err(BodyError::Data(format!(
@@ -375,11 +455,14 @@ impl<R: Read> BodyReader<'_, R> {
             )));
         }
 
+        let budget_wait = self.limits.busy_wait;
         let received = self.received;
+        let budget = self.budget;
         let limits = self.limits;
         let guard = &self.guard;
         let chunk = &mut self.chunk;
         let mut text = Vec::new();
+        let mut memory: Option<OwnedSemaphorePermit> = None;
         let mut string = self.json.next_string_reader().map_err(|err| {
             guard
                 .error(limits)
@@ -399,13 +482,28 @@ impl<R: Read> BodyReader<'_, R> {
                     max: max_text_bytes,
                 });
             }
+            let needed = text.len() + len;
+            if needed > text.capacity() {
+                // Grown here rather than by `Vec`, so that the budget covers the capacity,
+                // and the old buffer too while the text is copied to the new one.
+                let capacity = needed.max(2 * text.capacity()).min(max_text_bytes);
+                reserve(&mut memory, text.capacity() + capacity, budget, budget_wait)?;
+                text.reserve_exact(capacity - text.len());
+                if let Some(memory) = memory.as_mut() {
+                    drop(memory.split(memory.num_permits() - capacity));
+                }
+            }
             text.extend_from_slice(&chunk[..len]);
         }
         drop(string);
 
         // The string reader returns whole UTF-8 characters only, so this never fails.
-        String::from_utf8(text)
-            .map_err(|err| BodyError::Syntax(format!("invalid UTF-8 in a string: {err}")))
+        let text = String::from_utf8(text)
+            .map_err(|err| BodyError::Syntax(format!("invalid UTF-8 in a string: {err}")))?;
+        Ok(Text {
+            text,
+            _memory: memory,
+        })
     }
 
     fn next_name(&mut self) -> Result<String, BodyError> {
@@ -423,6 +521,37 @@ impl<R: Read> BodyReader<'_, R> {
             .error(self.limits)
             .unwrap_or_else(|| reader_error(err, self.received))
     }
+}
+
+/// The wait ends a deadlock of requests each holding part of the budget and waiting for more.
+/// Runs on a blocking thread of the runtime, so it may block on it.
+fn reserve(
+    memory: &mut Option<OwnedSemaphorePermit>,
+    bytes: usize,
+    budget: &Arc<Semaphore>,
+    wait: Duration,
+) -> Result<(), BodyError> {
+    let held = memory.as_ref().map_or(0, OwnedSemaphorePermit::num_permits);
+    if bytes <= held {
+        return Ok(());
+    }
+    let more = u32::try_from(bytes - held).map_err(|_| BodyError::Busy)?;
+    let more = match Arc::clone(budget).try_acquire_many_owned(more) {
+        Ok(more) => more,
+        Err(_) => tokio::runtime::Handle::current()
+            .block_on(tokio::time::timeout(
+                wait,
+                Arc::clone(budget).acquire_many_owned(more),
+            ))
+            .ok()
+            .and_then(Result::ok)
+            .ok_or(BodyError::Busy)?,
+    };
+    match memory {
+        Some(memory) => memory.merge(more),
+        None => *memory = Some(more),
+    }
+    Ok(())
 }
 
 fn reader_error(err: ReaderError, received: &ReceiveState) -> BodyError {
@@ -466,16 +595,29 @@ mod tests {
             max_text_bytes: 1000,
             max_query_bytes: 1000,
             max_documents: 3,
+            memory_budget_bytes: 4096,
             ..HighlightLimits::default()
         }
     }
 
     fn read(body: &[u8], limits: &HighlightLimits) -> (Vec<String>, Result<usize, BodyError>) {
+        read_with_budget(
+            body,
+            limits,
+            &Arc::new(Semaphore::new(limits.memory_budget_bytes)),
+        )
+    }
+
+    fn read_with_budget(
+        body: &[u8],
+        limits: &HighlightLimits,
+        budget: &Arc<Semaphore>,
+    ) -> (Vec<String>, Result<usize, BodyError>) {
         let (parts, mut query, mut documents) = body_parts(100);
-        let result = read_body(body, limits, &ReceiveState::default(), parts);
+        let result = read_body(body, limits, &ReceiveState::default(), budget, parts);
         let mut items = Vec::new();
         if let Ok(query) = query.try_recv() {
-            items.push(format!("query: {query}"));
+            items.push(format!("query: {}", query.as_ref()));
         }
         while let Ok(document) = documents.try_recv() {
             items.push(format!("document: {}", (*document).as_ref()));
@@ -487,7 +629,7 @@ mod tests {
         documents: usize,
     ) -> (
         BodyParts,
-        oneshot::Receiver<String>,
+        oneshot::Receiver<Text>,
         mpsc::Receiver<HighlightDocument>,
     ) {
         let (query_tx, query_rx) = oneshot::channel();
@@ -599,6 +741,160 @@ mod tests {
     }
 
     #[test]
+    fn a_growing_text_takes_its_capacity_from_the_budget() {
+        let limits = HighlightLimits {
+            max_text_bytes: 200_000,
+            ..limits()
+        };
+        let budget = Arc::new(Semaphore::new(1_000_000));
+        let (parts, _query, mut documents) = body_parts(100);
+        // Read in pieces of 64 KiB: the buffer grows to 64 KiB, then doubles.
+        let body = format!(r#"{{"query":"q","documents":["{}"]}}"#, "x".repeat(100_000));
+
+        read_body(
+            body.as_bytes(),
+            &limits,
+            &ReceiveState::default(),
+            &budget,
+            parts,
+        )
+        .unwrap();
+
+        let _document = documents.try_recv().unwrap();
+        assert_eq!(budget.available_permits(), 1_000_000 - 1 - 2 * 64 * 1024);
+    }
+
+    #[tokio::test]
+    async fn a_growing_text_counts_its_old_buffer_while_it_is_copied() {
+        // Growing from 64 KiB to 128 KiB holds both buffers for a moment.
+        let budget = Arc::new(Semaphore::new(1 + 3 * 64 * 1024 - 1));
+        let limits = HighlightLimits {
+            max_text_bytes: 200_000,
+            busy_wait: Duration::from_millis(50),
+            ..limits()
+        };
+        let body = format!(r#"{{"query":"q","documents":["{}"]}}"#, "x".repeat(100_000));
+
+        let result = {
+            let budget = Arc::clone(&budget);
+            tokio::task::spawn_blocking(move || {
+                read_with_budget(body.as_bytes(), &limits, &budget).1
+            })
+            .await
+            .unwrap()
+        };
+
+        assert!(matches!(result, Err(BodyError::Busy)), "{result:?}");
+    }
+
+    #[test]
+    fn documents_in_memory_take_from_the_budget_until_dropped() {
+        let budget = Arc::new(Semaphore::new(100));
+        let (parts, mut query, mut documents) = body_parts(100);
+        let body = format!(r#"{{"query":"q","documents":["{}"]}}"#, "x".repeat(60));
+
+        read_body(
+            body.as_bytes(),
+            &limits(),
+            &ReceiveState::default(),
+            &budget,
+            parts,
+        )
+        .unwrap();
+
+        let query = query.try_recv().unwrap();
+        let document = documents.try_recv().unwrap();
+        assert_eq!(
+            budget.available_permits(),
+            100 - 1 - 60,
+            "counted by text length"
+        );
+        drop((query, document));
+        assert_eq!(budget.available_permits(), 100);
+    }
+
+    #[tokio::test]
+    async fn a_text_over_the_whole_budget_makes_the_request_busy() {
+        let budget = Arc::new(Semaphore::new(100));
+        let body = format!(r#"{{"query":"q","documents":["{}"]}}"#, "x".repeat(200));
+        let limits = HighlightLimits {
+            busy_wait: Duration::from_millis(50),
+            ..limits()
+        };
+
+        let result = {
+            let budget = Arc::clone(&budget);
+            tokio::task::spawn_blocking(move || {
+                read_with_budget(body.as_bytes(), &limits, &budget).1
+            })
+            .await
+            .unwrap()
+        };
+
+        assert!(matches!(result, Err(BodyError::Busy)), "{result:?}");
+        assert_eq!(
+            budget.available_permits(),
+            100,
+            "the memory went back to the budget"
+        );
+    }
+
+    #[test]
+    fn the_default_budget_fits_one_request_alone() {
+        let limits = HighlightLimits::default();
+        assert!(
+            5 * limits.max_text_bytes <= limits.memory_budget_bytes,
+            "the query, one document highlighted, one waiting and one being read, \
+             and the old buffer of the one being read while it grows"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_used_up_budget_is_waited_for_a_while() {
+        let budget = Arc::new(Semaphore::new(100));
+        let held = Arc::clone(&budget).try_acquire_many_owned(100).unwrap();
+        let reading = {
+            let budget = Arc::clone(&budget);
+            tokio::task::spawn_blocking(move || {
+                let (parts, _query, _documents) = body_parts(100);
+                let body = br#"{"query":"q","documents":["a"]}"#;
+                read_body(
+                    &body[..],
+                    &limits(),
+                    &ReceiveState::default(),
+                    &budget,
+                    parts,
+                )
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        drop(held);
+
+        assert_eq!(reading.await.unwrap().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_budget_used_up_for_too_long_makes_the_request_busy() {
+        let budget = Arc::new(Semaphore::new(100));
+        let _held = Arc::clone(&budget).try_acquire_many_owned(100).unwrap();
+        let limits = HighlightLimits {
+            busy_wait: Duration::from_millis(50),
+            ..limits()
+        };
+
+        let result = tokio::task::spawn_blocking(move || {
+            let (parts, _query, _documents) = body_parts(100);
+            let body = br#"{"query":"q","documents":["a"]}"#;
+            read_body(&body[..], &limits, &ReceiveState::default(), &budget, parts)
+        })
+        .await
+        .unwrap();
+
+        assert!(matches!(result, Err(BodyError::Busy)), "{result:?}");
+    }
+
+    #[test]
     fn a_field_name_over_the_limit_is_too_large() {
         let limits = HighlightLimits {
             max_name_bytes: 100,
@@ -670,7 +966,13 @@ mod tests {
         );
         let mut counted = Counted(body.as_bytes(), 0);
 
-        let result = read_body(&mut counted, &limits(), &ReceiveState::default(), parts);
+        let result = read_body(
+            &mut counted,
+            &limits(),
+            &ReceiveState::default(),
+            &Arc::new(Semaphore::new(4096)),
+            parts,
+        );
 
         assert!(matches!(result, Err(BodyError::Cancelled)), "{result:?}");
         assert!(counted.1 < 10_000, "read {} bytes", counted.1);
@@ -701,7 +1003,13 @@ mod tests {
             documents: Some(documents),
         };
 
-        let result = read_body(body, &limits(), &ReceiveState::default(), parts);
+        let result = read_body(
+            body,
+            &limits(),
+            &ReceiveState::default(),
+            &Arc::new(Semaphore::new(4096)),
+            parts,
+        );
 
         assert!(matches!(result, Err(BodyError::Cancelled)), "{result:?}");
     }
@@ -712,7 +1020,13 @@ mod tests {
         drop(documents);
         let body = br#"{"query":"q","documents":["a"]}"#;
 
-        let result = read_body(&body[..], &limits(), &ReceiveState::default(), parts);
+        let result = read_body(
+            &body[..],
+            &limits(),
+            &ReceiveState::default(),
+            &Arc::new(Semaphore::new(4096)),
+            parts,
+        );
 
         assert!(matches!(result, Err(BodyError::Cancelled)), "{result:?}");
     }
@@ -845,6 +1159,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn discarding_stops_once_the_body_pauses_too_long() {
+        let body = futures::stream::iter([Ok::<_, io::Error>(Bytes::from_static(b" "))])
+            .chain(futures::stream::pending());
+        let limits = HighlightLimits {
+            receive_idle_timeout: Duration::from_millis(50),
+            ..limits()
+        };
+
+        let discarding = tokio::time::timeout(Duration::from_secs(5), drain(body, limits)).await;
+
+        assert!(discarding.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_body_that_stops_arriving_fails_the_read() {
+        let chunks = futures::stream::iter([Ok::<_, io::Error>(Bytes::from_static(b"{"))])
+            .chain(futures::stream::pending());
+        let body = LimitedBody::new(
+            chunks,
+            &HighlightLimits {
+                receive_idle_timeout: Duration::from_millis(100),
+                ..limits()
+            },
+        );
+        let received = body.state();
+        let reader = tokio_util::io::SyncIoBridge::new(tokio_util::io::StreamReader::new(body));
+        let (parts, _query, _documents) = body_parts(100);
+
+        let result = tokio::task::spawn_blocking(move || {
+            read_body(
+                reader,
+                &limits(),
+                &received,
+                &Arc::new(Semaphore::new(4096)),
+                parts,
+            )
+        })
+        .await
+        .unwrap();
+
+        assert!(matches!(result, Err(BodyError::Timeout)), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn pauses_of_the_server_do_not_count_as_idle() {
+        let (chunks_tx, chunks_rx) = mpsc::channel::<io::Result<Bytes>>(2);
+        let chunks = tokio_stream_from(chunks_rx);
+        let mut body = LimitedBody::new(
+            chunks,
+            &HighlightLimits {
+                receive_idle_timeout: Duration::from_millis(100),
+                ..limits()
+            },
+        );
+        chunks_tx.send(Ok(Bytes::from_static(b"a"))).await.unwrap();
+        assert!(body.next().await.unwrap().is_ok());
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            chunks_tx.send(Ok(Bytes::from_static(b"b"))).await.unwrap();
+        });
+
+        assert!(body.next().await.unwrap().is_ok());
+    }
+
+    fn tokio_stream_from(
+        mut rx: mpsc::Receiver<io::Result<Bytes>>,
+    ) -> impl Stream<Item = io::Result<Bytes>> + Unpin {
+        Box::pin(futures::stream::poll_fn(move |cx| rx.poll_recv(cx)))
+    }
+
+    #[tokio::test]
     async fn the_body_limit_fails_the_read() {
         let chunks = futures::stream::iter(
             [
@@ -864,10 +1251,17 @@ mod tests {
         let reader = tokio_util::io::SyncIoBridge::new(tokio_util::io::StreamReader::new(body));
         let (parts, _query, _documents) = body_parts(100);
 
-        let result =
-            tokio::task::spawn_blocking(move || read_body(reader, &limits(), &received, parts))
-                .await
-                .unwrap();
+        let result = tokio::task::spawn_blocking(move || {
+            read_body(
+                reader,
+                &limits(),
+                &received,
+                &Arc::new(Semaphore::new(4096)),
+                parts,
+            )
+        })
+        .await
+        .unwrap();
 
         assert!(matches!(result, Err(BodyError::BodyTooLarge)), "{result:?}");
     }

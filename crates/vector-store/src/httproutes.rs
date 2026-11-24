@@ -24,6 +24,7 @@ use crate::highlight_body;
 use crate::highlight_body::BodyError;
 use crate::highlight_body::BodyParts;
 use crate::highlight_body::HighlightLimits;
+use crate::highlight_body::HighlightShared;
 use crate::highlight_body::LimitedBody;
 use crate::indexes;
 use crate::indexes::Indexes;
@@ -82,6 +83,7 @@ use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::RwLock;
+use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
@@ -142,6 +144,7 @@ struct RoutesInnerState {
     internals: Sender<Internals>,
     index_engine_version: String,
     use_tls: bool,
+    highlight: HighlightShared,
 }
 
 pub(crate) async fn new(
@@ -161,6 +164,7 @@ pub(crate) async fn new(
         internals,
         index_engine_version,
         use_tls,
+        highlight: HighlightShared::new(HighlightLimits::default()),
     };
     let (router, api) = new_open_api_router();
     let router = router
@@ -1223,6 +1227,8 @@ A document that matches no query term yields `null`. \
 The body is read as a stream, one document at a time, so it has no overall size limit beyond 640 MiB; \
 the query may be at most 2 MiB and each document 100 MiB, and a request may carry at most 1000 documents. \
 `query` has to come before `documents`, so that highlighting can start at the first document. \
+When too many highlight requests are in progress, or the memory for their documents is used up, \
+for over 5 s, the request fails with 503 and a plain-text message. \
 If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
     params(
         ("keyspace" = httpapi::KeyspaceName, Path, description = "The name of the ScyllaDB keyspace containing the index."),
@@ -1244,6 +1250,12 @@ If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
         (
             status = 403,
             description = "Forbidden. TLS is enabled in the configuration, but the client connected over plain HTTP.",
+            content_type = "application/json",
+            body = ErrorMessage
+        ),
+        (
+            status = 408,
+            description = "Request timeout. No part of the body arrived for 30 s.",
             content_type = "application/json",
             body = ErrorMessage
         ),
@@ -1292,7 +1304,7 @@ async fn post_index_highlight(
 ) -> Response {
     let keyspace: crate::KeyspaceName = keyspace.into();
     let index_name: crate::IndexName = index_name.into();
-    let limits = HighlightLimits::default();
+    let limits = state.highlight.limits;
 
     let answer_early = |response: Response, body: Body| {
         tokio::spawn(highlight_body::drain(body.into_data_stream(), limits));
@@ -1347,7 +1359,24 @@ async fn post_index_highlight(
         Err(resp) => return answer_early(resp, body),
     };
 
-    highlight_streamed(&fts_sender, index_key, body, limits).await
+    let reading = tokio::time::timeout(
+        limits.busy_wait,
+        Arc::clone(&state.highlight.requests).acquire_owned(),
+    )
+    .await;
+    let Ok(Ok(reading)) = reading else {
+        let msg = "too many highlight requests in progress";
+        debug!("post_index_highlight: {msg}");
+        return answer_early((StatusCode::SERVICE_UNAVAILABLE, msg).into_response(), body);
+    };
+    highlight_streamed(
+        &fts_sender,
+        index_key,
+        body,
+        state.highlight.clone(),
+        reading,
+    )
+    .await
 }
 
 type HighlightBodyReader = SyncIoBridge<StreamReader<LimitedBody<BodyDataStream>, Bytes>>;
@@ -1357,8 +1386,11 @@ async fn highlight_streamed(
     fts_sender: &Sender<FtsIndex>,
     index_key: IndexKey,
     body: Body,
-    limits: HighlightLimits,
+    highlight: HighlightShared,
+    reading_permit: OwnedSemaphorePermit,
 ) -> Response {
+    let limits = highlight.limits;
+    let budget = Arc::clone(&highlight.budget);
     let body = LimitedBody::new(body.into_data_stream(), &limits);
     let received = body.state();
     let mut reader = SyncIoBridge::new(StreamReader::new(body));
@@ -1366,17 +1398,18 @@ async fn highlight_streamed(
     // One document waits while another is highlighted.
     let (documents_tx, documents) = mpsc::channel(1);
     let reading: HighlightBodyReading = tokio::task::spawn_blocking(move || {
+        let _reading_permit = reading_permit;
         let parts = BodyParts {
             query: query_tx,
             documents: documents_tx,
         };
-        let result = highlight_body::read_body(&mut reader, &limits, &received, parts);
+        let result = highlight_body::read_body(&mut reader, &limits, &received, &budget, parts);
         (result, reader)
     });
 
     let Ok(query) = query.await else {
         drop(documents);
-        return finish_reading(reading, Vec::new(), limits).await;
+        return finish_reading(reading, Vec::new(), highlight).await;
     };
     let mut excerpts = match fts_sender
         .highlight(index_key, Box::new(query), documents)
@@ -1391,7 +1424,7 @@ async fn highlight_streamed(
             } else {
                 StatusCode::INTERNAL_SERVER_ERROR
             };
-            return abandon_reading(reading, limits, (status, msg).into_response());
+            return abandon_reading(reading, highlight, (status, msg).into_response());
         }
     };
 
@@ -1399,13 +1432,13 @@ async fn highlight_streamed(
     while let Some(excerpt) = excerpts.recv().await {
         highlights.push(excerpt);
     }
-    finish_reading(reading, highlights, limits).await
+    finish_reading(reading, highlights, highlight).await
 }
 
 async fn finish_reading(
     reading: HighlightBodyReading,
     highlights: Vec<Option<String>>,
-    limits: HighlightLimits,
+    highlight: HighlightShared,
 ) -> Response {
     let (result, reader) = match reading.await {
         Ok(stopped) => stopped,
@@ -1433,7 +1466,7 @@ async fn finish_reading(
         }
         Err(err) => err,
     };
-    tokio::spawn(highlight_body::drain(into_body(reader), limits));
+    tokio::spawn(highlight_body::drain(into_body(reader), highlight.limits));
     if let BodyError::Cancelled = err {
         let msg = format!(
             "index.highlight request error: the index stopped after {} documents",
@@ -1445,11 +1478,13 @@ async fn finish_reading(
     debug!("post_index_highlight: {err}");
     let status = match err {
         BodyError::Syntax(_) | BodyError::Receive => StatusCode::BAD_REQUEST,
+        BodyError::Timeout => StatusCode::REQUEST_TIMEOUT,
         BodyError::Data(_) => StatusCode::UNPROCESSABLE_ENTITY,
         BodyError::TextTooLong { .. }
         | BodyError::TooManyDocuments { .. }
         | BodyError::NameTooLong { .. }
         | BodyError::BodyTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+        BodyError::Busy => StatusCode::SERVICE_UNAVAILABLE,
         BodyError::Cancelled => StatusCode::INTERNAL_SERVER_ERROR,
     };
     (status, err.to_string()).into_response()
@@ -1458,12 +1493,12 @@ async fn finish_reading(
 /// The FTS index has dropped the documents channel, which stops the reader.
 fn abandon_reading(
     reading: HighlightBodyReading,
-    limits: HighlightLimits,
+    highlight: HighlightShared,
     response: Response,
 ) -> Response {
     tokio::spawn(async move {
         if let Ok((_, reader)) = reading.await {
-            highlight_body::drain(into_body(reader), limits).await;
+            highlight_body::drain(into_body(reader), highlight.limits).await;
         }
     });
     response
