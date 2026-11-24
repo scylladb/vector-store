@@ -56,6 +56,8 @@ pub use crate::db_driver::DbIndexInfo;
 pub use crate::db_value::DbRow;
 pub use crate::db_value::DbValue;
 pub use crate::distance::Distance;
+use crate::highlight_body::HighlightLimits;
+use crate::highlight_body::HighlightShared;
 pub use crate::httpserver::HttpServer;
 pub use crate::httpserver::HttpServerExt;
 pub use crate::index_key::IndexKey;
@@ -246,6 +248,10 @@ pub struct Config {
     pub tls_key_path: Option<std::path::PathBuf>,
     pub mtls_addr: SocketAddr,
     pub mtls_ca_cert_path: Option<std::path::PathBuf>,
+    pub highlight_memory_budget: Option<NonZeroUsize>,
+    pub highlight_max_requests: Option<NonZeroUsize>,
+    pub highlight_busy_wait: Option<Duration>,
+    pub highlight_receive_idle_timeout: Option<Duration>,
 }
 
 impl Default for Config {
@@ -281,6 +287,10 @@ impl Default for Config {
             cdc_fine_sleep_interval: None,
             monitor_indexes_interval: None,
             engine_status_update_interval: None,
+            highlight_memory_budget: None,
+            highlight_max_requests: None,
+            highlight_busy_wait: None,
+            highlight_receive_idle_timeout: None,
         }
     }
 }
@@ -1017,6 +1027,8 @@ pub async fn run(
     let config_rx = config_receivers.config.clone();
     let opensearch_addr = config_rx.borrow().opensearch_addr.clone();
     let diskann_backend = config_rx.borrow().diskann_backend;
+    // Shared by both listeners.
+    let highlight = HighlightShared::new(HighlightLimits::from_config(&config_rx.borrow()));
 
     let internals = internals::new(db_driver.clone());
     let memory = memory::new(internals.clone(), config_rx.clone());
@@ -1070,6 +1082,7 @@ pub async fn run(
         metrics.clone(),
         internals.clone(),
         index_engine_version.clone(),
+        highlight.clone(),
         config_receivers.http,
     )
     .await?;
@@ -1081,6 +1094,7 @@ pub async fn run(
         metrics,
         internals,
         index_engine_version,
+        highlight,
         config_receivers.mtls_http,
     )
     .await?;

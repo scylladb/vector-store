@@ -6,6 +6,7 @@
 //! Reads `/highlight` request bodies as a stream, one document at a time, so that the
 //! FTS index highlights a document while the next one arrives.
 
+use crate::Config;
 use crate::fts_index::HighlightDocument;
 use bytes::Bytes;
 use futures::Stream;
@@ -14,6 +15,7 @@ use std::cell::Cell;
 use std::future::Future;
 use std::io;
 use std::io::Read;
+use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -33,6 +35,9 @@ use tokio::sync::oneshot;
 use tracing::debug;
 
 const MIB: usize = 1024 * 1024;
+/// The query, one document highlighted, one waiting and one being read, and the old buffer
+/// of the one being read while it grows.
+const TEXTS_HELD_AT_ONCE: usize = 5;
 
 /// Limits of a `/highlight` request.
 #[derive(Clone, Copy, Debug)]
@@ -75,6 +80,32 @@ impl Default for HighlightLimits {
             receive_idle_timeout: Duration::from_secs(30),
             // As long as a whole body may take to arrive.
             drain_timeout: Duration::from_secs(120),
+        }
+    }
+}
+
+impl HighlightLimits {
+    pub(crate) fn from_config(config: &Config) -> Self {
+        let default = Self::default();
+        let memory_budget_bytes = config
+            .highlight_memory_budget
+            .map_or(default.memory_budget_bytes, NonZeroUsize::get);
+        // A text that could never fit in the budget gets 413, not 503.
+        let max_text_bytes = default
+            .max_text_bytes
+            .min(memory_budget_bytes / TEXTS_HELD_AT_ONCE);
+        Self {
+            max_text_bytes,
+            max_query_bytes: default.max_query_bytes.min(max_text_bytes),
+            memory_budget_bytes,
+            max_requests: config
+                .highlight_max_requests
+                .map_or(default.max_requests, NonZeroUsize::get),
+            busy_wait: config.highlight_busy_wait.unwrap_or(default.busy_wait),
+            receive_idle_timeout: config
+                .highlight_receive_idle_timeout
+                .unwrap_or(default.receive_idle_timeout),
+            ..default
         }
     }
 }
@@ -842,11 +873,7 @@ mod tests {
     #[test]
     fn the_default_budget_fits_one_request_alone() {
         let limits = HighlightLimits::default();
-        assert!(
-            5 * limits.max_text_bytes <= limits.memory_budget_bytes,
-            "the query, one document highlighted, one waiting and one being read, \
-             and the old buffer of the one being read while it grows"
-        );
+        assert!(TEXTS_HELD_AT_ONCE * limits.max_text_bytes <= limits.memory_budget_bytes);
     }
 
     #[tokio::test]
@@ -1223,6 +1250,35 @@ mod tests {
         });
 
         assert!(body.next().await.unwrap().is_ok());
+    }
+
+    #[test]
+    fn limits_from_config_replace_only_what_is_set() {
+        let default = HighlightLimits::default();
+        let unset = HighlightLimits::from_config(&Config::default());
+        assert_eq!(unset.memory_budget_bytes, default.memory_budget_bytes);
+        assert_eq!(unset.max_requests, default.max_requests);
+        assert_eq!(unset.busy_wait, default.busy_wait);
+
+        let set = HighlightLimits::from_config(&Config {
+            highlight_memory_budget: NonZeroUsize::new(1000),
+            highlight_max_requests: NonZeroUsize::new(2),
+            highlight_busy_wait: Some(Duration::from_secs(1)),
+            highlight_receive_idle_timeout: Some(Duration::from_secs(2)),
+            ..Config::default()
+        });
+        assert_eq!(set.memory_budget_bytes, 1000);
+        assert_eq!(set.max_requests, 2);
+        assert_eq!(set.busy_wait, Duration::from_secs(1));
+        assert_eq!(set.receive_idle_timeout, Duration::from_secs(2));
+        assert_eq!(set.max_text_bytes, 1000 / TEXTS_HELD_AT_ONCE);
+        assert_eq!(set.max_query_bytes, 1000 / TEXTS_HELD_AT_ONCE);
+
+        let large = HighlightLimits::from_config(&Config {
+            highlight_memory_budget: NonZeroUsize::new(4096 * MIB),
+            ..Config::default()
+        });
+        assert_eq!(large.max_text_bytes, default.max_text_bytes);
     }
 
     fn tokio_stream_from(

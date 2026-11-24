@@ -23,7 +23,6 @@ use crate::fts_index::FtsIndexExt;
 use crate::highlight_body;
 use crate::highlight_body::BodyError;
 use crate::highlight_body::BodyParts;
-use crate::highlight_body::HighlightLimits;
 use crate::highlight_body::HighlightShared;
 use crate::highlight_body::LimitedBody;
 use crate::indexes;
@@ -147,6 +146,7 @@ struct RoutesInnerState {
     highlight: HighlightShared,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn new(
     indexes: Arc<RwLock<Indexes>>,
     engine: Sender<Engine>,
@@ -155,6 +155,7 @@ pub(crate) async fn new(
     internals: Sender<Internals>,
     index_engine_version: String,
     use_tls: bool,
+    highlight: HighlightShared,
 ) -> Router {
     let state = RoutesInnerState {
         _engine: engine,
@@ -164,7 +165,7 @@ pub(crate) async fn new(
         internals,
         index_engine_version,
         use_tls,
-        highlight: HighlightShared::new(HighlightLimits::default()),
+        highlight,
     };
     let (router, api) = new_open_api_router();
     let router = router
@@ -1225,10 +1226,11 @@ rarer terms when picking which fragment of a long text to show. \
 Highlights are returned in the same order as the requested documents. \
 A document that matches no query term yields `null`. \
 The body is read as a stream, one document at a time, so it has no overall size limit beyond 640 MiB; \
-the query may be at most 2 MiB and each document 100 MiB, and a request may carry at most 1000 documents. \
+the query may be at most 2 MiB and each document 100 MiB (less when the memory budget is set below 500 MiB, the query below 10 MiB), \
+and a request may carry at most 1000 documents. \
 `query` has to come before `documents`, so that highlighting can start at the first document. \
 When too many highlight requests are in progress, or the memory for their documents is used up, \
-for over 5 s, the request fails with 503 and a plain-text message. \
+for longer than `VECTOR_STORE_HIGHLIGHT_BUSY_WAIT` (5 s by default), the request fails with 503 and a plain-text message. \
 If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
     params(
         ("keyspace" = httpapi::KeyspaceName, Path, description = "The name of the ScyllaDB keyspace containing the index."),
@@ -1255,13 +1257,13 @@ If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
         ),
         (
             status = 408,
-            description = "Request timeout. No part of the body arrived for 30 s.",
+            description = "Request timeout. No part of the body arrived for `VECTOR_STORE_HIGHLIGHT_RECEIVE_IDLE_TIMEOUT` (30 s by default).",
             content_type = "application/json",
             body = ErrorMessage
         ),
         (
             status = 413,
-            description = "Payload too large. The query is over 2 MiB or a document is over 100 MiB, the request carries more than 1000 documents, a field name is over 4 KiB, or the body is over 640 MiB.",
+            description = "Payload too large. The query is over 2 MiB or a document is over 100 MiB (less when the memory budget is set below 500 MiB, the query below 10 MiB), the request carries more than 1000 documents, a field name is over 4 KiB, or the body is over 640 MiB.",
             content_type = "application/json",
             body = ErrorMessage
         ),
