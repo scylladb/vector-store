@@ -35,6 +35,8 @@ use tokio::sync::oneshot;
 use tracing::debug;
 
 const MIB: usize = 1024 * 1024;
+/// Discarding a body holds no memory, only a task.
+const DRAINS_PER_REQUEST: usize = 16;
 /// The query, one document highlighted, one waiting and one being read, and the old buffer
 /// of the one being read while it grows.
 const TEXTS_HELD_AT_ONCE: usize = 5;
@@ -123,6 +125,7 @@ pub(crate) struct HighlightShared {
     pub(crate) limits: HighlightLimits,
     pub(crate) budget: Arc<Semaphore>,
     pub(crate) requests: Arc<Semaphore>,
+    drains: Arc<Semaphore>,
 }
 
 impl HighlightShared {
@@ -131,7 +134,25 @@ impl HighlightShared {
             limits,
             budget: Arc::new(Semaphore::new(limits.memory_budget_bytes)),
             requests: Arc::new(Semaphore::new(limits.max_requests)),
+            drains: Arc::new(Semaphore::new(DRAINS_PER_REQUEST * limits.max_requests)),
         }
+    }
+
+    /// Past `DRAINS_PER_REQUEST * max_requests` drains at once, the body is dropped, closing
+    /// the connection.
+    pub(crate) fn drain<S, E>(&self, body: S)
+    where
+        S: Stream<Item = Result<Bytes, E>> + Unpin + Send + 'static,
+    {
+        let Ok(permit) = Arc::clone(&self.drains).try_acquire_owned() else {
+            debug!("highlight: too many request bodies being discarded, dropping this one");
+            return;
+        };
+        let limits = self.limits;
+        tokio::spawn(async move {
+            drain(body, limits).await;
+            drop(permit);
+        });
     }
 }
 
@@ -1406,5 +1427,49 @@ mod tests {
         .unwrap();
 
         assert!(matches!(result, Err(BodyError::BodyTooLarge)), "{result:?}");
+    }
+
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
+
+    struct EndlessBody(Arc<AtomicBool>);
+
+    impl Stream for EndlessBody {
+        type Item = io::Result<Bytes>;
+
+        fn poll_next(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Poll::Pending
+        }
+    }
+
+    impl Drop for EndlessBody {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+
+    #[tokio::test]
+    async fn bodies_past_the_drain_limit_are_dropped_at_once() {
+        let shared = HighlightShared::new(HighlightLimits {
+            max_requests: 1,
+            ..limits()
+        });
+        let drained: Vec<_> = (0..DRAINS_PER_REQUEST)
+            .map(|_| Arc::new(AtomicBool::new(false)))
+            .collect();
+        let past_the_limit = Arc::new(AtomicBool::new(false));
+
+        for dropped in &drained {
+            shared.drain(EndlessBody(Arc::clone(dropped)));
+        }
+        shared.drain(EndlessBody(Arc::clone(&past_the_limit)));
+        tokio::task::yield_now().await;
+
+        assert!(
+            drained
+                .iter()
+                .all(|dropped| !dropped.load(Ordering::Relaxed))
+        );
+        assert!(past_the_limit.load(Ordering::Relaxed));
     }
 }

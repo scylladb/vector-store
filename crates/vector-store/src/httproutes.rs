@@ -1309,7 +1309,7 @@ async fn post_index_highlight(
     let limits = state.highlight.limits;
 
     let answer_early = |response: Response, body: Body| {
-        tokio::spawn(highlight_body::drain(body.into_data_stream(), limits));
+        state.highlight.drain(body.into_data_stream());
         response
     };
 
@@ -1468,7 +1468,7 @@ async fn finish_reading(
         }
         Err(err) => err,
     };
-    tokio::spawn(highlight_body::drain(into_body(reader), highlight.limits));
+    highlight.drain(into_body(reader));
     if let BodyError::Cancelled = err {
         let msg = format!(
             "index.highlight request error: the index stopped after {} documents",
@@ -1500,7 +1500,7 @@ fn abandon_reading(
 ) -> Response {
     tokio::spawn(async move {
         if let Ok((_, reader)) = reading.await {
-            highlight_body::drain(into_body(reader), highlight.limits).await;
+            highlight.drain(into_body(reader));
         }
     });
     response
