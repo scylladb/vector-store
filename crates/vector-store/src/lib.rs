@@ -16,6 +16,7 @@ mod distance;
 mod engine;
 mod file_monitor;
 mod fts_index;
+mod highlight_body;
 mod httproutes;
 mod httpserver;
 mod index_key;

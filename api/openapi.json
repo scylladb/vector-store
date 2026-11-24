@@ -363,7 +363,7 @@
         "tags": [
           "scylla-vector-store-index"
         ],
-        "description": "Computes a highlighted excerpt (snippet) for each of the supplied document texts. The index is used only to analyze the query and to weight its terms by their document frequency, prioritizing rarer terms when picking which fragment of a long text to show. Highlights are returned in the same order as the requested documents. A document that matches no query term yields `null`. If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
+        "description": "Computes a highlighted excerpt (snippet) for each of the supplied document texts. The index is used only to analyze the query and to weight its terms by their document frequency, prioritizing rarer terms when picking which fragment of a long text to show. Highlights are returned in the same order as the requested documents. A document that matches no query term yields `null`. The body is read as a stream, one document at a time, so it has no overall size limit beyond 640 MiB; the query may be at most 2 MiB and each document 100 MiB, and a request may carry at most 1000 documents. `query` has to come before `documents`, so that highlighting can start at the first document. If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
         "operationId": "post_index_highlight",
         "parameters": [
           {
@@ -407,7 +407,7 @@
             }
           },
           "400": {
-            "description": "Bad request. Possible causes: malformed input, unparsable query, or missing required fields.",
+            "description": "Bad request. Possible causes: malformed input, unparsable query, missing required fields, or an unknown field nested more than 127 levels deep.",
             "content": {
               "application/json": {
                 "schema": {
@@ -436,8 +436,28 @@
               }
             }
           },
+          "413": {
+            "description": "Payload too large. The query is over 2 MiB or a document is over 100 MiB, the request carries more than 1000 documents, a field name is over 4 KiB, or the body is over 640 MiB.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported media type. The request has no JSON `Content-Type` header (`application/json` or `application/*+json`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
           "422": {
-            "description": "Index cannot be served. Possible causes: the index exists in ScyllaDB, but its table has a primary key column of a type Vector Store does not support.",
+            "description": "Unprocessable entity. Possible causes: the body is JSON but not a highlight request (a missing or duplicate field, or a value of the wrong type), or the index exists in ScyllaDB, but its table has a primary key column of a type Vector Store does not support.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1405,7 +1425,7 @@
           },
           "query": {
             "type": "string",
-            "description": "The text query whose terms should be marked in the documents."
+            "description": "The text query whose terms should be marked in the documents. It has to come before `documents`, since the Vector Store reads the body as a stream."
           }
         }
       },
