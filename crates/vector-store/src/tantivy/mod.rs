@@ -69,17 +69,16 @@ impl Writer {
         &mut self,
         doc: TantivyDocument,
         mut in_progress: AsyncInProgress,
-    ) -> tantivy::Result<usize> {
+    ) -> tantivy::Result<()> {
         self.writer.add_document(doc)?;
         in_progress.applied();
         self.uncommitted_docs_in_progress_guards.push(in_progress);
-        Ok(self.uncommitted_docs())
+        Ok(())
     }
 
-    fn rm_document(&mut self, term: tantivy::Term, in_progress: AsyncInProgress) -> usize {
+    fn rm_document(&mut self, term: tantivy::Term, in_progress: AsyncInProgress) {
         self.writer.delete_term(term);
         self.uncommitted_docs_in_progress_guards.push(in_progress);
-        self.uncommitted_docs()
     }
 
     /// Commits the documents to the index and returns the commit opstamp with their in-progress
@@ -293,19 +292,15 @@ fn commit(index: &Index, key: &IndexKey) {
 }
 
 fn add_document(
-    index: &Index,
+    writer: &mut Writer,
+    schema: &Schema,
     primary_id: PrimaryId,
     document: String,
     in_progress: AsyncInProgress,
-) -> usize {
-    let doc = create_doc(&index.schema, primary_id, &document);
-    let mut writer = index.writer.write().unwrap();
-    match writer.add_document(doc, in_progress) {
-        Ok(pending) => pending,
-        Err(err) => {
-            error!("tantivy: failed to add document {primary_id:?}: {err}");
-            writer.uncommitted_docs()
-        }
+) {
+    let doc = create_doc(schema, primary_id, &document);
+    if let Err(err) = writer.add_document(doc, in_progress) {
+        error!("tantivy: failed to add document {primary_id:?}: {err}");
     }
 }
 
@@ -314,9 +309,14 @@ fn create_term(schema: &Schema, primary_id: PrimaryId) -> tantivy::Term {
     tantivy::Term::from_field_u64(primary_id_field, u64::from(primary_id))
 }
 
-fn remove_document(index: &Index, primary_id: PrimaryId, in_progress: AsyncInProgress) -> usize {
-    let term = create_term(&index.schema, primary_id);
-    index.writer.write().unwrap().rm_document(term, in_progress)
+fn remove_document(
+    writer: &mut Writer,
+    schema: &Schema,
+    primary_id: PrimaryId,
+    in_progress: AsyncInProgress,
+) {
+    let term = create_term(schema, primary_id);
+    writer.rm_document(term, in_progress);
 }
 
 /// The tantivy indexes of one index key, one per index id.
@@ -378,7 +378,17 @@ where
         let commit_threshold = self.commit_threshold;
         self.worker
             .spawn_blocking(move || {
-                let pending = add_document(&index, primary_id, document, in_progress);
+                let pending = {
+                    let mut writer = index.writer.write().unwrap();
+                    add_document(
+                        &mut writer,
+                        &index.schema,
+                        primary_id,
+                        document,
+                        in_progress,
+                    );
+                    writer.uncommitted_docs()
+                };
                 if pending >= commit_threshold {
                     commit(&index, &key);
                 }
@@ -398,7 +408,11 @@ where
         let commit_threshold = self.commit_threshold;
         self.worker
             .spawn_blocking(move || {
-                let pending = remove_document(&index, primary_id, in_progress);
+                let pending = {
+                    let mut writer = index.writer.write().unwrap();
+                    remove_document(&mut writer, &index.schema, primary_id, in_progress);
+                    writer.uncommitted_docs()
+                };
                 if pending >= commit_threshold {
                     commit(&index, &key);
                 }
