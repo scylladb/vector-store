@@ -214,6 +214,7 @@ criterion_group!(
     ann::search_while_inserting,
     ann::search_while_deleting,
     fts::fts_fullscan_build,
+    fts::fts_search,
 );
 
 #[hotpath::main]

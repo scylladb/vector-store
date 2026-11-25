@@ -21,6 +21,7 @@ use super::init;
 use super::run_vector_store;
 use super::wait_until_all_tasks_finished;
 use super::wait_until_index_is_created;
+use super::wait_until_index_is_ready;
 use super::wait_until_index_is_removed;
 use axum::http::StatusCode;
 use criterion::BenchmarkId;
@@ -28,6 +29,7 @@ use criterion::Criterion;
 use criterion::SamplingMode;
 use criterion::Throughput;
 use httpapi::IndexInfo;
+use httpapi::PostIndexBm25Response;
 use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
 use scylla::routing::Token;
@@ -57,8 +59,17 @@ use vector_store::NonemptyArc;
 /// Upper bound for any wait on the pipeline, so a lost document fails the run instead of hanging it.
 const WAIT_TIMEOUT: Duration = Duration::from_secs(120);
 
+const SEARCH_LIMIT: usize = 10;
+
+/// Zipf ranks of the query terms: a frequent word, a word present in a few documents out of
+/// a thousand, and a pair of mid-frequency words.
+const COMMON_RANK: usize = 0;
+const RARE_RANK: usize = 1_000;
+const PAIR_RANKS: (usize, usize) = (10, 100);
+
 struct Sizes {
     build_docs: usize,
+    search_docs_per_index: usize,
     index_counts: Vec<usize>,
 }
 
@@ -91,6 +102,7 @@ fn sizes() -> Sizes {
         } else {
             500_000
         },
+        search_docs_per_index: 1_000,
         index_counts: index_counts(),
     }
 }
@@ -186,6 +198,12 @@ impl FtsIndex {
 
     fn index_name(&self) -> httpapi::IndexName {
         self.metadata.index_name.clone().into()
+    }
+
+    /// Ends the full scan, after which the index serves searches.
+    async fn finish_scan(&mut self, client: &TestClient) {
+        self.tx = None;
+        wait_until_index_is_ready(client, &self.keyspace_name(), &self.index_name()).await;
     }
 }
 
@@ -377,14 +395,38 @@ impl Fixture {
         }
     }
 
-    fn teardown(self) {
+    /// Creates `count` indexes, fills each with `docs_per_index` documents and lets them serve.
+    fn serving_indexes(&self, ids: &Ids, count: usize, documents: &[String]) -> Vec<FtsIndex> {
+        self.runtime.block_on(async {
+            let mut indexes = create_fts_indexes(&self.db, &self.client, ids, count).await;
+            let guard = BatchGuard::new(&self.db);
+            // Each document once per index, in an order that the round robin hands every index
+            // the whole set.
+            let documents = documents
+                .iter()
+                .flat_map(|document| std::iter::repeat_n(document, count))
+                .map(|document| (ids.next_pk(), document.clone()))
+                .collect::<Vec<_>>();
+            let total = documents.len();
+            send_documents(&indexes, documents, default_concurrency()).await;
+            guard.wait(&self.db, total).await;
+            for index in &mut indexes {
+                index.finish_scan(&self.client).await;
+                assert_count(&self.client, index, total / count).await;
+            }
+            indexes
+        })
+    }
+
+    fn teardown(self, indexes: Vec<FtsIndex>) {
         let Self {
             runtime,
+            db,
             client,
             _server,
             _config_tx,
-            ..
         } = self;
+        runtime.block_on(delete_fts_indexes(&db, &client, indexes));
         drop(client);
         drop(_server);
         drop(_config_tx);
@@ -443,7 +485,183 @@ pub(crate) fn fts_fullscan_build(c: &mut Criterion) {
             },
         );
         if let Some(fixture) = fixture {
-            fixture.teardown();
+            fixture.teardown(Vec::new());
         }
+    }
+}
+
+/// Calls slower than this count as stalls, which the 99th percentile hides.
+const SLOW_CALL: Duration = Duration::from_millis(50);
+
+/// Latencies of single calls, for the percentiles Criterion does not report.
+#[derive(Clone, Default)]
+struct Latencies(Arc<Mutex<Vec<Duration>>>);
+
+impl Latencies {
+    fn push(&self, latency: Duration) {
+        self.0.lock().unwrap().push(latency);
+    }
+
+    fn print(&self, name: &str) {
+        let mut latencies = std::mem::take(&mut *self.0.lock().unwrap());
+        if latencies.is_empty() {
+            return;
+        }
+        latencies.sort();
+        let percentile = |p: usize| latencies[(latencies.len() - 1) * p / 100];
+        let slow = latencies.len() - latencies.partition_point(|&l| l <= SLOW_CALL);
+        eprintln!(
+            "fts latency [{name}]: p50={:?} p99={:?} max={:?} over {SLOW_CALL:?}={slow} calls={}",
+            percentile(50),
+            percentile(99),
+            latencies[latencies.len() - 1],
+            latencies.len()
+        );
+    }
+}
+
+/// The three query kinds the search scenarios rotate through.
+fn queries() -> [String; 3] {
+    let corpus = Corpus::new(corpus::SEED);
+    [
+        corpus.word(COMMON_RANK).to_string(),
+        corpus.word(RARE_RANK).to_string(),
+        format!(
+            "{} {}",
+            corpus.word(PAIR_RANKS.0),
+            corpus.word(PAIR_RANKS.1)
+        ),
+    ]
+}
+
+/// Asserts once that every query finds something, so no query measures a dictionary miss.
+fn assert_queries_hit(fixture: &Fixture, index: &FtsIndex, queries: &[String]) {
+    fixture.runtime.block_on(async {
+        for query in queries {
+            let response = fixture
+                .client
+                .bm25(
+                    &index.keyspace_name(),
+                    &index.index_name(),
+                    query.clone(),
+                    NonZeroUsize::new(SEARCH_LIMIT).unwrap().into(),
+                )
+                .await;
+            assert_eq!(response.status_code(), StatusCode::OK, "fts: query {query}");
+            assert!(
+                !response.json::<PostIndexBm25Response>().scores.is_empty(),
+                "fts: query {query} finds nothing"
+            );
+        }
+    });
+}
+
+/// What a search scenario needs: a running fixture, the indexes to query, and the work left to
+/// do once the measurement ends.
+struct SearchSetup {
+    fixture: Fixture,
+    targets: Targets,
+    finish: Box<dyn FnOnce(Fixture)>,
+}
+
+/// The indexes a search scenario queries, as keyspace and index names.
+type Targets = Arc<Vec<(httpapi::KeyspaceName, httpapi::IndexName)>>;
+
+/// Measures BM25 calls with `concurrency` parallel callers, the query and the index picked by
+/// the iteration number. The setup runs only when the filter selects the benchmark.
+fn bench_search(
+    c: &mut Criterion,
+    name: String,
+    queries: [String; 3],
+    setup: impl FnOnce(&[String; 3]) -> SearchSetup,
+) {
+    let concurrency = default_concurrency();
+    let latencies = Latencies::default();
+    let queries = Arc::new(queries);
+    let mut setup = Some(setup);
+    let mut state: Option<SearchSetup> = None;
+
+    let mut group = c.benchmark_group("pipeline");
+    group.throughput(Throughput::Elements(concurrency as u64));
+    group.bench_with_input(
+        BenchmarkId::new(&name, concurrency),
+        &concurrency,
+        |b, &concurrency| {
+            let SearchSetup {
+                fixture, targets, ..
+            } = state.get_or_insert_with(|| setup.take().unwrap()(&queries));
+            b.to_async(&fixture.runtime).iter_custom(|iters| {
+                let client = Arc::clone(&fixture.client);
+                let targets = Arc::clone(targets);
+                let queries = Arc::clone(&queries);
+                let latencies = latencies.clone();
+                async move {
+                    super::run_with_concurrency(concurrency, iters, move |_, it| {
+                        let client = Arc::clone(&client);
+                        let targets = Arc::clone(&targets);
+                        let queries = Arc::clone(&queries);
+                        let latencies = latencies.clone();
+                        async move {
+                            let (keyspace_name, index_name) = &targets[it as usize % targets.len()];
+                            let query = queries[it as usize % queries.len()].clone();
+                            let start = Instant::now();
+                            let response = client
+                                .bm25(
+                                    keyspace_name,
+                                    index_name,
+                                    query,
+                                    NonZeroUsize::new(SEARCH_LIMIT).unwrap().into(),
+                                )
+                                .await;
+                            let elapsed = start.elapsed();
+                            assert_eq!(response.status_code(), StatusCode::OK);
+                            latencies.push(elapsed);
+                            elapsed
+                        }
+                    })
+                    .await
+                }
+            });
+        },
+    );
+    group.finish();
+    if let Some(SearchSetup {
+        fixture, finish, ..
+    }) = state
+    {
+        latencies.print(&name);
+        finish(fixture);
+    }
+}
+
+fn targets(indexes: &[FtsIndex]) -> Targets {
+    Arc::new(
+        indexes
+            .iter()
+            .map(|index| (index.keyspace_name(), index.index_name()))
+            .collect(),
+    )
+}
+
+/// BM25 latency over N serving indexes, each call to one of them.
+pub(crate) fn fts_search(c: &mut Criterion) {
+    init();
+    print_setup();
+
+    let sizes = sizes();
+    let documents = Corpus::new(corpus::SEED).documents(sizes.search_docs_per_index);
+
+    for &count in &sizes.index_counts {
+        bench_search(c, format!("fts-search-{count}"), queries(), |queries| {
+            let fixture = Fixture::new();
+            let ids = Ids::default();
+            let indexes = fixture.serving_indexes(&ids, count, &documents);
+            assert_queries_hit(&fixture, &indexes[0], queries);
+            SearchSetup {
+                targets: targets(&indexes),
+                fixture,
+                finish: Box::new(move |fixture| fixture.teardown(indexes)),
+            }
+        });
     }
 }
