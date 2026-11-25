@@ -6,19 +6,27 @@
 //! FTS scenarios of the pipeline benchmark: real Tantivy indexes fed through the range scan
 //! path, measured until the documents are searchable.
 
+use super::corpus;
+use super::corpus::Corpus;
 use super::db_basic;
 use super::db_basic::DbBasic;
 use super::db_basic::Index;
 use super::db_basic::RangeScanFn;
 use super::db_basic::TOKEN_MIN;
 use super::db_basic::Table;
+use super::default_concurrency;
 use super::default_config;
 use super::default_runtime;
+use super::init;
 use super::run_vector_store;
 use super::wait_until_all_tasks_finished;
 use super::wait_until_index_is_created;
 use super::wait_until_index_is_removed;
 use axum::http::StatusCode;
+use criterion::BenchmarkId;
+use criterion::Criterion;
+use criterion::SamplingMode;
+use criterion::Throughput;
 use httpapi::IndexInfo;
 use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
@@ -27,10 +35,12 @@ use scylla::value::CqlValue;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::Once;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+use std::time::Instant;
 use testclient::TestClient;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
@@ -46,6 +56,56 @@ use vector_store::NonemptyArc;
 
 /// Upper bound for any wait on the pipeline, so a lost document fails the run instead of hanging it.
 const WAIT_TIMEOUT: Duration = Duration::from_secs(120);
+
+struct Sizes {
+    build_docs: usize,
+    index_counts: Vec<usize>,
+}
+
+const ENV_FTS_INDEXES: &str = "BENCHES_FTS_INDEXES";
+
+/// The index counts to run, a comma-separated list; larger counts are opt-in because an
+/// unmodified Tantivy writer needs over 20 GB to build a hundred indexes.
+fn index_counts() -> Vec<usize> {
+    dotenvy::var(ENV_FTS_INDEXES)
+        .ok()
+        .map(|counts| {
+            counts
+                .split(',')
+                .map(|count| {
+                    count
+                        .trim()
+                        .parse()
+                        .unwrap_or_else(|_| panic!("{ENV_FTS_INDEXES}: bad index count {count}"))
+                })
+                .collect()
+        })
+        .unwrap_or_else(|| vec![1, 10])
+}
+
+/// Debug builds only run as the CI smoke test, so they get small sizes.
+fn sizes() -> Sizes {
+    Sizes {
+        build_docs: if cfg!(debug_assertions) {
+            1_000
+        } else {
+            500_000
+        },
+        index_counts: index_counts(),
+    }
+}
+
+fn print_setup() {
+    static PRINTED: Once = Once::new();
+    PRINTED.call_once(|| {
+        eprintln!(
+            "fts: VECTOR_STORE_THREADS={} BENCHES_CONCURRENCY={} {ENV_FTS_INDEXES}={:?}",
+            dotenvy::var("VECTOR_STORE_THREADS").unwrap_or_else(|_| "default".into()),
+            default_concurrency(),
+            index_counts(),
+        );
+    });
+}
 
 fn fts_index_metadata(id: usize) -> IndexMetadata {
     IndexMetadata {
@@ -329,5 +389,61 @@ impl Fixture {
         drop(_server);
         drop(_config_tx);
         wait_until_all_tasks_finished(&runtime);
+    }
+}
+
+/// Builds fresh indexes from a full scan of `build_docs` documents spread over N indexes and
+/// reports documents per second until all of them are searchable.
+pub(crate) fn fts_fullscan_build(c: &mut Criterion) {
+    init();
+    print_setup();
+
+    let sizes = sizes();
+    let concurrency = default_concurrency();
+    let documents = Arc::new(Corpus::new(corpus::SEED).documents(sizes.build_docs));
+
+    let mut group = c.benchmark_group("pipeline");
+    group
+        .sample_size(10)
+        .sampling_mode(SamplingMode::Flat)
+        .throughput(Throughput::Elements(sizes.build_docs as u64));
+
+    for &count in &sizes.index_counts {
+        // Created on the first call, so a benchmark left out by the filter costs nothing.
+        let mut fixture = None;
+        let ids = Ids::default();
+        group.bench_with_input(
+            BenchmarkId::new(format!("fts-fullscan-build-{count}"), concurrency),
+            &concurrency,
+            |b, &concurrency| {
+                let fixture = fixture.get_or_insert_with(Fixture::new);
+                b.iter_custom(|iters| {
+                    let mut elapsed = Duration::ZERO;
+                    for _ in 0..iters {
+                        elapsed += fixture.runtime.block_on(async {
+                            let indexes =
+                                create_fts_indexes(&fixture.db, &fixture.client, &ids, count).await;
+                            let batch = with_pks(&ids, &documents);
+                            let guard = BatchGuard::new(&fixture.db);
+
+                            let start = Instant::now();
+                            let sent = send_documents(&indexes, batch, concurrency).await;
+                            guard.wait(&fixture.db, documents.len()).await;
+                            let elapsed = start.elapsed();
+
+                            for (index, sent) in indexes.iter().zip(sent) {
+                                assert_count(&fixture.client, index, sent).await;
+                            }
+                            delete_fts_indexes(&fixture.db, &fixture.client, indexes).await;
+                            elapsed
+                        });
+                    }
+                    elapsed
+                });
+            },
+        );
+        if let Some(fixture) = fixture {
+            fixture.teardown();
+        }
     }
 }
