@@ -216,6 +216,7 @@ criterion_group!(
     fts::fts_fullscan_build,
     fts::fts_search,
     fts::fts_search_while_inserting,
+    fts::fts_search_while_other_building,
 );
 
 #[hotpath::main]

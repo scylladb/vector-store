@@ -861,3 +861,56 @@ pub(crate) fn fts_search_while_inserting(c: &mut Criterion) {
         },
     );
 }
+
+/// BM25 latency on one index while another index takes a full-scan build.
+pub(crate) fn fts_search_while_other_building(c: &mut Criterion) {
+    init();
+    print_setup();
+
+    let sizes = sizes();
+    bench_search(
+        c,
+        "fts-search-while-other-building".into(),
+        queries(),
+        |queries| {
+            let mut corpus = Corpus::new(corpus::SEED);
+            let documents = corpus.documents(sizes.search_docs_per_index);
+            let build_documents = Arc::new(corpus.documents(sizes.search_docs_per_index));
+            let fixture = Fixture::new();
+            let ids = Arc::new(Ids::default());
+            let searched = fixture.serving_indexes(&ids, 1, &documents);
+            assert_queries_hit(&fixture, &searched[0], queries);
+
+            let building = fixture
+                .runtime
+                .block_on(create_fts_indexes(&fixture.db, &fixture.client, &ids, 1))
+                .pop()
+                .unwrap();
+            let tx = building.tx.clone().unwrap();
+            let writer = Writer::spawn(&fixture.runtime, build_documents, {
+                let ids = Arc::clone(&ids);
+                move |_, document| {
+                    let tx = tx.clone();
+                    let pk = ids.next_pk();
+                    async move { tx.send((pk, document)).await.is_ok() }
+                }
+            });
+            SearchSetup {
+                targets: targets(&searched),
+                fixture,
+                finish: Box::new(move |fixture| {
+                    let written = writer.stop(&fixture.runtime);
+                    eprintln!(
+                        "fts: {written} documents built into the other index during the search"
+                    );
+                    fixture
+                        .runtime
+                        .block_on(assert_count(&fixture.client, &building, written));
+                    let mut indexes = searched;
+                    indexes.push(building);
+                    fixture.teardown(indexes);
+                }),
+            }
+        },
+    );
+}
