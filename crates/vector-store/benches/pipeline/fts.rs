@@ -8,14 +8,170 @@
 
 use super::db_basic;
 use super::db_basic::DbBasic;
+use super::db_basic::Index;
+use super::db_basic::RangeScanFn;
+use super::db_basic::TOKEN_MIN;
+use super::db_basic::Table;
 use super::default_config;
 use super::default_runtime;
 use super::run_vector_store;
 use super::wait_until_all_tasks_finished;
+use super::wait_until_index_is_created;
+use super::wait_until_index_is_removed;
+use scylla::cluster::metadata::ColumnType;
+use scylla::cluster::metadata::NativeType;
+use scylla::routing::Token;
+use scylla::value::CqlValue;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::sync::atomic::AtomicI64;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use testclient::TestClient;
+use tokio::sync::mpsc;
 use tokio::sync::watch;
+use uuid::Uuid;
 use vector_store::Config;
+use vector_store::DbIndexPartitioning;
+use vector_store::DbRow;
+use vector_store::DbValue;
+use vector_store::IndexKind;
+use vector_store::IndexMetadata;
+use vector_store::IndexOptionsFts;
+use vector_store::NonemptyArc;
+
+fn fts_index_metadata(id: usize) -> IndexMetadata {
+    IndexMetadata {
+        keyspace_name: "fts".into(),
+        table_name: format!("docs_{id}").into(),
+        index_name: format!("fts_{id}").into(),
+        primary_key_columns: NonemptyArc::new(["id"]).unwrap(),
+        partition_key_count: NonZeroUsize::new(1).unwrap(),
+        target_columns: NonemptyArc::new(["content"]).unwrap(),
+        partitioning: DbIndexPartitioning::Global,
+        filtering_columns: Arc::new([]),
+        alternator_attribute_types: Default::default(),
+        version: Uuid::new_v4().into(),
+        kind: IndexKind::Fts(IndexOptionsFts::default()),
+    }
+}
+
+fn add_fts_table(db: &DbBasic, index: &IndexMetadata) {
+    db.add_table(
+        index.keyspace_name.clone(),
+        index.table_name.clone(),
+        Table {
+            primary_keys: index.primary_key_columns.clone(),
+            partition_key_count: 1,
+            columns: Arc::new(
+                [
+                    ("id".into(), ColumnType::Native(NativeType::BigInt)),
+                    ("content".into(), ColumnType::Native(NativeType::Text)),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+            dimensions: Default::default(),
+        },
+    )
+    .unwrap();
+}
+
+/// A range scan that streams the documents sent to the returned sender and ends when it is
+/// dropped.
+fn range_scan_fn_documents_mpsc() -> (RangeScanFn, mpsc::Sender<(i64, String)>) {
+    let (tx, rx) = mpsc::channel(1024);
+    let mut rx = Some(rx);
+    let scan: RangeScanFn = Box::new(move || {
+        let (tx_rows, rx_rows) = mpsc::channel(1);
+        let Some(mut rx) = rx.take() else {
+            return rx_rows;
+        };
+        tokio::spawn(async move {
+            while let Some((pk, document)) = rx.recv().await {
+                let row = DbRow {
+                    columns: vec![
+                        Some(DbValue::Value(CqlValue::BigInt(pk))),
+                        Some(DbValue::Value(CqlValue::Text(document))),
+                        Some(DbValue::Value(CqlValue::BigInt(1))),
+                    ],
+                };
+                if tx_rows.send(Ok(row)).await.is_err() {
+                    break;
+                }
+            }
+        });
+        rx_rows
+    });
+    (scan, tx)
+}
+
+/// An FTS index whose full scan streams the documents sent through `tx` until it is dropped.
+struct FtsIndex {
+    metadata: IndexMetadata,
+    tx: Option<mpsc::Sender<(i64, String)>>,
+}
+
+impl FtsIndex {
+    fn keyspace_name(&self) -> httpapi::KeyspaceName {
+        self.metadata.keyspace_name.clone().into()
+    }
+
+    fn index_name(&self) -> httpapi::IndexName {
+        self.metadata.index_name.clone().into()
+    }
+}
+
+/// Hands out unique index ids and primary keys across iterations.
+#[derive(Default)]
+struct Ids {
+    index: AtomicUsize,
+    pk: AtomicI64,
+}
+
+impl Ids {
+    fn next_pk(&self) -> i64 {
+        self.pk.fetch_add(1, Ordering::Relaxed)
+    }
+}
+
+/// Creates `count` FTS indexes fed through range scans and waits until Vector Store knows them.
+async fn create_fts_indexes(
+    db: &DbBasic,
+    client: &TestClient,
+    ids: &Ids,
+    count: usize,
+) -> Vec<FtsIndex> {
+    let indexes = (0..count)
+        .map(|_| {
+            let metadata = fts_index_metadata(ids.index.fetch_add(1, Ordering::Relaxed));
+            add_fts_table(db, &metadata);
+            let (scan, tx) = range_scan_fn_documents_mpsc();
+            db.add_index(Index::new(metadata.clone()).with_range_scan(Token::new(TOKEN_MIN), scan))
+                .unwrap();
+            FtsIndex {
+                metadata,
+                tx: Some(tx),
+            }
+        })
+        .collect::<Vec<_>>();
+    for index in &indexes {
+        wait_until_index_is_created(client, &index.keyspace_name(), &index.index_name()).await;
+    }
+    indexes
+}
+
+/// Deletes the indexes together and only then waits for them, as Vector Store notices a removed
+/// index only on its next periodic check.
+async fn delete_fts_indexes(db: &DbBasic, client: &TestClient, indexes: Vec<FtsIndex>) {
+    for index in &indexes {
+        db.del_index(&index.metadata.keyspace_name, &index.metadata.index_name)
+            .unwrap();
+    }
+    for index in &indexes {
+        wait_until_index_is_removed(client, &index.keyspace_name(), &index.index_name()).await;
+    }
+}
 
 /// A running Vector Store over `DbBasic`, kept alive for one benchmark.
 struct Fixture {
