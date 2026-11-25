@@ -3,12 +3,13 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
-//! FTS scenarios of the pipeline benchmark: real Tantivy indexes fed through the range scan
-//! path, measured until the documents are searchable.
+//! FTS scenarios of the pipeline benchmark: real Tantivy indexes fed through the range scan and
+//! CDC paths, measured until the documents are searchable.
 
 use super::corpus;
 use super::corpus::Corpus;
 use super::db_basic;
+use super::db_basic::CdcRow;
 use super::db_basic::DbBasic;
 use super::db_basic::Index;
 use super::db_basic::RangeScanFn;
@@ -34,10 +35,12 @@ use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
 use scylla::routing::Token;
 use scylla::value::CqlValue;
+use scylla_cdc::consumer::OperationType;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::Once;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -46,6 +49,7 @@ use std::time::Instant;
 use testclient::TestClient;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
+use tokio::task::JoinHandle;
 use uuid::Uuid;
 use vector_store::Config;
 use vector_store::DbIndexPartitioning;
@@ -664,4 +668,170 @@ pub(crate) fn fts_search(c: &mut Criterion) {
             }
         });
     }
+}
+
+/// A background task that writes documents until stopped and reports how many it wrote.
+struct Writer {
+    stop: Arc<AtomicBool>,
+    task: JoinHandle<usize>,
+}
+
+impl Writer {
+    fn spawn<F, Fut>(
+        runtime: &tokio::runtime::Runtime,
+        documents: Arc<Vec<String>>,
+        write: F,
+    ) -> Self
+    where
+        F: Fn(usize, String) -> Fut + Send + 'static,
+        Fut: Future<Output = bool> + Send,
+    {
+        let stop = Arc::new(AtomicBool::new(false));
+        let task = runtime.spawn({
+            let stop = Arc::clone(&stop);
+            async move {
+                let mut written = 0;
+                while !stop.load(Ordering::Relaxed) {
+                    let document = documents[written % documents.len()].clone();
+                    if !write(written, document).await {
+                        break;
+                    }
+                    written += 1;
+                }
+                written
+            }
+        });
+        Self { stop, task }
+    }
+
+    fn stop(self, runtime: &tokio::runtime::Runtime) -> usize {
+        self.stop.store(true, Ordering::Relaxed);
+        runtime.block_on(self.task).unwrap()
+    }
+}
+
+/// BM25 latency on one index while CDC inserts stream into the same index.
+pub(crate) fn fts_search_while_inserting(c: &mut Criterion) {
+    init();
+    print_setup();
+
+    let sizes = sizes();
+    bench_search(
+        c,
+        "fts-search-while-inserting".into(),
+        queries(),
+        |queries| {
+            let mut corpus = Corpus::new(corpus::SEED);
+            let documents = corpus.documents(sizes.search_docs_per_index);
+            let cdc_documents = Arc::new(corpus.documents(sizes.search_docs_per_index));
+            let fixture = Fixture::new();
+            let ids = Ids::default();
+
+            // The CDC rows carry only the primary key; the text is fetched by key, as from ScyllaDB.
+            let first_cdc_pk = 1_000_000_000;
+            let (tx_cdc, rx_cdc) = mpsc::channel::<CdcRow>(1024);
+            let index = fixture.runtime.block_on(async {
+                let metadata = fts_index_metadata(ids.index.fetch_add(1, Ordering::Relaxed));
+                add_fts_table(&fixture.db, &metadata);
+                let (scan, tx) = range_scan_fn_documents_mpsc();
+                let mut rx_cdc = Some(rx_cdc);
+                let cdc_scan: db_basic::CdcScanFn = Box::new(move || {
+                    let (tx_rows, rx_rows) = mpsc::channel(1);
+                    if let Some(mut rx_cdc) = rx_cdc.take() {
+                        tokio::spawn(async move {
+                            while let Some(row) = rx_cdc.recv().await {
+                                if tx_rows.send(row).await.is_err() {
+                                    break;
+                                }
+                            }
+                        });
+                    }
+                    rx_rows
+                });
+                let fetch_documents = Arc::clone(&cdc_documents);
+                let writetime = AtomicI64::new(1);
+                fixture
+                    .db
+                    .add_index(
+                        Index::new(metadata.clone())
+                            .with_range_scan(Token::new(TOKEN_MIN), scan)
+                            .with_cdc_scan(
+                                super::CDC_SAFETY_INTERVAL,
+                                cdc_scan,
+                                db_basic::cdc_column_specs(
+                                    &metadata.keyspace_name,
+                                    &metadata.table_name,
+                                    [("id", NativeType::BigInt)],
+                                    "content",
+                                    ColumnType::Native(NativeType::Text),
+                                ),
+                            )
+                            .with_fetch_row(db_basic::fetch_row(move |pk| {
+                                let pk = pk.get(0).unwrap().as_bigint().unwrap();
+                                let document = fetch_documents
+                                    [(pk - first_cdc_pk) as usize % fetch_documents.len()]
+                                .clone();
+                                Ok(Some(DbRow {
+                                    columns: vec![
+                                        Some(DbValue::Value(CqlValue::Text(document))),
+                                        Some(DbValue::Value(CqlValue::BigInt(
+                                            writetime.fetch_add(1, Ordering::Relaxed) + 1,
+                                        ))),
+                                    ],
+                                }))
+                            })),
+                    )
+                    .unwrap();
+                let mut index = FtsIndex {
+                    metadata,
+                    tx: Some(tx),
+                };
+                wait_until_index_is_created(
+                    &fixture.client,
+                    &index.keyspace_name(),
+                    &index.index_name(),
+                )
+                .await;
+                let guard = BatchGuard::new(&fixture.db);
+                send_documents(
+                    std::slice::from_ref(&index),
+                    with_pks(&ids, &documents),
+                    default_concurrency(),
+                )
+                .await;
+                guard.wait(&fixture.db, documents.len()).await;
+                index.finish_scan(&fixture.client).await;
+                index
+            });
+            assert_queries_hit(&fixture, &index, queries);
+
+            let writer = Writer::spawn(&fixture.runtime, cdc_documents, move |written, _| {
+                let tx_cdc = tx_cdc.clone();
+                async move {
+                    tx_cdc
+                        .send(CdcRow {
+                            primary_key: vec![CqlValue::BigInt(first_cdc_pk + written as i64)],
+                            operation: OperationType::RowUpdate,
+                            timestamp_us: 1,
+                        })
+                        .await
+                        .is_ok()
+                }
+            });
+            SearchSetup {
+                targets: targets(std::slice::from_ref(&index)),
+                fixture,
+                finish: Box::new(move |fixture| {
+                    let written = writer.stop(&fixture.runtime);
+                    eprintln!("fts: {written} documents inserted through CDC during the search");
+                    fixture.runtime.block_on(assert_count(
+                        &fixture.client,
+                        &index,
+                        documents.len() + written,
+                    ));
+                    fixture.teardown(vec![index]);
+                }),
+            }
+        },
+    );
 }
