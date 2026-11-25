@@ -639,6 +639,113 @@ async fn fts_highlight_not_serving_returns_503() {
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
+/// Sends the head of a highlight request whose body is declared over the 640 MiB limit and
+/// only its first bytes, then returns the answer, which must come before the rest of the body.
+async fn answer_to_a_body_declared_over_the_limit(
+    client: &HttpClient,
+    keyspace_name: &str,
+    index_name: &str,
+    content_type: &str,
+) -> String {
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
+
+    let addr = client
+        .url()
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap()
+        .to_string();
+    let mut stream = tokio::net::TcpStream::connect(&addr).await.unwrap();
+    let head = format!(
+        "POST /api/v1/indexes/{keyspace_name}/{index_name}/highlight HTTP/1.1\r\n\
+         Host: {addr}\r\n\
+         Content-Type: {content_type}\r\n\
+         Content-Length: {}\r\n\r\n",
+        640 * 1024 * 1024 + 1
+    );
+    stream.write_all(head.as_bytes()).await.unwrap();
+    stream
+        .write_all(br#"{"query":"hello","documents":["hello world""#)
+        .await
+        .unwrap();
+
+    // The server goes on discarding a body that never comes: read until the answer is
+    // complete.
+    let mut answer = Vec::new();
+    let read_answer = async {
+        let mut chunk = [0; 1024];
+        loop {
+            let complete = String::from_utf8_lossy(&answer)
+                .split_once("\r\n\r\n")
+                .is_some_and(|(head, body)| {
+                    head.lines()
+                        .find_map(|line| line.strip_prefix("content-length: "))
+                        .and_then(|len| len.parse::<usize>().ok())
+                        .is_some_and(|len| body.len() >= len)
+                });
+            if complete {
+                break;
+            }
+            match stream.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(read) => answer.extend_from_slice(&chunk[..read]),
+            }
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), read_answer)
+        .await
+        .expect("the answer must come before the rest of the body");
+    String::from_utf8_lossy(&answer).into_owned()
+}
+
+#[tokio::test]
+async fn fts_highlight_answers_413_before_reading_a_body_declared_over_the_limit() {
+    crate::enable_tracing();
+
+    let (client, keyspace_name, index_name, _db, _hold) =
+        setup_fts_and_wait([(vec![CqlValue::Int(1)], "hello world", 10)], 1).await;
+
+    let answer = answer_to_a_body_declared_over_the_limit(
+        &client,
+        keyspace_name.as_ref(),
+        index_name.as_ref(),
+        "application/json",
+    )
+    .await;
+
+    assert!(
+        answer.starts_with("HTTP/1.1 413 "),
+        "unexpected answer: {answer:?}"
+    );
+    assert!(
+        answer.ends_with("the highlight request body is too large"),
+        "unexpected answer: {answer:?}"
+    );
+}
+
+#[tokio::test]
+async fn fts_highlight_answers_415_before_413_for_a_body_declared_over_the_limit() {
+    crate::enable_tracing();
+
+    let (client, keyspace_name, index_name, _db, _hold) =
+        setup_fts_and_wait([(vec![CqlValue::Int(1)], "hello world", 10)], 1).await;
+
+    let answer = answer_to_a_body_declared_over_the_limit(
+        &client,
+        keyspace_name.as_ref(),
+        index_name.as_ref(),
+        "text/plain",
+    )
+    .await;
+
+    assert!(
+        answer.starts_with("HTTP/1.1 415 "),
+        "unexpected answer: {answer:?}"
+    );
+}
+
 /// Sends a highlight request the way ScyllaDB does: the whole body first, and only
 /// then reads the answer. Returns the status and the body of the answer.
 ///

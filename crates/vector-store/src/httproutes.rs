@@ -1308,6 +1308,10 @@ async fn post_index_highlight(
     let index_name: crate::IndexName = index_name.into();
     let limits = state.highlight.limits;
 
+    let declared = headers
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|len| len.to_str().ok()?.parse::<u64>().ok());
+    let too_large = declared.is_some_and(|len| len > limits.max_body_bytes);
     let answer_early = |response: Response, body: Body| {
         state.highlight.drain(body.into_data_stream());
         response
@@ -1323,6 +1327,15 @@ async fn post_index_highlight(
                 "Expected request with `Content-Type: application/json`",
             )
                 .into_response(),
+            body,
+        );
+    }
+    // Otherwise the body is highlighted up to the limit before the answer.
+    if too_large {
+        let err = BodyError::BodyTooLarge;
+        debug!("post_index_highlight: {err}");
+        return answer_early(
+            (StatusCode::PAYLOAD_TOO_LARGE, err.to_string()).into_response(),
             body,
         );
     }
