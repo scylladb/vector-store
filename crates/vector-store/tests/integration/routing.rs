@@ -3,12 +3,14 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
+use crate::common;
 use crate::common::add_table;
-use crate::common::blocking_scan_fn;
 use crate::common::make_vs_index;
 use crate::common::ordered_timeuuid;
 use crate::common::setup;
-use crate::common::single_row_scan;
+use crate::db_basic;
+use crate::db_basic::Index;
+use crate::db_basic::TOKEN_MIN;
 use crate::wait_for;
 use httpapi::IndexStatus;
 use httpapi::PostIndexAnnFilter;
@@ -18,13 +20,15 @@ use httpclient::HttpClient;
 use reqwest::StatusCode;
 use rstest::rstest;
 use scylla::cluster::metadata::NativeType;
+use scylla::routing::Token;
 use scylla::value::CqlValue;
 use std::num::NonZeroUsize;
 use std::time::Duration;
 use vector_store::DbIndexPartitioning;
+use vector_store::DbRow;
+use vector_store::DbValue;
 use vector_store::IndexMetadata;
 use vector_store::NonemptyArc;
-use vector_store::Timestamp;
 
 const ANN_LIMIT: usize = 5;
 
@@ -198,11 +202,10 @@ async fn ann_routes_to_serving_index_while_replacement_is_bootstrapping() {
         &[],
         ordered_timeuuid(1),
     );
-    db.add_index(
-        oldest.clone(),
-        Some(single_row_scan([CqlValue::Int(1)])),
-        None,
-    )
+    db.add_index(Index::new(oldest.clone()).with_range_scan(
+        Token::new(TOKEN_MIN),
+        common::single_row_range_scan([CqlValue::Int(1)]),
+    ))
     .unwrap();
     wait_for_serving(&client, &oldest).await;
 
@@ -215,8 +218,11 @@ async fn ann_routes_to_serving_index_while_replacement_is_bootstrapping() {
         &[],
         ordered_timeuuid(2),
     );
-    db.add_index(replacement.clone(), Some(blocking_scan_fn()), None)
-        .unwrap();
+    db.add_index(
+        Index::new(replacement.clone())
+            .with_range_scan(Token::new(TOKEN_MIN), db_basic::pending_range_scan_fn()),
+    )
+    .unwrap();
     wait_for_bootstrapping(&client, &replacement).await;
 
     let response = assert_ann_served_by(&client, &oldest, post_ann(&client, &replacement)).await;
@@ -247,11 +253,10 @@ async fn setup_oldest_and_replacement() -> (HttpClient, impl Sized, IndexMetadat
         &[],
         ordered_timeuuid(1),
     );
-    db.add_index(
-        oldest.clone(),
-        Some(single_row_scan([CqlValue::Int(1)])),
-        None,
-    )
+    db.add_index(Index::new(oldest.clone()).with_range_scan(
+        Token::new(TOKEN_MIN),
+        common::single_row_range_scan([CqlValue::Int(1)]),
+    ))
     .unwrap();
     wait_for_serving(&client, &oldest).await;
 
@@ -264,11 +269,10 @@ async fn setup_oldest_and_replacement() -> (HttpClient, impl Sized, IndexMetadat
         &[],
         ordered_timeuuid(2),
     );
-    db.add_index(
-        replacement.clone(),
-        Some(single_row_scan([CqlValue::Int(1)])),
-        None,
-    )
+    db.add_index(Index::new(replacement.clone()).with_range_scan(
+        Token::new(TOKEN_MIN),
+        common::single_row_range_scan([CqlValue::Int(1)]),
+    ))
     .unwrap();
     wait_for_serving(&client, &replacement).await;
 
@@ -343,16 +347,15 @@ async fn ann_return_columns_does_not_affect_routing() {
         &["color"],
         ordered_timeuuid(1),
     );
-    db.add_index(
-        oldest.clone(),
-        Some(crate::db_basic::scan_fn_vectors([(
-            [CqlValue::Int(1)].into(),
+    db.add_index(Index::new(oldest.clone()).with_range_scan(
+        Token::new(TOKEN_MIN),
+        db_basic::range_scan_fn_vectors([(
+            [CqlValue::Int(1)],
             Some(vec![1.0, 2.0, 3.0].into()),
-            [Some(CqlValue::Text("red".to_string()))].into(),
-            Timestamp::from_millis(10),
-        )])),
-        None,
-    )
+            [Some(CqlValue::Text("red".to_string()))],
+            10,
+        )]),
+    ))
     .unwrap();
     wait_for_serving(&client, &oldest).await;
 
@@ -365,11 +368,10 @@ async fn ann_return_columns_does_not_affect_routing() {
         &[],
         ordered_timeuuid(2),
     );
-    db.add_index(
-        replacement.clone(),
-        Some(single_row_scan([CqlValue::Int(1)])),
-        None,
-    )
+    db.add_index(Index::new(replacement.clone()).with_range_scan(
+        Token::new(TOKEN_MIN),
+        common::single_row_range_scan([CqlValue::Int(1)]),
+    ))
     .unwrap();
     wait_for_serving(&client, &replacement).await;
 
@@ -453,11 +455,10 @@ async fn ann_routes_to_newest_local_index_with_same_score() {
         &[],
         ordered_timeuuid(1),
     );
-    db.add_index(
-        older_local.clone(),
-        Some(single_row_scan([CqlValue::Int(1), CqlValue::Int(1)])),
-        None,
-    )
+    db.add_index(Index::new(older_local.clone()).with_range_scan(
+        Token::new(TOKEN_MIN),
+        common::single_row_range_scan([CqlValue::Int(1), CqlValue::Int(1)]),
+    ))
     .unwrap();
     wait_for_serving(&client, &older_local).await;
 
@@ -470,11 +471,10 @@ async fn ann_routes_to_newest_local_index_with_same_score() {
         &[],
         ordered_timeuuid(2),
     );
-    db.add_index(
-        newer_local.clone(),
-        Some(single_row_scan([CqlValue::Int(1), CqlValue::Int(1)])),
-        None,
-    )
+    db.add_index(Index::new(newer_local.clone()).with_range_scan(
+        Token::new(TOKEN_MIN),
+        common::single_row_range_scan([CqlValue::Int(1), CqlValue::Int(1)]),
+    ))
     .unwrap();
     wait_for_serving(&client, &newer_local).await;
 
@@ -524,15 +524,10 @@ async fn ann_routes_to_local_index_with_more_matching_partition_key_columns() {
         &[],
         ordered_timeuuid(1),
     );
-    db.add_index(
-        less_precise.clone(),
-        Some(single_row_scan([
-            CqlValue::Int(1),
-            CqlValue::Int(1),
-            CqlValue::Int(1),
-        ])),
-        None,
-    )
+    db.add_index(Index::new(less_precise.clone()).with_range_scan(
+        Token::new(TOKEN_MIN),
+        common::single_row_range_scan([CqlValue::Int(1), CqlValue::Int(1), CqlValue::Int(1)]),
+    ))
     .unwrap();
     wait_for_serving(&client, &less_precise).await;
 
@@ -545,15 +540,10 @@ async fn ann_routes_to_local_index_with_more_matching_partition_key_columns() {
         &[],
         ordered_timeuuid(2),
     );
-    db.add_index(
-        more_precise.clone(),
-        Some(single_row_scan([
-            CqlValue::Int(1),
-            CqlValue::Int(1),
-            CqlValue::Int(1),
-        ])),
-        None,
-    )
+    db.add_index(Index::new(more_precise.clone()).with_range_scan(
+        Token::new(TOKEN_MIN),
+        common::single_row_range_scan([CqlValue::Int(1), CqlValue::Int(1), CqlValue::Int(1)]),
+    ))
     .unwrap();
     wait_for_serving(&client, &more_precise).await;
 
@@ -609,11 +599,19 @@ async fn ann_routes_to_local_index_with_filter_columns_covering_restriction() {
         &["f"],
         ordered_timeuuid(1),
     );
-    db.add_index(
-        covering.clone(),
-        Some(single_row_scan([CqlValue::Int(1), CqlValue::Int(1)])),
-        None,
-    )
+    db.add_index(Index::new(covering.clone()).with_range_scan(
+        Token::new(TOKEN_MIN),
+        db_basic::make_range_scan_fn([DbRow {
+            columns: vec![
+                Some(DbValue::Value(CqlValue::Int(1))),
+                Some(DbValue::Value(CqlValue::Int(1))),
+                Some(DbValue::Vector(vec![1.0, 2.0, 3.0].into())),
+                Some(DbValue::Value(CqlValue::BigInt(10))),
+                Some(DbValue::Value(CqlValue::Int(1))),
+                Some(DbValue::Value(CqlValue::BigInt(10))),
+            ],
+        }]),
+    ))
     .unwrap();
     wait_for_serving(&client, &covering).await;
 
@@ -626,11 +624,10 @@ async fn ann_routes_to_local_index_with_filter_columns_covering_restriction() {
         &[],
         ordered_timeuuid(2),
     );
-    db.add_index(
-        non_covering.clone(),
-        Some(single_row_scan([CqlValue::Int(1), CqlValue::Int(1)])),
-        None,
-    )
+    db.add_index(Index::new(non_covering.clone()).with_range_scan(
+        Token::new(TOKEN_MIN),
+        common::single_row_range_scan([CqlValue::Int(1), CqlValue::Int(1)]),
+    ))
     .unwrap();
     wait_for_serving(&client, &non_covering).await;
 
@@ -686,11 +683,10 @@ async fn ann_routes_to_global_index_with_filter_columns_covering_restriction() {
         &["f"],
         ordered_timeuuid(1),
     );
-    db.add_index(
-        covering.clone(),
-        Some(single_row_scan([CqlValue::Int(1), CqlValue::Int(1)])),
-        None,
-    )
+    db.add_index(Index::new(covering.clone()).with_range_scan(
+        Token::new(TOKEN_MIN),
+        common::single_row_range_scan([CqlValue::Int(1), CqlValue::Int(1)]),
+    ))
     .unwrap();
     wait_for_serving(&client, &covering).await;
 
@@ -703,11 +699,10 @@ async fn ann_routes_to_global_index_with_filter_columns_covering_restriction() {
         &[],
         ordered_timeuuid(2),
     );
-    db.add_index(
-        non_covering.clone(),
-        Some(single_row_scan([CqlValue::Int(1), CqlValue::Int(1)])),
-        None,
-    )
+    db.add_index(Index::new(non_covering.clone()).with_range_scan(
+        Token::new(TOKEN_MIN),
+        common::single_row_range_scan([CqlValue::Int(1), CqlValue::Int(1)]),
+    ))
     .unwrap();
     wait_for_serving(&client, &non_covering).await;
 
@@ -762,11 +757,10 @@ async fn ann_routes_to_local_index_when_pk_restrictions_match() {
         &[],
         ordered_timeuuid(1),
     );
-    db.add_index(
-        local_index.clone(),
-        Some(single_row_scan([CqlValue::Int(1), CqlValue::Int(1)])),
-        None,
-    )
+    db.add_index(Index::new(local_index.clone()).with_range_scan(
+        Token::new(TOKEN_MIN),
+        common::single_row_range_scan([CqlValue::Int(1), CqlValue::Int(1)]),
+    ))
     .unwrap();
     wait_for_serving(&client, &local_index).await;
 
@@ -779,11 +773,10 @@ async fn ann_routes_to_local_index_when_pk_restrictions_match() {
         &[],
         ordered_timeuuid(2),
     );
-    db.add_index(
-        global_index.clone(),
-        Some(single_row_scan([CqlValue::Int(1), CqlValue::Int(1)])),
-        None,
-    )
+    db.add_index(Index::new(global_index.clone()).with_range_scan(
+        Token::new(TOKEN_MIN),
+        common::single_row_range_scan([CqlValue::Int(1), CqlValue::Int(1)]),
+    ))
     .unwrap();
     wait_for_serving(&client, &global_index).await;
 
@@ -832,11 +825,10 @@ async fn ann_routes_to_global_index_without_pk_restrictions() {
         &[],
         ordered_timeuuid(1),
     );
-    db.add_index(
-        local_index.clone(),
-        Some(single_row_scan([CqlValue::Int(1), CqlValue::Int(1)])),
-        None,
-    )
+    db.add_index(Index::new(local_index.clone()).with_range_scan(
+        Token::new(TOKEN_MIN),
+        common::single_row_range_scan([CqlValue::Int(1), CqlValue::Int(1)]),
+    ))
     .unwrap();
     wait_for_serving(&client, &local_index).await;
 
@@ -849,11 +841,10 @@ async fn ann_routes_to_global_index_without_pk_restrictions() {
         &[],
         ordered_timeuuid(2),
     );
-    db.add_index(
-        global_index.clone(),
-        Some(single_row_scan([CqlValue::Int(1), CqlValue::Int(1)])),
-        None,
-    )
+    db.add_index(Index::new(global_index.clone()).with_range_scan(
+        Token::new(TOKEN_MIN),
+        common::single_row_range_scan([CqlValue::Int(1), CqlValue::Int(1)]),
+    ))
     .unwrap();
     wait_for_serving(&client, &global_index).await;
 

@@ -489,6 +489,7 @@ async fn create_cdc_reader<T: DbDriver>(
             CdcLogReaderConfig::default()
                 .keyspace(metadata.keyspace_name)
                 .table_name(metadata.table_name)
+                .index_name(metadata.index_name)
                 .consumer_factory(Arc::new(consumer_factory))
                 .start_timestamp(cdc_start)
                 .safety_interval(params.safety_interval)

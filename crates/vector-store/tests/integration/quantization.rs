@@ -12,13 +12,13 @@ use httpapi::DataType;
 use httpapi::IndexStatus;
 use httpapi::PostIndexAnnFilter;
 use httpapi::PostIndexAnnRestriction;
+use scylla::cluster::metadata::NativeType;
 use scylla::value::CqlValue;
 use std::num::NonZeroUsize;
 use vector_store::ColumnName;
 use vector_store::DbIndexPartitioning;
 use vector_store::Distance;
 use vector_store::Quantization;
-use vector_store::Timestamp;
 
 #[tokio::test]
 // This test verifies that quantization is applied correctly by observing its effect on search results.
@@ -44,23 +44,15 @@ async fn quantization_is_effectively_applied() {
         add_vector: Vec<f32>,
         search_vector: Vec<f32>,
     ) -> httpapi::Distance {
-        let values = [(
-            [CqlValue::Int(1)].into(),
-            Some(add_vector.into()),
-            [].into(),
-            Timestamp::from_millis(10),
-        )];
+        let values = [([CqlValue::Int(1)], Some(add_vector.into()), [], 10)];
         let values_len = values.len();
-        let (run, index, _db, _node_state) = setup_store_with_quantization(
+        let (run, index, _db) = setup_store_with_quantization(
             usearch_test_config(),
             DbIndexPartitioning::Global,
             ["pk".into()],
             1,
-            [(
-                "pk".to_string().into(),
-                scylla::cluster::metadata::NativeType::Int,
-            )],
-            Some(db_basic::scan_fn_vectors(values)),
+            [("pk".to_string().into(), NativeType::Int)],
+            Some(db_basic::range_scan_fn_vectors(values)),
             None,
             quantization,
             NonZeroUsize::new(3).unwrap().into(),
@@ -135,12 +127,12 @@ async fn quantization_is_returned_as_index_data_type() {
         (Quantization::I8, DataType::I8),
         (Quantization::B1, DataType::B1),
     ] {
-        let (run, index, _db, _node_state) = setup_store_with_quantization(
+        let (run, index, _db) = setup_store_with_quantization(
             usearch_test_config(),
             DbIndexPartitioning::Global,
             ["pk".into()],
             1,
-            [],
+            [("pk".to_string().into(), NativeType::Int)],
             None,
             None,
             quantization,
@@ -179,13 +171,13 @@ async fn search_with_quantization(quantization: Quantization, filter: Option<Pos
     let pk_value = 1;
     let pk_column: ColumnName = "pk".into();
     let vectors = vec![(
-        [CqlValue::Int(pk_value)].into(),
+        [CqlValue::Int(pk_value)],
         Some(vector.clone().into()),
-        [].into(),
-        Timestamp::from_millis(10),
+        [],
+        10,
     )];
 
-    let (run, index, _db, _node_state) = setup_store_with_quantization(
+    let (run, index, _db) = setup_store_with_quantization(
         usearch_test_config(),
         DbIndexPartitioning::Global,
         [pk_column.clone()],
@@ -194,7 +186,7 @@ async fn search_with_quantization(quantization: Quantization, filter: Option<Pos
             pk_column.clone(),
             scylla::cluster::metadata::NativeType::Int,
         )],
-        Some(db_basic::scan_fn_vectors(vectors)),
+        Some(db_basic::range_scan_fn_vectors(vectors)),
         None,
         quantization,
         NonZeroUsize::new(DIMENSIONS).unwrap().into(),
@@ -299,13 +291,13 @@ async fn binary_quantization_with_non_divisible_by_8_dimensions() {
     let pk_value = 1;
     let pk_column: ColumnName = "pk".into();
     let vectors = vec![(
-        [CqlValue::Int(pk_value)].into(),
+        [CqlValue::Int(pk_value)],
         Some(vector.clone().into()),
-        [].into(),
-        Timestamp::from_millis(10),
+        [],
+        10,
     )];
 
-    let (run, index, _db, _node_state) = setup_store_with_quantization(
+    let (run, index, _db) = setup_store_with_quantization(
         usearch_test_config(),
         DbIndexPartitioning::Global,
         [pk_column.clone()],
@@ -314,7 +306,7 @@ async fn binary_quantization_with_non_divisible_by_8_dimensions() {
             pk_column.clone(),
             scylla::cluster::metadata::NativeType::Int,
         )],
-        Some(db_basic::scan_fn_vectors(vectors)),
+        Some(db_basic::range_scan_fn_vectors(vectors)),
         None,
         Quantization::B1,
         NonZeroUsize::new(DIMENSIONS).unwrap().into(),

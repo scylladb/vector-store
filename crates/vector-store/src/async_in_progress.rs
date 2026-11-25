@@ -52,27 +52,34 @@ impl Drop for Applied {
 
 /// The guard of a change sent to an index, which the index drops once it has applied the change.
 #[derive(Debug)]
-pub struct AsyncInProgress {
+pub(crate) struct AsyncInProgress {
     // Dropped first: the index is marked dirty before a full scan sees the change applied.
     _dirty: Option<DirtyFlag>,
     _state: State,
     applied: Option<Applied>,
+    #[cfg(feature = "in-progress")]
+    in_progress_guard: Option<mpsc::Sender<()>>,
 }
 
 impl AsyncInProgress {
-    pub fn none() -> Self {
+    #[cfg(test)]
+    pub(crate) fn none() -> Self {
         Self {
             _dirty: None,
             _state: State::None,
             applied: None,
+            #[cfg(feature = "in-progress")]
+            in_progress_guard: None,
         }
     }
 
-    pub fn fullscan(tx: mpsc::Sender<()>) -> Self {
+    pub(crate) fn fullscan(tx: mpsc::Sender<()>) -> Self {
         Self {
             _dirty: None,
             _state: State::Fullscan(tx),
             applied: None,
+            #[cfg(feature = "in-progress")]
+            in_progress_guard: None,
         }
     }
 
@@ -84,6 +91,8 @@ impl AsyncInProgress {
                 timestamp,
             })),
             applied: None,
+            #[cfg(feature = "in-progress")]
+            in_progress_guard: None,
         }
     }
 
@@ -104,6 +113,8 @@ impl AsyncInProgress {
             _dirty: self._dirty.clone(),
             _state: State::None,
             applied: None,
+            #[cfg(feature = "in-progress")]
+            in_progress_guard: self.in_progress_guard.clone(),
         }
     }
 
@@ -136,5 +147,13 @@ impl AsyncInProgress {
     #[cfg(test)]
     pub(crate) fn is_fullscan(&self) -> bool {
         matches!(self._state, State::Fullscan(_))
+    }
+
+    #[cfg(feature = "in-progress")]
+    pub(crate) fn with_in_progress_guard(self, benches_guard: Option<mpsc::Sender<()>>) -> Self {
+        Self {
+            in_progress_guard: benches_guard,
+            ..self
+        }
     }
 }

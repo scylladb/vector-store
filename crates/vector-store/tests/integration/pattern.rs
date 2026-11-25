@@ -6,7 +6,9 @@
 use crate::create_config_channels;
 use crate::db_basic;
 use crate::db_basic::DbBasic;
-use crate::db_basic::ScanFn;
+use crate::db_basic::Index;
+use crate::db_basic::RangeScanFn;
+use crate::db_basic::TOKEN_MIN;
 use crate::db_basic::Table;
 use crate::wait_for;
 use httpapi::IndexOptions;
@@ -15,13 +17,14 @@ use httpapi::PatternIndexOptions;
 use httpapi::PostIndexLikeResponse;
 use httpclient::HttpClient;
 use reqwest::StatusCode;
+use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
+use scylla::routing::Token;
 use scylla::value::CqlValue;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
-use tokio::sync::mpsc::Sender;
 use uuid::Uuid;
 use vector_store::ColumnName;
 use vector_store::Config;
@@ -32,8 +35,6 @@ use vector_store::IndexMetadata;
 use vector_store::IndexOptionsPattern;
 use vector_store::NonemptyArc;
 use vector_store::NonemptyIteratorExt;
-use vector_store::Timestamp;
-use vector_store::node_state::NodeState;
 
 fn pattern_index_metadata(
     primary_key_columns: impl IntoIterator<Item = ColumnName>,
@@ -62,24 +63,26 @@ async fn setup_pattern_store(
     primary_keys: impl IntoIterator<Item = ColumnName>,
     partition_key_count: usize,
     columns: impl IntoIterator<Item = (ColumnName, NativeType)>,
-    fullscan_fn: Option<ScanFn>,
-    cdc_fn: Option<ScanFn>,
+    range_scan_fn: RangeScanFn,
     options: IndexOptionsPattern,
 ) -> (
     impl std::future::Future<Output = (HttpClient, impl Sized, impl Sized)>,
     IndexMetadata,
     DbBasic,
-    Sender<NodeState>,
 ) {
     let config = Config {
         vector_store_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
         ..Default::default()
     };
 
-    let node_state = vector_store::new_node_state().await;
-    let (db_actor, db) = db_basic::new(node_state.clone());
+    let db = db_basic::new();
 
-    let columns: Arc<HashMap<_, _>> = Arc::new(columns.into_iter().collect());
+    let columns: Arc<HashMap<_, _>> = Arc::new(
+        columns
+            .into_iter()
+            .map(|(name, column)| (name, ColumnType::Native(column)))
+            .collect(),
+    );
     let index = pattern_index_metadata(primary_keys, options);
 
     db.add_table(
@@ -94,27 +97,26 @@ async fn setup_pattern_store(
     )
     .unwrap();
 
-    db.add_index(index.clone(), fullscan_fn, cdc_fn).unwrap();
+    db.add_index(Index::new(index.clone()).with_range_scan(Token::new(TOKEN_MIN), range_scan_fn))
+        .unwrap();
 
     let (receivers, senders) = create_config_channels(config).await;
 
     let run = {
-        let node_state = node_state.clone();
+        let db = db.clone();
         async move {
-            let (server, _mtls) = vector_store::run(Some(node_state), Some(db_actor), receivers)
-                .await
-                .unwrap();
+            let (server, _mtls) = vector_store::run(db, receivers).await.unwrap();
             let addr = (*server.address().await.borrow()).unwrap();
 
             (HttpClient::new(addr), server, senders)
         }
     };
 
-    (run, index, db, node_state)
+    (run, index, db)
 }
 
 pub(crate) async fn setup_pattern_and_wait(
-    documents: impl IntoIterator<Item = (Vec<CqlValue>, &str, u64)>,
+    documents: impl IntoIterator<Item = (Vec<CqlValue>, &str, i64)>,
     expected_count: usize,
     options: IndexOptionsPattern,
 ) -> (
@@ -126,21 +128,17 @@ pub(crate) async fn setup_pattern_and_wait(
 ) {
     let docs: Vec<_> = documents
         .into_iter()
-        .map(|(pk, doc, ts)| {
-            (
-                pk.into_iter().collect(),
-                Some(doc.to_string()),
-                Timestamp::from_millis(ts),
-            )
-        })
+        .map(|(pk, doc, ts)| (pk, Some(doc.to_string()), ts))
         .collect();
 
-    let (run, index, db, node_state) = setup_pattern_store(
+    let (run, index, db) = setup_pattern_store(
         ["pk".into()],
         1,
-        [("pk".to_string().into(), NativeType::Int)],
-        Some(db_basic::scan_fn_documents(docs)),
-        None,
+        [
+            ("pk".to_string().into(), NativeType::Int),
+            ("content".to_string().into(), NativeType::Text),
+        ],
+        db_basic::range_scan_fn_documents(docs),
         options,
     )
     .await;
@@ -162,13 +160,7 @@ pub(crate) async fn setup_pattern_and_wait(
     )
     .await;
 
-    (
-        client,
-        keyspace_name,
-        index_name,
-        db,
-        (server, config_tx, node_state),
-    )
+    (client, keyspace_name, index_name, db, (server, config_tx))
 }
 
 #[tokio::test]
@@ -203,26 +195,26 @@ async fn pattern_index_visible_in_indexes() {
 async fn pattern_index_returns_proper_count() {
     crate::enable_tracing();
 
-    let (run, index, _db, _node_state) = setup_pattern_store(
+    let (run, index, _db) = setup_pattern_store(
         ["pk".into(), "ck".into()],
         1,
         [
             ("pk".to_string().into(), NativeType::Int),
             ("ck".to_string().into(), NativeType::Text),
+            ("content".to_string().into(), NativeType::Text),
         ],
-        Some(db_basic::scan_fn_documents([
+        db_basic::range_scan_fn_documents([
             (
-                [CqlValue::Int(1), CqlValue::Text("one".to_string())].into(),
+                [CqlValue::Int(1), CqlValue::Text("one".to_string())],
                 Some("hello world".to_string()),
-                Timestamp::from_millis(10),
+                10,
             ),
             (
-                [CqlValue::Int(2), CqlValue::Text("two".to_string())].into(),
+                [CqlValue::Int(2), CqlValue::Text("two".to_string())],
                 Some("foo bar".to_string()),
-                Timestamp::from_millis(20),
+                20,
             ),
-        ])),
-        None,
+        ]),
         IndexOptionsPattern::default(),
     )
     .await;
@@ -308,24 +300,26 @@ async fn pattern_back_to_back_updates_keep_one_latest_document_per_row() {
     crate::enable_tracing();
 
     const ROWS: i32 = 300;
-    const VERSIONS: u64 = 3;
+    const VERSIONS: i64 = 3;
     let rows = (0..ROWS).flat_map(|row| {
         (0..VERSIONS).map(move |version| {
             (
-                [CqlValue::Int(row)].into(),
+                [CqlValue::Int(row)],
                 Some(format!("r{row}v{version}")),
-                Timestamp::from_millis(10 + version),
+                10 + version,
             )
         })
     });
-    let scan = db_basic::scan_fn_documents(rows);
+    let scan = db_basic::range_scan_fn_documents(rows);
 
-    let (run, index, _db, _node_state) = setup_pattern_store(
+    let (run, index, _db) = setup_pattern_store(
         ["pk".into()],
         1,
-        [("pk".to_string().into(), NativeType::Int)],
-        Some(scan),
-        None,
+        [
+            ("pk".to_string().into(), NativeType::Int),
+            ("content".to_string().into(), NativeType::Text),
+        ],
+        scan,
         IndexOptionsPattern::default(),
     )
     .await;

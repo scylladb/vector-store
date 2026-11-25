@@ -15,6 +15,8 @@ use crate::TableName;
 use crate::Vector;
 use crate::db_value::DbRow;
 use ::scylla::cluster::metadata::Column;
+use ::scylla::cluster::metadata::ColumnKind;
+use ::scylla::cluster::metadata::ColumnType;
 use ::scylla::routing::Token;
 use futures::Stream;
 use futures::future::RemoteHandle;
@@ -26,6 +28,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
+#[derive(Debug, Clone)]
 pub struct DbIndexInfo {
     pub keyspace_name: KeyspaceName,
     pub index_name: IndexName,
@@ -33,16 +36,32 @@ pub struct DbIndexInfo {
     pub options: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct DbColumn {
+    pub typ: ColumnType<'static>,
+    pub kind: ColumnKind,
+}
+
+impl From<&Column> for DbColumn {
+    fn from(column: &Column) -> Self {
+        DbColumn {
+            typ: column.typ.clone(),
+            kind: column.kind.clone(),
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct CdcLogReaderConfig {
-    keyspace: Option<KeyspaceName>,
-    table_name: Option<TableName>,
-    consumer_factory: Option<Arc<dyn ConsumerFactory>>,
-    start_timestamp: Option<Duration>,
-    safety_interval: Option<Duration>,
-    sleep_interval: Option<Duration>,
-    should_save_progress: Option<bool>,
-    checkpoint_saver: Option<Arc<dyn CDCCheckpointSaver>>,
+    pub keyspace: Option<KeyspaceName>,
+    pub table_name: Option<TableName>,
+    pub index_name: Option<IndexName>,
+    pub consumer_factory: Option<Arc<dyn ConsumerFactory>>,
+    pub start_timestamp: Option<Duration>,
+    pub safety_interval: Option<Duration>,
+    pub sleep_interval: Option<Duration>,
+    pub should_save_progress: Option<bool>,
+    pub checkpoint_saver: Option<Arc<dyn CDCCheckpointSaver>>,
 }
 
 pub trait DbDriver: Clone + Send + Sync + 'static {
@@ -188,10 +207,12 @@ pub trait DbDriver: Clone + Send + Sync + 'static {
 
     fn clustering_key(&self, table: &Self::Table) -> impl Iterator<Item = ColumnName>;
 
-    fn columns<'a>(&self, table: &'a Self::Table)
-    -> impl Iterator<Item = (ColumnName, &'a Column)>;
+    fn columns<'a>(
+        &self,
+        table: &'a Self::Table,
+    ) -> impl Iterator<Item = (ColumnName, DbColumn)> + 'a;
 
-    fn column<'a>(&self, table: &'a Self::Table, column: &ColumnName) -> Option<&'a Column>;
+    fn column(&self, table: &Self::Table, column: &ColumnName) -> Option<DbColumn>;
 
     fn cdc_log_reader(
         &self,
@@ -207,6 +228,12 @@ pub trait DbDriver: Clone + Send + Sync + 'static {
     fn total_connections(&self, metrics: &Self::Metrics) -> u64;
 
     fn connection_timeouts(&self, metrics: &Self::Metrics) -> u64;
+
+    #[cfg(feature = "in-progress")]
+    fn make_in_progress_guard(
+        &self,
+        primary_key: &PrimaryKey,
+    ) -> Option<tokio::sync::mpsc::Sender<()>>;
 }
 
 impl CdcLogReaderConfig {
@@ -217,6 +244,11 @@ impl CdcLogReaderConfig {
 
     pub fn table_name(mut self, table_name: TableName) -> Self {
         self.table_name = Some(table_name);
+        self
+    }
+
+    pub fn index_name(mut self, index_name: IndexName) -> Self {
+        self.index_name = Some(index_name);
         self
     }
 
@@ -448,11 +480,11 @@ pub(crate) mod tests {
         fn columns<'a>(
             &self,
             _: &'a Self::Table,
-        ) -> impl Iterator<Item = (ColumnName, &'a Column)> {
+        ) -> impl Iterator<Item = (ColumnName, DbColumn)> + 'a {
             iter::from_fn(|| unimplemented!())
         }
 
-        fn column<'a>(&self, _: &'a Self::Table, _: &ColumnName) -> Option<&'a Column> {
+        fn column(&self, _: &Self::Table, _: &ColumnName) -> Option<DbColumn> {
             unimplemented!()
         }
 
@@ -477,6 +509,11 @@ pub(crate) mod tests {
         }
 
         fn connection_timeouts(&self, _: &Self::Metrics) -> u64 {
+            unimplemented!()
+        }
+
+        #[cfg(feature = "in-progress")]
+        fn make_in_progress_guard(&self, _: &PrimaryKey) -> Option<tokio::sync::mpsc::Sender<()>> {
             unimplemented!()
         }
     }

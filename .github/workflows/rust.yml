@@ -55,6 +55,9 @@ jobs:
     - name: Run cargo-clippy checks for test-hooks feature flag
       run: cargo clippy --features slow-test-hooks --all-targets --workspace -- -Dwarnings
 
+    - name: Run cargo-clippy checks for in-progress feature flag
+      run: cargo clippy --features in-progress --all-targets --workspace -- -Dwarnings
+
   cargo-fmt:
     needs: ["rust-check-code-changes"]
     if: needs.rust-check-code-changes.outputs.code-changed == 'true'
@@ -91,6 +94,22 @@ jobs:
 
     - name: Run cargo-test checks
       run: cargo test --features dev-tools,slow-test-hooks --verbose --all-targets --workspace
+
+  cargo-test-in-progress:
+    needs: ["rust-check-code-changes"]
+    if: needs.rust-check-code-changes.outputs.code-changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+    - name: Setup rust toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+
+    - name: Print rustc version
+      run: rustc --version
+
+    - name: Run cargo-test-in-progress checks
+      run: cargo test --features dev-tools,slow-test-hooks,in-progress --verbose --all-targets --workspace
 
   cargo-deny:
     needs: ["rust-check-code-changes"]
@@ -163,7 +182,7 @@ jobs:
         retention-days: 7
 
   rust-workflow-status:
-    needs: ["rust-check-code-changes", "cargo-clippy", "cargo-fmt", "cargo-test", "cargo-deny", "cargo-machete", "cargo-sbom"]
+    needs: ["rust-check-code-changes", "cargo-clippy", "cargo-fmt", "cargo-test", "cargo-test-in-progress", "cargo-deny", "cargo-machete", "cargo-sbom"]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -190,6 +209,11 @@ jobs:
 
         if [[ "${{ needs.cargo-test.result }}" == "failure" ]]; then
           echo "cargo-test job failed"
+          return_code=1
+        fi
+
+        if [[ "${{ needs.cargo-test-in-progress.result }}" == "failure" ]]; then
+          echo "cargo-test-in-progress job failed"
           return_code=1
         fi
 

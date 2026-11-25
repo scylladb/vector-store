@@ -7,10 +7,10 @@ mod alternator;
 mod async_in_progress;
 mod config_manager;
 mod cql_types;
-pub mod db;
+mod db;
 mod db_cdc;
 mod db_driver;
-pub mod db_index;
+mod db_index;
 mod db_value;
 mod distance;
 mod engine;
@@ -27,7 +27,7 @@ mod memory;
 mod metrics;
 mod monitor_indexes;
 mod monitor_items;
-pub mod node_state;
+mod node_state;
 mod nonempty;
 mod partition_key;
 mod pattern_index;
@@ -43,12 +43,13 @@ mod vector;
 mod vs_index;
 mod worker;
 
-pub use crate::async_in_progress::AsyncInProgress;
+use crate::async_in_progress::AsyncInProgress;
 pub use crate::config_manager::ConfigManager;
 pub use crate::config_manager::ConfigReceivers;
 pub use crate::config_manager::HttpServerConfig;
 pub use crate::config_manager::load_config;
 pub use crate::db_driver::CdcLogReaderConfig;
+pub use crate::db_driver::DbColumn;
 pub use crate::db_driver::DbDriver;
 pub use crate::db_driver::DbIndexInfo;
 pub use crate::db_value::DbRow;
@@ -60,24 +61,22 @@ pub use crate::index_key::IndexKey;
 use crate::indexes::Indexes;
 pub use crate::info::Info;
 use crate::metrics::Metrics;
-use crate::node_state::NodeState;
 pub use crate::nonempty::NonemptyArc;
-pub use crate::nonempty::NonemptyBox;
+use crate::nonempty::NonemptyBox;
 pub use crate::nonempty::NonemptyIteratorExt;
 pub use crate::partition_key::PartitionKey;
 pub use crate::primary_key::PrimaryKey;
 pub use crate::similarity::SimilarityScore;
 pub use crate::table::PartitionId;
 pub use crate::table::PrimaryId;
-pub use crate::timestamp::Timestamp;
-pub use crate::timestamp::Timestamped;
+use crate::timestamp::Timestamp;
+use crate::timestamp::Timestamped;
 pub use crate::tracing_output::TracingOutput;
 pub use crate::tracing_output::stdout_is_journal;
 pub use crate::tracing_output::stdout_is_terminal;
 pub use crate::tracing_output::tracing_layer;
 pub use crate::vector::Vector;
 use crate::vs_index::VsIndexFactory;
-use db::Db;
 use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
 use scylla::serialize::SerializationError;
@@ -88,6 +87,7 @@ use scylla::value::CqlValue;
 use scylla_cdc::CqlIdentifier;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::hash::Hash;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
@@ -500,7 +500,18 @@ impl FromStr for SpaceType {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
+impl Display for SpaceType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Euclidean => write!(f, "EUCLIDEAN"),
+            Self::Cosine => write!(f, "COSINE"),
+            Self::DotProduct => write!(f, "DOT_PRODUCT"),
+            Self::Hamming => write!(f, "HAMMING"),
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default, derive_more::Display)]
 /// Represents the quantization type for vectors.
 ///
 /// Quantization is a process that reduces the precision of floating-point numbers,
@@ -589,7 +600,17 @@ fn parse_bool_option(option: &str, value: &str) -> anyhow::Result<bool> {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, derive_more::AsRef, derive_more::From)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    derive_more::Display,
+    derive_more::AsRef,
+    derive_more::From,
+)]
 /// Whether a full-text index stores token positions, which are required by phrase queries.
 pub struct Positions(bool);
 
@@ -607,7 +628,17 @@ impl FromStr for Positions {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, derive_more::AsRef, derive_more::From)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    derive_more::Display,
+    derive_more::AsRef,
+    derive_more::From,
+)]
 /// Whether a pattern index distinguishes letter case. When false: values (documents) and
 /// patterns are lowercased.
 pub struct CaseSensitive(bool);
@@ -713,7 +744,7 @@ pub struct Filter {
     pub allow_filtering: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, derive_more::From)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, derive_more::Display, derive_more::From)]
 pub struct IndexVersion(Uuid);
 
 impl IndexVersion {
@@ -938,16 +969,16 @@ pub enum DbIndexedValue {
 
 /// The operation read from a CDC row or full scan.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DbIndexedOperation {
+enum DbIndexedOperation {
     Upsert(NonemptyBox<Timestamped<DbIndexedValue>>),
     Delete(Timestamp),
 }
 
 /// A row read from a CDC row or full scan, containing the primary key and the operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DbIndexedRow {
-    pub primary_key: PrimaryKey,
-    pub operation: DbIndexedOperation,
+struct DbIndexedRow {
+    pub(crate) primary_key: PrimaryKey,
+    pub(crate) operation: DbIndexedOperation,
 }
 
 #[derive(Debug, derive_more::Display)]
@@ -977,21 +1008,15 @@ pub fn block_on<Output>(threads: Option<usize>, f: impl AsyncFnOnce() -> Output)
 }
 
 pub async fn run(
-    node_state: Option<Sender<NodeState>>,
-    db_actor: Option<Sender<Db>>,
+    db_driver: impl DbDriver,
     config_receivers: ConfigReceivers,
 ) -> anyhow::Result<(Sender<HttpServer>, Sender<HttpServer>)> {
-    let node_state = if let Some(node_state) = node_state {
-        node_state
-    } else {
-        new_node_state().await
-    };
+    let node_state = node_state::new().await;
 
     let config_rx = config_receivers.config.clone();
     let opensearch_addr = config_rx.borrow().opensearch_addr.clone();
     let diskann_backend = config_rx.borrow().diskann_backend;
 
-    let db_driver = db_driver::new_scylla();
     let internals = internals::new(db_driver.clone());
     let memory = memory::new(internals.clone(), config_rx.clone());
     let worker = worker::new();
@@ -1008,18 +1033,14 @@ pub async fn run(
     };
 
     let metrics = Arc::new(Metrics::new());
-    let db_actor = if let Some(db_actor) = db_actor {
-        db_actor
-    } else {
-        db::new(
-            node_state.clone(),
-            internals.clone(),
-            config_rx,
-            db_driver,
-            Arc::clone(&metrics),
-        )
-        .await?
-    };
+    let db_actor = db::new(
+        node_state.clone(),
+        internals.clone(),
+        config_rx,
+        db_driver,
+        Arc::clone(&metrics),
+    )
+    .await?;
 
     let index_engine_version = vs_index_factory.index_engine_version();
     let indexes = Arc::new(RwLock::new(Indexes::new()));
@@ -1066,8 +1087,8 @@ pub async fn run(
     Ok((main, mtls))
 }
 
-pub async fn new_node_state() -> Sender<NodeState> {
-    node_state::new().await
+pub fn new_db_driver() -> impl DbDriver {
+    db_driver::new_scylla()
 }
 
 pub fn openapi() -> OpenApi {
@@ -1093,12 +1114,12 @@ pub async fn wait_for_shutdown() {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Percentage {
+pub(crate) struct Percentage {
     value: f64,
 }
 
 impl Percentage {
-    pub fn get(&self) -> f64 {
+    pub(crate) fn get(&self) -> f64 {
         self.value
     }
 }
@@ -1118,7 +1139,7 @@ impl TryFrom<f64> for Percentage {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Progress {
+pub(crate) enum Progress {
     Done,
     InProgress(Percentage),
 }

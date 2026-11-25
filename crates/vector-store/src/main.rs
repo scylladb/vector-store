@@ -86,7 +86,8 @@ fn main() -> anyhow::Result<()> {
         // Start SIGHUP handler now that we're in the Tokio runtime
         config_manager.start(dotenvy_to_std_var);
 
-        let (server, _mtls) = vector_store::run(None, None, config_receivers).await?;
+        let db_driver = vector_store::new_db_driver();
+        let (server, _mtls) = vector_store::run(db_driver, config_receivers).await?;
         let addr = (*server.address().await.borrow())
             .ok_or_else(|| anyhow!("failed to get server address"))?;
         tracing::info!("listening on {addr}");

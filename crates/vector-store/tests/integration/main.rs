@@ -7,6 +7,7 @@ mod common;
 mod db_basic;
 mod fts;
 mod https;
+mod index_build;
 mod index_info;
 mod index_status;
 mod info;
@@ -43,7 +44,7 @@ fn enable_tracing() {
     INIT_TRACING.call_once(|| {
         tracing_subscriber::registry()
             .with(EnvFilter::try_new("info").unwrap())
-            .with(fmt::layer().with_target(false))
+            .with(fmt::layer().with_test_writer().with_target(false))
             .init();
     });
 }

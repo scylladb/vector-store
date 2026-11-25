@@ -5,6 +5,8 @@
 
 use crate::create_config_channels;
 use crate::db_basic;
+use crate::db_basic::Index;
+use crate::db_basic::TOKEN_MIN;
 use crate::db_basic::Table;
 use crate::mock_opensearch;
 use crate::vs_index::usearch_test_config;
@@ -14,7 +16,9 @@ use httpapi::PostIndexAnnRequest;
 use httpapi::PostIndexAnnResponse;
 use httpclient::HttpClient;
 use reqwest::StatusCode;
+use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
+use scylla::routing::Token;
 use scylla::value::CqlValue;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -29,13 +33,11 @@ use vector_store::IndexMetadata;
 use vector_store::IndexOptionsVs;
 use vector_store::NonemptyArc;
 use vector_store::SpaceType::Euclidean;
-use vector_store::Timestamp;
 
 #[tokio::test]
 async fn simple_create_search_delete_index() {
     crate::enable_tracing();
-    let node_state = vector_store::new_node_state().await;
-    let (db_actor, db) = db_basic::new(node_state.clone());
+    let db = db_basic::new();
 
     let index = IndexMetadata {
         keyspace_name: "vector".into(),
@@ -64,9 +66,7 @@ async fn simple_create_search_delete_index() {
         ..usearch_test_config()
     })
     .await;
-    let (server, _mtls) = vector_store::run(Some(node_state), Some(db_actor), receivers)
-        .await
-        .unwrap();
+    let (server, _mtls) = vector_store::run(db.clone(), receivers).await.unwrap();
     let addr = (*server.address().await.borrow()).unwrap();
 
     let client = HttpClient::new(addr);
@@ -79,8 +79,8 @@ async fn simple_create_search_delete_index() {
             partition_key_count: 1,
             columns: Arc::new(
                 [
-                    ("pk".into(), NativeType::Int),
-                    ("ck".into(), NativeType::Text),
+                    ("pk".into(), ColumnType::Native(NativeType::Int)),
+                    ("ck".into(), ColumnType::Native(NativeType::Text)),
                 ]
                 .into_iter()
                 .collect(),
@@ -94,30 +94,29 @@ async fn simple_create_search_delete_index() {
         },
     )
     .unwrap();
-    db.add_index(
-        index.clone(),
-        Some(db_basic::scan_fn_vectors([
+    db.add_index(Index::new(index.clone()).with_range_scan(
+        Token::new(TOKEN_MIN),
+        db_basic::range_scan_fn_vectors([
             (
-                [CqlValue::Int(1), CqlValue::Text("one".to_string())].into(),
+                [CqlValue::Int(1), CqlValue::Text("one".to_string())],
                 Some(vec![1., 1., 1.].into()),
-                [].into(),
-                Timestamp::from_millis(10),
+                [],
+                10,
             ),
             (
-                [CqlValue::Int(2), CqlValue::Text("two".to_string())].into(),
+                [CqlValue::Int(2), CqlValue::Text("two".to_string())],
                 Some(vec![2., -2., 2.].into()),
-                [].into(),
-                Timestamp::from_millis(20),
+                [],
+                20,
             ),
             (
-                [CqlValue::Int(3), CqlValue::Text("three".to_string())].into(),
+                [CqlValue::Int(3), CqlValue::Text("three".to_string())],
                 Some(vec![3., 3., 3.].into()),
-                [].into(),
-                Timestamp::from_millis(30),
+                [],
+                30,
             ),
-        ])),
-        None,
-    )
+        ]),
+    ))
     .unwrap();
 
     let keyspace_name = index.keyspace_name.clone().into();
@@ -170,8 +169,7 @@ async fn simple_create_search_delete_index() {
 #[tokio::test]
 async fn ann_returns_requested_column_values() {
     crate::enable_tracing();
-    let node_state = vector_store::new_node_state().await;
-    let (db_actor, db) = db_basic::new(node_state.clone());
+    let db = db_basic::new();
 
     let index = IndexMetadata {
         keyspace_name: "vector".into(),
@@ -200,9 +198,7 @@ async fn ann_returns_requested_column_values() {
         ..usearch_test_config()
     })
     .await;
-    let (server, _mtls) = vector_store::run(Some(node_state), Some(db_actor), receivers)
-        .await
-        .unwrap();
+    let (server, _mtls) = vector_store::run(db.clone(), receivers).await.unwrap();
     let addr = (*server.address().await.borrow()).unwrap();
 
     let client = HttpClient::new(addr);
@@ -215,8 +211,8 @@ async fn ann_returns_requested_column_values() {
             partition_key_count: 1,
             columns: Arc::new(
                 [
-                    ("pk".into(), NativeType::Int),
-                    ("color".into(), NativeType::Text),
+                    ("pk".into(), ColumnType::Native(NativeType::Int)),
+                    ("color".into(), ColumnType::Native(NativeType::Text)),
                 ]
                 .into_iter()
                 .collect(),
@@ -230,33 +226,32 @@ async fn ann_returns_requested_column_values() {
         },
     )
     .unwrap();
-    db.add_index(
-        index.clone(),
-        Some(db_basic::scan_fn_vectors([
+    db.add_index(Index::new(index.clone()).with_range_scan(
+        Token::new(TOKEN_MIN),
+        db_basic::range_scan_fn_vectors([
             (
-                [CqlValue::Int(1)].into(),
+                [CqlValue::Int(1)],
                 Some(vec![1., 1., 1.].into()),
-                [Some(CqlValue::Text("red".to_string()))].into(),
-                Timestamp::from_millis(10),
+                [Some(CqlValue::Text("red".to_string()))],
+                10,
             ),
             (
                 // No "color" stored for this row: it must come back as
                 // null, not be silently omitted or default to a bogus
                 // value.
-                [CqlValue::Int(2)].into(),
+                [CqlValue::Int(2)],
                 Some(vec![2., -2., 2.].into()),
-                [None].into(),
-                Timestamp::from_millis(20),
+                [None],
+                20,
             ),
             (
-                [CqlValue::Int(3)].into(),
+                [CqlValue::Int(3)],
                 Some(vec![3., 3., 3.].into()),
-                [Some(CqlValue::Text("blue".to_string()))].into(),
-                Timestamp::from_millis(30),
+                [Some(CqlValue::Text("blue".to_string()))],
+                30,
             ),
-        ])),
-        None,
-    )
+        ]),
+    ))
     .unwrap();
 
     let keyspace_name = index.keyspace_name.clone().into();
@@ -328,8 +323,7 @@ async fn ann_returns_requested_column_values() {
 #[tokio::test]
 async fn ann_skips_stale_opensearch_hit() {
     crate::enable_tracing();
-    let node_state = vector_store::new_node_state().await;
-    let (db_actor, db) = db_basic::new(node_state.clone());
+    let db = db_basic::new();
 
     let index = IndexMetadata {
         keyspace_name: "vector".into(),
@@ -358,9 +352,7 @@ async fn ann_skips_stale_opensearch_hit() {
         ..usearch_test_config()
     })
     .await;
-    let (server, _mtls) = vector_store::run(Some(node_state), Some(db_actor), receivers)
-        .await
-        .unwrap();
+    let (server, _mtls) = vector_store::run(db.clone(), receivers).await.unwrap();
     let addr = (*server.address().await.borrow()).unwrap();
 
     let client = HttpClient::new(addr);
@@ -371,7 +363,11 @@ async fn ann_skips_stale_opensearch_hit() {
         Table {
             primary_keys: NonemptyArc::new(["pk"]).unwrap(),
             partition_key_count: 1,
-            columns: Arc::new([("pk".into(), NativeType::Int)].into_iter().collect()),
+            columns: Arc::new(
+                [("pk".into(), ColumnType::Native(NativeType::Int))]
+                    .into_iter()
+                    .collect(),
+            ),
             dimensions: [(
                 index.target_columns.first().clone(),
                 index.vs().unwrap().dimensions,
@@ -381,16 +377,15 @@ async fn ann_skips_stale_opensearch_hit() {
         },
     )
     .unwrap();
-    db.add_index(
-        index.clone(),
-        Some(db_basic::scan_fn_vectors([(
-            [CqlValue::Int(1)].into(),
+    db.add_index(Index::new(index.clone()).with_range_scan(
+        Token::new(TOKEN_MIN),
+        db_basic::range_scan_fn_vectors([(
+            [CqlValue::Int(1)],
             Some(vec![1., 1., 1.].into()),
-            [].into(),
-            Timestamp::from_millis(10),
-        )])),
-        None,
-    )
+            [],
+            10,
+        )]),
+    ))
     .unwrap();
 
     let keyspace_name = index.keyspace_name.clone().into();

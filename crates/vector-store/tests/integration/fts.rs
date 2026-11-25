@@ -6,20 +6,24 @@
 use crate::create_config_channels;
 use crate::db_basic;
 use crate::db_basic::DbBasic;
-use crate::db_basic::ScanFn;
+use crate::db_basic::Index;
+use crate::db_basic::RangeScanFn;
+use crate::db_basic::TOKEN_MAX;
+use crate::db_basic::TOKEN_MIN;
 use crate::db_basic::Table;
 use crate::wait_for;
 use httpapi::IndexNotReadyReason;
 use httpapi::IndexStatus;
 use httpclient::HttpClient;
 use reqwest::StatusCode;
+use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
+use scylla::routing::Token;
 use scylla::value::CqlValue;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
-use tokio::sync::mpsc::Sender;
 use uuid::Uuid;
 use vector_store::ColumnName;
 use vector_store::Config;
@@ -30,9 +34,6 @@ use vector_store::IndexMetadata;
 use vector_store::IndexOptionsFts;
 use vector_store::NonemptyArc;
 use vector_store::NonemptyIteratorExt;
-use vector_store::Percentage;
-use vector_store::Timestamp;
-use vector_store::node_state::NodeState;
 
 fn fts_index_metadata(primary_key_columns: impl IntoIterator<Item = ColumnName>) -> IndexMetadata {
     let primary_key_columns = primary_key_columns
@@ -58,23 +59,25 @@ async fn setup_fts_store(
     primary_keys: impl IntoIterator<Item = ColumnName>,
     partition_key_count: usize,
     columns: impl IntoIterator<Item = (ColumnName, NativeType)>,
-    fullscan_fn: Option<ScanFn>,
-    cdc_fn: Option<ScanFn>,
+    range_scan_fn: RangeScanFn,
 ) -> (
     impl std::future::Future<Output = (HttpClient, impl Sized, impl Sized)>,
     IndexMetadata,
     DbBasic,
-    Sender<NodeState>,
 ) {
     let config = Config {
         vector_store_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
         ..Default::default()
     };
 
-    let node_state = vector_store::new_node_state().await;
-    let (db_actor, db) = db_basic::new(node_state.clone());
+    let db = db_basic::new();
 
-    let columns: Arc<HashMap<_, _>> = Arc::new(columns.into_iter().collect());
+    let columns: Arc<HashMap<_, _>> = Arc::new(
+        columns
+            .into_iter()
+            .map(|(name, column)| (name, ColumnType::Native(column)))
+            .collect(),
+    );
     let index = fts_index_metadata(primary_keys);
 
     db.add_table(
@@ -89,49 +92,48 @@ async fn setup_fts_store(
     )
     .unwrap();
 
-    db.add_index(index.clone(), fullscan_fn, cdc_fn).unwrap();
+    db.add_index(Index::new(index.clone()).with_range_scan(Token::new(TOKEN_MIN), range_scan_fn))
+        .unwrap();
 
     let (receivers, senders) = create_config_channels(config).await;
 
     let run = {
-        let node_state = node_state.clone();
+        let db = db.clone();
         async move {
-            let (server, _mtls) = vector_store::run(Some(node_state), Some(db_actor), receivers)
-                .await
-                .unwrap();
+            let (server, _mtls) = vector_store::run(db, receivers).await.unwrap();
             let addr = (*server.address().await.borrow()).unwrap();
 
             (HttpClient::new(addr), server, senders)
         }
     };
 
-    (run, index, db, node_state)
+    (run, index, db)
 }
 
 #[tokio::test]
 async fn fts_index_returns_proper_count() {
     crate::enable_tracing();
 
-    let (run, index, _db, _node_state) = setup_fts_store(
+    let (run, index, _db) = setup_fts_store(
         ["pk".into(), "ck".into()],
         1,
         [
             ("pk".to_string().into(), NativeType::Int),
             ("ck".to_string().into(), NativeType::Text),
+            ("content".to_string().into(), NativeType::Text),
         ],
-        Some(db_basic::scan_fn_documents([
+        db_basic::range_scan_fn_documents([
             (
-                [CqlValue::Int(1), CqlValue::Text("one".to_string())].into(),
+                [CqlValue::Int(1), CqlValue::Text("one".to_string())],
                 Some("hello world".to_string()),
-                Timestamp::from_millis(10),
+                10,
             ),
             (
-                [CqlValue::Int(2), CqlValue::Text("two".to_string())].into(),
+                [CqlValue::Int(2), CqlValue::Text("two".to_string())],
                 Some("foo bar".to_string()),
-                Timestamp::from_millis(20),
+                20,
             ),
-        ])),
-        None,
+        ]),
     )
     .await;
 
@@ -153,7 +155,7 @@ async fn fts_index_returns_proper_count() {
 }
 
 pub(crate) async fn setup_fts_and_wait(
-    documents: impl IntoIterator<Item = (Vec<CqlValue>, &str, u64)>,
+    documents: impl IntoIterator<Item = (Vec<CqlValue>, &str, i64)>,
     expected_count: usize,
 ) -> (
     HttpClient,
@@ -164,21 +166,17 @@ pub(crate) async fn setup_fts_and_wait(
 ) {
     let docs: Vec<_> = documents
         .into_iter()
-        .map(|(pk, doc, ts)| {
-            (
-                pk.into_iter().collect(),
-                Some(doc.to_string()),
-                Timestamp::from_millis(ts),
-            )
-        })
+        .map(|(pk, doc, ts)| (pk, Some(doc.to_string()), ts))
         .collect();
 
-    let (run, index, db, node_state) = setup_fts_store(
+    let (run, index, db) = setup_fts_store(
         ["pk".into()],
         1,
-        [("pk".to_string().into(), NativeType::Int)],
-        Some(db_basic::scan_fn_documents(docs)),
-        None,
+        [
+            ("pk".to_string().into(), NativeType::Int),
+            ("content".to_string().into(), NativeType::Text),
+        ],
+        db_basic::range_scan_fn_documents(docs),
     )
     .await;
 
@@ -199,13 +197,7 @@ pub(crate) async fn setup_fts_and_wait(
     )
     .await;
 
-    (
-        client,
-        keyspace_name,
-        index_name,
-        db,
-        (server, config_tx, node_state),
-    )
+    (client, keyspace_name, index_name, db, (server, config_tx))
 }
 
 #[tokio::test]
@@ -332,12 +324,14 @@ async fn fts_bm25_search_returns_503_and_node_bootstrapping_reason_when_index_is
  {
     crate::enable_tracing();
 
-    let (run, index, _db, _node_state) = setup_fts_store(
+    let (run, index, _db) = setup_fts_store(
         ["pk".into()],
         1,
-        [("pk".to_string().into(), NativeType::Int)],
-        Some(db_basic::pending_scan_fn()),
-        None,
+        [
+            ("pk".to_string().into(), NativeType::Int),
+            ("content".to_string().into(), NativeType::Text),
+        ],
+        db_basic::pending_range_scan_fn(),
     )
     .await;
     let (client, _server, _config_tx) = run.await;
@@ -384,11 +378,16 @@ async fn fts_bm25_search_returns_503_and_index_building_reason_when_index_is_bui
         index_name: "fts_idx_building".into(),
         ..fts_index_metadata([ColumnName::from("pk")])
     };
-    db.add_index(index.clone(), Some(db_basic::pending_scan_fn()), None)
-        .unwrap();
-    db.set_next_full_scan_progress(vector_store::Progress::InProgress(
-        Percentage::try_from(75.0).unwrap(),
-    ));
+    db.set_token_ring(vec![
+        Token::new(TOKEN_MIN / 2),
+        Token::new(0),
+        Token::new(TOKEN_MAX / 2),
+    ]);
+    db.add_index(
+        Index::new(index.clone())
+            .with_range_scan(Token::new(TOKEN_MIN), db_basic::pending_range_scan_fn()),
+    )
+    .unwrap();
 
     let keyspace_name = index.keyspace_name.clone().into();
     let index_name = index.index_name.clone().into();
@@ -398,7 +397,9 @@ async fn fts_bm25_search_returns_503_and_index_building_reason_when_index_is_bui
             client
                 .index_status(&keyspace_name, &index_name)
                 .await
-                .is_ok_and(|status| status.status == IndexStatus::Bootstrapping)
+                .is_ok_and(|status| {
+                    status.status == IndexStatus::Bootstrapping && status.build_progress == 75.0
+                })
         },
         "Waiting for FTS index to be bootstrapping",
     )
@@ -601,19 +602,14 @@ async fn fts_highlight_unparsable_query_returns_400() {
 async fn fts_highlight_not_serving_returns_503() {
     crate::enable_tracing();
 
-    let fullscan_fn = |_| {
-        use futures::FutureExt;
-        async move {
-            std::future::pending::<()>().await;
-        }
-        .boxed()
-    };
-    let (run, index, _db, _node_state) = setup_fts_store(
+    let (run, index, _db) = setup_fts_store(
         ["pk".into()],
         1,
-        [("pk".to_string().into(), NativeType::Int)],
-        Some(Box::new(fullscan_fn)),
-        None,
+        [
+            ("pk".to_string().into(), NativeType::Int),
+            ("content".to_string().into(), NativeType::Text),
+        ],
+        db_basic::pending_range_scan_fn(),
     )
     .await;
     let (client, _server, _config_tx) = run.await;
@@ -648,24 +644,26 @@ async fn fts_back_to_back_updates_keep_one_latest_document_per_row() {
     crate::enable_tracing();
 
     const ROWS: i32 = 300;
-    const VERSIONS: u64 = 3;
+    const VERSIONS: i64 = 3;
     let rows = (0..ROWS).flat_map(|row| {
         (0..VERSIONS).map(move |version| {
             (
-                [CqlValue::Int(row)].into(),
+                [CqlValue::Int(row)],
                 Some(format!("r{row}v{version}")),
-                Timestamp::from_millis(10 + version),
+                10 + version,
             )
         })
     });
-    let scan = db_basic::scan_fn_documents(rows);
+    let scan = db_basic::range_scan_fn_documents(rows);
 
-    let (run, index, _db, _node_state) = setup_fts_store(
+    let (run, index, _db) = setup_fts_store(
         ["pk".into()],
         1,
-        [("pk".to_string().into(), NativeType::Int)],
-        Some(scan),
-        None,
+        [
+            ("pk".to_string().into(), NativeType::Int),
+            ("content".to_string().into(), NativeType::Text),
+        ],
+        scan,
     )
     .await;
     let (client, _server, _config_tx) = run.await;

@@ -7,8 +7,11 @@ use crate::Duration;
 use crate::create_config_channels;
 use crate::db_basic;
 use crate::db_basic::DbBasic;
-use crate::db_basic::ScanFn;
-use crate::db_basic::StoreVectors;
+use crate::db_basic::FetchVector;
+use crate::db_basic::Index;
+use crate::db_basic::RangeScanFn;
+use crate::db_basic::TOKEN_MAX;
+use crate::db_basic::TOKEN_MIN;
 use crate::db_basic::Table;
 use crate::wait_for;
 use crate::wait_for_value;
@@ -21,7 +24,9 @@ use httpapi::PostIndexAnnRestriction;
 use httpclient::HttpClient;
 use reqwest::StatusCode;
 use rstest::rstest;
+use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
+use scylla::routing::Token;
 use scylla::value::Counter;
 use scylla::value::CqlValue;
 use serde_json::Value;
@@ -33,7 +38,8 @@ use std::net::Ipv6Addr;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
-use tokio::sync::mpsc::Sender;
+use tap::Pipe;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 use vector_store::ColumnName;
 use vector_store::Config;
@@ -49,11 +55,8 @@ use vector_store::IndexMetadata;
 use vector_store::IndexOptionsVs;
 use vector_store::NonemptyArc;
 use vector_store::NonemptyIteratorExt;
-use vector_store::Percentage;
 use vector_store::Quantization;
 use vector_store::SpaceType;
-use vector_store::Timestamp;
-use vector_store::node_state::NodeState;
 
 pub(crate) fn usearch_test_config() -> Config {
     Config {
@@ -70,12 +73,6 @@ fn diskann_test_config() -> Config {
     }
 }
 
-/// The DiskANN Scylla backend re-reads the vectors it indexed from the base
-/// table, so the db mock has to keep them.
-fn store_vectors(config: &Config) -> StoreVectors {
-    (config.diskann_backend == Some(DiskannBackendKind::Scylla)).into()
-}
-
 fn diskann_scylla_test_config() -> Config {
     Config {
         vector_store_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
@@ -90,13 +87,12 @@ pub(crate) async fn setup_store(
     primary_keys: impl IntoIterator<Item = ColumnName>,
     partition_key_count: usize,
     columns: impl IntoIterator<Item = (ColumnName, NativeType)>,
-    fullscan_fn: Option<ScanFn>,
-    cdc_fn: Option<ScanFn>,
+    range_scan_fn: Option<RangeScanFn>,
+    fetch_vector: Option<mpsc::Sender<FetchVector>>,
 ) -> (
     impl std::future::Future<Output = (HttpClient, impl Sized, impl Sized)>,
     IndexMetadata,
     DbBasic,
-    Sender<NodeState>,
 ) {
     setup_store_with_quantization(
         config,
@@ -104,8 +100,8 @@ pub(crate) async fn setup_store(
         primary_keys,
         partition_key_count,
         columns,
-        fullscan_fn,
-        cdc_fn,
+        range_scan_fn,
+        fetch_vector,
         Quantization::default(),
         NonZeroUsize::new(3).unwrap().into(),
     )
@@ -119,22 +115,24 @@ pub(crate) async fn setup_store_with_quantization(
     primary_keys: impl IntoIterator<Item = ColumnName>,
     partition_key_count: usize,
     columns: impl IntoIterator<Item = (ColumnName, NativeType)>,
-    fullscan_fn: Option<ScanFn>,
-    cdc_fn: Option<ScanFn>,
+    range_scan_fn: Option<RangeScanFn>,
+    fetch_vector: Option<mpsc::Sender<FetchVector>>,
     quantization: Quantization,
     dimension: Dimensions,
 ) -> (
     impl std::future::Future<Output = (HttpClient, impl Sized, impl Sized)>,
     IndexMetadata,
     DbBasic,
-    Sender<NodeState>,
 ) {
-    let node_state = vector_store::new_node_state().await;
-
-    let (db_actor, db) = db_basic::new_with(node_state.clone(), store_vectors(&config));
+    let db = db_basic::new();
 
     let primary_keys = primary_keys.into_iter().collect_nonempty_arc().unwrap();
-    let columns: Arc<HashMap<_, _>> = Arc::new(columns.into_iter().collect());
+    let columns: Arc<HashMap<_, _>> = Arc::new(
+        columns
+            .into_iter()
+            .map(|(name, column)| (name, ColumnType::Native(column)))
+            .collect(),
+    );
     let filtering_columns = columns
         .keys()
         .filter(|c| !primary_keys.contains(c))
@@ -178,23 +176,38 @@ pub(crate) async fn setup_store_with_quantization(
     )
     .unwrap();
 
-    db.add_index(index.clone(), fullscan_fn, cdc_fn).unwrap();
+    db.add_index(
+        Index::new(index.clone())
+            .pipe(|index| {
+                if let Some(range_scan_fn) = range_scan_fn {
+                    index.with_range_scan(Token::new(TOKEN_MIN), range_scan_fn)
+                } else {
+                    index
+                }
+            })
+            .pipe(|index| {
+                if let Some(fetch_vector) = fetch_vector {
+                    index.with_fetch_vector(fetch_vector)
+                } else {
+                    index
+                }
+            }),
+    )
+    .unwrap();
 
     let (receivers, senders) = create_config_channels(config).await;
 
     let run = {
-        let node_state = node_state.clone();
+        let db = db.clone();
         async move {
-            let (server, _mtls) = vector_store::run(Some(node_state), Some(db_actor), receivers)
-                .await
-                .unwrap();
+            let (server, _mtls) = vector_store::run(db, receivers).await.unwrap();
             let addr = (*server.address().await.borrow()).unwrap();
 
             (HttpClient::new(addr), server, senders)
         }
     };
 
-    (run, index, db, node_state)
+    (run, index, db)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -204,24 +217,18 @@ pub(crate) async fn setup_store_and_wait_for_index(
     primary_keys: impl IntoIterator<Item = ColumnName>,
     partition_key_count: usize,
     columns: impl IntoIterator<Item = (ColumnName, NativeType)>,
-    fullscan_fn: Option<ScanFn>,
-    cdc_fn: Option<ScanFn>,
+    range_scan_fn: Option<RangeScanFn>,
+    fetch_vector: Option<mpsc::Sender<FetchVector>>,
     expected_count: Option<usize>,
-) -> (
-    IndexMetadata,
-    HttpClient,
-    DbBasic,
-    impl Sized,
-    Sender<NodeState>,
-) {
-    let (run, index, db, node_state) = setup_store(
+) -> (IndexMetadata, HttpClient, DbBasic, impl Sized) {
+    let (run, index, db) = setup_store(
         config,
         partitioning,
         primary_keys,
         partition_key_count,
         columns,
-        fullscan_fn,
-        cdc_fn,
+        range_scan_fn,
+        fetch_vector,
     )
     .await;
     let (client, server, _config_tx) = run.await;
@@ -243,7 +250,7 @@ pub(crate) async fn setup_store_and_wait_for_index(
     )
     .await;
 
-    (index, client, db, (server, _config_tx), node_state)
+    (index, client, db, (server, _config_tx))
 }
 
 #[rstest]
@@ -254,7 +261,7 @@ pub(crate) async fn setup_store_and_wait_for_index(
 async fn simple_create_search_delete_index(#[case] config: Config) {
     crate::enable_tracing();
 
-    let (run, index, db, _node_state) = setup_store(
+    let (run, index, db) = setup_store(
         config,
         DbIndexPartitioning::Global,
         ["pk".into(), "ck".into()],
@@ -263,27 +270,32 @@ async fn simple_create_search_delete_index(#[case] config: Config) {
             ("pk".to_string().into(), NativeType::Int),
             ("ck".to_string().into(), NativeType::Text),
         ],
-        Some(db_basic::scan_fn_vectors([
+        Some(db_basic::range_scan_fn_vectors([
             (
-                [CqlValue::Int(1), CqlValue::Text("one".to_string())].into(),
+                [CqlValue::Int(1), CqlValue::Text("one".to_string())],
                 Some(vec![1., 1., 1.].into()),
-                [].into(),
-                Timestamp::from_millis(10),
+                [],
+                10,
             ),
             (
-                [CqlValue::Int(2), CqlValue::Text("two".to_string())].into(),
+                [CqlValue::Int(2), CqlValue::Text("two".to_string())],
                 Some(vec![2., -2., 2.].into()),
-                [].into(),
-                Timestamp::from_millis(20),
+                [],
+                20,
             ),
             (
-                [CqlValue::Int(3), CqlValue::Text("three".to_string())].into(),
+                [CqlValue::Int(3), CqlValue::Text("three".to_string())],
                 Some(vec![3., 3., 3.].into()),
-                [].into(),
-                Timestamp::from_millis(30),
+                [],
+                30,
             ),
         ])),
-        None,
+        Some(db_basic::fetch_vector(|pk| match pk.get(0).unwrap() {
+            CqlValue::Int(1) => Ok(Some(vec![1., 1., 1.].into())),
+            CqlValue::Int(2) => Ok(Some(vec![2., -2., 2.].into())),
+            CqlValue::Int(3) => Ok(Some(vec![3., 3., 3.].into())),
+            _ => panic!("Unexpected primary key: {:?}", pk),
+        })),
     )
     .await;
     let (client, _server, _config_tx) = run.await;
@@ -343,8 +355,7 @@ async fn simple_create_search_delete_index(#[case] config: Config) {
 async fn failed_db_index_create(#[case] config: Config) {
     crate::enable_tracing();
 
-    let node_state = vector_store::new_node_state().await;
-    let (db_actor, db) = db_basic::new_with(node_state.clone(), store_vectors(&config));
+    let db = db_basic::new();
 
     let index = IndexMetadata {
         keyspace_name: "vector".into(),
@@ -368,14 +379,12 @@ async fn failed_db_index_create(#[case] config: Config) {
     };
 
     let (receivers, _senders) = create_config_channels(config).await;
-    let (server, _mtls) = vector_store::run(Some(node_state), Some(db_actor), receivers)
-        .await
-        .unwrap();
+    let (server, _mtls) = vector_store::run(db.clone(), receivers).await.unwrap();
     let addr = (*server.address().await.borrow()).unwrap();
 
     let client = HttpClient::new(addr);
 
-    db.set_next_get_db_index_failed();
+    db.set_next_await_schema_agreement_failed();
 
     db.add_table(
         index.keyspace_name.clone(),
@@ -385,8 +394,8 @@ async fn failed_db_index_create(#[case] config: Config) {
             partition_key_count: 1,
             columns: Arc::new(
                 [
-                    ("pk".into(), NativeType::Int),
-                    ("ck".into(), NativeType::Text),
+                    ("pk".into(), ColumnType::Native(NativeType::Int)),
+                    ("ck".into(), ColumnType::Native(NativeType::Text)),
                 ]
                 .into_iter()
                 .collect(),
@@ -400,7 +409,7 @@ async fn failed_db_index_create(#[case] config: Config) {
         },
     )
     .unwrap();
-    db.add_index(index.clone(), None, None).unwrap();
+    db.add_index(Index::new(index.clone())).unwrap();
 
     wait_for(
         || async { !client.indexes().await.is_empty() },
@@ -408,14 +417,10 @@ async fn failed_db_index_create(#[case] config: Config) {
     )
     .await;
 
-    db.add_index(
-        IndexMetadata {
-            index_name: "ann2".into(),
-            ..index.clone()
-        },
-        None,
-        None,
-    )
+    db.add_index(Index::new(IndexMetadata {
+        index_name: "ann2".into(),
+        ..index.clone()
+    }))
     .unwrap();
 
     wait_for(
@@ -430,14 +435,10 @@ async fn failed_db_index_create(#[case] config: Config) {
     assert!(names.contains(&"ann"));
     assert!(names.contains(&"ann2"));
 
-    db.add_index(
-        IndexMetadata {
-            index_name: "ann3".into(),
-            ..index.clone()
-        },
-        None,
-        None,
-    )
+    db.add_index(Index::new(IndexMetadata {
+        index_name: "ann3".into(),
+        ..index.clone()
+    }))
     .unwrap();
 
     wait_for(
@@ -476,7 +477,7 @@ async fn failed_db_index_create(#[case] config: Config) {
 async fn ann_returns_requested_column_values(#[case] config: Config) {
     crate::enable_tracing();
 
-    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+    let (index, client, _db, _server) = setup_store_and_wait_for_index(
         config,
         DbIndexPartitioning::Global,
         ["pk".into()],
@@ -485,30 +486,35 @@ async fn ann_returns_requested_column_values(#[case] config: Config) {
             ("pk".to_string().into(), NativeType::Int),
             ("color".to_string().into(), NativeType::Text),
         ],
-        Some(db_basic::scan_fn_vectors([
+        Some(db_basic::range_scan_fn_vectors([
             (
-                [CqlValue::Int(1)].into(),
+                [CqlValue::Int(1)],
                 Some(vec![1., 1., 1.].into()),
-                [Some(CqlValue::Text("red".to_string()))].into(),
-                Timestamp::from_millis(10),
+                [Some(CqlValue::Text("red".to_string()))],
+                10,
             ),
             (
                 // No "color" stored for this row: it must come back as
                 // null, not be silently omitted or default to a bogus
                 // value.
-                [CqlValue::Int(2)].into(),
+                [CqlValue::Int(2)],
                 Some(vec![2., -2., 2.].into()),
-                [None].into(),
-                Timestamp::from_millis(20),
+                [None],
+                20,
             ),
             (
-                [CqlValue::Int(3)].into(),
+                [CqlValue::Int(3)],
                 Some(vec![3., 3., 3.].into()),
-                [Some(CqlValue::Text("blue".to_string()))].into(),
-                Timestamp::from_millis(30),
+                [Some(CqlValue::Text("blue".to_string()))],
+                30,
             ),
         ])),
-        None,
+        Some(db_basic::fetch_vector(|pk| match pk.get(0).unwrap() {
+            CqlValue::Int(1) => Ok(Some(vec![1., 1., 1.].into())),
+            CqlValue::Int(2) => Ok(Some(vec![2., -2., 2.].into())),
+            CqlValue::Int(3) => Ok(Some(vec![3., 3., 3.].into())),
+            _ => panic!("Unexpected primary key: {:?}", pk),
+        })),
         Some(3),
     )
     .await;
@@ -560,19 +566,22 @@ async fn ann_returns_requested_column_values(#[case] config: Config) {
 async fn ann_return_columns_null_for_column_not_tracked_by_index(#[case] config: Config) {
     crate::enable_tracing();
 
-    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+    let (index, client, _db, _server) = setup_store_and_wait_for_index(
         config,
         DbIndexPartitioning::Global,
         ["pk".into()],
         1,
         [("pk".to_string().into(), NativeType::Int)],
-        Some(db_basic::scan_fn_vectors([(
-            [CqlValue::Int(1)].into(),
+        Some(db_basic::range_scan_fn_vectors([(
+            [CqlValue::Int(1)],
             Some(vec![1., 1., 1.].into()),
-            [].into(),
-            Timestamp::from_millis(10),
+            [],
+            10,
         )])),
-        None,
+        Some(db_basic::fetch_vector(|pk| match pk.get(0).unwrap() {
+            CqlValue::Int(1) => Ok(Some(vec![1., 1., 1.].into())),
+            _ => panic!("Unexpected primary key: {:?}", pk),
+        })),
         Some(1),
     )
     .await;
@@ -610,17 +619,17 @@ async fn ann_return_columns_null_for_column_not_tracked_by_index(#[case] config:
 async fn ann_return_columns_includes_target_vector() {
     crate::enable_tracing();
 
-    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+    let (index, client, _db, _server) = setup_store_and_wait_for_index(
         usearch_test_config(),
         DbIndexPartitioning::Global,
         ["pk".into()],
         1,
         [("pk".to_string().into(), NativeType::Int)],
-        Some(db_basic::scan_fn_vectors([(
-            [CqlValue::Int(1)].into(),
+        Some(db_basic::range_scan_fn_vectors([(
+            [CqlValue::Int(1)],
             Some(vec![1., 2., -3.].into()),
-            [].into(),
-            Timestamp::from_millis(10),
+            [],
+            10,
         )])),
         None,
         Some(1),
@@ -660,17 +669,17 @@ async fn ann_return_columns_includes_target_vector() {
 async fn ann_return_columns_target_vector_unsupported(#[case] config: Config) {
     crate::enable_tracing();
 
-    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+    let (index, client, _db, _server) = setup_store_and_wait_for_index(
         config,
         DbIndexPartitioning::Global,
         ["pk".into()],
         1,
         [("pk".to_string().into(), NativeType::Int)],
-        Some(db_basic::scan_fn_vectors([(
-            [CqlValue::Int(1)].into(),
+        Some(db_basic::range_scan_fn_vectors([(
+            [CqlValue::Int(1)],
             Some(vec![1., 2., -3.].into()),
-            [].into(),
-            Timestamp::from_millis(10),
+            [],
+            10,
         )])),
         None,
         Some(1),
@@ -706,7 +715,7 @@ async fn ann_return_columns_target_vector_unsupported(#[case] config: Config) {
 async fn ann_filtered_ann_returns_requested_column_values() {
     crate::enable_tracing();
 
-    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+    let (index, client, _db, _server) = setup_store_and_wait_for_index(
         usearch_test_config(),
         DbIndexPartitioning::Global,
         ["pk".into()],
@@ -715,18 +724,18 @@ async fn ann_filtered_ann_returns_requested_column_values() {
             ("pk".to_string().into(), NativeType::Int),
             ("color".to_string().into(), NativeType::Text),
         ],
-        Some(db_basic::scan_fn_vectors([
+        Some(db_basic::range_scan_fn_vectors([
             (
-                [CqlValue::Int(1)].into(),
+                [CqlValue::Int(1)],
                 Some(vec![1., 1., 1.].into()),
-                [Some(CqlValue::Text("red".to_string()))].into(),
-                Timestamp::from_millis(10),
+                [Some(CqlValue::Text("red".to_string()))],
+                10,
             ),
             (
-                [CqlValue::Int(2)].into(),
+                [CqlValue::Int(2)],
                 Some(vec![1., 1., 1.].into()),
-                [Some(CqlValue::Text("blue".to_string()))].into(),
-                Timestamp::from_millis(20),
+                [Some(CqlValue::Text("blue".to_string()))],
+                20,
             ),
         ])),
         None,
@@ -782,7 +791,7 @@ async fn ann_filtered_ann_returns_requested_column_values() {
 async fn ann_filtered_ann_returns_empty_column_values_for_partition_with_no_rows() {
     crate::enable_tracing();
 
-    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+    let (index, client, _db, _server) = setup_store_and_wait_for_index(
         usearch_test_config(),
         DbIndexPartitioning::Local(NonemptyArc::new(["pk"]).unwrap()),
         ["pk".into()],
@@ -791,11 +800,11 @@ async fn ann_filtered_ann_returns_empty_column_values_for_partition_with_no_rows
             ("pk".to_string().into(), NativeType::Int),
             ("color".to_string().into(), NativeType::Text),
         ],
-        Some(db_basic::scan_fn_vectors([(
-            [CqlValue::Int(1)].into(),
+        Some(db_basic::range_scan_fn_vectors([(
+            [CqlValue::Int(1)],
             Some(vec![1., 1., 1.].into()),
-            [Some(CqlValue::Text("red".to_string()))].into(),
-            Timestamp::from_millis(10),
+            [Some(CqlValue::Text("red".to_string()))],
+            10,
         )])),
         None,
         Some(1),
@@ -837,7 +846,7 @@ async fn ann_returns_bad_request_when_provided_vector_size_is_not_eq_index_dimen
     #[case] config: Config,
 ) {
     crate::enable_tracing();
-    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+    let (index, client, _db, _server) = setup_store_and_wait_for_index(
         config,
         DbIndexPartitioning::Global,
         ["pk".into(), "ck".into()],
@@ -846,11 +855,11 @@ async fn ann_returns_bad_request_when_provided_vector_size_is_not_eq_index_dimen
             ("pk".to_string().into(), NativeType::Int),
             ("ck".to_string().into(), NativeType::Text),
         ],
-        Some(db_basic::scan_fn_vectors([(
-            [CqlValue::Int(1), CqlValue::Text("one".to_string())].into(),
+        Some(db_basic::range_scan_fn_vectors([(
+            [CqlValue::Int(1), CqlValue::Text("one".to_string())],
             Some(vec![1., 1., 1.].into()),
-            [].into(),
-            Timestamp::from_millis(10),
+            [],
+            10,
         )])),
         None,
         Some(1),
@@ -878,7 +887,7 @@ async fn ann_returns_bad_request_when_filtering_required_but_not_allowed() {
 
     let pk_column: ColumnName = "pk".into();
     let ck_column: ColumnName = "ck".into();
-    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+    let (index, client, _db, _server) = setup_store_and_wait_for_index(
         usearch_test_config(),
         DbIndexPartitioning::Global,
         [pk_column.clone(), ck_column.clone()],
@@ -887,11 +896,11 @@ async fn ann_returns_bad_request_when_filtering_required_but_not_allowed() {
             (pk_column.clone(), NativeType::Int),
             (ck_column.clone(), NativeType::Int),
         ],
-        Some(db_basic::scan_fn_vectors([(
-            [CqlValue::Int(1), CqlValue::Int(1)].into(),
+        Some(db_basic::range_scan_fn_vectors([(
+            [CqlValue::Int(1), CqlValue::Int(1)],
             Some(vec![1., 1., 1.].into()),
-            [].into(),
-            Timestamp::from_millis(10),
+            [],
+            10,
         )])),
         None,
         Some(1),
@@ -924,7 +933,7 @@ async fn ann_returns_bad_request_when_filtering_required_but_not_allowed() {
 #[tokio::test]
 async fn ann_fail_while_building_when_node_is_bootstrapping(#[case] config: Config) {
     crate::enable_tracing();
-    let (run, index, db, _node_state) = setup_store(
+    let (run, index, _db) = setup_store(
         config,
         DbIndexPartitioning::Global,
         ["pk".into(), "ck".into()],
@@ -933,13 +942,10 @@ async fn ann_fail_while_building_when_node_is_bootstrapping(#[case] config: Conf
             ("pk".to_string().into(), NativeType::Int),
             ("ck".to_string().into(), NativeType::Text),
         ],
-        Some(db_basic::pending_scan_fn()),
+        Some(db_basic::pending_range_scan_fn()),
         None,
     )
     .await;
-    db.set_next_full_scan_progress(vector_store::Progress::InProgress(
-        Percentage::try_from(33.333).unwrap(),
-    ));
     let (client, _server, _config_tx) = run.await;
 
     let keyspace_name = index.keyspace_name.into();
@@ -979,17 +985,17 @@ async fn ann_fail_while_building_when_node_is_bootstrapping(#[case] config: Conf
 async fn ann_fail_while_building_when_node_is_serving(#[case] config: Config) {
     crate::enable_tracing();
 
-    let (serving_index, client, db, _server, _node_state) = setup_store_and_wait_for_index(
+    let (serving_index, client, db, _server) = setup_store_and_wait_for_index(
         config,
         DbIndexPartitioning::Global,
         ["pk".into()],
         1,
         [("pk".to_string().into(), NativeType::Int)],
-        Some(db_basic::scan_fn_vectors([(
-            [CqlValue::Int(1)].into(),
+        Some(db_basic::range_scan_fn_vectors([(
+            [CqlValue::Int(1)],
             Some(vec![1., 1., 1.].into()),
-            [].into(),
-            Timestamp::from_millis(10),
+            [],
+            10,
         )])),
         None,
         Some(1),
@@ -1012,12 +1018,17 @@ async fn ann_fail_while_building_when_node_is_serving(#[case] config: Config) {
         index.vs().unwrap().dimensions,
     )
     .unwrap();
+    db.set_token_ring(vec![
+        Token::new(TOKEN_MIN / 2),
+        Token::new(0),
+        Token::new(TOKEN_MAX / 2),
+    ]);
     // Add second index that is Bootstrapping (pending_scan_fn). So now we have node Serving and this index Bootstrapping - a good state to test desired scenario.
-    db.add_index(index.clone(), Some(db_basic::pending_scan_fn()), None)
-        .unwrap();
-    db.set_next_full_scan_progress(vector_store::Progress::InProgress(
-        Percentage::try_from(75.0).unwrap(),
-    ));
+    db.add_index(
+        Index::new(index.clone())
+            .with_range_scan(Token::new(TOKEN_MIN), db_basic::pending_range_scan_fn()),
+    )
+    .unwrap();
 
     let keyspace_name: httpapi::KeyspaceName = index.keyspace_name.into();
     let index_name: httpapi::IndexName = index.index_name.into();
@@ -1027,7 +1038,9 @@ async fn ann_fail_while_building_when_node_is_serving(#[case] config: Config) {
             client
                 .index_status(&keyspace_name, &index_name)
                 .await
-                .is_ok_and(|status| status.status == IndexStatus::Bootstrapping)
+                .is_ok_and(|status| {
+                    status.status == IndexStatus::Bootstrapping && status.build_progress == 75.0
+                })
         },
         "Waiting for index to be bootstrapping",
     )
@@ -1063,48 +1076,30 @@ async fn ann_fail_while_building_when_node_is_serving(#[case] config: Config) {
 #[case::diskann(diskann_test_config())]
 #[case::diskann_scylla(diskann_scylla_test_config())]
 #[tokio::test]
-async fn ann_failed_when_wrong_number_of_primary_keys(#[case] config: Config) {
+async fn index_omits_vectors_with_wrong_number_of_primary_keys(#[case] config: Config) {
     crate::enable_tracing();
-    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+    let (_, _, _db, _server) = setup_store_and_wait_for_index(
         config,
         DbIndexPartitioning::Global,
         vec!["pk".into()],
         1,
         [("pk".into(), NativeType::Int)],
-        Some(db_basic::scan_fn_vectors([(
-            [CqlValue::Int(1), CqlValue::Text("one".to_string())].into(),
-            Some(vec![1., 1., 1.].into()),
-            [].into(),
-            Timestamp::from_millis(10),
-        )])),
+        Some(db_basic::range_scan_fn_vectors([
+            (
+                vec![CqlValue::Int(1)],
+                Some(vec![1., 1., 1.].into()),
+                [],
+                10,
+            ),
+            (
+                vec![CqlValue::Int(2), CqlValue::Text("two".to_string())],
+                Some(vec![2., 2., 2.].into()),
+                [],
+                10,
+            ),
+        ])),
         None,
         Some(1),
-    )
-    .await;
-
-    let keyspace_name = index.keyspace_name.into();
-    let index_name = index.index_name.into();
-    wait_for(
-        || async {
-            let response = client
-                .post_ann(
-                    &keyspace_name,
-                    &index_name,
-                    vec![1.0, 2.0, 3.0].into(),
-                    None,
-                    NonZeroUsize::new(1).unwrap().into(),
-                )
-                .await;
-
-            if response.status() == StatusCode::INTERNAL_SERVER_ERROR {
-                true
-            } else {
-                let response = response.json::<PostIndexAnnResponse>().await.unwrap();
-                assert_eq!(response.distances.len(), 0);
-                false
-            }
-        },
-        "Waiting for index to be return internal server error on ANN",
     )
     .await;
 }
@@ -1117,27 +1112,26 @@ async fn ann_failed_when_wrong_number_of_primary_keys(#[case] config: Config) {
 #[tokio::test]
 async fn ann_returns_inet_primary_key(#[case] config: Config) {
     crate::enable_tracing();
-    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+    let (index, client, _db, _server) = setup_store_and_wait_for_index(
         config,
         DbIndexPartitioning::Global,
         vec!["addr".into()],
         1,
         [("addr".into(), NativeType::Inet)],
-        Some(db_basic::scan_fn_vectors([
+        Some(db_basic::range_scan_fn_vectors([
             (
-                [CqlValue::Inet(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))].into(),
+                [CqlValue::Inet(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))],
                 Some(vec![1., 0., 0.].into()),
-                [].into(),
-                Timestamp::from_millis(10),
+                [],
+                10,
             ),
             (
                 [CqlValue::Inet(IpAddr::V6(Ipv6Addr::new(
                     0x2001, 0xdb8, 0, 0, 0, 0, 0, 1,
-                )))]
-                .into(),
+                )))],
                 Some(vec![0., 1., 0.].into()),
-                [].into(),
-                Timestamp::from_millis(10),
+                [],
+                10,
             ),
         ])),
         None,
@@ -1179,24 +1173,24 @@ async fn ann_returns_inet_primary_key(#[case] config: Config) {
 #[tokio::test]
 async fn ann_filter_inet_eq() {
     crate::enable_tracing();
-    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+    let (index, client, _db, _server) = setup_store_and_wait_for_index(
         usearch_test_config(),
         DbIndexPartitioning::Global,
         vec!["addr".into()],
         1,
         [("addr".into(), NativeType::Inet)],
-        Some(db_basic::scan_fn_vectors([
+        Some(db_basic::range_scan_fn_vectors([
             (
-                [CqlValue::Inet(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))].into(),
+                [CqlValue::Inet(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))],
                 Some(vec![1., 0., 0.].into()),
-                [].into(),
-                Timestamp::from_millis(10),
+                [],
+                10,
             ),
             (
-                [CqlValue::Inet(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)))].into(),
+                [CqlValue::Inet(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)))],
                 Some(vec![0., 1., 0.].into()),
-                [].into(),
-                Timestamp::from_millis(10),
+                [],
+                10,
             ),
         ])),
         None,
@@ -1238,17 +1232,17 @@ async fn ann_filter_inet_eq() {
 #[tokio::test]
 async fn ann_returns_error_for_unsupported_primary_key_type() {
     crate::enable_tracing();
-    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+    let (index, client, _db, _server) = setup_store_and_wait_for_index(
         usearch_test_config(),
         DbIndexPartitioning::Global,
         vec!["pk".into()],
         1,
         [("pk".into(), NativeType::Int)],
-        Some(db_basic::scan_fn_vectors([(
-            [CqlValue::Counter(Counter(1))].into(),
+        Some(db_basic::range_scan_fn_vectors([(
+            [CqlValue::Counter(Counter(1))],
             Some(vec![1., 1., 1.].into()),
-            [].into(),
-            Timestamp::from_millis(10),
+            [],
+            10,
         )])),
         None,
         Some(1),
@@ -1282,8 +1276,7 @@ async fn ann_returns_error_for_unsupported_primary_key_type() {
 async fn ann_filter_partition_key_int_eq() {
     crate::enable_tracing();
 
-    let (index, client, pk_column, ck_column, _, _db, _server, _node_state) =
-        setup_int_int_store().await;
+    let (index, client, pk_column, ck_column, _, _db, _server) = setup_int_int_store().await;
 
     let pk_column_http: httpapi::ColumnName = pk_column.into();
     let ck_column_http: httpapi::ColumnName = ck_column.into();
@@ -1340,8 +1333,7 @@ async fn ann_filter_partition_key_int_eq() {
 async fn ann_filter_clustering_key_int_eq() {
     crate::enable_tracing();
 
-    let (index, client, pk_column, ck_column, _, _db, _server, _node_state) =
-        setup_int_int_store().await;
+    let (index, client, pk_column, ck_column, _, _db, _server) = setup_int_int_store().await;
 
     let pk_column_http: httpapi::ColumnName = pk_column.into();
     let ck_column_http: httpapi::ColumnName = ck_column.into();
@@ -1398,8 +1390,7 @@ async fn ann_filter_clustering_key_int_eq() {
 async fn ann_filter_partition_key_int_in() {
     crate::enable_tracing();
 
-    let (index, client, pk_column, ck_column, _, _db, _server, _node_state) =
-        setup_int_int_store().await;
+    let (index, client, pk_column, ck_column, _, _db, _server) = setup_int_int_store().await;
 
     let pk_column_http: httpapi::ColumnName = pk_column.into();
     let ck_column_http: httpapi::ColumnName = ck_column.into();
@@ -1460,8 +1451,7 @@ async fn ann_filter_partition_key_int_in() {
 async fn ann_filter_clustering_key_int_in() {
     crate::enable_tracing();
 
-    let (index, client, pk_column, ck_column, _, _db, _server, _node_state) =
-        setup_int_int_store().await;
+    let (index, client, pk_column, ck_column, _, _db, _server) = setup_int_int_store().await;
 
     let pk_column_http: httpapi::ColumnName = pk_column.into();
     let ck_column_http: httpapi::ColumnName = ck_column.into();
@@ -1522,8 +1512,7 @@ async fn ann_filter_clustering_key_int_in() {
 async fn ann_filter_primary_key_int_eq_tuple() {
     crate::enable_tracing();
 
-    let (index, client, pk_column, ck_column, _, _db, _server, _node_state) =
-        setup_int_int_store().await;
+    let (index, client, pk_column, ck_column, _, _db, _server) = setup_int_int_store().await;
 
     let pk_column_http: httpapi::ColumnName = pk_column.into();
     let ck_column_http: httpapi::ColumnName = ck_column.into();
@@ -1550,8 +1539,7 @@ async fn ann_filter_primary_key_int_eq_tuple() {
 async fn ann_filter_primary_key_int_in_tuple() {
     crate::enable_tracing();
 
-    let (index, client, pk_column, ck_column, _, _db, _server, _node_state) =
-        setup_int_int_store().await;
+    let (index, client, pk_column, ck_column, _, _db, _server) = setup_int_int_store().await;
 
     let pk_column_http: httpapi::ColumnName = pk_column.into();
     let ck_column_http: httpapi::ColumnName = ck_column.into();
@@ -1584,12 +1572,11 @@ async fn setup_int_int_store() -> (
     ColumnName,
     DbBasic,
     impl Sized,
-    Sender<NodeState>,
 ) {
     let pk_column: ColumnName = "pk".into();
     let ck_column: ColumnName = "ck".into();
     let f_column: ColumnName = "f".into();
-    let (index, client, db, server, node_state) = setup_store_and_wait_for_index(
+    let (index, client, db, server) = setup_store_and_wait_for_index(
         usearch_test_config(),
         DbIndexPartitioning::Global,
         [pk_column.clone(), ck_column.clone()],
@@ -1599,13 +1586,13 @@ async fn setup_int_int_store() -> (
             (ck_column.clone(), NativeType::Int),
             (f_column.clone(), NativeType::Int),
         ],
-        Some(db_basic::scan_fn_vectors(
+        Some(db_basic::range_scan_fn_vectors(
             (0..INT_INT_VECTOR_COUNT as i32).map(|i| {
                 (
-                    [CqlValue::Int(i / 10), CqlValue::Int(i % 10)].into(),
+                    [CqlValue::Int(i / 10), CqlValue::Int(i % 10)],
                     Some(vec![i as f32, i as f32, i as f32].into()),
-                    [Some(CqlValue::Int(i))].into(),
-                    Timestamp::from_millis(10),
+                    [Some(CqlValue::Int(i))],
+                    10,
                 )
             }),
         )),
@@ -1614,9 +1601,7 @@ async fn setup_int_int_store() -> (
     )
     .await;
 
-    (
-        index, client, pk_column, ck_column, f_column, db, server, node_state,
-    )
+    (index, client, pk_column, ck_column, f_column, db, server)
 }
 
 /// Runs an ANN query with the given restrictions and returns a HashSet of (pk, ck) values.
@@ -1683,8 +1668,7 @@ fn assert_pk_ck_combinations(
 async fn ann_filter_clustering_key_int_lt() {
     crate::enable_tracing();
 
-    let (index, client, pk_column, ck_column, _, _db, _server, _node_state) =
-        setup_int_int_store().await;
+    let (index, client, pk_column, ck_column, _, _db, _server) = setup_int_int_store().await;
 
     let pk_column = pk_column.into();
     let ck_column = ck_column.into();
@@ -1724,8 +1708,7 @@ async fn ann_filter_clustering_key_int_lt() {
 async fn ann_filter_clustering_key_int_lte() {
     crate::enable_tracing();
 
-    let (index, client, pk_column, ck_column, _, _db, _server, _node_state) =
-        setup_int_int_store().await;
+    let (index, client, pk_column, ck_column, _, _db, _server) = setup_int_int_store().await;
 
     let pk_column = pk_column.into();
     let ck_column = ck_column.into();
@@ -1765,8 +1748,7 @@ async fn ann_filter_clustering_key_int_lte() {
 async fn ann_filter_clustering_key_int_gt() {
     crate::enable_tracing();
 
-    let (index, client, pk_column, ck_column, _, _db, _server, _node_state) =
-        setup_int_int_store().await;
+    let (index, client, pk_column, ck_column, _, _db, _server) = setup_int_int_store().await;
 
     let pk_column = pk_column.into();
     let ck_column = ck_column.into();
@@ -1806,8 +1788,7 @@ async fn ann_filter_clustering_key_int_gt() {
 async fn ann_filter_clustering_key_int_gte() {
     crate::enable_tracing();
 
-    let (index, client, pk_column, ck_column, _, _db, _server, _node_state) =
-        setup_int_int_store().await;
+    let (index, client, pk_column, ck_column, _, _db, _server) = setup_int_int_store().await;
 
     let pk_column = pk_column.into();
     let ck_column = ck_column.into();
@@ -1847,8 +1828,7 @@ async fn ann_filter_clustering_key_int_gte() {
 async fn ann_filter_clustering_key_int_range() {
     crate::enable_tracing();
 
-    let (index, client, pk_column, ck_column, _, _db, _server, _node_state) =
-        setup_int_int_store().await;
+    let (index, client, pk_column, ck_column, _, _db, _server) = setup_int_int_store().await;
 
     let pk_column = pk_column.into();
     let ck_column = ck_column.into();
@@ -1894,8 +1874,7 @@ async fn ann_filter_clustering_key_int_range() {
 async fn ann_filter_primary_key_int_lt_tuple() {
     crate::enable_tracing();
 
-    let (index, client, pk_column, ck_column, _, _db, _server, _node_state) =
-        setup_int_int_store().await;
+    let (index, client, pk_column, ck_column, _, _db, _server) = setup_int_int_store().await;
 
     let pk_column = pk_column.into();
     let ck_column = ck_column.into();
@@ -1943,8 +1922,7 @@ async fn ann_filter_primary_key_int_lt_tuple() {
 async fn ann_filter_primary_key_int_lte_tuple() {
     crate::enable_tracing();
 
-    let (index, client, pk_column, ck_column, _, _db, _server, _node_state) =
-        setup_int_int_store().await;
+    let (index, client, pk_column, ck_column, _, _db, _server) = setup_int_int_store().await;
 
     let pk_column = pk_column.into();
     let ck_column = ck_column.into();
@@ -1993,8 +1971,7 @@ async fn ann_filter_primary_key_int_lte_tuple() {
 async fn ann_filter_primary_key_int_gt_tuple() {
     crate::enable_tracing();
 
-    let (index, client, pk_column, ck_column, _, _db, _server, _node_state) =
-        setup_int_int_store().await;
+    let (index, client, pk_column, ck_column, _, _db, _server) = setup_int_int_store().await;
 
     let pk_column = pk_column.into();
     let ck_column = ck_column.into();
@@ -2041,8 +2018,7 @@ async fn ann_filter_primary_key_int_gt_tuple() {
 async fn ann_filter_primary_key_int_gte_tuple() {
     crate::enable_tracing();
 
-    let (index, client, pk_column, ck_column, _, _db, _server, _node_state) =
-        setup_int_int_store().await;
+    let (index, client, pk_column, ck_column, _, _db, _server) = setup_int_int_store().await;
 
     let pk_column = pk_column.into();
     let ck_column = ck_column.into();
@@ -2094,7 +2070,7 @@ async fn ann_filter_partition_key_text_gt() {
     let ck_column: ColumnName = "ck".into();
     let pk_column_http: httpapi::ColumnName = pk_column.clone().into();
     let ck_column_http: httpapi::ColumnName = ck_column.clone().into();
-    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+    let (index, client, _db, _server) = setup_store_and_wait_for_index(
         usearch_test_config(),
         DbIndexPartitioning::Global,
         [pk_column.clone(), ck_column.clone()],
@@ -2103,13 +2079,13 @@ async fn ann_filter_partition_key_text_gt() {
             (pk_column.clone(), NativeType::Text),
             (ck_column.clone(), NativeType::Int),
         ],
-        Some(db_basic::scan_fn_vectors(
+        Some(db_basic::range_scan_fn_vectors(
             ["a", "b", "c", "d", "e"].iter().enumerate().map(|(i, pk)| {
                 (
-                    [CqlValue::Text(pk.to_string()), CqlValue::Int(i as i32)].into(),
+                    [CqlValue::Text(pk.to_string()), CqlValue::Int(i as i32)],
                     Some(vec![i as f32, i as f32, i as f32].into()),
-                    [].into(),
-                    Timestamp::from_millis(10),
+                    [],
+                    10,
                 )
             }),
         )),
@@ -2177,8 +2153,7 @@ async fn ann_filter_partition_key_text_gt() {
 async fn ann_filter_filtering_columns_int_eq() {
     crate::enable_tracing();
 
-    let (index, client, pk_column, ck_column, f_column, _db, _server, _node_state) =
-        setup_int_int_store().await;
+    let (index, client, pk_column, ck_column, f_column, _db, _server) = setup_int_int_store().await;
 
     let pk_column_http: httpapi::ColumnName = pk_column.into();
     let ck_column_http: httpapi::ColumnName = ck_column.into();
@@ -2213,7 +2188,7 @@ async fn http_server_is_responsive_when_index_add_hangs() {
         ]),
         ..usearch_test_config()
     };
-    let (run, _index, _db, _node_state) = setup_store(
+    let (run, _index, _db) = setup_store(
         config,
         DbIndexPartitioning::Global,
         ["pk".into(), "ck".into()],
@@ -2222,11 +2197,11 @@ async fn http_server_is_responsive_when_index_add_hangs() {
             ("pk".to_string().into(), NativeType::Int),
             ("ck".to_string().into(), NativeType::Text),
         ],
-        Some(db_basic::scan_fn_vectors([(
-            [CqlValue::Int(1), CqlValue::Text("one".to_string())].into(),
+        Some(db_basic::range_scan_fn_vectors([(
+            [CqlValue::Int(1), CqlValue::Text("one".to_string())],
             Some(vec![1., 1., 1.].into()),
-            [].into(),
-            Timestamp::from_millis(10),
+            [],
+            10,
         )])),
         None,
     )
@@ -2256,25 +2231,15 @@ async fn http_server_is_responsive_when_index_add_hangs() {
 async fn null_vector_is_not_indexed(#[case] config: Config) {
     crate::enable_tracing();
 
-    let (run, index, _db, _node_state) = setup_store(
+    let (run, index, _db) = setup_store(
         config,
         DbIndexPartitioning::Global,
         ["pk".into()],
         1,
         [("pk".to_string().into(), NativeType::Int)],
-        Some(db_basic::scan_fn_vectors([
-            (
-                [CqlValue::Int(1)].into(),
-                Some(vec![1., 1., 1.].into()),
-                [].into(),
-                Timestamp::from_millis(10),
-            ),
-            (
-                [CqlValue::Int(2)].into(),
-                None,
-                [].into(),
-                Timestamp::from_millis(20),
-            ),
+        Some(db_basic::range_scan_fn_vectors([
+            ([CqlValue::Int(1)], Some(vec![1., 1., 1.].into()), [], 10),
+            ([CqlValue::Int(2)], None, [], 20),
         ])),
         None,
     )
@@ -2314,8 +2279,7 @@ async fn null_vector_is_not_indexed(#[case] config: Config) {
 async fn similarity_scores_are_decreasing_and_correctly_converted(#[case] config: Config) {
     crate::enable_tracing();
 
-    let node_state = vector_store::new_node_state().await;
-    let (db_actor, db) = db_basic::new_with(node_state.clone(), store_vectors(&config));
+    let db = db_basic::new();
 
     // Use a 1-D Euclidean index so distances are easy to predict.
     let index = IndexMetadata {
@@ -2345,7 +2309,11 @@ async fn similarity_scores_are_decreasing_and_correctly_converted(#[case] config
         Table {
             primary_keys: NonemptyArc::new(["pk"]).unwrap(),
             partition_key_count: 1,
-            columns: Arc::new([("pk".into(), NativeType::Int)].into_iter().collect()),
+            columns: Arc::new(
+                [("pk".into(), ColumnType::Native(NativeType::Int))]
+                    .into_iter()
+                    .collect(),
+            ),
             dimensions: [(
                 index.target_columns.first().clone(),
                 index.vs().unwrap().dimensions,
@@ -2361,35 +2329,26 @@ async fn similarity_scores_are_decreasing_and_correctly_converted(#[case] config
     // squared distances are 0, 1, 9 respectively, and expected similarity
     // scores (using 1/(1+d)) are 1/(1+0)=1.0, 1/(1+1)=0.5, 1/(1+9)=0.1.
     db.add_index(
-        index.clone(),
-        Some(db_basic::scan_fn_vectors([
-            (
-                [CqlValue::Int(1)].into(),
-                Some(vec![0.0_f32].into()),
-                [].into(),
-                Timestamp::from_millis(10),
-            ),
-            (
-                [CqlValue::Int(2)].into(),
-                Some(vec![1.0_f32].into()),
-                [].into(),
-                Timestamp::from_millis(20),
-            ),
-            (
-                [CqlValue::Int(3)].into(),
-                Some(vec![3.0_f32].into()),
-                [].into(),
-                Timestamp::from_millis(30),
-            ),
-        ])),
-        None,
+        Index::new(index.clone())
+            .with_range_scan(
+                Token::new(TOKEN_MIN),
+                db_basic::range_scan_fn_vectors([
+                    ([CqlValue::Int(1)], Some(vec![0.0_f32].into()), [], 10),
+                    ([CqlValue::Int(2)], Some(vec![1.0_f32].into()), [], 20),
+                    ([CqlValue::Int(3)], Some(vec![3.0_f32].into()), [], 30),
+                ]),
+            )
+            .with_fetch_vector(db_basic::fetch_vector(|pk| match pk.get(0).unwrap() {
+                CqlValue::Int(1) => Ok(Some(vec![0.0_f32].into())),
+                CqlValue::Int(2) => Ok(Some(vec![1.0_f32].into())),
+                CqlValue::Int(3) => Ok(Some(vec![3.0_f32].into())),
+                _ => panic!("Unexpected primary key: {:?}", pk),
+            })),
     )
     .unwrap();
 
     let (receivers, _senders) = create_config_channels(config).await;
-    let (server, _mtls) = vector_store::run(Some(node_state), Some(db_actor), receivers)
-        .await
-        .unwrap();
+    let (server, _mtls) = vector_store::run(db, receivers).await.unwrap();
     let addr = (*server.address().await.borrow()).unwrap();
     let client = HttpClient::new(addr);
 
@@ -2458,13 +2417,13 @@ async fn similarity_scores_are_decreasing_and_correctly_converted(#[case] config
 async fn empty_index_has_zero_count(#[case] config: Config) {
     crate::enable_tracing();
 
-    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+    let (index, client, _db, _server) = setup_store_and_wait_for_index(
         config,
         DbIndexPartitioning::Global,
         ["pk".into()],
         1,
         [("pk".to_string().into(), NativeType::Int)],
-        Some(db_basic::scan_fn_vectors(std::iter::empty())),
+        None,
         None,
         Some(0),
     )
@@ -2489,13 +2448,13 @@ async fn empty_index_has_zero_count(#[case] config: Config) {
 async fn empty_index_returns_empty_ann_results(#[case] config: Config) {
     crate::enable_tracing();
 
-    let (index, client, _db, _server, _node_state) = setup_store_and_wait_for_index(
+    let (index, client, _db, _server) = setup_store_and_wait_for_index(
         config,
         DbIndexPartitioning::Global,
         ["pk".into()],
         1,
         [("pk".to_string().into(), NativeType::Int)],
-        Some(db_basic::scan_fn_vectors(std::iter::empty())),
+        None,
         None,
         Some(0),
     )

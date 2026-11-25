@@ -5,12 +5,15 @@
 
 use crate::create_config_channels;
 use crate::db_basic;
+use crate::db_basic::Index;
+use crate::db_basic::TOKEN_MIN;
 use crate::db_basic::Table;
 use crate::vs_index::usearch_test_config;
-use futures::FutureExt;
 use httpapi::NodeStatus;
 use httpclient::HttpClient;
+use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
+use scylla::routing::Token;
 use scylla::value::CqlValue;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -18,13 +21,11 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::info;
 use uuid::Uuid;
-use vector_store::AsyncInProgress;
 use vector_store::Config;
 use vector_store::Connectivity;
 use vector_store::DbIndexPartitioning;
-use vector_store::DbIndexedOperation;
-use vector_store::DbIndexedRow;
-use vector_store::DbIndexedValue;
+use vector_store::DbRow;
+use vector_store::DbValue;
 use vector_store::ExpansionAdd;
 use vector_store::ExpansionSearch;
 use vector_store::HttpServerExt;
@@ -32,13 +33,11 @@ use vector_store::IndexKind;
 use vector_store::IndexMetadata;
 use vector_store::IndexOptionsVs;
 use vector_store::NonemptyArc;
-use vector_store::NonemptyBox;
 use vector_store::Quantization;
 use vector_store::SpaceType;
-use vector_store::Timestamp;
-use vector_store::Timestamped;
 
 #[tokio::test]
+#[cfg_attr(not(feature = "in-progress"), ignore = "requires in-progress")]
 /// The test case scenario:
 /// - start scylla cluster
 /// - create a keyspace and a table with 1_000 vectors
@@ -50,9 +49,7 @@ use vector_store::Timestamped;
 async fn memory_limit_during_index_build() {
     crate::enable_tracing();
 
-    let node_state = vector_store::new_node_state().await;
-
-    let (db_actor, db) = db_basic::new(node_state.clone());
+    let db = db_basic::new();
 
     let index = IndexMetadata {
         keyspace_name: "ksp".into(),
@@ -81,7 +78,11 @@ async fn memory_limit_during_index_build() {
         Table {
             primary_keys: NonemptyArc::new(["pk"]).unwrap(),
             partition_key_count: 1,
-            columns: Arc::new([("pk".into(), NativeType::Int)].into_iter().collect()),
+            columns: Arc::new(
+                [("pk".into(), ColumnType::Native(NativeType::Int))]
+                    .into_iter()
+                    .collect(),
+            ),
             dimensions: [(
                 index.target_columns.first().clone(),
                 index.vs().unwrap().dimensions,
@@ -92,40 +93,46 @@ async fn memory_limit_during_index_build() {
     )
     .unwrap();
 
-    let (tx_outer, mut rx_outer) = mpsc::channel(1);
-    db.add_index(
-        index.clone(),
-        Some(Box::new(move |tx_inner| {
-            async move {
-                let mut pk = 0;
-                while let Some(item) = rx_outer.recv().await {
-                    pk += 1;
-                    let (tx_in_progress, mut rx_in_progress) = mpsc::channel(1);
-                    tx_inner
-                        .send((
-                            DbIndexedRow {
-                                primary_key: [CqlValue::Int(pk)].into(),
-                                operation: DbIndexedOperation::Upsert(
-                                    NonemptyBox::new([Timestamped::new(
-                                        Timestamp::from_millis(10),
-                                        Some(DbIndexedValue::Vector(item)),
-                                    )])
-                                    .unwrap(),
-                                ),
-                            },
-                            AsyncInProgress::fullscan(tx_in_progress.clone()),
-                        ))
+    let (tx_outer, rx_outer) = mpsc::channel(1);
+    db.add_index(Index::new(index.clone()).with_range_scan(
+        Token::new(TOKEN_MIN),
+        Box::new({
+            let mut rx_outer = Some(rx_outer);
+            let db = db.clone();
+            move || {
+                let (tx, rx) = mpsc::channel(1);
+                let Some(mut rx_outer) = rx_outer.take() else {
+                    return rx;
+                };
+                let db = db.clone();
+
+                tokio::spawn(async move {
+                    let mut pk = 0;
+                    while let Some(item) = rx_outer.recv().await {
+                        pk += 1;
+                        let (tx_in_progress, mut rx_in_progress) = mpsc::channel(1);
+                        db.set_make_in_progress_guard(Some(Box::new({
+                            let tx_in_progress = tx_in_progress.clone().downgrade();
+                            move |_| tx_in_progress.upgrade()
+                        })));
+                        tx.send(Ok(DbRow {
+                            columns: vec![
+                                Some(DbValue::Value(CqlValue::Int(pk))),
+                                Some(DbValue::Vector(item)),
+                                Some(DbValue::Value(CqlValue::BigInt(10))),
+                            ],
+                        }))
                         .await
                         .unwrap();
-                    // wait until in-progress marker is dropped
-                    drop(tx_in_progress);
-                    while rx_in_progress.recv().await.is_some() {}
-                }
+                        // wait until in-progress marker is dropped
+                        drop(tx_in_progress);
+                        while rx_in_progress.recv().await.is_some() {}
+                    }
+                });
+                rx
             }
-            .boxed()
-        })),
-        None,
-    )
+        }),
+    ))
     .unwrap();
 
     const LIMIT_MEMORY: u64 = 20 * 1024 * 1024; // 20 MB - it shouldn't be enough to index any vector
@@ -137,10 +144,7 @@ async fn memory_limit_during_index_build() {
 
     let (receivers, senders) = create_config_channels(config.clone()).await;
 
-    let node_state = node_state.clone();
-    let (server, _mtls) = vector_store::run(Some(node_state), Some(db_actor), receivers)
-        .await
-        .unwrap();
+    let (server, _mtls) = vector_store::run(db, receivers).await.unwrap();
     let addr = (*server.address().await.borrow()).unwrap();
 
     let client = HttpClient::new(addr);

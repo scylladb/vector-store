@@ -2,16 +2,18 @@
  * Copyright 2026-present ScyllaDB
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
+use crate::common;
 use crate::common::add_table;
-use crate::common::blocking_scan_fn;
 use crate::common::make_fts_index;
 use crate::common::make_fts_index_with_options;
 use crate::common::make_index_with_kind;
 use crate::common::make_vs_index;
 use crate::common::ordered_timeuuid;
 use crate::common::setup;
-use crate::common::single_row_scan;
 use crate::db_basic;
+use crate::db_basic::Index;
+use crate::db_basic::TOKEN_MIN;
+use crate::db_basic::Table;
 use crate::wait_for;
 use crate::wait_for_value;
 use httpapi::DataType;
@@ -23,24 +25,27 @@ use httpapi::VectorIndexOptions;
 use httpclient::HttpClient;
 use reqwest::StatusCode;
 use rstest::rstest;
+use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
+use scylla::routing::Token;
 use scylla::value::CqlValue;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 use vector_store::Analyzer;
-use vector_store::DbCustomIndex;
-use vector_store::DbIndexKind;
+use vector_store::Connectivity;
 use vector_store::DbIndexPartitioning;
-use vector_store::DbUnsupportedIndex;
+use vector_store::Dimensions;
+use vector_store::ExpansionAdd;
+use vector_store::ExpansionSearch;
 use vector_store::IndexKind;
 use vector_store::IndexOptionsFts;
+use vector_store::IndexOptionsPattern;
 use vector_store::IndexOptionsVs;
-use vector_store::NonemptyArc;
-use vector_store::Percentage;
-use vector_store::Progress;
-use vector_store::Timestamp;
+use vector_store::NonemptyIteratorExt;
+use vector_store::Quantization;
+use vector_store::SpaceType;
 
 #[rstest]
 #[timeout(Duration::from_secs(10))]
@@ -74,11 +79,10 @@ async fn index_info_reports_vector_index_options() {
             quantization: vector_store::Quantization::F16,
         }),
     );
-    db.add_index(
-        index.clone(),
-        Some(single_row_scan([CqlValue::Int(1)])),
-        None,
-    )
+    db.add_index(Index::new(index.clone()).with_range_scan(
+        Token::new(db_basic::TOKEN_MIN),
+        common::single_row_range_scan([CqlValue::Int(1)]),
+    ))
     .unwrap();
 
     let ks = index.keyspace_name.as_ref().into();
@@ -142,15 +146,14 @@ async fn index_info_reports_fulltext_index_options(
         ordered_timeuuid(1),
         options,
     );
-    db.add_index(
-        index.clone(),
-        Some(db_basic::scan_fn_documents([(
-            [CqlValue::Int(1)].into(),
+    db.add_index(Index::new(index.clone()).with_range_scan(
+        Token::new(TOKEN_MIN),
+        db_basic::range_scan_fn_documents([(
+            [CqlValue::Int(1)],
             Some("hello world".to_string()),
-            Timestamp::from_millis(10),
-        )])),
-        None,
-    )
+            10,
+        )]),
+    ))
     .unwrap();
 
     let ks = index.keyspace_name.as_ref().into();
@@ -207,11 +210,10 @@ async fn indexes_lists_all_indexes_with_options() {
         ordered_timeuuid(1),
         IndexKind::Vs(first_options.clone()),
     );
-    db.add_index(
-        first_index.clone(),
-        Some(single_row_scan([CqlValue::Int(1)])),
-        None,
-    )
+    db.add_index(Index::new(first_index.clone()).with_range_scan(
+        Token::new(TOKEN_MIN),
+        common::single_row_range_scan([CqlValue::Int(1)]),
+    ))
     .unwrap();
 
     let second_options = IndexOptionsVs {
@@ -232,24 +234,22 @@ async fn indexes_lists_all_indexes_with_options() {
         ordered_timeuuid(2),
         IndexKind::Vs(second_options.clone()),
     );
-    db.add_index(
-        second_index.clone(),
-        Some(single_row_scan([CqlValue::Int(1)])),
-        None,
-    )
+    db.add_index(Index::new(second_index.clone()).with_range_scan(
+        Token::new(TOKEN_MIN),
+        common::single_row_range_scan([CqlValue::Int(1)]),
+    ))
     .unwrap();
 
     let fts_options = IndexOptionsFts::default();
     let fts_index = make_fts_index("third", &["pk"], 1, "content", ordered_timeuuid(3));
-    db.add_index(
-        fts_index.clone(),
-        Some(db_basic::scan_fn_documents([(
-            [CqlValue::Int(1)].into(),
+    db.add_index(Index::new(fts_index.clone()).with_range_scan(
+        Token::new(TOKEN_MIN),
+        db_basic::range_scan_fn_documents([(
+            [CqlValue::Int(1)],
             Some("hello world".to_string()),
-            Timestamp::from_millis(10),
-        )])),
-        None,
-    )
+            10,
+        )]),
+    ))
     .unwrap();
 
     wait_for(
@@ -305,11 +305,10 @@ async fn indexes_listing_reports_status_and_progress_when_serving() {
         &[],
         ordered_timeuuid(1),
     );
-    db.add_index(
-        index.clone(),
-        Some(single_row_scan([CqlValue::Int(1)])),
-        None,
-    )
+    db.add_index(Index::new(index.clone()).with_range_scan(
+        Token::new(db_basic::TOKEN_MIN),
+        common::single_row_range_scan([CqlValue::Int(1)]),
+    ))
     .unwrap();
 
     let entries = wait_for_value(
@@ -344,10 +343,6 @@ async fn indexes_listing_reports_progress_of_bootstrapping_index() {
         ["embedding".into()],
     );
 
-    // Pin the reported full-scan progress to a partial value, then add an index
-    // whose scan never completes, keeping it bootstrapping at that progress.
-    db.set_next_full_scan_progress(Progress::InProgress(Percentage::try_from(37.0).unwrap()));
-
     let index = make_vs_index(
         "building",
         &["pk"],
@@ -357,16 +352,25 @@ async fn indexes_listing_reports_progress_of_bootstrapping_index() {
         &[],
         ordered_timeuuid(1),
     );
-    db.add_index(index.clone(), Some(blocking_scan_fn()), None)
-        .unwrap();
+    db.set_token_ring(vec![
+        Token::new(db_basic::TOKEN_MIN / 2),
+        Token::new(0),
+        Token::new(db_basic::TOKEN_MAX / 2),
+    ]);
+    db.add_index(Index::new(index.clone()).with_range_scan(
+        Token::new(db_basic::TOKEN_MIN),
+        db_basic::pending_range_scan_fn(),
+    ))
+    .unwrap();
 
+    // We have four token ranges, single range is blocking, so the progress should be 75%
     wait_for(
         || async {
             client.indexes().await.first().is_some_and(|entry| {
-                entry.status == IndexStatus::Bootstrapping && entry.build_progress == 37.0
+                entry.status == IndexStatus::Bootstrapping && entry.build_progress == 75.0
             })
         },
-        "the listed index to be bootstrapping with build_progress == 37%",
+        "the listed index to be bootstrapping with build_progress == 75%",
     )
     .await;
 }
@@ -390,15 +394,14 @@ async fn indexes_listing_reports_status_of_a_fulltext_index() {
     );
 
     let index = make_fts_index("fulltext", &["pk"], 1, "content", ordered_timeuuid(1));
-    db.add_index(
-        index.clone(),
-        Some(db_basic::scan_fn_documents([(
-            [CqlValue::Int(1)].into(),
+    db.add_index(Index::new(index.clone()).with_range_scan(
+        Token::new(db_basic::TOKEN_MIN),
+        db_basic::range_scan_fn_documents([(
+            [CqlValue::Int(1)],
             Some("hello world".to_string()),
-            Timestamp::from_millis(10),
-        )])),
-        None,
-    )
+            10,
+        )]),
+    ))
     .unwrap();
 
     let entries = wait_for_value(
@@ -419,41 +422,52 @@ async fn indexes_listing_reports_status_of_a_fulltext_index() {
     assert_eq!(entries[0].build_progress, 100.0);
 }
 
-const UNSUPPORTED_REASON: &str =
-    "unsupported primary key column type: column pk has type frozen<tuple<int, int>>";
 const UNSUPPORTED_RESPONSE: &str = "index keyspace.idx cannot be served: \
-    unsupported primary key column type: column pk has type frozen<tuple<int, int>>";
+    unsupported primary key column type: column pk has type frozen<tuple<int>>, \
+    which cannot be represented in an index primary key";
 
 async fn setup_unsupported_index(
-    kind: DbIndexKind,
+    kind: IndexKind,
     target_column: &'static str,
 ) -> (HttpClient, impl Sized) {
     let (client, db, keep) = setup().await;
-    add_table(
-        &db,
-        ["pk".into()],
-        1,
-        [
-            ("pk".into(), NativeType::Int),
-            ("content".into(), NativeType::Text),
-        ],
-        ["embedding".into()],
-    );
-    db.add_unsupported_index(DbUnsupportedIndex {
-        index: DbCustomIndex {
-            keyspace: "keyspace".into(),
-            index: "idx".into(),
-            table: "items".into(),
-            primary_key_columns: NonemptyArc::new(["pk"]).unwrap(),
-            partition_key_count: NonZeroUsize::new(1).unwrap(),
-            target_columns: NonemptyArc::new([target_column]).unwrap(),
-            partitioning: DbIndexPartitioning::Global,
-            filtering_columns: Arc::new([]),
-            alternator_attribute_types: Default::default(),
-            kind,
+    db.add_table(
+        "keyspace".into(),
+        "items".into(),
+        Table {
+            primary_keys: ["pk".into()].into_iter().collect_nonempty_arc().unwrap(),
+            partition_key_count: 1,
+            columns: Arc::new(
+                [
+                    (
+                        "pk".into(),
+                        ColumnType::Tuple(vec![ColumnType::Native(NativeType::Int)]),
+                    ),
+                    ("content".into(), ColumnType::Native(NativeType::Text)),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+            dimensions: match &kind {
+                IndexKind::Vs(IndexOptionsVs { dimensions, .. }) => {
+                    [(target_column.into(), *dimensions)].into_iter().collect()
+                }
+                _ => Default::default(),
+            },
         },
-        reason: UNSUPPORTED_REASON.to_string(),
-    });
+    )
+    .unwrap();
+    db.add_index(Index::new(make_index_with_kind(
+        "idx",
+        &["pk"],
+        1,
+        target_column,
+        DbIndexPartitioning::Global,
+        &[],
+        ordered_timeuuid(1),
+        kind,
+    )))
+    .unwrap();
 
     wait_for(
         || async {
@@ -473,7 +487,18 @@ async fn setup_unsupported_index(
 #[tokio::test]
 async fn unsupported_index_is_listed_as_unsupported() {
     crate::enable_tracing();
-    let (client, _keep) = setup_unsupported_index(DbIndexKind::VectorSearch, "embedding").await;
+    let (client, _keep) = setup_unsupported_index(
+        IndexKind::Vs(IndexOptionsVs {
+            dimensions: Dimensions::from(NonZeroUsize::new(3).unwrap()),
+            connectivity: Connectivity::default(),
+            expansion_add: ExpansionAdd::default(),
+            expansion_search: ExpansionSearch::default(),
+            space_type: SpaceType::default(),
+            quantization: Quantization::default(),
+        }),
+        "embedding",
+    )
+    .await;
 
     let info = client
         .index_info(&"keyspace".into(), &"idx".into())
@@ -494,7 +519,18 @@ async fn unsupported_index_is_listed_as_unsupported() {
 #[tokio::test]
 async fn unsupported_vector_index_reports_why_it_cannot_be_served() {
     crate::enable_tracing();
-    let (client, _keep) = setup_unsupported_index(DbIndexKind::VectorSearch, "embedding").await;
+    let (client, _keep) = setup_unsupported_index(
+        IndexKind::Vs(IndexOptionsVs {
+            dimensions: Dimensions::from(NonZeroUsize::new(3).unwrap()),
+            connectivity: Connectivity::default(),
+            expansion_add: ExpansionAdd::default(),
+            expansion_search: ExpansionSearch::default(),
+            space_type: SpaceType::default(),
+            quantization: Quantization::default(),
+        }),
+        "embedding",
+    )
+    .await;
     let (ks, idx) = ("keyspace".into(), "idx".into());
 
     let limit = NonZeroUsize::new(1).unwrap().into();
@@ -510,7 +546,8 @@ async fn unsupported_vector_index_reports_why_it_cannot_be_served() {
 #[tokio::test]
 async fn unsupported_fulltext_index_reports_why_it_cannot_be_served_from_bm25() {
     crate::enable_tracing();
-    let (client, _keep) = setup_unsupported_index(DbIndexKind::FullTextSearch, "content").await;
+    let (client, _keep) =
+        setup_unsupported_index(IndexKind::Fts(IndexOptionsFts::default()), "content").await;
 
     let limit = NonZeroUsize::new(1).unwrap().into();
     let response = client
@@ -525,7 +562,8 @@ async fn unsupported_fulltext_index_reports_why_it_cannot_be_served_from_bm25() 
 #[tokio::test]
 async fn unsupported_fulltext_index_reports_why_it_cannot_be_served_from_highlight() {
     crate::enable_tracing();
-    let (client, _keep) = setup_unsupported_index(DbIndexKind::FullTextSearch, "content").await;
+    let (client, _keep) =
+        setup_unsupported_index(IndexKind::Fts(IndexOptionsFts::default()), "content").await;
 
     let response = client
         .post_highlight(&"keyspace".into(), &"idx".into(), "hello".into(), vec![])
@@ -539,7 +577,11 @@ async fn unsupported_fulltext_index_reports_why_it_cannot_be_served_from_highlig
 #[tokio::test]
 async fn unsupported_pattern_index_reports_why_it_cannot_be_served() {
     crate::enable_tracing();
-    let (client, _keep) = setup_unsupported_index(DbIndexKind::Pattern, "content").await;
+    let (client, _keep) = setup_unsupported_index(
+        IndexKind::Pattern(IndexOptionsPattern::default()),
+        "content",
+    )
+    .await;
 
     let limit = NonZeroUsize::new(1).unwrap().into();
     let response = client

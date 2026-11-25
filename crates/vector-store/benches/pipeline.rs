@@ -7,12 +7,16 @@
 #[allow(dead_code)]
 mod db_basic;
 
+use crate::db_basic::CdcRow;
+use crate::db_basic::CdcScanFn;
+use crate::db_basic::Index;
+use crate::db_basic::RangeScanFn;
+use crate::db_basic::TOKEN_MIN;
 use axum::http::StatusCode;
 use criterion::BenchmarkId;
 use criterion::Criterion;
 use criterion::criterion_group;
 use db_basic::DbBasic;
-use db_basic::ScanFn;
 use db_basic::Table;
 use futures::FutureExt;
 use futures::StreamExt;
@@ -20,12 +24,19 @@ use futures::stream;
 use httpapi::IndexInfo;
 use httpapi::IndexStatus;
 use itertools::Itertools;
+use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
+use scylla::frame::response::result::ColumnSpec;
+use scylla::routing::Token;
 use scylla::value::CqlValue;
+use scylla_cdc::consumer::OperationType;
 use std::cell::RefCell;
+use std::collections::HashMap;
+use std::iter;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::LazyLock;
+use std::sync::Mutex;
 use std::sync::Once;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicI64;
@@ -43,15 +54,13 @@ use tokio::sync::watch;
 use tokio::task;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
-use vector_store::AsyncInProgress;
 use vector_store::ColumnName;
 use vector_store::Config;
 use vector_store::ConfigReceivers;
 use vector_store::Connectivity;
 use vector_store::DbIndexPartitioning;
-use vector_store::DbIndexedOperation;
-use vector_store::DbIndexedRow;
-use vector_store::DbIndexedValue;
+use vector_store::DbRow;
+use vector_store::DbValue;
 use vector_store::ExpansionAdd;
 use vector_store::ExpansionSearch;
 use vector_store::HttpServerConfig;
@@ -60,18 +69,14 @@ use vector_store::IndexKind;
 use vector_store::IndexMetadata;
 use vector_store::IndexOptionsVs;
 use vector_store::NonemptyArc;
-use vector_store::NonemptyBox;
 use vector_store::NonemptyIteratorExt;
-use vector_store::PrimaryKey;
 use vector_store::Quantization;
 use vector_store::SpaceType;
-use vector_store::Timestamp;
-use vector_store::Timestamped;
 use vector_store::Vector;
-use vector_store::db::Db;
-use vector_store::node_state::NodeState;
 
 const ENV_CONCURRENCY: &str = "BENCHES_CONCURRENCY";
+const CDC_SAFETY_INTERVAL: Duration = Duration::from_millis(1);
+const CDC_SLEEP_INTERVAL: Duration = Duration::ZERO;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -150,6 +155,8 @@ async fn default_config() -> Arc<Config> {
             "VECTOR_STORE_USEARCH_SIMULATOR" => {
                 dotenvy::var(key).unwrap_or("1us:1us:1us".to_string())
             }
+            "VECTOR_STORE_CDC_SAFETY_INTERVAL" => format!("{CDC_SAFETY_INTERVAL:?}"),
+            "VECTOR_STORE_CDC_SLEEP_INTERVAL" => format!("{CDC_SLEEP_INTERVAL:?}"),
             _ => dotenvy::var(key)?,
         })
     }
@@ -176,7 +183,12 @@ fn setup_table(
         Table {
             primary_keys: primary_keys.into_iter().collect_nonempty_arc().unwrap(),
             partition_key_count,
-            columns: Arc::new(columns.into_iter().collect()),
+            columns: Arc::new(
+                columns
+                    .into_iter()
+                    .map(|(name, column)| (name, ColumnType::Native(column)))
+                    .collect(),
+            ),
             dimensions: [(
                 index.target_columns.first().clone(),
                 index.vs().unwrap().dimensions,
@@ -188,13 +200,61 @@ fn setup_table(
     .unwrap();
 }
 
+fn cdc_column_specs(index: &IndexMetadata) -> Vec<ColumnSpec<'static>> {
+    db_basic::cdc_column_specs_vector(
+        &index.keyspace_name,
+        &index.table_name,
+        index
+            .primary_key_columns
+            .iter()
+            .map(|column| (column, NativeType::BigInt)),
+        index.target_columns.first(),
+        *index.vs().unwrap().dimensions.as_ref(),
+    )
+}
+
 fn setup_index(
     db: &DbBasic,
-    index: IndexMetadata,
-    fullscan_fn: Option<ScanFn>,
-    cdc_fn: Option<ScanFn>,
+    index_metadata: &IndexMetadata,
+    range_scan_fn: Option<RangeScanFn>,
+    cdc: Option<(CdcScanFn, usize)>,
 ) {
-    db.add_index(index, fullscan_fn, cdc_fn).unwrap();
+    db.add_index(
+        Index::new(index_metadata.clone())
+            .pipe(|index| {
+                if let Some(range_scan_fn) = range_scan_fn {
+                    index.with_range_scan(Token::new(TOKEN_MIN), range_scan_fn)
+                } else {
+                    index
+                }
+            })
+            .pipe(|index| {
+                if let Some((cdc_scan_fn, dimensions)) = cdc {
+                    index
+                        .with_cdc_scan(
+                            CDC_SAFETY_INTERVAL,
+                            cdc_scan_fn,
+                            cdc_column_specs(index_metadata),
+                        )
+                        .with_fetch_row(db_basic::fetch_row({
+                            let mut timestamp = 1;
+                            move |pk| {
+                                let pk = pk.get(0).unwrap().as_bigint().unwrap();
+                                timestamp += 1;
+                                Ok(Some(DbRow {
+                                    columns: vec![
+                                        Some(DbValue::Vector(vec![pk as f32; dimensions].into())),
+                                        Some(DbValue::Value(CqlValue::BigInt(timestamp))),
+                                    ],
+                                }))
+                            }
+                        }))
+                } else {
+                    index
+                }
+            }),
+    )
+    .unwrap();
 }
 
 fn delete_index(db: &DbBasic, index: &IndexMetadata) {
@@ -204,8 +264,7 @@ fn delete_index(db: &DbBasic, index: &IndexMetadata) {
 
 async fn run_vector_store(
     config: watch::Receiver<Arc<Config>>,
-    node_state: mpsc::Sender<NodeState>,
-    db: mpsc::Sender<Db>,
+    db: DbBasic,
 ) -> (impl Sized, Arc<TestClient>) {
     let addr = config.borrow().vector_store_addr;
     let (http_tx, http_rx) = watch::channel(Some(Arc::new(HttpServerConfig { addr, tls: None })));
@@ -216,9 +275,7 @@ async fn run_vector_store(
         mtls_http: mtls_http_rx,
     };
 
-    let (server, _mtls) = vector_store::run(Some(node_state), Some(db), receivers)
-        .await
-        .unwrap();
+    let (server, _mtls) = vector_store::run(db, receivers).await.unwrap();
 
     let client = Arc::new(TestClient::new(server.router().await.unwrap()));
     ((http_tx, server), client)
@@ -274,31 +331,90 @@ fn wait_until_all_tasks_finished(runtime: &Runtime) {
     }
 }
 
-fn scan_fn_mpsc(
-    mut items: mpsc::Receiver<(PrimaryKey, Option<Vector>, Timestamp, AsyncInProgress)>,
-) -> ScanFn {
-    Box::new(move |tx| {
-        async move {
-            while let Some((primary_key, embedding, timestamp, in_progress)) = items.recv().await {
+fn range_scan_fn_mpsc(items: mpsc::Receiver<(Vec<CqlValue>, Option<Vector>, i64)>) -> RangeScanFn {
+    let mut items = Some(items);
+    Box::new(move || {
+        let (tx, rx) = mpsc::channel(1);
+        let Some(mut items) = items.take() else {
+            return rx;
+        };
+        tokio::spawn(async move {
+            while let Some((primary_key, embedding, timestamp)) = items.recv().await {
                 let _ = tx
-                    .send((
-                        DbIndexedRow {
-                            primary_key,
-                            operation: DbIndexedOperation::Upsert(
-                                NonemptyBox::new([Timestamped::new(
-                                    timestamp,
-                                    embedding.map(DbIndexedValue::Vector),
-                                )])
-                                .unwrap(),
-                            ),
-                        },
-                        in_progress,
-                    ))
+                    .send(Ok(DbRow {
+                        columns: primary_key
+                            .into_iter()
+                            .map(|v| Some(DbValue::Value(v)))
+                            .chain(iter::once(embedding.map(DbValue::Vector)))
+                            .chain(iter::once(Some(DbValue::Value(CqlValue::BigInt(
+                                timestamp,
+                            )))))
+                            .collect(),
+                    }))
                     .await;
             }
-        }
-        .boxed()
+        });
+        rx
     })
+}
+
+fn cdc_scan_fn_mpsc(items: mpsc::Receiver<(Vec<CqlValue>, OperationType, u64)>) -> CdcScanFn {
+    let mut items = Some(items);
+    Box::new(move || {
+        let (tx, rx) = mpsc::channel(1);
+        let Some(mut items) = items.take() else {
+            return rx;
+        };
+        tokio::spawn(async move {
+            while let Some((primary_key, operation, timestamp_us)) = items.recv().await {
+                let _ = tx
+                    .send(CdcRow {
+                        primary_key,
+                        operation,
+                        timestamp_us,
+                    })
+                    .await;
+            }
+        });
+        rx
+    })
+}
+
+#[derive(Clone)]
+struct Guards(Arc<Mutex<HashMap<i64, mpsc::Sender<()>>>>);
+
+impl Guards {
+    fn new(db: &DbBasic) -> Self {
+        let guards = Self(Arc::new(Mutex::new(HashMap::new())));
+        db.set_make_in_progress_guard({
+            let guards = guards.clone();
+            Some(Box::new(move |pk| {
+                guards.take(pk.get(0).unwrap().as_bigint().unwrap())
+            }))
+        });
+        guards
+    }
+
+    fn insert(&self, key: i64) -> mpsc::Receiver<()> {
+        let (tx, rx) = mpsc::channel(1);
+        self.0.lock().unwrap().insert(key, tx);
+        rx
+    }
+
+    fn take(&self, key: i64) -> Option<mpsc::Sender<()>> {
+        self.0.lock().unwrap().remove(&key)
+    }
+}
+
+struct Guard(mpsc::WeakSender<()>);
+
+impl Guard {
+    fn receiver(db: &DbBasic) -> (mpsc::Sender<()>, mpsc::Receiver<()>) {
+        let (tx, rx) = mpsc::channel(1);
+        let guard = Self(tx.clone().downgrade());
+        db.set_make_in_progress_guard(Some(Box::new(move |_| guard.0.upgrade())));
+        (tx, rx)
+    }
 }
 
 fn fullscan_insert(c: &mut Criterion) {
@@ -319,8 +435,7 @@ fn fullscan_insert(c: &mut Criterion) {
             let index_metadata = index_metadata.clone();
             let notify_stop = notify_stop.clone();
             async move {
-                let node_state = vector_store::new_node_state().await;
-                let (db_actor, db) = db_basic::new(node_state.clone());
+                let db = db_basic::new();
                 setup_table(
                     &db,
                     &index_metadata,
@@ -329,11 +444,11 @@ fn fullscan_insert(c: &mut Criterion) {
                     [("id".into(), NativeType::BigInt)],
                 );
                 let (_config_tx, config_rx) = watch::channel(default_config().await);
-                let (_server, client) = run_vector_store(config_rx, node_state, db_actor).await;
+                let (_server, client) = run_vector_store(config_rx, db.clone()).await;
 
                 let (tx, rx) = mpsc::channel(concurrency);
 
-                setup_index(&db, index_metadata.clone(), Some(scan_fn_mpsc(rx)), None);
+                setup_index(&db, &index_metadata, Some(range_scan_fn_mpsc(rx)), None);
                 let keyspace_name = index_metadata.keyspace_name.clone().into();
                 let index_name = index_metadata.index_name.clone().into();
                 wait_until_index_is_created(&client, &keyspace_name, &index_name).await;
@@ -352,21 +467,23 @@ fn fullscan_insert(c: &mut Criterion) {
         &concurrency,
         |b, concurrency| {
             let fixture = fixture.borrow();
-            let (runtime, _, _, _, tx) = fixture.as_ref().unwrap();
+            let (runtime, _, db, _, tx) = fixture.as_ref().unwrap();
+            let guards = Guards::new(db);
             b.to_async(runtime).iter_custom(|iters| {
+                let guards = guards.clone();
                 let tx = tx.clone();
                 let next_pk = Arc::clone(&next_pk);
                 async move {
-                    run_with_concurrency(*concurrency, iters, move |it| {
+                    run_with_concurrency(*concurrency, iters, move |_, it| {
+                        let guards = guards.clone();
                         let tx = tx.clone();
                         let pk = next_pk.fetch_add(1, Ordering::Relaxed);
                         async move {
-                            let (tx_in_progress, mut rx_in_progress) = mpsc::channel(1);
+                            let mut rx_in_progress = guards.insert(pk);
                             let request = (
-                                [(CqlValue::BigInt(pk))].into_iter().collect(),
+                                vec![(CqlValue::BigInt(pk))],
                                 Some(vec![it as f32; DIMENSIONS].into()),
-                                Timestamp::from_millis(1),
-                                AsyncInProgress::fullscan(tx_in_progress),
+                                1,
                             );
                             let start = Instant::now();
                             tx.send(request).await.unwrap();
@@ -417,8 +534,7 @@ fn search(c: &mut Criterion) {
             let notify_stop = notify_stop.clone();
             let index_metadata = index_metadata.clone();
             async move {
-                let node_state = vector_store::new_node_state().await;
-                let (db_actor, db) = db_basic::new(node_state.clone());
+                let db = db_basic::new();
                 setup_table(
                     &db,
                     &index_metadata,
@@ -426,17 +542,16 @@ fn search(c: &mut Criterion) {
                     1,
                     [("id".into(), NativeType::BigInt)],
                 );
-                setup_index(&db, index_metadata.clone(), Some(scan_fn_mpsc(rx)), None);
+                setup_index(&db, &index_metadata, Some(range_scan_fn_mpsc(rx)), None);
                 let (_config_tx, config_rx) = watch::channel(default_config().await);
-                let (_server, client) = run_vector_store(config_rx, node_state, db_actor).await;
+                let (_server, client) = run_vector_store(config_rx, db.clone()).await;
 
-                let (tx_in_progress, mut rx_in_progress) = mpsc::channel(1);
+                let (tx_in_progress, mut rx_in_progress) = Guard::receiver(&db);
                 for it in 0..100000 {
                     tx.send((
-                        [(CqlValue::BigInt(it))].into_iter().collect(),
+                        vec![(CqlValue::BigInt(it))],
                         Some(vec![it as f32; DIMENSIONS].into()),
-                        Timestamp::from_millis(1),
-                        AsyncInProgress::fullscan(tx_in_progress.clone()),
+                        1,
                     ))
                     .await
                     .unwrap();
@@ -469,7 +584,7 @@ fn search(c: &mut Criterion) {
                 let index_metadata = index_metadata.clone();
                 let client = client.clone();
                 async move {
-                    run_with_concurrency(*concurrency, iters, move |it| {
+                    run_with_concurrency(*concurrency, iters, move |_, it| {
                         let keyspace_name = index_metadata.keyspace_name.clone().into();
                         let index_name = index_metadata.index_name.clone().into();
                         let client = client.clone();
@@ -524,8 +639,7 @@ fn cdc_insert(c: &mut Criterion) {
             let index_metadata = index_metadata.clone();
             let notify_stop = notify_stop.clone();
             async move {
-                let node_state = vector_store::new_node_state().await;
-                let (db_actor, db) = db_basic::new(node_state.clone());
+                let db = db_basic::new();
                 setup_table(
                     &db,
                     &index_metadata,
@@ -534,11 +648,16 @@ fn cdc_insert(c: &mut Criterion) {
                     [("id".into(), NativeType::BigInt)],
                 );
                 let (_config_tx, config_rx) = watch::channel(default_config().await);
-                let (_server, client) = run_vector_store(config_rx, node_state, db_actor).await;
+                let (_server, client) = run_vector_store(config_rx, db.clone()).await;
 
                 let (tx, rx) = mpsc::channel(concurrency);
 
-                setup_index(&db, index_metadata.clone(), None, Some(scan_fn_mpsc(rx)));
+                setup_index(
+                    &db,
+                    &index_metadata,
+                    None,
+                    Some((cdc_scan_fn_mpsc(rx), DIMENSIONS)),
+                );
                 let keyspace_name = index_metadata.keyspace_name.clone().into();
                 let index_name = index_metadata.index_name.clone().into();
                 wait_until_index_is_ready(&client, &keyspace_name, &index_name).await;
@@ -557,22 +676,21 @@ fn cdc_insert(c: &mut Criterion) {
         &concurrency,
         |b, concurrency| {
             let fixture = fixture.borrow();
-            let (runtime, _, _, _, tx) = fixture.as_ref().unwrap();
+            let (runtime, _, db, _, tx) = fixture.as_ref().unwrap();
+            let guards = Guards::new(db);
             b.to_async(runtime).iter_custom(|iters| {
+                let guards = guards.clone();
                 let tx = tx.clone();
                 let next_pk = Arc::clone(&next_pk);
                 async move {
-                    run_with_concurrency(*concurrency, iters, move |it| {
+                    run_with_concurrency(*concurrency, iters, move |_, _| {
+                        let guards = guards.clone();
                         let tx = tx.clone();
                         let pk = next_pk.fetch_add(1, Ordering::Relaxed);
                         async move {
-                            let (tx_in_progress, mut rx_in_progress) = mpsc::channel(1);
-                            let request = (
-                                [(CqlValue::BigInt(pk))].into_iter().collect(),
-                                Some(vec![it as f32; DIMENSIONS].into()),
-                                Timestamp::from_millis(1),
-                                AsyncInProgress::fullscan(tx_in_progress),
-                            );
+                            let mut rx_in_progress = guards.insert(pk);
+                            let request =
+                                (vec![(CqlValue::BigInt(pk))], OperationType::RowUpdate, 1);
                             let start = Instant::now();
                             tx.send(request).await.unwrap();
                             // wait until in-progress marker is dropped
@@ -623,8 +741,7 @@ fn cdc_update(c: &mut Criterion) {
             let notify_stop = notify_stop.clone();
             let index_metadata = index_metadata.clone();
             async move {
-                let node_state = vector_store::new_node_state().await;
-                let (db_actor, db) = db_basic::new(node_state.clone());
+                let db = db_basic::new();
                 setup_table(
                     &db,
                     &index_metadata,
@@ -634,21 +751,20 @@ fn cdc_update(c: &mut Criterion) {
                 );
                 setup_index(
                     &db,
-                    index_metadata.clone(),
-                    Some(scan_fn_mpsc(rx_fullscan)),
-                    Some(scan_fn_mpsc(rx_cdc)),
+                    &index_metadata,
+                    Some(range_scan_fn_mpsc(rx_fullscan)),
+                    Some((cdc_scan_fn_mpsc(rx_cdc), DIMENSIONS)),
                 );
                 let (_config_tx, config_rx) = watch::channel(default_config().await);
-                let (_server, client) = run_vector_store(config_rx, node_state, db_actor).await;
+                let (_server, client) = run_vector_store(config_rx, db.clone()).await;
 
-                let (tx_in_progress, mut rx_in_progress) = mpsc::channel(1);
+                let (tx_in_progress, mut rx_in_progress) = Guard::receiver(&db);
                 for it in 0..INDEX_SIZE {
                     tx_fullscan
                         .send((
-                            [(CqlValue::BigInt(it as i64))].into_iter().collect(),
+                            vec![(CqlValue::BigInt(it as i64))],
                             Some(vec![it as f32; DIMENSIONS].into()),
-                            Timestamp::from_millis(1),
-                            AsyncInProgress::fullscan(tx_in_progress.clone()),
+                            1,
                         ))
                         .await
                         .unwrap();
@@ -677,32 +793,35 @@ fn cdc_update(c: &mut Criterion) {
         &concurrency,
         |b, concurrency| {
             let fixture = fixture.borrow();
-            let (runtime, _, _, _, tx_cdc) = fixture.as_ref().unwrap();
+            let (runtime, _, db, _, tx_cdc) = fixture.as_ref().unwrap();
             let next_timestamp = Arc::clone(&next_timestamp);
+            let guards = Guards::new(db);
             b.to_async(runtime).iter_custom(|iters| {
+                let guards = guards.clone();
                 let next_timestamp = Arc::clone(&next_timestamp);
                 let tx_cdc = tx_cdc.clone();
+                let concurrency = *concurrency;
                 async move {
-                    run_with_concurrency(*concurrency, iters, move |it| {
+                    run_with_concurrency(concurrency, iters, move |concurrency_no, _| {
+                        let guards = guards.clone();
                         let next_timestamp = Arc::clone(&next_timestamp);
                         let tx_cdc = tx_cdc.clone();
+                        let min_pk = concurrency_no * INDEX_SIZE / concurrency;
+                        let max_pk = (concurrency_no + 1) * INDEX_SIZE / concurrency;
                         async move {
-                            let id = rand::random_range(0..INDEX_SIZE) as i64;
-                            let vector = vec![it as f32; DIMENSIONS].into();
+                            let id = rand::random_range(min_pk..max_pk) as i64;
+                            let mut rx_in_progress = guards.insert(id);
                             let timestamp = next_timestamp.fetch_add(1, Ordering::Relaxed);
-                            let (tx_in_progress, mut rx_in_progress) = mpsc::channel(1);
                             let start = Instant::now();
                             tx_cdc
                                 .send((
-                                    [(CqlValue::BigInt(id))].into_iter().collect(),
-                                    Some(vector),
-                                    Timestamp::from_millis(timestamp),
-                                    AsyncInProgress::fullscan(tx_in_progress.clone()),
+                                    vec![(CqlValue::BigInt(id))],
+                                    OperationType::RowUpdate,
+                                    timestamp,
                                 ))
                                 .await
                                 .unwrap();
                             // wait until the in-progress marker is dropped
-                            drop(tx_in_progress);
                             while rx_in_progress.recv().await.is_some() {}
                             start.elapsed()
                         }
@@ -750,8 +869,7 @@ fn cdc_delete(c: &mut Criterion) {
             let notify_stop = notify_stop.clone();
             let index_metadata = index_metadata.clone();
             async move {
-                let node_state = vector_store::new_node_state().await;
-                let (db_actor, db) = db_basic::new(node_state.clone());
+                let db = db_basic::new();
                 setup_table(
                     &db,
                     &index_metadata,
@@ -761,21 +879,20 @@ fn cdc_delete(c: &mut Criterion) {
                 );
                 setup_index(
                     &db,
-                    index_metadata.clone(),
-                    Some(scan_fn_mpsc(rx_fullscan)),
-                    Some(scan_fn_mpsc(rx_cdc)),
+                    &index_metadata,
+                    Some(range_scan_fn_mpsc(rx_fullscan)),
+                    Some((cdc_scan_fn_mpsc(rx_cdc), DIMENSIONS)),
                 );
                 let (_config_tx, config_rx) = watch::channel(default_config().await);
-                let (_server, client) = run_vector_store(config_rx, node_state, db_actor).await;
+                let (_server, client) = run_vector_store(config_rx, db.clone()).await;
 
-                let (tx_in_progress, mut rx_in_progress) = mpsc::channel(1);
+                let (tx_in_progress, mut rx_in_progress) = Guard::receiver(&db);
                 for it in 0..INDEX_SIZE {
                     tx_fullscan
                         .send((
-                            [(CqlValue::BigInt(it as i64))].into_iter().collect(),
+                            vec![(CqlValue::BigInt(it as i64))],
                             Some(vec![it as f32; DIMENSIONS].into()),
-                            Timestamp::from_millis(1),
-                            AsyncInProgress::fullscan(tx_in_progress.clone()),
+                            1,
                         ))
                         .await
                         .unwrap();
@@ -804,31 +921,32 @@ fn cdc_delete(c: &mut Criterion) {
         &concurrency,
         |b, concurrency| {
             let fixture = fixture.borrow();
-            let (runtime, _, _, _, tx_cdc) = fixture.as_ref().unwrap();
+            let (runtime, _, db, _, tx_cdc) = fixture.as_ref().unwrap();
             let next_timestamp = Arc::clone(&next_timestamp);
+            let guards = Guards::new(db);
             b.to_async(runtime).iter_custom(|iters| {
+                let guards = guards.clone();
                 let next_timestamp = Arc::clone(&next_timestamp);
                 let tx_cdc = tx_cdc.clone();
                 async move {
-                    run_with_concurrency(*concurrency, iters, move |_| {
+                    run_with_concurrency(*concurrency, iters, move |_, _| {
+                        let guards = guards.clone();
                         let next_timestamp = Arc::clone(&next_timestamp);
                         let tx_cdc = tx_cdc.clone();
                         async move {
                             let timestamp = next_timestamp.fetch_add(1, Ordering::Relaxed);
                             let id = timestamp as i64;
-                            let (tx_in_progress, mut rx_in_progress) = mpsc::channel(1);
+                            let mut rx_in_progress = guards.insert(id);
                             let start = Instant::now();
                             tx_cdc
                                 .send((
-                                    [(CqlValue::BigInt(id))].into_iter().collect(),
-                                    None,
-                                    Timestamp::from_millis(timestamp),
-                                    AsyncInProgress::fullscan(tx_in_progress.clone()),
+                                    vec![(CqlValue::BigInt(id))],
+                                    OperationType::RowDelete,
+                                    timestamp,
                                 ))
                                 .await
                                 .unwrap();
                             // wait until the in-progress marker is dropped
-                            drop(tx_in_progress);
                             while rx_in_progress.recv().await.is_some() {}
                             start.elapsed()
                         }
@@ -878,8 +996,7 @@ fn search_while_updating(c: &mut Criterion) {
             let notify_stop = notify_stop.clone();
             let index_metadata = index_metadata.clone();
             async move {
-                let node_state = vector_store::new_node_state().await;
-                let (db_actor, db) = db_basic::new(node_state.clone());
+                let db = db_basic::new();
 
                 setup_table(
                     &db,
@@ -890,22 +1007,21 @@ fn search_while_updating(c: &mut Criterion) {
                 );
                 setup_index(
                     &db,
-                    index_metadata.clone(),
-                    Some(scan_fn_mpsc(rx_fullscan)),
-                    Some(scan_fn_mpsc(rx_cdc)),
+                    &index_metadata,
+                    Some(range_scan_fn_mpsc(rx_fullscan)),
+                    Some((cdc_scan_fn_mpsc(rx_cdc), DIMENSIONS)),
                 );
 
                 let (config_tx, config_rx) = watch::channel(default_config().await);
-                let (_server, client) = run_vector_store(config_rx, node_state, db_actor).await;
+                let (_server, client) = run_vector_store(config_rx, db.clone()).await;
 
-                let (tx_in_progress, mut rx_in_progress) = mpsc::channel(1);
+                let (tx_in_progress, mut rx_in_progress) = Guard::receiver(&db);
                 for it in 0..INDEX_SIZE {
                     tx_fullscan
                         .send((
-                            [(CqlValue::BigInt(it as i64))].into_iter().collect(),
+                            vec![(CqlValue::BigInt(it as i64))],
                             Some(vec![it as f32; DIMENSIONS].into()),
-                            Timestamp::from_millis(1),
-                            AsyncInProgress::fullscan(tx_in_progress.clone()),
+                            1,
                         ))
                         .await
                         .unwrap();
@@ -921,20 +1037,18 @@ fn search_while_updating(c: &mut Criterion) {
                 wait_until_index_is_ready(&client, &keyspace_name, &index_name).await;
 
                 // run updates in the background while searching
+                let (tx_in_progress, mut rx_in_progress) = Guard::receiver(&db);
                 let cdc_task = tokio::spawn(async move {
                     let mut next_timestamp = 0;
-                    let (tx_in_progress, mut rx_in_progress) = mpsc::channel(1);
                     while Arc::clone(&notify_stop).notified().now_or_never().is_none() {
                         let id = rand::random_range(0..INDEX_SIZE) as i64;
-                        let vector = vec![next_timestamp as f32; DIMENSIONS].into();
                         let timestamp = next_timestamp;
                         next_timestamp += 1;
                         if tx_cdc
                             .send((
-                                [(CqlValue::BigInt(id))].into_iter().collect(),
-                                Some(vector),
-                                Timestamp::from_millis(timestamp),
-                                AsyncInProgress::fullscan(tx_in_progress.clone()),
+                                vec![(CqlValue::BigInt(id))],
+                                OperationType::RowUpdate,
+                                timestamp,
                             ))
                             .await
                             .is_err()
@@ -972,7 +1086,7 @@ fn search_while_updating(c: &mut Criterion) {
                 let index_metadata = index_metadata.clone();
                 let client = client.clone();
                 async move {
-                    run_with_concurrency(*concurrency, iters, move |it| {
+                    run_with_concurrency(*concurrency, iters, move |_, it| {
                         let keyspace_name = index_metadata.keyspace_name.clone().into();
                         let index_name = index_metadata.index_name.clone().into();
                         let client = client.clone();
@@ -1028,8 +1142,7 @@ fn search_while_inserting(c: &mut Criterion) {
             let notify_stop = notify_stop.clone();
             let index_metadata = index_metadata.clone();
             async move {
-                let node_state = vector_store::new_node_state().await;
-                let (db_actor, db) = db_basic::new(node_state.clone());
+                let db = db_basic::new();
 
                 setup_table(
                     &db,
@@ -1040,13 +1153,13 @@ fn search_while_inserting(c: &mut Criterion) {
                 );
                 setup_index(
                     &db,
-                    index_metadata.clone(),
+                    &index_metadata,
                     None,
-                    Some(scan_fn_mpsc(rx_cdc)),
+                    Some((cdc_scan_fn_mpsc(rx_cdc), DIMENSIONS)),
                 );
 
                 let (config_tx, config_rx) = watch::channel(default_config().await);
-                let (_server, client) = run_vector_store(config_rx, node_state, db_actor).await;
+                let (_server, client) = run_vector_store(config_rx, db.clone()).await;
 
                 let keyspace_name = index_metadata.keyspace_name.clone().into();
                 let index_name = index_metadata.index_name.clone().into();
@@ -1054,20 +1167,13 @@ fn search_while_inserting(c: &mut Criterion) {
                 wait_until_index_is_ready(&client, &keyspace_name, &index_name).await;
 
                 // run inserts in the background while searching
+                let (tx_in_progress, mut rx_in_progress) = Guard::receiver(&db);
                 let cdc_task = tokio::spawn(async move {
                     let pk = Arc::new(AtomicI64::new(0));
-                    let (tx_in_progress, mut rx_in_progress) = mpsc::channel(1);
                     while Arc::clone(&notify_stop).notified().now_or_never().is_none() {
                         let pk = pk.fetch_add(1, Ordering::Relaxed);
-                        let vector = vec![pk as f32; DIMENSIONS].into();
-                        let timestamp = Timestamp::from_millis(1);
                         if tx_cdc
-                            .send((
-                                [(CqlValue::BigInt(pk))].into_iter().collect(),
-                                Some(vector),
-                                timestamp,
-                                AsyncInProgress::fullscan(tx_in_progress.clone()),
-                            ))
+                            .send((vec![(CqlValue::BigInt(pk))], OperationType::RowUpdate, 1))
                             .await
                             .is_err()
                         {
@@ -1104,7 +1210,7 @@ fn search_while_inserting(c: &mut Criterion) {
                 let index_metadata = index_metadata.clone();
                 let client = client.clone();
                 async move {
-                    run_with_concurrency(*concurrency, iters, move |it| {
+                    run_with_concurrency(*concurrency, iters, move |_, it| {
                         let keyspace_name = index_metadata.keyspace_name.clone().into();
                         let index_name = index_metadata.index_name.clone().into();
                         let client = client.clone();
@@ -1162,8 +1268,7 @@ fn search_while_deleting(c: &mut Criterion) {
             let notify_stop = notify_stop.clone();
             let index_metadata = index_metadata.clone();
             async move {
-                let node_state = vector_store::new_node_state().await;
-                let (db_actor, db) = db_basic::new(node_state.clone());
+                let db = db_basic::new();
 
                 setup_table(
                     &db,
@@ -1174,23 +1279,22 @@ fn search_while_deleting(c: &mut Criterion) {
                 );
                 setup_index(
                     &db,
-                    index_metadata.clone(),
-                    Some(scan_fn_mpsc(rx_fullscan)),
-                    Some(scan_fn_mpsc(rx_cdc)),
+                    &index_metadata,
+                    Some(range_scan_fn_mpsc(rx_fullscan)),
+                    Some((cdc_scan_fn_mpsc(rx_cdc), DIMENSIONS)),
                 );
 
                 let (config_tx, config_rx) = watch::channel(default_config().await);
-                let (_server, client) = run_vector_store(config_rx, node_state, db_actor).await;
+                let (_server, client) = run_vector_store(config_rx, db.clone()).await;
 
                 // build the index with a fullscan before starting the benchmark
-                let (tx_in_progress, mut rx_in_progress) = mpsc::channel(1);
+                let (tx_in_progress, mut rx_in_progress) = Guard::receiver(&db);
                 for it in 0..INDEX_SIZE {
                     tx_fullscan
                         .send((
-                            [(CqlValue::BigInt(it as i64))].into_iter().collect(),
+                            vec![(CqlValue::BigInt(it as i64))],
                             Some(vec![it as f32; DIMENSIONS].into()),
-                            Timestamp::from_millis(1),
-                            AsyncInProgress::fullscan(tx_in_progress.clone()),
+                            1,
                         ))
                         .await
                         .unwrap();
@@ -1206,19 +1310,18 @@ fn search_while_deleting(c: &mut Criterion) {
                 wait_until_index_is_ready(&client, &keyspace_name, &index_name).await;
 
                 // run removes in the background while searching
+                let (tx_in_progress, mut rx_in_progress) = Guard::receiver(&db);
                 let cdc_task = tokio::spawn(async move {
                     let mut next_timestamp = 2;
-                    let (tx_in_progress, mut rx_in_progress) = mpsc::channel(1);
                     while Arc::clone(&notify_stop).notified().now_or_never().is_none() {
                         let id = rand::random_range(0..INDEX_SIZE) as i64;
                         let timestamp = next_timestamp;
                         next_timestamp += 1;
                         if tx_cdc
                             .send((
-                                [(CqlValue::BigInt(id))].into_iter().collect(),
-                                None,
-                                Timestamp::from_millis(timestamp),
-                                AsyncInProgress::fullscan(tx_in_progress.clone()),
+                                vec![(CqlValue::BigInt(id))],
+                                OperationType::RowDelete,
+                                timestamp,
                             ))
                             .await
                             .is_err()
@@ -1256,7 +1359,7 @@ fn search_while_deleting(c: &mut Criterion) {
                 let index_metadata = index_metadata.clone();
                 let client = client.clone();
                 async move {
-                    run_with_concurrency(*concurrency, iters, move |it| {
+                    run_with_concurrency(*concurrency, iters, move |_, it| {
                         let keyspace_name = index_metadata.keyspace_name.clone().into();
                         let index_name = index_metadata.index_name.clone().into();
                         let client = client.clone();
@@ -1294,12 +1397,12 @@ fn search_while_deleting(c: &mut Criterion) {
 #[hotpath::measure]
 async fn run_with_concurrency<F, Fut>(concurrency: usize, iters: u64, f: F) -> Duration
 where
-    F: Fn(u64) -> Fut + Clone + Send + Sync + 'static,
+    F: Fn(usize, u64) -> Fut + Clone + Send + Sync + 'static,
     Fut: std::future::Future<Output = Duration> + Send + 'static,
 {
     let counter = Arc::new(AtomicU64::new(0));
     let tasks = (0..concurrency)
-        .map(|_| {
+        .map(|concurrency| {
             let counter = Arc::clone(&counter);
             let f = f.clone();
             tokio::spawn(async move {
@@ -1309,7 +1412,7 @@ where
                     if it >= iters {
                         break;
                     }
-                    let duration = f(it).await;
+                    let duration = f(concurrency, it).await;
                     durations.push(duration);
                 }
                 durations.into_iter().fold(Duration::ZERO, |acc, x| acc + x)
@@ -1344,22 +1447,22 @@ async fn run_search_in_background(
     );
     setup_index(
         &db,
-        index_metadata.clone(),
-        Some(scan_fn_mpsc(rx_fullscan)),
+        &index_metadata,
+        Some(range_scan_fn_mpsc(rx_fullscan)),
         None,
     );
 
-    let (tx_in_progress, mut rx_in_progress) = mpsc::channel(1);
+    let (tx_in_progress, mut rx_in_progress) = Guard::receiver(&db);
     tx_fullscan
         .send((
-            [(CqlValue::BigInt(1i64))].into_iter().collect(),
+            vec![(CqlValue::BigInt(1i64))],
             Some(vec![1.0f32; DIMENSIONS].into()),
-            Timestamp::from_millis(1),
-            AsyncInProgress::fullscan(tx_in_progress),
+            1,
         ))
         .await
         .unwrap();
     // wait until all in-progress markers are dropped
+    drop(tx_in_progress);
     while rx_in_progress.recv().await.is_some() {}
 
     let keyspace_name = index_metadata.keyspace_name.clone().into();

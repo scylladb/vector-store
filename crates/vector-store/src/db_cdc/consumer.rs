@@ -76,6 +76,10 @@ impl<T: DbDriver> CdcConsumerData<T> {
             timestamp,
         );
 
+        #[cfg(feature = "in-progress")]
+        let async_in_progress = async_in_progress
+            .with_in_progress_guard(self.db_driver.make_in_progress_guard(&primary_key));
+
         let Some(row) = rows_result else {
             // If no row is found for the primary key, it is deleted
             _ = self
@@ -159,23 +163,26 @@ impl<T: DbDriver> CdcConsumer<T> {
     }
 
     async fn process_delete(&self) {
-        let _ = self
-            .consumer_data
-            .tx
-            .send((
-                DbIndexedRow {
-                    primary_key: self.primary_key.iter().cloned().collect(),
-                    operation: DbIndexedOperation::Delete(self.timestamp),
-                },
-                AsyncInProgress::cdc(
-                    self.consumer_data.metrics.indexing_lag.with_label_values(&[
-                        self.consumer_data.index_key.keyspace().as_ref(),
-                        self.consumer_data.index_key.index().as_ref(),
-                    ]),
-                    self.timestamp,
-                ),
-            ))
-            .await;
+        let row = DbIndexedRow {
+            primary_key: self.primary_key.iter().cloned().collect(),
+            operation: DbIndexedOperation::Delete(self.timestamp),
+        };
+        let async_in_progress = AsyncInProgress::cdc(
+            self.consumer_data.metrics.indexing_lag.with_label_values(&[
+                self.consumer_data.index_key.keyspace().as_ref(),
+                self.consumer_data.index_key.index().as_ref(),
+            ]),
+            self.timestamp,
+        );
+
+        #[cfg(feature = "in-progress")]
+        let async_in_progress = async_in_progress.with_in_progress_guard(
+            self.consumer_data
+                .db_driver
+                .make_in_progress_guard(&row.primary_key),
+        );
+
+        let _ = self.consumer_data.tx.send((row, async_in_progress)).await;
     }
 }
 

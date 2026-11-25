@@ -96,7 +96,7 @@ type IsValidSchemaR = bool;
 
 const RECONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 
-pub enum Db {
+pub(crate) enum Db {
     GetDbIndex {
         metadata: IndexMetadata,
         tx: oneshot::Sender<GetDbIndexR>,

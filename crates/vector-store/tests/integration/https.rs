@@ -20,8 +20,7 @@ async fn run_server(
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
 ) -> (impl Sized, core::net::SocketAddr, impl Sized) {
-    let node_state = vector_store::new_node_state().await;
-    let (db_actor, _db) = db_basic::new(node_state.clone());
+    let db = db_basic::new();
 
     let config = vector_store::Config {
         vector_store_addr: addr,
@@ -32,9 +31,7 @@ async fn run_server(
 
     let (receivers, senders) = create_config_channels(config).await;
 
-    let (server, _mtls) = vector_store::run(Some(node_state), Some(db_actor), receivers)
-        .await
-        .unwrap();
+    let (server, _mtls) = vector_store::run(db, receivers).await.unwrap();
 
     let addr = (*server.address().await.borrow()).unwrap();
 
