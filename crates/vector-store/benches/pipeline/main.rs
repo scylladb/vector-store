@@ -4,6 +4,7 @@
  */
 
 mod ann;
+mod corpus;
 #[path = "../../tests/integration/db_basic.rs"]
 #[allow(dead_code)]
 mod db_basic;
