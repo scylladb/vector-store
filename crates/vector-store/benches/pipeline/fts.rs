@@ -18,15 +18,19 @@ use super::run_vector_store;
 use super::wait_until_all_tasks_finished;
 use super::wait_until_index_is_created;
 use super::wait_until_index_is_removed;
+use axum::http::StatusCode;
+use httpapi::IndexInfo;
 use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
 use scylla::routing::Token;
 use scylla::value::CqlValue;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 use testclient::TestClient;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
@@ -39,6 +43,9 @@ use vector_store::IndexKind;
 use vector_store::IndexMetadata;
 use vector_store::IndexOptionsFts;
 use vector_store::NonemptyArc;
+
+/// Upper bound for any wait on the pipeline, so a lost document fails the run instead of hanging it.
+const WAIT_TIMEOUT: Duration = Duration::from_secs(120);
 
 fn fts_index_metadata(id: usize) -> IndexMetadata {
     IndexMetadata {
@@ -171,6 +178,116 @@ async fn delete_fts_indexes(db: &DbBasic, client: &TestClient, indexes: Vec<FtsI
     for index in &indexes {
         wait_until_index_is_removed(client, &index.keyspace_name(), &index.index_name()).await;
     }
+}
+
+/// Sends the documents round-robin over the indexes from `concurrency` tasks and returns how many
+/// documents each index got.
+async fn send_documents(
+    indexes: &[FtsIndex],
+    documents: Vec<(i64, String)>,
+    concurrency: usize,
+) -> Vec<usize> {
+    let mut sent = vec![0; indexes.len()];
+    let mut batches = vec![Vec::new(); concurrency];
+    for (i, document) in documents.into_iter().enumerate() {
+        sent[i % indexes.len()] += 1;
+        let tx = indexes[i % indexes.len()].tx.clone().unwrap();
+        batches[i % concurrency].push((tx, document));
+    }
+    let tasks = batches
+        .into_iter()
+        .map(|batch| {
+            tokio::spawn(async move {
+                for (tx, document) in batch {
+                    tx.send(document).await.unwrap();
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    for task in tasks {
+        task.await.unwrap();
+    }
+    sent
+}
+
+/// Waits until the documents of a batch are searchable: every row the pipeline takes gets a clone
+/// of one sender, which is dropped with the in-progress marker of that row, so the receiver closes
+/// once the last marker of the batch is gone.
+struct BatchGuard {
+    tx: Arc<Mutex<Option<mpsc::Sender<()>>>>,
+    taken: Arc<AtomicUsize>,
+    rx: mpsc::Receiver<()>,
+}
+
+impl BatchGuard {
+    fn new(db: &DbBasic) -> Self {
+        let (tx, rx) = mpsc::channel(1);
+        let tx = Arc::new(Mutex::new(Some(tx)));
+        let taken = Arc::new(AtomicUsize::new(0));
+        db.set_make_in_progress_guard(Some(Box::new({
+            let tx = Arc::clone(&tx);
+            let taken = Arc::clone(&taken);
+            move |_| {
+                let tx = tx.lock().unwrap().clone();
+                if tx.is_some() {
+                    taken.fetch_add(1, Ordering::Relaxed);
+                }
+                tx
+            }
+        })));
+        Self { tx, taken, rx }
+    }
+
+    /// Waits until `expected` rows have entered the pipeline and all of them are searchable.
+    async fn wait(mut self, db: &DbBasic, expected: usize) {
+        tokio::time::timeout(WAIT_TIMEOUT, async {
+            while self.taken.load(Ordering::Relaxed) < expected {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            db.set_make_in_progress_guard(None);
+            self.tx.lock().unwrap().take();
+            while self.rx.recv().await.is_some() {}
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "fts: {} of {expected} documents entered the pipeline, not all became searchable in {WAIT_TIMEOUT:?}",
+                self.taken.load(Ordering::Relaxed)
+            )
+        });
+    }
+}
+
+/// Asserts that the index holds `expected` searchable documents, waiting for late reloads.
+async fn assert_count(client: &TestClient, index: &FtsIndex, expected: usize) {
+    let mut count = 0;
+    let result = tokio::time::timeout(WAIT_TIMEOUT, async {
+        loop {
+            let response = client
+                .index_status(&index.keyspace_name(), &index.index_name())
+                .await;
+            if response.status_code() == StatusCode::OK {
+                count = response.json::<IndexInfo>().count;
+                if count == expected {
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        result.is_ok(),
+        "fts: index {} holds {count} documents, expected {expected}",
+        index.metadata.index_name
+    );
+}
+
+fn with_pks(ids: &Ids, documents: &[String]) -> Vec<(i64, String)> {
+    documents
+        .iter()
+        .map(|document| (ids.next_pk(), document.clone()))
+        .collect()
 }
 
 /// A running Vector Store over `DbBasic`, kept alive for one benchmark.
