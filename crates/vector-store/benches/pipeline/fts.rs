@@ -135,6 +135,80 @@ fn print_setup() {
     });
 }
 
+fn status_field(key: &str) -> Option<String> {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix(key))
+        .map(|value| value.trim().to_string())
+}
+
+/// The thread count of the process, without the sampler's own thread.
+fn thread_count() -> Option<usize> {
+    status_field("Threads:")?
+        .parse::<usize>()
+        .ok()
+        .map(|threads| threads - 1)
+}
+
+/// Samples the thread count of the process until dropped, so threads that live only while
+/// documents are indexed are seen too.
+struct ThreadSampler {
+    stop: Arc<AtomicBool>,
+    peak: Arc<AtomicUsize>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ThreadSampler {
+    fn start() -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let thread = std::thread::spawn({
+            let stop = Arc::clone(&stop);
+            let peak = Arc::clone(&peak);
+            move || {
+                while !stop.load(Ordering::Relaxed) {
+                    if let Some(threads) = thread_count() {
+                        peak.fetch_max(threads, Ordering::Relaxed);
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+        });
+        Self {
+            stop,
+            peak,
+            thread: Some(thread),
+        }
+    }
+
+    /// The peak thread count since the start or the previous call.
+    fn take_peak(&self) -> usize {
+        self.peak.swap(0, Ordering::Relaxed)
+    }
+}
+
+impl Drop for ThreadSampler {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            thread.join().unwrap();
+        }
+    }
+}
+
+/// Prints the thread count and memory of the process.
+fn print_footprint(label: &str, sampler: &ThreadSampler) {
+    let field = |key: &str| status_field(key).unwrap_or_else(|| "n/a".into());
+    eprintln!(
+        "fts footprint [{label}]: threads={} peak_threads={} rss={} peak={}",
+        thread_count().map_or_else(|| "n/a".into(), |threads| threads.to_string()),
+        sampler.take_peak(),
+        field("VmRSS:"),
+        field("VmHWM:"),
+    );
+}
+
 fn fts_index_metadata(id: usize) -> IndexMetadata {
     IndexMetadata {
         keyspace_name: "fts".into(),
@@ -391,10 +465,12 @@ struct Fixture {
     client: Arc<TestClient>,
     _server: Box<dyn Send>,
     _config_tx: watch::Sender<Arc<Config>>,
+    sampler: ThreadSampler,
 }
 
 impl Fixture {
     fn new() -> Self {
+        let sampler = ThreadSampler::start();
         let runtime = default_runtime();
         let (db, client, server, config_tx) = runtime.block_on(async {
             let db = db_basic::new();
@@ -408,6 +484,7 @@ impl Fixture {
             client,
             _server: server,
             _config_tx: config_tx,
+            sampler,
         }
     }
 
@@ -441,12 +518,14 @@ impl Fixture {
             client,
             _server,
             _config_tx,
+            sampler,
         } = self;
         runtime.block_on(delete_fts_indexes(&db, &client, indexes));
         drop(client);
         drop(_server);
         drop(_config_tx);
         wait_until_all_tasks_finished(&runtime);
+        drop(sampler);
     }
 }
 
@@ -470,6 +549,7 @@ pub(crate) fn fts_fullscan_build(c: &mut Criterion) {
         // Created on the first call, so a benchmark left out by the filter costs nothing.
         let mut fixture = None;
         let ids = Ids::default();
+        let mut footprint_printed = false;
         group.bench_with_input(
             BenchmarkId::new(format!("fts-fullscan-build-{count}"), concurrency),
             &concurrency,
@@ -491,6 +571,13 @@ pub(crate) fn fts_fullscan_build(c: &mut Criterion) {
 
                             for (index, sent) in indexes.iter().zip(sent) {
                                 assert_count(&fixture.client, index, sent).await;
+                            }
+                            if !footprint_printed {
+                                print_footprint(
+                                    &format!("after a build of {count} indexes"),
+                                    &fixture.sampler,
+                                );
+                                footprint_printed = true;
                             }
                             delete_fts_indexes(&fixture.db, &fixture.client, indexes).await;
                             elapsed
@@ -672,6 +759,7 @@ pub(crate) fn fts_search(c: &mut Criterion) {
             let fixture = Fixture::new();
             let ids = Ids::default();
             let indexes = fixture.serving_indexes(&ids, count, &documents);
+            print_footprint(&format!("{count} idle indexes"), &fixture.sampler);
             assert_queries_hit(&fixture, &indexes[0], queries);
             SearchSetup {
                 targets: targets(&indexes),
