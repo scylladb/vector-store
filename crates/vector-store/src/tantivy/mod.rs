@@ -37,6 +37,7 @@ use tantivy::schema::TextOptions;
 use tantivy::tokenizer::TextAnalyzer;
 use tokio::sync::Notify;
 use tokio::sync::Semaphore;
+use tokio::sync::SemaphorePermit;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
@@ -57,24 +58,52 @@ use crate::worker::WorkerExt;
 pub(crate) const COMMIT_INTERVAL: Duration = Duration::from_secs(1);
 pub(crate) const MAX_UNCOMMITTED_THRESHOLD: usize = 10_000;
 
+// The most extra indexing threads one writer takes.
+const MAX_EXTRA_INDEXING_THREADS: usize = 7;
+
 /// Caps the writers alive at once, and with them the Tantivy threads of the process.
 fn writers() -> &'static Semaphore {
     static WRITERS: OnceLock<Semaphore> = OnceLock::new();
     WRITERS.get_or_init(|| Semaphore::new(perf::num_workers().into()))
 }
 
+/// The indexing threads writers may have beyond their first one, shared by the whole process,
+/// so that a single index being built gets several and many at once get few each.
+fn extra_indexing_threads() -> &'static Semaphore {
+    static THREADS: OnceLock<Semaphore> = OnceLock::new();
+    THREADS.get_or_init(|| Semaphore::new(perf::num_workers().into()))
+}
+
+/// A writer with the extra indexing threads it holds until it is dropped.
 struct SessionWriter {
     writer: IndexWriter,
+    merge_threads: usize,
     // Handed to the reader on commit, which holds them until the documents are searchable.
     uncommitted: Vec<AsyncInProgress>,
+    _extra_threads: Option<SemaphorePermit<'static>>,
 }
 
 /// A writer and its threads exist only while its index is being written, so their number is
-/// bounded by the number of indexes written at once, not by the number of indexes.
-fn new_writer(index: &tantivy::Index) -> anyhow::Result<SessionWriter> {
+/// bounded by the number of indexes written at once, not by the number of indexes. A writer
+/// that starts with a full buffer takes extra indexing threads, as its index is being built:
+/// up to half of those left, so that the next such writers get some too.
+fn new_writer(index: &tantivy::Index, hot: bool) -> anyhow::Result<SessionWriter> {
+    let extra_threads = hot
+        .then(|| {
+            let budget = extra_indexing_threads();
+            let wanted = MAX_EXTRA_INDEXING_THREADS.min(budget.available_permits().div_ceil(2));
+            (1..=wanted)
+                .rev()
+                .find_map(|threads| budget.try_acquire_many(threads as u32).ok())
+        })
+        .flatten();
+    let extra = extra_threads
+        .as_ref()
+        .map_or(0, |threads| threads.num_permits());
+    let merge_threads = if extra >= 3 { 2 } else { 1 };
     let options = IndexWriterOptions::builder()
-        .num_worker_threads(1)
-        .num_merge_threads(1)
+        .num_worker_threads(1 + extra)
+        .num_merge_threads(merge_threads)
         .build();
     let writer: IndexWriter = index
         .writer_with_options(options)
@@ -84,7 +113,9 @@ fn new_writer(index: &tantivy::Index) -> anyhow::Result<SessionWriter> {
     writer.set_merge_policy(Box::new(NoMergePolicy));
     Ok(SessionWriter {
         writer,
+        merge_threads,
         uncommitted: Vec::new(),
+        _extra_threads: extra_threads,
     })
 }
 
@@ -350,10 +381,9 @@ struct Merges {
 }
 
 impl Merges {
-    /// Starts the merge the merge policy asks for, one at a time as the writer has one merge
-    /// thread.
+    /// Starts the merges the merge policy asks for, as many as the writer has merge threads.
     fn start(&mut self, index: &Index, key: &IndexKey, writer: &mut SessionWriter) {
-        while !self.failed && self.running.is_empty() {
+        while !self.failed && self.running.len() < writer.merge_threads {
             let segments = match index.index.searchable_segment_metas() {
                 Ok(segments) => segments,
                 Err(err) => {
@@ -427,6 +457,8 @@ async fn write_session(
             .as_ref()
             .is_some_and(|writer| !writer.uncommitted.is_empty());
         if !mutations.is_empty() || uncommitted {
+            // A writer created for a full buffer is taken as one of an index being built.
+            let hot = mutations.len() >= commit_threshold;
             let (done_tx, done_rx) = oneshot::channel();
             worker
                 .spawn_blocking({
@@ -436,7 +468,7 @@ async fn write_session(
                     move || {
                         let writer = match writer {
                             Some(writer) => Ok(writer),
-                            None => new_writer(&index.index),
+                            None => new_writer(&index.index, hot),
                         };
                         _ = done_tx.send(match writer {
                             Ok(mut writer) => {
@@ -623,6 +655,7 @@ where
         // Sized here, on the runtime of the service: a flush that creates a writer may run
         // on the worker's own thread, whose runtime has one worker.
         writers();
+        extra_indexing_threads();
         let allocate_rx = memory.subscribe_allocate().await;
         let mut commit_interval = tokio::time::interval(commit_interval);
         commit_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
