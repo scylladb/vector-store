@@ -459,6 +459,18 @@ pub async fn load_config(env: impl Fn(&str) -> anyhow::Result<String>) -> anyhow
         config.diskann_max_points = Some(max_points);
     }
 
+    if let Ok(threads) = env("VECTOR_STORE_TANTIVY_INDEXING_THREADS_POOL") {
+        config.tantivy_indexing_threads_pool = Some(threads.trim().parse().map_err(|_| {
+            anyhow!("Unable to parse VECTOR_STORE_TANTIVY_INDEXING_THREADS_POOL env (integer)")
+        })?);
+    }
+
+    if let Ok(threads) = env("VECTOR_STORE_TANTIVY_INDEXING_THREADS_PER_INDEX") {
+        config.tantivy_indexing_threads_per_index = Some(threads.trim().parse().map_err(|_| {
+            anyhow!("Unable to parse VECTOR_STORE_TANTIVY_INDEXING_THREADS_PER_INDEX env (integer)")
+        })?);
+    }
+
     if let Ok(diskann_backend) = env("VECTOR_STORE_DISKANN_BACKEND") {
         config.diskann_backend = Some(diskann_backend.trim().parse().map_err(|_| {
             anyhow!("Unable to parse VECTOR_STORE_DISKANN_BACKEND env (inmem/scylla)")
@@ -923,6 +935,37 @@ mod tests {
             Some(NonZeroUsize::new(500_000).unwrap())
         );
         assert_eq!(config.diskann_backend, Some(DiskannBackendKind::Scylla));
+    }
+
+    #[tokio::test]
+    async fn load_config_tantivy_indexing_threads() {
+        let env = mock_env(HashMap::new());
+        let config = load_config(env).await.unwrap();
+        assert_eq!(config.tantivy_indexing_threads_pool, None);
+        assert_eq!(config.tantivy_indexing_threads_per_index, None);
+
+        let env = mock_env(HashMap::from([
+            ("VECTOR_STORE_TANTIVY_INDEXING_THREADS_POOL", "16".into()),
+            (
+                "VECTOR_STORE_TANTIVY_INDEXING_THREADS_PER_INDEX",
+                "3".into(),
+            ),
+        ]));
+        let config = load_config(env).await.unwrap();
+        assert_eq!(config.tantivy_indexing_threads_pool, Some(16));
+        assert_eq!(config.tantivy_indexing_threads_per_index, Some(3));
+
+        let env = mock_env(HashMap::from([(
+            "VECTOR_STORE_TANTIVY_INDEXING_THREADS_POOL",
+            "many".into(),
+        )]));
+        let result = load_config(env).await;
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Unable to parse VECTOR_STORE_TANTIVY_INDEXING_THREADS_POOL")
+        );
     }
 
     #[tokio::test]

@@ -39,6 +39,8 @@ service supports also `.env` files.
 | `VECTOR_STORE_DISKANN_BACKEND`             | Use DiskANN as the indexing engine instead of USearch, on the given data provider: `inmem` (vectors and adjacency in RAM) or `scylla` (exact vectors read back from the base table). | (unset: USearch)         |
 | `VECTOR_STORE_DISKANN_ALPHA`               | DiskANN parameter that controls the trade-off between index quality and build time. | (DiskANN default)                    |
 | `VECTOR_STORE_DISKANN_MAX_POINTS`          | Maximum number of vectors a single DiskANN partition index can hold. | `1M (1_000_000)`                    |
+| `VECTOR_STORE_TANTIVY_INDEXING_THREADS_POOL` | How many indexing threads all the full-text and pattern indexes may use at once. Every index being written has one, and the rest go to indexes being built. A value up to `VECTOR_STORE_THREADS` leaves every index with one indexing thread. | (twice the value of `VECTOR_STORE_THREADS`) |
+| `VECTOR_STORE_TANTIVY_INDEXING_THREADS_PER_INDEX` | The most indexing threads a single index being built uses. | `8` |
 | `VECTOR_STORE_ALTER_INDEX_SIMULATOR`       | Enable simulator for missing `ALTER INDEX`. When enable indexes aren't deleted and their version is not checked.                                                                     | `false`                  |
 
 ### Duration values

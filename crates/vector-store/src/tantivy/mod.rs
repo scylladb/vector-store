@@ -44,6 +44,7 @@ use tokio::sync::watch;
 use tracing::error;
 
 use crate::AsyncInProgress;
+use crate::Config;
 use crate::IndexKey;
 use crate::memory::Allocate;
 use crate::memory::Memory;
@@ -58,8 +59,8 @@ use crate::worker::WorkerExt;
 pub(crate) const COMMIT_INTERVAL: Duration = Duration::from_secs(1);
 pub(crate) const MAX_UNCOMMITTED_THRESHOLD: usize = 10_000;
 
-// The most extra indexing threads one writer takes.
-const MAX_EXTRA_INDEXING_THREADS: usize = 7;
+// The most indexing threads one writer has, unless configured.
+const DEFAULT_INDEXING_THREADS_PER_INDEX: usize = 8;
 
 /// Caps the writers alive at once, and with them the Tantivy threads of the process.
 fn writers() -> &'static Semaphore {
@@ -67,11 +68,50 @@ fn writers() -> &'static Semaphore {
     WRITERS.get_or_init(|| Semaphore::new(perf::num_workers().into()))
 }
 
-/// The indexing threads writers may have beyond their first one, shared by the whole process,
-/// so that a single index being built gets several and many at once get few each.
-fn extra_indexing_threads() -> &'static Semaphore {
-    static THREADS: OnceLock<Semaphore> = OnceLock::new();
-    THREADS.get_or_init(|| Semaphore::new(perf::num_workers().into()))
+/// The indexing threads writers may have beyond their first one.
+struct ExtraIndexingThreads {
+    // Shared by the whole process, so that a single index being built gets several and many
+    // at once get few each.
+    budget: Semaphore,
+    per_index: usize,
+}
+
+static EXTRA_INDEXING_THREADS: OnceLock<ExtraIndexingThreads> = OnceLock::new();
+
+/// Every writer has one indexing thread, so the limits on all the indexing threads leave
+/// the extra ones what is above one per writer.
+fn extra_indexing_threads_or(
+    total: Option<usize>,
+    per_index: Option<usize>,
+) -> &'static ExtraIndexingThreads {
+    EXTRA_INDEXING_THREADS.get_or_init(|| {
+        let writers = perf::num_workers().get();
+        ExtraIndexingThreads {
+            budget: Semaphore::new(total.map_or(writers, |total| total.saturating_sub(writers))),
+            per_index: per_index
+                .unwrap_or(DEFAULT_INDEXING_THREADS_PER_INDEX)
+                .saturating_sub(1),
+        }
+    })
+}
+
+fn extra_indexing_threads() -> &'static ExtraIndexingThreads {
+    extra_indexing_threads_or(None, None)
+}
+
+/// Takes the limits of the indexing threads from the configuration. It must run on the
+/// runtime of the service, before the first index is created.
+pub(crate) fn configure(config: &Config) {
+    extra_indexing_threads_or(
+        config.tantivy_indexing_threads_pool,
+        config.tantivy_indexing_threads_per_index,
+    );
+}
+
+/// A writer takes up to half of the extra indexing threads left, so that the next writers
+/// get some too.
+fn extra_indexing_threads_wanted(available: usize, per_index: usize) -> usize {
+    per_index.min(available.div_ceil(2))
 }
 
 /// A writer with the extra indexing threads it holds until it is dropped.
@@ -85,16 +125,18 @@ struct SessionWriter {
 
 /// A writer and its threads exist only while its index is being written, so their number is
 /// bounded by the number of indexes written at once, not by the number of indexes. A writer
-/// that starts with a full buffer takes extra indexing threads, as its index is being built:
-/// up to half of those left, so that the next such writers get some too.
+/// that starts with a full buffer takes extra indexing threads, as its index is being built.
 fn new_writer(index: &tantivy::Index, hot: bool) -> anyhow::Result<SessionWriter> {
     let extra_threads = hot
         .then(|| {
-            let budget = extra_indexing_threads();
-            let wanted = MAX_EXTRA_INDEXING_THREADS.min(budget.available_permits().div_ceil(2));
+            let threads = extra_indexing_threads();
+            let wanted = extra_indexing_threads_wanted(
+                threads.budget.available_permits(),
+                threads.per_index,
+            );
             (1..=wanted)
                 .rev()
-                .find_map(|threads| budget.try_acquire_many(threads as u32).ok())
+                .find_map(|wanted| threads.budget.try_acquire_many(wanted as u32).ok())
         })
         .flatten();
     let extra = extra_threads
@@ -1029,6 +1071,20 @@ mod tests {
 
     #[rstest]
     #[timeout(Duration::from_secs(20))]
+    #[rstest]
+    #[case(12, 7, 6)]
+    #[case(32, 7, 7)]
+    #[case(1, 7, 1)]
+    #[case(0, 7, 0)]
+    #[case(12, 0, 0)]
+    fn writer_takes_half_of_the_extra_indexing_threads_left(
+        #[case] available: usize,
+        #[case] per_index: usize,
+        #[case] wanted: usize,
+    ) {
+        assert_eq!(extra_indexing_threads_wanted(available, per_index), wanted);
+    }
+
     #[tokio::test]
     async fn writers_alive_never_exceed_the_cap() {
         const INDEXES: usize = 3;
