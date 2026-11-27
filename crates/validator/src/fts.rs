@@ -1470,3 +1470,23 @@ async fn highlight_of_rows_over_the_request_body_limit_together_returns_error(
 
     info!("finished");
 }
+
+#[e2etest::test(group = fts)]
+async fn bm25_regex_query(fixture: Arc<Fixture>) {
+    info!("started");
+
+    fixture
+        .insert_documents([
+            (1, "the quick brown Fox jumps over the lazy dog"),
+            (2, "a slow turtle walks through the garden"),
+        ])
+        .await;
+    fixture.create_fts_index().await;
+
+    let pks = fixture.bm25_search_pks("/fo.*/").await;
+
+    // `Fox` is indexed as `fox`, which the regex matches.
+    assert_eq!(pks, vec![1], "expected only pk 1 for regex '/fo.*/'");
+
+    info!("finished");
+}
