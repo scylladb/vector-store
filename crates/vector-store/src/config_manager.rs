@@ -16,12 +16,97 @@ use secrecy::ExposeSecret;
 use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::num::NonZeroUsize;
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
 
 const DEFAULT_TLS_FILE_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 const TLS_FILE_CHECK_INTERVAL_ENV: &str = "VECTOR_STORE_TLS_FILE_CHECK_INTERVAL";
+
+/// Which value wins when the `.env` file sets a variable that is already set in the process
+/// environment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DotenvPrecedence {
+    /// The process environment wins: the `.env` file only fills in unset variables. Used at
+    /// startup.
+    ProcessEnvironment,
+    /// The `.env` file wins over the process environment. Used on a SIGHUP reload, so that
+    /// edits to the file take effect.
+    DotenvFile,
+}
+
+/// Loads the `.env` file from the working directory or the nearest of its parents, and logs
+/// which file was loaded.
+///
+/// Variables loaded from the `.env` file are set after exec, so they do not show up in
+/// `/proc/<pid>/environ`; this log is the only record of where the configuration came from.
+pub fn load_dotenv(precedence: DotenvPrecedence) {
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(err) => {
+            tracing::warn!(
+                "Failed to look for a .env file, cannot read the working directory: {err}"
+            );
+            return;
+        }
+    };
+    let path = match find_dotenv_file(&cwd) {
+        Ok(Some(path)) => path,
+        Ok(None) => {
+            tracing::info!("No .env file found in {cwd:?} or its parent directories");
+            return;
+        }
+        Err(err) => {
+            tracing::warn!(
+                "Failed to look for a .env file in {cwd:?} or its parent directories: {err}"
+            );
+            return;
+        }
+    };
+    let outcome = match precedence {
+        DotenvPrecedence::ProcessEnvironment => dotenvy::from_path(&path),
+        DotenvPrecedence::DotenvFile => dotenvy::from_path_override(&path),
+    };
+    log_dotenv_outcome(&path, &outcome, precedence);
+}
+
+/// Finds the `.env` file the way dotenvy does: in `dir` or the nearest of its parents, skipping
+/// entries that are not files. The file is resolved here, not by dotenvy, because dotenvy does
+/// not return its path when loading it fails part way, after some variables were already set.
+fn find_dotenv_file(dir: &Path) -> std::io::Result<Option<PathBuf>> {
+    for dir in dir.ancestors() {
+        let candidate = dir.join(".env");
+        match std::fs::metadata(&candidate) {
+            Ok(metadata) if metadata.is_file() => return Ok(Some(candidate)),
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(None)
+}
+
+fn log_dotenv_outcome(path: &Path, outcome: &dotenvy::Result<()>, precedence: DotenvPrecedence) {
+    match outcome {
+        Ok(()) => match precedence {
+            DotenvPrecedence::ProcessEnvironment => tracing::info!(
+                "Loaded .env file {path:?}; variables already set in the process environment \
+                 take precedence over it"
+            ),
+            DotenvPrecedence::DotenvFile => tracing::info!(
+                "Loaded .env file {path:?}; it overrides variables set in the process environment"
+            ),
+        },
+        // The error's own message quotes the offending line, which may hold a secret.
+        Err(dotenvy::Error::LineParse(_, index)) => tracing::warn!(
+            "Failed to parse .env file {path:?} at character {index} of a line; variables set \
+             before that line were loaded"
+        ),
+        Err(err) => tracing::warn!("Failed to load .env file {path:?}: {err}"),
+    }
+}
 
 fn tls_file_check_interval(env: &impl Fn(&str) -> anyhow::Result<String>) -> Duration {
     match env(TLS_FILE_CHECK_INTERVAL_ENV) {
@@ -174,6 +259,11 @@ impl ConfigManager {
         // Check for restart-required changes
         self.check_restart_required_changes(&old_config, &new_config);
 
+        log_credentials_changes(
+            old_config.credentials.as_ref(),
+            new_config.credentials.as_ref(),
+        );
+
         self.send_config(new_config).await;
 
         Ok(())
@@ -271,16 +361,17 @@ impl ConfigManager {
                     tracing::info!("Received SIGHUP signal, reloading configuration...");
 
                     // Re-read the .env file to pick up any changes
-                    if let Err(e) = dotenvy::from_filename_override(".env") {
-                        tracing::debug!("No .env file found or error reading it: {}", e);
-                    }
+                    load_dotenv(DotenvPrecedence::DotenvFile);
 
                     match self.reload_config(&env).await {
                         Ok(()) => {
                             tracing::info!("Configuration reloaded successfully");
                         }
                         Err(e) => {
-                            tracing::error!("Failed to reload configuration: {}", e);
+                            tracing::error!(
+                                "Failed to reload configuration, the previous configuration \
+                                 and ScyllaDB credentials stay in effect: {e:#}"
+                            );
                         }
                     }
                     let updated_config = self.config_tx.borrow().as_ref().clone();
@@ -312,64 +403,100 @@ where
     const USERNAME_ENV: &str = "VECTOR_STORE_SCYLLADB_USERNAME";
     const PASS_FILE_ENV: &str = "VECTOR_STORE_SCYLLADB_PASSWORD_FILE";
     const CERT_FILE_ENV: &str = "VECTOR_STORE_SCYLLADB_CERTIFICATE_FILE";
-    // Check for certificate file
-    let certificate_path = match env(CERT_FILE_ENV) {
-        Ok(val) => {
-            tracing::debug!("{} = {:?}", CERT_FILE_ENV, val);
-            Some(std::path::PathBuf::from(val))
-        }
-        Err(_) => None,
-    };
-
-    // Check for username/password authentication
-    let username = match env(USERNAME_ENV) {
-        Ok(val) => {
-            tracing::debug!("{} = {}", USERNAME_ENV, val);
-            Some(val)
-        }
-        Err(_) => None,
-    };
+    let certificate_path = env(CERT_FILE_ENV).ok().map(PathBuf::from);
+    let username = env(USERNAME_ENV).ok();
 
     // If neither certificate nor username is provided, return None
     if certificate_path.is_none() && username.is_none() {
-        tracing::debug!(
-            "No credentials or certificate configured, connecting without authentication"
+        tracing::info!(
+            "No ScyllaDB credentials or certificate configured, connecting without authentication"
         );
         return Ok(None);
     }
 
-    // Handle username/password if username is provided
-    let (username, password) = if let Some(username) = username {
-        if username.is_empty() {
+    let password_file = match &username {
+        Some(username) if username.is_empty() => {
             bail!("credentials: {USERNAME_ENV} must not be empty");
         }
+        Some(_) => match env(PASS_FILE_ENV) {
+            Ok(password_file) => Some(PathBuf::from(password_file)),
+            Err(_) => {
+                bail!("credentials: {PASS_FILE_ENV} env required when {USERNAME_ENV} is set")
+            }
+        },
+        None => None,
+    };
 
-        let Ok(password_file) = env(PASS_FILE_ENV) else {
-            bail!("credentials: {PASS_FILE_ENV} env required when {USERNAME_ENV} is set");
-        };
+    // Logged before the password file is read, so that a failed read still shows which file it
+    // was. The password itself, or anything derived from it, must never be logged.
+    tracing::info!(
+        "ScyllaDB credentials: username {}, password file {}, certificate file {}",
+        debug_or_none(username.as_ref()),
+        debug_or_none(password_file.as_ref()),
+        debug_or_none(certificate_path.as_ref()),
+    );
 
-        let password = secrecy::SecretString::new(
-            tokio::fs::read_to_string(&password_file)
-                .await
-                .map_err(|e| anyhow!("credentials: failed to read password file: {e}"))?
-                .into(),
-        );
-
-        (
-            Some(username),
-            Some(secrecy::SecretString::new(
-                password.expose_secret().trim().into(),
-            )),
-        )
-    } else {
-        tracing::info!("No username/password configured, using certificate-only authentication");
-        (None, None)
+    let password = match password_file {
+        Some(password_file) => Some(read_password(&password_file).await?),
+        None => None,
     };
     Ok(Some(Credentials {
         username,
         password,
         certificate_path,
     }))
+}
+
+async fn read_password(password_file: &Path) -> anyhow::Result<secrecy::SecretString> {
+    let password = secrecy::SecretString::new(
+        tokio::fs::read_to_string(password_file)
+            .await
+            .map_err(|e| anyhow!("credentials: failed to read password file: {e}"))?
+            .into(),
+    );
+    Ok(secrecy::SecretString::new(
+        password.expose_secret().trim().into(),
+    ))
+}
+
+fn debug_or_none(value: Option<&impl std::fmt::Debug>) -> String {
+    value.map_or_else(|| "none".to_string(), |value| format!("{value:?}"))
+}
+
+/// Names the parts of the ScyllaDB credentials that differ between `old` and `new`; empty when
+/// they are the same. No credentials compare equal to credentials with every part unset.
+pub(crate) fn credentials_changes(
+    old: Option<&Credentials>,
+    new: Option<&Credentials>,
+) -> Vec<&'static str> {
+    fn parts(creds: Option<&Credentials>) -> (Option<&str>, Option<&str>, Option<&Path>) {
+        (
+            creds.and_then(|c| c.username.as_deref()),
+            creds
+                .and_then(|c| c.password.as_ref())
+                .map(|password| password.expose_secret()),
+            creds.and_then(|c| c.certificate_path.as_deref()),
+        )
+    }
+    let (old_username, old_password, old_certificate) = parts(old);
+    let (new_username, new_password, new_certificate) = parts(new);
+    [
+        ("username", old_username != new_username),
+        ("password", old_password != new_password),
+        ("certificate file", old_certificate != new_certificate),
+    ]
+    .into_iter()
+    .filter_map(|(part, changed)| changed.then_some(part))
+    .collect()
+}
+
+fn log_credentials_changes(old: Option<&Credentials>, new: Option<&Credentials>) {
+    let changes = credentials_changes(old, new);
+    if changes.is_empty() {
+        tracing::info!("ScyllaDB credentials unchanged");
+    } else {
+        tracing::info!("ScyllaDB credentials changed: {}", changes.join(", "));
+    }
 }
 
 pub async fn load_config(env: impl Fn(&str) -> anyhow::Result<String>) -> anyhow::Result<Config> {
@@ -611,6 +738,88 @@ mod tests {
         file.path().to_str().unwrap().into()
     }
 
+    #[test]
+    #[tracing_test::traced_test]
+    fn dotenv_logs_loaded_file_at_startup() {
+        let path = Path::new("/opt/vector-store/.env");
+
+        log_dotenv_outcome(path, &Ok(()), DotenvPrecedence::ProcessEnvironment);
+
+        assert!(logs_contain(
+            "Loaded .env file \"/opt/vector-store/.env\"; variables already set in the process \
+             environment take precedence over it"
+        ));
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn dotenv_logs_loaded_file_on_reload() {
+        let path = Path::new("/opt/vector-store/.env");
+
+        log_dotenv_outcome(path, &Ok(()), DotenvPrecedence::DotenvFile);
+
+        assert!(logs_contain(
+            "Loaded .env file \"/opt/vector-store/.env\"; it overrides variables set in the \
+             process environment"
+        ));
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn dotenv_parse_error_names_the_file_but_not_the_line() {
+        let path = Path::new("/opt/vector-store/.env");
+        let line = "VECTOR_STORE_SECRET='leaked-secret".to_string();
+
+        log_dotenv_outcome(
+            path,
+            &Err(dotenvy::Error::LineParse(line, 20)),
+            DotenvPrecedence::DotenvFile,
+        );
+
+        assert!(logs_contain(
+            "Failed to parse .env file \"/opt/vector-store/.env\" at character 20 of a line"
+        ));
+        assert!(!logs_contain("leaked-secret"));
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn dotenv_logs_other_errors_with_the_file() {
+        let path = Path::new("/opt/vector-store/.env");
+        let denied = dotenvy::Error::Io(std::io::ErrorKind::PermissionDenied.into());
+
+        log_dotenv_outcome(path, &Err(denied), DotenvPrecedence::ProcessEnvironment);
+
+        assert!(logs_contain(
+            "Failed to load .env file \"/opt/vector-store/.env\": permission denied"
+        ));
+    }
+
+    #[test]
+    fn find_dotenv_file_takes_the_nearest_file_in_a_parent_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("parent");
+        let cwd = parent.join("cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(root.path().join(".env"), "").unwrap();
+        std::fs::write(parent.join(".env"), "").unwrap();
+
+        assert_eq!(find_dotenv_file(&cwd).unwrap(), Some(parent.join(".env")));
+    }
+
+    #[test]
+    fn find_dotenv_file_skips_a_directory_named_dotenv() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("cwd");
+        std::fs::create_dir_all(cwd.join(".env")).unwrap();
+        std::fs::write(root.path().join(".env"), "").unwrap();
+
+        assert_eq!(
+            find_dotenv_file(&cwd).unwrap(),
+            Some(root.path().join(".env"))
+        );
+    }
+
     #[tokio::test]
     async fn credentials_none_when_no_username() {
         let env = mock_env(HashMap::new());
@@ -738,6 +947,163 @@ mod tests {
             creds.certificate_path,
             Some(std::path::PathBuf::from("/path/to/cert.pem"))
         );
+    }
+
+    const SENTINEL_PASSWORD: &str = "s3ntinel-pa55word";
+
+    fn creds(
+        username: Option<&str>,
+        password: Option<&str>,
+        certificate: Option<&str>,
+    ) -> Credentials {
+        Credentials {
+            username: username.map(String::from),
+            password: password.map(|password| secrecy::SecretString::new(password.into())),
+            certificate_path: certificate.map(PathBuf::from),
+        }
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn credentials_logs_username_and_password_file_but_not_password() {
+        let file = pass_file(SENTINEL_PASSWORD);
+        let env = mock_env(HashMap::from([
+            ("VECTOR_STORE_SCYLLADB_USERNAME", USERNAME.into()),
+            ("VECTOR_STORE_SCYLLADB_PASSWORD_FILE", path(&file)),
+        ]));
+
+        credentials(&env).await.unwrap();
+
+        assert!(logs_contain(&format!(
+            "ScyllaDB credentials: username \"{USERNAME}\", password file {:?}, \
+             certificate file none",
+            file.path()
+        )));
+        assert!(!logs_contain(SENTINEL_PASSWORD));
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn credentials_logs_password_file_when_reading_it_fails() {
+        let env = mock_env(HashMap::from([
+            ("VECTOR_STORE_SCYLLADB_USERNAME", USERNAME.into()),
+            (
+                "VECTOR_STORE_SCYLLADB_PASSWORD_FILE",
+                "/no/such/file/exists".into(),
+            ),
+        ]));
+
+        let result = credentials(&env).await;
+
+        assert!(result.is_err());
+        assert!(logs_contain(
+            "password file \"/no/such/file/exists\", certificate file none"
+        ));
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn credentials_logs_certificate_only() {
+        let env = mock_env(HashMap::from([(
+            "VECTOR_STORE_SCYLLADB_CERTIFICATE_FILE",
+            "/path/to/cert.pem".into(),
+        )]));
+
+        credentials(&env).await.unwrap();
+
+        assert!(logs_contain(
+            "ScyllaDB credentials: username none, password file none, \
+             certificate file \"/path/to/cert.pem\""
+        ));
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn credentials_logs_when_none_configured() {
+        credentials(&mock_env(HashMap::new())).await.unwrap();
+
+        assert!(logs_contain(
+            "No ScyllaDB credentials or certificate configured, connecting without authentication"
+        ));
+    }
+
+    #[test]
+    fn credentials_changes_empty_when_same() {
+        let old = creds(Some(USERNAME), Some(PASSWORD), Some("/path/to/cert.pem"));
+        let new = creds(Some(USERNAME), Some(PASSWORD), Some("/path/to/cert.pem"));
+
+        assert!(credentials_changes(Some(&old), Some(&new)).is_empty());
+        assert!(credentials_changes(None, None).is_empty());
+    }
+
+    #[test]
+    fn credentials_changes_names_changed_parts() {
+        let old = creds(Some(USERNAME), Some(PASSWORD), None);
+        let new = creds(Some(USERNAME), Some("new_pass"), Some("/path/to/cert.pem"));
+
+        assert_eq!(
+            credentials_changes(Some(&old), Some(&new)),
+            vec!["password", "certificate file"]
+        );
+    }
+
+    #[test]
+    fn credentials_changes_when_authentication_added_or_removed() {
+        let creds = creds(Some(USERNAME), Some(PASSWORD), None);
+
+        assert_eq!(
+            credentials_changes(None, Some(&creds)),
+            vec!["username", "password"]
+        );
+        assert_eq!(
+            credentials_changes(Some(&creds), None),
+            vec!["username", "password"]
+        );
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn reload_logs_unchanged_credentials() {
+        let file = pass_file(SENTINEL_PASSWORD);
+        let vars = HashMap::from([
+            ("VECTOR_STORE_SCYLLADB_USERNAME", USERNAME.into()),
+            ("VECTOR_STORE_SCYLLADB_PASSWORD_FILE", path(&file)),
+        ]);
+        let config = load_config(mock_env(vars.clone())).await.unwrap();
+        let (config_manager, _receivers) = ConfigManager::new(config).await.unwrap();
+
+        config_manager.reload_config(mock_env(vars)).await.unwrap();
+
+        assert!(logs_contain("ScyllaDB credentials unchanged"));
+        assert!(!logs_contain(SENTINEL_PASSWORD));
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn reload_logs_changed_password_without_logging_it() {
+        const OLD_PASSWORD: &str = "old-pa55word";
+        let old_file = pass_file(OLD_PASSWORD);
+        let new_file = pass_file(SENTINEL_PASSWORD);
+        let old_env = mock_env(HashMap::from([
+            ("VECTOR_STORE_SCYLLADB_USERNAME", USERNAME.into()),
+            ("VECTOR_STORE_SCYLLADB_PASSWORD_FILE", path(&old_file)),
+        ]));
+        let new_env = mock_env(HashMap::from([
+            ("VECTOR_STORE_SCYLLADB_USERNAME", USERNAME.into()),
+            ("VECTOR_STORE_SCYLLADB_PASSWORD_FILE", path(&new_file)),
+        ]));
+        let config = load_config(old_env).await.unwrap();
+        let (config_manager, _receivers) = ConfigManager::new(config).await.unwrap();
+
+        config_manager.reload_config(new_env).await.unwrap();
+
+        assert!(logs_contain(&format!(
+            "password file {:?}",
+            new_file.path()
+        )));
+        assert!(logs_contain("ScyllaDB credentials changed: password"));
+        assert!(!logs_contain(OLD_PASSWORD));
+        assert!(!logs_contain(SENTINEL_PASSWORD));
     }
 
     #[tokio::test]
