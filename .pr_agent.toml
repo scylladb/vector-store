@@ -1,0 +1,3 @@
+# Qodo: apply REVIEW.md in code reviews (off by default on single-tenant deployments such as ours).
+[review_agent]
+enable_review_md = true
