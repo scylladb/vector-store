@@ -3,26 +3,16 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
-#[path = "../tests/integration/db_basic.rs"]
-#[allow(dead_code)]
-mod db_basic;
-
-use crate::db_basic::CdcRow;
-use crate::db_basic::CdcScanFn;
-use crate::db_basic::Index;
-use crate::db_basic::RangeScanFn;
-use crate::db_basic::TOKEN_MIN;
-use axum::http::StatusCode;
+use super::db_basic::CdcRow;
+use super::db_basic::CdcScanFn;
+use super::db_basic::DbBasic;
+use super::db_basic::Index;
+use super::db_basic::RangeScanFn;
+use super::db_basic::TOKEN_MIN;
+use super::db_basic::Table;
 use criterion::BenchmarkId;
 use criterion::Criterion;
-use criterion::criterion_group;
-use db_basic::DbBasic;
-use db_basic::Table;
 use futures::FutureExt;
-use futures::StreamExt;
-use futures::stream;
-use httpapi::IndexInfo;
-use httpapi::IndexStatus;
 use itertools::Itertools;
 use scylla::cluster::metadata::ColumnType;
 use scylla::cluster::metadata::NativeType;
@@ -37,34 +27,26 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::Mutex;
-use std::sync::Once;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
 use std::time::Instant;
 use tap::Pipe;
 use testclient::TestClient;
-use tokio::runtime::Runtime;
 use tokio::sync::Notify;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
-use tokio::task;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 use vector_store::ColumnName;
-use vector_store::Config;
-use vector_store::ConfigReceivers;
 use vector_store::Connectivity;
 use vector_store::DbIndexPartitioning;
 use vector_store::DbRow;
 use vector_store::DbValue;
 use vector_store::ExpansionAdd;
 use vector_store::ExpansionSearch;
-use vector_store::HttpServerConfig;
-use vector_store::HttpServerExt;
 use vector_store::IndexKind;
 use vector_store::IndexMetadata;
 use vector_store::IndexOptionsVs;
@@ -74,53 +56,18 @@ use vector_store::Quantization;
 use vector_store::SpaceType;
 use vector_store::Vector;
 
-const ENV_CONCURRENCY: &str = "BENCHES_CONCURRENCY";
-const CDC_SAFETY_INTERVAL: Duration = Duration::from_millis(1);
-const CDC_SLEEP_INTERVAL: Duration = Duration::ZERO;
-
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
-static INIT: Once = Once::new();
-
-fn init() {
-    INIT.call_once(|| {
-        _ = dotenvy::dotenv();
-
-        #[cfg(feature = "console")]
-        console_subscriber::init();
-
-        #[cfg(not(feature = "console"))]
-        {
-            use tracing_subscriber::EnvFilter;
-            use tracing_subscriber::fmt;
-            use tracing_subscriber::prelude::*;
-
-            tracing_subscriber::registry()
-                .with(EnvFilter::try_new("none").unwrap())
-                .with(fmt::layer().with_target(false))
-                .init();
-        }
-    });
-}
-
-fn default_runtime() -> Runtime {
-    let threads = dotenvy::var("VECTOR_STORE_THREADS")
-        .ok()
-        .and_then(|s| s.parse().ok());
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .pipe(|mut b| {
-            if let Some(threads) = threads {
-                b.worker_threads(threads);
-            }
-            b
-        })
-        .enable_all()
-        .build()
-        .unwrap();
-    hotpath::tokio_runtime!(runtime.handle());
-    runtime
-}
+use super::CDC_SAFETY_INTERVAL;
+use super::db_basic;
+use super::default_concurrency;
+use super::default_config;
+use super::default_runtime;
+use super::init;
+use super::run_vector_store;
+use super::run_with_concurrency;
+use super::wait_until_all_tasks_finished;
+use super::wait_until_index_is_created;
+use super::wait_until_index_is_ready;
+use super::wait_until_index_is_removed;
 
 fn default_index_metadata(
     primary_key_columns: impl IntoIterator<Item = ColumnName>,
@@ -147,27 +94,6 @@ fn default_index_metadata(
             quantization: Quantization::default(),
         }),
     }
-}
-
-async fn default_config() -> Arc<Config> {
-    fn env(key: &str) -> anyhow::Result<String> {
-        Ok(match key {
-            "VECTOR_STORE_USEARCH_SIMULATOR" => {
-                dotenvy::var(key).unwrap_or("1us:1us:1us".to_string())
-            }
-            "VECTOR_STORE_CDC_SAFETY_INTERVAL" => format!("{CDC_SAFETY_INTERVAL:?}"),
-            "VECTOR_STORE_CDC_SLEEP_INTERVAL" => format!("{CDC_SLEEP_INTERVAL:?}"),
-            _ => dotenvy::var(key)?,
-        })
-    }
-    Arc::new(vector_store::load_config(env).await.unwrap())
-}
-
-fn default_concurrency() -> usize {
-    dotenvy::var(ENV_CONCURRENCY)
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1)
 }
 
 fn setup_table(
@@ -262,75 +188,6 @@ fn delete_index(db: &DbBasic, index: &IndexMetadata) {
         .unwrap();
 }
 
-async fn run_vector_store(
-    config: watch::Receiver<Arc<Config>>,
-    db: DbBasic,
-) -> (impl Sized, Arc<TestClient>) {
-    let addr = config.borrow().vector_store_addr;
-    let (http_tx, http_rx) = watch::channel(Some(Arc::new(HttpServerConfig { addr, tls: None })));
-    let (_mtls_tx, mtls_http_rx) = watch::channel(None);
-    let receivers = ConfigReceivers {
-        config,
-        http: http_rx,
-        mtls_http: mtls_http_rx,
-    };
-
-    let (server, _mtls) = vector_store::run(db, receivers).await.unwrap();
-
-    let client = Arc::new(TestClient::new(server.router().await.unwrap()));
-    ((http_tx, server), client)
-}
-
-async fn wait_until_index_is_created(
-    client: &TestClient,
-    keyspace_name: &httpapi::KeyspaceName,
-    index_name: &httpapi::IndexName,
-) {
-    loop {
-        let response = client.index_status(keyspace_name, index_name).await;
-        if response.status_code() == StatusCode::OK {
-            break;
-        }
-        task::yield_now().await;
-    }
-}
-
-async fn wait_until_index_is_ready(
-    client: &TestClient,
-    keyspace_name: &httpapi::KeyspaceName,
-    index_name: &httpapi::IndexName,
-) {
-    loop {
-        let response = client.index_status(keyspace_name, index_name).await;
-        if response.status_code() == StatusCode::OK
-            && response.json::<IndexInfo>().status == IndexStatus::Serving
-        {
-            break;
-        }
-        task::yield_now().await;
-    }
-}
-
-async fn wait_until_index_is_removed(
-    client: &TestClient,
-    keyspace_name: &httpapi::KeyspaceName,
-    index_name: &httpapi::IndexName,
-) {
-    loop {
-        let response = client.index_status(keyspace_name, index_name).await;
-        if response.status_code() != StatusCode::OK {
-            break;
-        }
-        task::yield_now().await;
-    }
-}
-
-fn wait_until_all_tasks_finished(runtime: &Runtime) {
-    while runtime.metrics().num_alive_tasks() > 1 {
-        std::thread::yield_now();
-    }
-}
-
 fn range_scan_fn_mpsc(items: mpsc::Receiver<(Vec<CqlValue>, Option<Vector>, i64)>) -> RangeScanFn {
     let mut items = Some(items);
     Box::new(move || {
@@ -417,7 +274,7 @@ impl Guard {
     }
 }
 
-fn fullscan_insert(c: &mut Criterion) {
+pub(crate) fn fullscan_insert(c: &mut Criterion) {
     init();
 
     const DIMENSIONS: usize = 128;
@@ -463,7 +320,7 @@ fn fullscan_insert(c: &mut Criterion) {
 
     let next_pk = Arc::new(AtomicI64::new(0));
     group.bench_with_input(
-        BenchmarkId::new("fullscan-insert", concurrency),
+        BenchmarkId::new("ann-fullscan-insert", concurrency),
         &concurrency,
         |b, concurrency| {
             let fixture = fixture.borrow();
@@ -514,7 +371,7 @@ fn fullscan_insert(c: &mut Criterion) {
     }
 }
 
-fn search(c: &mut Criterion) {
+pub(crate) fn search(c: &mut Criterion) {
     init();
 
     const DIMENSIONS: usize = 128;
@@ -574,7 +431,7 @@ fn search(c: &mut Criterion) {
     });
 
     group.bench_with_input(
-        BenchmarkId::new("search", concurrency),
+        BenchmarkId::new("ann-search", concurrency),
         &concurrency,
         |b, concurrency| {
             let fixture = fixture.borrow();
@@ -621,7 +478,7 @@ fn search(c: &mut Criterion) {
     }
 }
 
-fn cdc_insert(c: &mut Criterion) {
+pub(crate) fn cdc_insert(c: &mut Criterion) {
     init();
 
     const DIMENSIONS: usize = 128;
@@ -672,7 +529,7 @@ fn cdc_insert(c: &mut Criterion) {
 
     let next_pk = Arc::new(AtomicI64::new(0));
     group.bench_with_input(
-        BenchmarkId::new("cdc-insert", concurrency),
+        BenchmarkId::new("ann-cdc-insert", concurrency),
         &concurrency,
         |b, concurrency| {
             let fixture = fixture.borrow();
@@ -720,7 +577,7 @@ fn cdc_insert(c: &mut Criterion) {
     }
 }
 
-fn cdc_update(c: &mut Criterion) {
+pub(crate) fn cdc_update(c: &mut Criterion) {
     init();
 
     const DIMENSIONS: usize = 1536;
@@ -789,7 +646,7 @@ fn cdc_update(c: &mut Criterion) {
     // We start the next timestamp at 2, because the fullscan inserts used timestamp 1.
     let next_timestamp = Arc::new(AtomicU64::new(2));
     group.bench_with_input(
-        BenchmarkId::new("cdc-update", concurrency),
+        BenchmarkId::new("ann-cdc-update", concurrency),
         &concurrency,
         |b, concurrency| {
             let fixture = fixture.borrow();
@@ -848,7 +705,7 @@ fn cdc_update(c: &mut Criterion) {
     }
 }
 
-fn cdc_delete(c: &mut Criterion) {
+pub(crate) fn cdc_delete(c: &mut Criterion) {
     init();
 
     const DIMENSIONS: usize = 1536;
@@ -917,7 +774,7 @@ fn cdc_delete(c: &mut Criterion) {
     // We start the next timestamp at 2, because the fullscan inserts used timestamp 1.
     let next_timestamp = Arc::new(AtomicU64::new(2));
     group.bench_with_input(
-        BenchmarkId::new("cdc-delete", concurrency),
+        BenchmarkId::new("ann-cdc-delete", concurrency),
         &concurrency,
         |b, concurrency| {
             let fixture = fixture.borrow();
@@ -973,7 +830,7 @@ fn cdc_delete(c: &mut Criterion) {
     }
 }
 
-fn search_while_updating(c: &mut Criterion) {
+pub(crate) fn search_while_updating(c: &mut Criterion) {
     init();
 
     const DIMENSIONS: usize = 1536;
@@ -1075,7 +932,7 @@ fn search_while_updating(c: &mut Criterion) {
     });
 
     group.bench_with_input(
-        BenchmarkId::new("search-while-updating", concurrency),
+        BenchmarkId::new("ann-search-while-updating", concurrency),
         &concurrency,
         |b, concurrency| {
             let fixture = fixture.borrow();
@@ -1121,7 +978,7 @@ fn search_while_updating(c: &mut Criterion) {
     }
 }
 
-fn search_while_inserting(c: &mut Criterion) {
+pub(crate) fn search_while_inserting(c: &mut Criterion) {
     init();
 
     const DIMENSIONS: usize = 1536;
@@ -1199,7 +1056,7 @@ fn search_while_inserting(c: &mut Criterion) {
     });
 
     group.bench_with_input(
-        BenchmarkId::new("search-while-inserting", concurrency),
+        BenchmarkId::new("ann-search-while-inserting", concurrency),
         &concurrency,
         |b, concurrency| {
             let fixture = fixture.borrow();
@@ -1245,7 +1102,7 @@ fn search_while_inserting(c: &mut Criterion) {
     }
 }
 
-fn search_while_deleting(c: &mut Criterion) {
+pub(crate) fn search_while_deleting(c: &mut Criterion) {
     init();
 
     const DIMENSIONS: usize = 1536;
@@ -1348,7 +1205,7 @@ fn search_while_deleting(c: &mut Criterion) {
     });
 
     group.bench_with_input(
-        BenchmarkId::new("search-while-deleting", concurrency),
+        BenchmarkId::new("ann-search-while-deleting", concurrency),
         &concurrency,
         |b, concurrency| {
             let fixture = fixture.borrow();
@@ -1392,37 +1249,6 @@ fn search_while_deleting(c: &mut Criterion) {
         drop(config_tx);
         wait_until_all_tasks_finished(&runtime);
     }
-}
-
-#[hotpath::measure]
-async fn run_with_concurrency<F, Fut>(concurrency: usize, iters: u64, f: F) -> Duration
-where
-    F: Fn(usize, u64) -> Fut + Clone + Send + Sync + 'static,
-    Fut: std::future::Future<Output = Duration> + Send + 'static,
-{
-    let counter = Arc::new(AtomicU64::new(0));
-    let tasks = (0..concurrency)
-        .map(|concurrency| {
-            let counter = Arc::clone(&counter);
-            let f = f.clone();
-            tokio::spawn(async move {
-                let mut durations = Vec::new();
-                loop {
-                    let it = counter.fetch_add(1, Ordering::Relaxed);
-                    if it >= iters {
-                        break;
-                    }
-                    let duration = f(concurrency, it).await;
-                    durations.push(duration);
-                }
-                durations.into_iter().fold(Duration::ZERO, |acc, x| acc + x)
-            })
-        })
-        .collect_vec();
-    stream::iter(tasks)
-        .then(|task| async move { task.await.unwrap() })
-        .fold(Duration::ZERO, |acc, x| async move { acc + x })
-        .await
 }
 
 async fn run_search_in_background(
@@ -1506,23 +1332,4 @@ async fn run_search_in_background(
         }
     });
     (task, stop)
-}
-
-criterion_group!(
-    benches,
-    fullscan_insert,
-    search,
-    cdc_insert,
-    cdc_update,
-    cdc_delete,
-    search_while_updating,
-    search_while_inserting,
-    search_while_deleting,
-);
-
-#[hotpath::main]
-fn main() {
-    benches();
-
-    Criterion::default().configure_from_args().final_summary();
 }

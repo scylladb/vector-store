@@ -11,6 +11,7 @@ use httpapi::KeyspaceName;
 use httpapi::Limit;
 use httpapi::PostIndexAnnFilter;
 use httpapi::PostIndexAnnRequest;
+use httpapi::PostIndexBm25Request;
 use httpapi::Vector;
 
 #[derive(Debug)]
@@ -62,6 +63,23 @@ impl TestClient {
                 routing: true,
                 return_columns: vec![],
             })
+            .await
+    }
+
+    #[hotpath::measure]
+    pub async fn bm25(
+        &self,
+        keyspace_name: &KeyspaceName,
+        index_name: &IndexName,
+        query: String,
+        limit: Limit,
+    ) -> TestResponse {
+        self.test_server
+            .post(&format!(
+                "{}/indexes/{}/{}/bm25",
+                self.url_api, keyspace_name, index_name
+            ))
+            .json(&PostIndexBm25Request { query, limit })
             .await
     }
 }
