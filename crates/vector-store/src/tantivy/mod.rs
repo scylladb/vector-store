@@ -9,6 +9,7 @@ use std::collections::btree_map;
 use std::mem;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::sync::RwLock;
 use std::time::Duration;
 
@@ -35,6 +36,7 @@ use tantivy::schema::Schema;
 use tantivy::schema::TextOptions;
 use tantivy::tokenizer::TextAnalyzer;
 use tokio::sync::Notify;
+use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
@@ -54,6 +56,12 @@ use crate::worker::WorkerExt;
 
 pub(crate) const COMMIT_INTERVAL: Duration = Duration::from_secs(1);
 pub(crate) const MAX_UNCOMMITTED_THRESHOLD: usize = 10_000;
+
+/// Caps the writers alive at once, and with them the Tantivy threads of the process.
+fn writers() -> &'static Semaphore {
+    static WRITERS: OnceLock<Semaphore> = OnceLock::new();
+    WRITERS.get_or_init(|| Semaphore::new(perf::num_workers().into()))
+}
 
 struct SessionWriter {
     writer: IndexWriter,
@@ -405,6 +413,7 @@ async fn write_session(
         let pending = index.pending.lock().unwrap();
         pending.requested || pending.mutations.len() >= commit_threshold
     };
+    let _permit = writers().acquire().await;
     let mut writer: Option<SessionWriter> = None;
     let mut merges = Merges::default();
     loop {
@@ -611,6 +620,9 @@ where
         commit_threshold: usize,
         new_index: F,
     ) -> Self {
+        // Sized here, on the runtime of the service: a flush that creates a writer may run
+        // on the worker's own thread, whose runtime has one worker.
+        writers();
         let allocate_rx = memory.subscribe_allocate().await;
         let mut commit_interval = tokio::time::interval(commit_interval);
         commit_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -797,8 +809,10 @@ pub(crate) mod test_support {
 mod tests {
     use std::io;
     use std::path::Path;
+    use std::sync::atomic::AtomicBool;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
+    use std::thread;
 
     use rstest::rstest;
     use tantivy::IndexSettings;
@@ -978,5 +992,76 @@ mod tests {
 
         assert_eq!(failures.load(Ordering::Relaxed), 0);
         assert_eq!(indexes.count(&key), 1);
+    }
+
+    #[rstest]
+    #[timeout(Duration::from_secs(20))]
+    #[tokio::test]
+    async fn writers_alive_never_exceed_the_cap() {
+        const INDEXES: usize = 3;
+        // The cap comes from the runtime of the first test that creates indexes; all of them
+        // run on a runtime like this one.
+        let cap = usize::from(perf::num_workers());
+        assert!(INDEXES > cap);
+        let (tx, mut rx) = mpsc::channel(1);
+        let mut all_indexes = Vec::new();
+        for _ in 0..INDEXES {
+            let mut indexes = make_indexes(RamDirectory::create()).await;
+            indexes
+                .add_document(
+                    0.into(),
+                    "text".into(),
+                    AsyncInProgress::fullscan(tx.clone()),
+                )
+                .await;
+            all_indexes.push(indexes);
+        }
+        let key = make_index_key();
+        let indexes = all_indexes
+            .iter()
+            .map(|indexes| indexes.get(&key).unwrap())
+            .collect::<Vec<_>>();
+        let done = Arc::new(AtomicBool::new(false));
+        let peak = thread::spawn({
+            let done = Arc::clone(&done);
+            move || {
+                let mut peak = 0;
+                while !done.load(Ordering::Relaxed) {
+                    // Counts the writers seen twice in a row: an index has one writer in this
+                    // test, so those were all alive at one time.
+                    let alive = indexes
+                        .iter()
+                        .map(|index| has_writer(index))
+                        .collect::<Vec<_>>();
+                    let alive = indexes
+                        .iter()
+                        .zip(alive)
+                        .filter(|(index, alive)| *alive && has_writer(index))
+                        .count();
+                    peak = peak.max(alive);
+                    thread::yield_now();
+                }
+                peak
+            }
+        });
+
+        // Reaching the threshold starts the write of every index.
+        for indexes in &mut all_indexes {
+            for primary in 1..TEST_COMMIT_THRESHOLD as u64 {
+                indexes
+                    .add_document(
+                        primary.into(),
+                        "text".into(),
+                        AsyncInProgress::fullscan(tx.clone()),
+                    )
+                    .await;
+            }
+        }
+        drop(tx);
+        rx.recv().await;
+        done.store(true, Ordering::Relaxed);
+        let peak = peak.join().unwrap();
+
+        assert!((1..=cap).contains(&peak), "{peak} writers alive at once");
     }
 }
