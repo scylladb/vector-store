@@ -226,6 +226,8 @@ pub struct Config {
     pub diskann_alpha: Option<DiskannAlpha>,
     pub diskann_max_points: Option<NonZeroUsize>,
     pub diskann_backend: Option<DiskannBackendKind>,
+    pub tantivy_indexing_threads_pool: Option<usize>,
+    pub tantivy_indexing_threads_per_index: Option<usize>,
     pub alter_index_simulator: bool,
     pub cql_connection_timeout: Option<Duration>,
     pub cql_keepalive_interval: Option<Duration>,
@@ -261,6 +263,8 @@ impl Default for Config {
             diskann_alpha: None,
             diskann_max_points: None,
             diskann_backend: None,
+            tantivy_indexing_threads_pool: None,
+            tantivy_indexing_threads_per_index: None,
             alter_index_simulator: false,
             disable_colors: false,
             tls_cert_path: None,
@@ -1016,6 +1020,7 @@ pub async fn run(
     let config_rx = config_receivers.config.clone();
     let opensearch_addr = config_rx.borrow().opensearch_addr.clone();
     let diskann_backend = config_rx.borrow().diskann_backend;
+    tantivy::configure(&config_rx.borrow());
 
     let internals = internals::new(db_driver.clone());
     let memory = memory::new(internals.clone(), config_rx.clone());
