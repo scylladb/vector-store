@@ -78,6 +78,16 @@ struct Sizes {
 }
 
 const ENV_FTS_INDEXES: &str = "BENCHES_FTS_INDEXES";
+const ENV_FTS_INSERT_RATE: &str = "BENCHES_FTS_INSERT_RATE";
+
+/// Documents per second sent through CDC while searching; unbounded when unset,
+/// but then a faster version also searches a bigger index.
+fn insert_rate() -> Option<f64> {
+    dotenvy::var(ENV_FTS_INSERT_RATE).ok().map(|rate| {
+        rate.parse()
+            .unwrap_or_else(|_| panic!("{ENV_FTS_INSERT_RATE}: bad rate {rate}"))
+    })
+}
 
 /// The index counts to run, a comma-separated list; larger counts are opt-in because an
 /// unmodified Tantivy writer needs over 20 GB to build a hundred indexes.
@@ -115,10 +125,12 @@ fn print_setup() {
     static PRINTED: Once = Once::new();
     PRINTED.call_once(|| {
         eprintln!(
-            "fts: VECTOR_STORE_THREADS={} BENCHES_CONCURRENCY={} {ENV_FTS_INDEXES}={:?}",
+            "fts: VECTOR_STORE_THREADS={} BENCHES_CONCURRENCY={} {ENV_FTS_INDEXES}={:?} \
+             {ENV_FTS_INSERT_RATE}={:?}",
             dotenvy::var("VECTOR_STORE_THREADS").unwrap_or_else(|_| "default".into()),
             default_concurrency(),
             index_counts(),
+            insert_rate(),
         );
     });
 }
@@ -805,9 +817,18 @@ pub(crate) fn fts_search_while_inserting(c: &mut Criterion) {
             });
             assert_queries_hit(&fixture, &index, queries);
 
+            let insert_rate = insert_rate();
+            let insert_start = Instant::now();
             let writer = Writer::spawn(&fixture.runtime, cdc_documents, move |written, _| {
                 let tx_cdc = tx_cdc.clone();
                 async move {
+                    if let Some(rate) = insert_rate {
+                        let due = Duration::from_secs_f64(written as f64 / rate);
+                        let ahead = due.saturating_sub(insert_start.elapsed());
+                        if !ahead.is_zero() {
+                            tokio::time::sleep(ahead).await;
+                        }
+                    }
                     tx_cdc
                         .send(CdcRow {
                             primary_key: vec![CqlValue::BigInt(first_cdc_pk + written as i64)],
@@ -823,7 +844,12 @@ pub(crate) fn fts_search_while_inserting(c: &mut Criterion) {
                 fixture,
                 finish: Box::new(move |fixture| {
                     let written = writer.stop(&fixture.runtime);
-                    eprintln!("fts: {written} documents inserted through CDC during the search");
+                    let secs = insert_start.elapsed().as_secs_f64();
+                    eprintln!(
+                        "fts: {written} documents inserted through CDC during the search \
+                         in {secs:.1}s ({:.1} Kdocs/s)",
+                        written as f64 / secs / 1000.0
+                    );
                     fixture.runtime.block_on(assert_count(
                         &fixture.client,
                         &index,
