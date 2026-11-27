@@ -8,6 +8,8 @@ use std::mem;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::anyhow;
@@ -93,10 +95,6 @@ impl Writer {
 
     fn uncommitted_docs(&self) -> usize {
         self.uncommitted_docs_in_progress_guards.len()
-    }
-
-    fn has_uncommitted_docs(&self) -> bool {
-        !self.uncommitted_docs_in_progress_guards.is_empty()
     }
 }
 
@@ -239,6 +237,7 @@ impl Reader {
 pub(crate) struct Index {
     pub(crate) index: tantivy::Index,
     writer: RwLock<Writer>,
+    needs_commit: AtomicBool,
     pub(crate) reader: Reader,
     pub(crate) schema: Schema,
 }
@@ -258,6 +257,7 @@ impl Index {
         Ok(Self {
             index,
             writer,
+            needs_commit: AtomicBool::new(false),
             reader,
             schema,
         })
@@ -287,7 +287,10 @@ fn commit(index: &Index, key: &IndexKey) {
         Ok((commit_opstamp, guards)) => index
             .reader
             .drop_guards_when_searchable(commit_opstamp, guards),
-        Err(err) => error!("tantivy: failed to commit for {key}: {err}"),
+        Err(err) => {
+            error!("tantivy: failed to commit for {key}: {err}");
+            index.needs_commit.store(true, Ordering::Relaxed);
+        }
     }
 }
 
@@ -390,7 +393,10 @@ where
                     writer.uncommitted_docs()
                 };
                 if pending >= commit_threshold {
+                    index.needs_commit.store(false, Ordering::Relaxed);
                     commit(&index, &key);
+                } else {
+                    index.needs_commit.store(true, Ordering::Relaxed);
                 }
             })
             .await;
@@ -414,7 +420,10 @@ where
                     writer.uncommitted_docs()
                 };
                 if pending >= commit_threshold {
+                    index.needs_commit.store(false, Ordering::Relaxed);
                     commit(&index, &key);
+                } else {
+                    index.needs_commit.store(true, Ordering::Relaxed);
                 }
             })
             .await;
@@ -439,7 +448,7 @@ where
     /// whose committed documents are not searchable yet.
     pub(crate) async fn commit_or_reload(&self) {
         for index in self.indexes.values() {
-            if index.writer.read().unwrap().has_uncommitted_docs() {
+            if index.needs_commit.swap(false, Ordering::Relaxed) {
                 let index = Arc::clone(index);
                 let key = self.key.clone();
                 self.worker
