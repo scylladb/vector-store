@@ -24,6 +24,10 @@
 #                  stat and diff of the files that decide how the release is
 #                  built, validated and what it exposes, beyond the Rust
 #                  sources
+#   src.diff       diff of the service's Rust sources (crates/vector-store/src)
+#   src-strings.txt
+#                  the changed lines of src.diff that hold a string literal,
+#                  each prefixed with its line number in src.diff
 # A one-line summary of each file goes to stdout.
 
 set -euo pipefail
@@ -122,7 +126,15 @@ release_paths=(
     g diff "${prev}" "${cut}" -- "${release_paths[@]}"
 } > "${out}/release-files.txt"
 
+# Where the user-visible changes of the service are: error texts, log lines
+# and their levels, metric names, configuration keys and defaults. Saved and
+# searched here, inside a script: the interactive session's shell hook can
+# rewrite or drop the output of git and grep run there.
+g diff "${prev}" "${cut}" -- crates/vector-store/src > "${out}/src.diff"
+grep -nE '^[-+][^-+].*"' "${out}/src.diff" > "${out}/src-strings.txt" || true
+
 echo "commits.tsv: $(wc -l < "${out}/commits.tsv") first-parent commits, ${prs} with a PR"
 awk -F'\t' '$2 == "-" { print "  without a PR: " $1 " " $3 }' "${out}/commits.tsv"
 echo "lock-diff.txt: $(wc -l < "${out}/lock-diff.txt") packages changed"
 echo "release-files.txt: $(g diff --name-only "${prev}" "${cut}" -- "${release_paths[@]}" | wc -l) files changed"
+echo "src.diff: $(wc -l < "${out}/src.diff") lines; src-strings.txt: $(wc -l < "${out}/src-strings.txt") changed lines with a string literal"

@@ -10,7 +10,7 @@ the tag pushed, the release workflow finished, and everything it produces
 checked. [docs/releasing.md](../../../docs/releasing.md) describes the workflow
 and its recovery paths; this skill is how a release is driven through it.
 **[reference.md](reference.md)** holds the reasoning behind the rules and the
-worked example of 1.14.0. Read the matching section before overriding a rule.
+worked examples of past releases. Read the matching section before overriding a rule.
 
 Nothing is pushed or published before the user approves the cut point, the
 notes and the rendered Slack message (step 5). A tag push starts nothing by
@@ -25,7 +25,7 @@ not a pre-release or a draft) starts the workflow, and its last job posts to
 | Repository | `scylladb/vector-store`. Never use the checkout's `origin`, which may be a fork. |
 | Tag | annotated `X.Y.Z`, message `Release version X.Y.Z` |
 | Release title | `vector-store-X.Y.Z` |
-| Workflow | `.github/workflows/release.yaml`, started by publishing the release; about 45 min, of which `build-cloud-images` takes about 30 |
+| Workflow | `.github/workflows/release.yaml`, started by publishing the release; about 40 min (36–47 so far), of which `build-cloud-images` takes 23–30 |
 | Announcement | `#release-announce`, `@here`, from the notes' `<!-- slack-announcement` block |
 | siren | `scylladb/siren` PR `feat(vectorstore): add version X.Y.Z [automation]`, merged by someone with siren rights |
 
@@ -52,7 +52,7 @@ not a pre-release or a draft) starts the workflow, and its last job posts to
 
 - `gh`, always scoped with `-R scylladb/vector-store`, and a clone with the
   `scylladb/vector-store` remote. Below it is called `$UP`; find its name
-  with `git remote -v | awk '/[:\/]scylladb\/vector-store(\.git)? \(push\)$/ {print $1}' | head -1`.
+  with `git remote -v | sed -nE 's#^([^[:space:]]+)[[:space:]].*[:/]scylladb/vector-store(\.git)? \(push\)$#\1#p' | head -1`.
   → [why](reference.md#the-remote)
 - Helpers in this directory, run from the repository root by their path.
   They call git without a pager or aliases, so their output is complete
@@ -60,12 +60,23 @@ not a pre-release or a draft) starts the workflow, and its last job posts to
   interactive session. Prefer them, and `git -c core.pager=cat`, over bare
   `git log A..B`. → [why](reference.md#helpers)
   - `collect-changes.sh <previous-sha> <cut-sha> <out-dir>`: commits,
-    every PR's description, the `Cargo.lock` version diff and the diff of the
-    files that decide how the release is built (step 3).
+    every PR's description, the `Cargo.lock` version diff, the diff of the
+    files that decide how the release is built, and the diff of the service's
+    sources with its changed string lines (step 3).
   - `slack-preview.sh <notes-file> <version> [<cut>]`: the message the
     `announce` job will post, produced by running that job's compose step from
     the cut's `release.yaml`, with warnings for text Slack would misread
     (step 4).
+  - `check-cloud-images.sh <X.Y.Z> <run-id> <out-dir>`: from the release
+    run's image build log, the base image, kernel and sudo checks of each
+    build and any provisioning command that failed without failing it; the
+    regions each AMI was copied to; and the siren automation PR compared with
+    the images the release's packer manifest gives `trigger-siren` (step 8.4).
+
+  This file holds no command with a dollar sign followed by a digit: Claude
+  Code replaces those with the skill's arguments when it loads the skill, so
+  awk fields and shell positional parameters live in the helpers.
+  → [why](reference.md#helpers)
 - Work directory: `W=<scratchpad or $TMPDIR>/vector-store-release/X.Y.Z`.
   Shell variables do not persist between tool calls; write paths in full.
 
@@ -157,6 +168,10 @@ own.
      `.cargo/config.toml`;
    - what the release workflow publishes or announces (Docker tags, assets,
      siren, Slack);
+   - `packer/`: the cloud images' base image and kernel, what they install
+     (swap, agents, sudo) and the instance types they need. The image build
+     runs only after the release is published, so a changed template gets
+     its first full run then → [why](reference.md#cloud-images);
    - `api/openapi.json`: a changed API version, endpoint or schema;
    - dependencies of the shipped binary: check with `cargo tree` on the cut's
      manifests and lockfile, not the checkout's, before writing that a crate
@@ -168,17 +183,21 @@ own.
      (tantivy, usearch, the scylla driver, opensearch, diskann) changes, even
      when its PR calls it a routine update: read the crate's changelog for the
      range (`~/.cargo/registry/src/*/<crate>-<version>/CHANGELOG.md`; run
-     `cargo fetch --manifest-path $W/cut/Cargo.toml` if it is missing), and
-     check with `git grep` at the cut which entries touch the APIs Vector
-     Store uses;
+     `cargo fetch --manifest-path $W/cut/Cargo.toml` if it is missing). A
+     crate that ships none, such as `scylla`, publishes its notes as GitHub
+     releases: read each version's in the range, e.g.
+     `gh release view v1.10.0 -R scylladb/scylla-rust-driver`. Check with
+     `git grep` at the cut which entries touch the APIs Vector Store uses;
    - RUSTSEC advisories fixed: titles from the local advisory database
      (`grep -rl RUSTSEC-YYYY-NNNN ~/.cargo/advisory-db*`) or rustsec.org.
-4. Also search the diff of `crates/vector-store/src` for user-visible
-   changes: error message texts, metric names and labels, configuration keys
-   and defaults, log format. Save the diff and grep the file:
-   `git -c core.pager=cat diff <previous-sha> <cut-sha> -- crates/vector-store/src > $W/src.diff`,
-   then `grep -E '^[-+][^-+].*"' $W/src.diff` is a quick start. Piped straight
-   into `grep`, the diff can come out empty. → [why](reference.md#helpers)
+4. Also read `src.diff`, the diff of `crates/vector-store/src`, for
+   user-visible changes: error message texts, log lines and their levels,
+   metric names and labels, configuration keys and defaults. Start from
+   `src-strings.txt`, its changed lines that hold a string literal, numbered
+   as in `src.diff`. Then read `src.diff` whole when it is under about 1,500
+   lines (with the Read tool, not `grep` or `cat` in the shell, whose output a
+   hook can rewrite): a change in which node a check looks at, or in what
+   triggers a log line, shows only there. → [why](reference.md#helpers)
 5. Write down every PR and its section. Every first-parent commit must land
    in the notes or in an explicit skip list (with the reason) shown in step 5.
 
@@ -215,7 +234,10 @@ Write `$W/notes-X.Y.Z.md`. → [why](reference.md#notes-format)
   the conditions that trigger a bug instead.
 - A claim you add beyond the PR text (a dependency is not shipped, a change
   needs no migration) must be checked first: `cargo tree`, `git show`, the
-  code.
+  code. A claim about which endpoint returns a value is checked against
+  `api/openapi.json` at the cut, e.g.
+  `git show <cut>:api/openapi.json | jq '.components.schemas.IndexInfo.properties | keys'`;
+  "shown by the API" in a PR does not say where.
 - Behaviour changes users act on (an error text, a log priority, a metric
   label, a default) say what to update.
 
@@ -233,7 +255,10 @@ Write `$W/notes-X.Y.Z.md`. → [why](reference.md#notes-format)
 Keep `*ScyllaDB Vector Store X.Y.Z*` in the first line bold. Leave
 security-related dependency updates out of the block: RUSTSEC advisories and
 the dependency bumps that resolve them go only in the notes' Security & CI
-section. A `:warning:` line is for what a user must check or change before
+section. A security fix in what the release ships beyond its Rust crates,
+such as the cloud images' kernel, gets a `:white_check_mark:` line of its own
+only when its severity is very high (remotely triggerable, as CVE-2026-98432
+in 1.16.0); otherwise it too stays in the notes. A `:warning:` line is for what a user must check or change before
 upgrading (a removed setting, a new status code, error or log text); a
 behaviour change they cannot act on goes only in the notes.
 → [why](reference.md#notes-format)
@@ -258,7 +283,12 @@ Show the user, in one message:
    and headlines if very long);
 3. the rendered Slack message from `$W/slack.txt`, exactly;
 4. the skipped commits with reasons, and anything found in step 3 that the
-   user should weigh (a toolchain change, an unmeasured risk).
+   user should weigh (a toolchain change, an unmeasured risk). When
+   `packer/` changed, say what its trial builds did not cover and what a
+   failed `build-cloud-images` job leaves: the release, the Docker images and
+   the assets published, but no siren PR and no Slack post, since
+   `trigger-siren` and `announce` need it. A transient failure is re-run; a
+   template bug needs a new release.
 
 Ask the calls the rules above leave open as separate questions, before the
 release question: how strong the performance statement is, and which changes
@@ -321,19 +351,21 @@ Push only that tag, never `--tags`. For a patch on an older series, pass
 3. **Docker Hub:** `docker buildx imagetools inspect scylladb/vector-store:X.Y.Z`
    lists exactly `linux/amd64` and `linux/arm64`; for a newest-GA release,
    `scylladb/vector-store:latest` has the same digest.
-4. **siren:** `gh pr list -R scylladb/siren --search "add version X.Y.Z in:title" --state all`
-   shows the automation PR. It must carry exactly the images the `trigger-siren`
-   job took from the release's packer manifest, each in its architecture's
-   field: the `us-east-1` AMI of the last `amazon-ebs` build of amd64 in
-   `images.aws` and of arm64 in `images-arm64.aws`, and the last
-   `googlecompute` image in `images.gcp`. A re-run appends its builds to the
-   manifest, so an image of an earlier attempt is in it too and must not be
-   accepted. Save both, then compare:
-   `gh release download X.Y.Z -R scylladb/vector-store -p 'vector-store-cloud-images-X.Y.Z.json' -O $W/cloud-images.json`,
-   `gh pr diff <n> -R scylladb/siren > $W/siren.diff`,
-   `jq -r '([.builds[] | select(.builder_type=="amazon-ebs")] | group_by(.custom_data.arch)[] | last | .custom_data.arch + " aws " + (.artifact_id | split(",")[] | select(startswith("us-east-1:")) | sub("^us-east-1:"; ""))), ([.builds[] | select(.builder_type=="googlecompute")] | last | "amd64 gcp " + .artifact_id)' $W/cloud-images.json | sort > $W/siren-expected.txt`,
-   `awk '/^\+ *images:/ { a = "amd64" } /^\+ *images-arm64:/ { a = "arm64" } a && /^\+ *(aws|gcp): / { f = $2; sub(/:$/, "", f); v = $3; sub(/.*\//, "", v); print a, f, v }' $W/siren.diff | sort > $W/siren-actual.txt`,
-   and `diff $W/siren-expected.txt $W/siren-actual.txt` prints nothing. It
+4. **Cloud images and siren:** `check-cloud-images.sh X.Y.Z <run-id> $W/images`
+   exits 0 when every check passes. It prints the base image of each build:
+   the template takes the newest published one, so put them in the report,
+   the only record of the GCP one. It checks that the kernel and sudo checks
+   of the install script passed in every build, that no provisioning command
+   failed while the build went on (the install script tolerates some, such
+   as the swap setup), and that each AMI was copied to every region of the
+   template. It finds the automation
+   PR, `feat(vectorstore): add version X.Y.Z [automation]`, and checks that
+   it carries exactly the images the `trigger-siren` job took from the
+   release's packer manifest, each in its architecture's field: the
+   `us-east-1` AMI of the last `amazon-ebs` build of amd64 in `images.aws` and
+   of arm64 in `images-arm64.aws`, and the last `googlecompute` image in
+   `images.gcp`. A re-run appends its builds to the manifest, so an image of an
+   earlier attempt is in it too and must not be accepted. The PR
    needs a merge by someone with siren rights; say
    so in the report with its link. siren's workflow always moves
    `defaults.vectorstore` to the dispatched version, so for a patch on an older
@@ -344,7 +376,8 @@ Push only that tag, never `--tags`. For a patch on an older series, pass
 
 1. **Release:** version, link, cut SHA, previous release, number of PRs.
 2. **Workflow:** run link, duration, conclusion, failed or re-run jobs.
-3. **Checks:** one line each for Slack, assets, Docker Hub, siren.
+3. **Checks:** one line each for Slack, assets, Docker Hub, cloud images
+   (with their base images) and siren.
 4. **Needs a person:** the siren PR merge, anything unverified or failed.
 
 Then remove the cut worktree, if step 3 made one: `git worktree remove $W/cut`.

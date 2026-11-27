@@ -23,11 +23,32 @@ was known before 1.14.0, and during 1.14.0 it did so for two `git diff`
 commands; empty output reads like "no changes". In 1.15.0 a
 `git diff … | grep` pipe printed nothing too, while the same `grep` on a saved
 diff found the removed `VECTOR_STORE_FULLTEXT_INDEXES` variable and a changed
-log line; step 3.4 therefore greps a file. The helpers
+log line; step 3.4 therefore greps a file. In 1.16.0 that was not enough:
+the same hook rewrites `grep` too, `command grep` included, and the string
+search over the saved `src.diff` printed 8 of the 42 lines it matched. The
+missing ones included the INFO-to-WARN change of "Memory usage above limit"
+and the new connect error. They turned up only in a second search and a full
+read of the 800-line diff, which also showed what no string carries: the
+connect check now asks every node instead of the first. `collect-changes.sh`
+now writes `src.diff` and its string lines itself, and step 3.4 reads the
+diff whole with the Read tool when it is short. The helpers
 call git with `-c core.pager=cat` from inside a script, which no hook rewrites,
 and write files that can be re-read. `collect-changes.sh` also fixes what is
 read: every PR body in full, not a truncated excerpt, which is where the
 measurements in the notes come from.
+
+SKILL.md itself is not read as written. When the skill is invoked with
+arguments, Claude Code replaces `$0`, `$1`, … in its text with those
+arguments, split on spaces and counted from 0. 1.16.0 was invoked as
+`let us  release version 1.16.0`, so the remote lookup arrived as
+`awk '… {print us}'` and the siren check's `f = $2 … v = $3` as
+`f = release … v = version`; the commands were retyped correctly by hand,
+but run as loaded they would have named a remote `us` and printed the words
+"release" and "version" instead of the siren fields. SKILL.md therefore
+holds no dollar sign followed by a digit: the remote lookup uses `sed` with
+`\1`, and the siren comparison moved into `check-cloud-images.sh`, where
+awk's fields are safe. Check a SKILL.md edit with
+`grep -nE '\$[0-9]' .claude/skills/vector-store-release/SKILL.md`.
 
 `slack-preview.sh` does not reimplement the `announce` job's parsing. It
 extracts the job's "Compose the Slack announcement" step from the workflow and
@@ -73,6 +94,48 @@ rust-stemmers to frostem, which stems 165 of 73,604 English dictionary words
 differently (measured by stemming the word list with both); and `lru` 0.18.5
 fixed an advisory that `deny.toml` had been ignoring.
 
+Not every crate ships its changelog. In 1.16.0, #703 updated the Scylla
+Rust Driver to 1.10.0, and `scylla-1.10.0` in the cargo registry has no
+CHANGELOG.md; the driver publishes its notes as GitHub releases. Read
+against the code with `git grep`, they gave three changes the PR did not
+mention: the driver now warns when `VECTOR_STORE_CQL_PREFERRED_DATACENTER`
+or `VECTOR_STORE_CQL_PREFERRED_RACK` names a datacenter or rack the cluster
+does not have, reports its own version in `system.clients` instead of
+`scylla-cql`'s, and logs a response on an unexpected stream id as a
+warning. They also showed which entries do not reach Vector Store, which
+calls neither `use_keyspace` nor `get_token_endpoints` and sends no batches.
+
+## Cloud images
+
+The `build-cloud-images` job builds the AWS and GCP images with packer from
+the release's tarballs, so it runs only after the release is published. A
+template change gets its first full run there: in CI no job runs packer. If
+the job fails, the release, the Docker images and the assets are already
+out, while `trigger-siren` and `announce` never run, since both need it. The
+release is public, unannounced and missing from siren. A transient failure
+can be re-run; a template bug needs a new release with a corrected
+template.
+
+1.16.0 was the first release built on the Ubuntu 26.04 template (#704). Its
+trial builds had not covered the subnet filter, the region copies, image
+sharing or the GCP image family; the gate said so, and the release run
+passed. The template takes the newest Ubuntu 26.04 image Canonical
+publishes instead of a pinned one, so the base changes between releases
+without a change in the repository. An AMI records its base in its
+`source-ami` tags; a GCP image cannot, and the build log is the only
+record. 1.16.0's were `ami-0ba4e0699ab96b9fc` (amd64),
+`ami-04696b291c4b4032e` (arm64) and
+`ubuntu-minimal-2604-resolute-amd64-v20261107` (GCP).
+
+A green job does not mean every step worked. The install script catches
+the failure of some commands (the swap setup, pip, node_exporter,
+process_exporter), prints it and goes on, so an image can ship without
+swap while the job succeeds. Its `run()` prints `Error while running:` for
+every failed command, which is what `check-cloud-images.sh` looks for.
+The siren PR carries only the `us-east-1` AMIs, so a copy missing from
+another region would not show there either; the helper compares each AMI's
+regions with the template's.
+
 ## Notes format
 
 The format follows the 1.12.0 and 1.13.0 notes, which the team reviewed: one
@@ -92,6 +155,16 @@ the driver 1.9.0 index build only fell within the spread of earlier builds
 (#683), and full-text search on tantivy 0.27 was named as not measured.
 Without such a basis, say what was measured and what was not.
 
+Where a value shows in the API needs the same check as any other claim. A
+1.16.0 bullet said that `/indexes/{keyspace}/{index}` shows why an index is
+`UNSUPPORTED`. #703 had said only that the reason is "shown by the API",
+and the draft placed it where the 1.15.0 notes described the endpoint. The
+endpoint's `IndexInfo` schema has no such field: the reason is in the
+`422` answers of `/ann`, `/bm25`, `/highlight` and `/like`, in the CQL
+error and in the log. The error was found after publishing and corrected
+with `gh release edit`. `api/openapi.json` at the cut would have shown it
+before the gate.
+
 The Slack block is the only part most people read. It is written for someone
 deciding whether to upgrade: one line on the kind of release, the fixes that
 matter, a `:warning:` per change they must act on, and a recommendation. The
@@ -103,6 +176,14 @@ had a `:lock:` line for two RUSTSEC advisories in `rustls-webpki` and
 `webpki-roots`. After that release the user decided that such updates are
 reported only in the notes' Security & CI section, not in the `@here`
 announcement.
+
+That rule was written for crates, and 1.16.0 asked about something else:
+its cloud images moved to Ubuntu 26.04 to ship a kernel with the fix for
+CVE-2026-98432, a remotely triggerable use-after-free in IPv4 TCP (#704).
+Asked at the gate, the user gave it a line of its own, and after the
+release set the rule: a security fix in what the release ships beyond its
+Rust crates is announced only when its severity is very high; others stay
+in the notes like the RUSTSEC updates.
 
 `:warning:` lines are for what a reader can check or change before upgrading.
 The 1.15.0 draft had a third one for tantivy 0.27's stemmer change; the user
@@ -171,3 +252,36 @@ older series must not be marked latest on GitHub either.
   crates, step 3.4 greps a saved diff, and step 5 asks the open judgment calls
   separately. The packer template names images with a 12-hour clock
   (`03` in its `isotime` layout), found while checking the siren PR.
+
+## Worked example: 1.16.0 (2026-11-17)
+
+- Previous release 1.15.0; cut `b41a969`, the head of master, merged the
+  same morning; 14 PRs. Rust and Validator (merge queue) green; the newest
+  Daily green on `78c1b45`, the commit before the cut, which added only the
+  packer change. Open PR mentioned, not waited for: #638 (tantivy indexes
+  marked dirty when the reader reloads).
+- Changes read from 14 PR descriptions, `lock-diff.txt` (hickory-proto and
+  hickory-net 0.26.3, validator only; scylla 1.10.0 and scylla-cql 3.0.0),
+  `release-files.txt` (the packer template's move to Ubuntu 26.04, a 50 GB
+  swap file, pre-installed Siren agents, a 24-hour clock in image names),
+  the driver's GitHub release notes and a full read of the source diff.
+- At the gate the user kept the performance statement as drafted (no code
+  on the vector search path changed; the 26.04 images A/B-measured with the
+  1.15.0 binary; #694 and the driver not measured), gave the kernel CVE its
+  own line, and kept only the swap WARN as a `:warning:` line; the
+  x86-64-v3 requirement of the amd64 images went to the notes only.
+- The workflow ran 36 minutes, 81 jobs, all green; `build-cloud-images`
+  took 23 minutes on its first run of the 26.04 template. Checks: the Slack
+  post was identical to the preview; six assets; `1.16.0` and `latest` with
+  the same digest on `linux/amd64` and `linux/arm64`; the siren PR
+  (scylladb/siren#16732) carried exactly the images `trigger-siren`
+  selected; kernel and sudo checks passed in all three image builds.
+- After publishing, two sentences of the notes were corrected with
+  `gh release edit`, which does not repost to Slack: where the API returns
+  the reason an index is `UNSUPPORTED`, and that the lab run of #704 used
+  images of the template carrying 1.15.0, not the 1.16.0 images.
+- Retrospective: SKILL.md lost its dollar-digit commands to the skill
+  argument substitution, `collect-changes.sh` writes the source diff and
+  its strings, step 3.3 reads GitHub releases of crates without a
+  changelog and covers `packer/`, `check-cloud-images.sh` checks the image
+  build, and API claims are checked against `api/openapi.json`.
