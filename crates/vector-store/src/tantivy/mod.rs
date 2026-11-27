@@ -4,16 +4,18 @@
  */
 
 use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::collections::btree_map;
 use std::mem;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::anyhow;
+use futures::StreamExt;
+use futures::future::BoxFuture;
+use futures::stream::FuturesUnordered;
 use tantivy::Directory;
 use tantivy::IndexWriter;
 use tantivy::Opstamp;
@@ -22,12 +24,17 @@ use tantivy::Searcher;
 use tantivy::TantivyDocument;
 use tantivy::directory::WatchCallback;
 use tantivy::directory::WatchHandle;
+use tantivy::index::SegmentId;
 use tantivy::indexer::IndexWriterOptions;
+use tantivy::merge_policy::LogMergePolicy;
+use tantivy::merge_policy::MergePolicy;
+use tantivy::merge_policy::NoMergePolicy;
 use tantivy::schema::FAST;
 use tantivy::schema::INDEXED;
 use tantivy::schema::Schema;
 use tantivy::schema::TextOptions;
 use tantivy::tokenizer::TextAnalyzer;
+use tokio::sync::Notify;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
@@ -48,55 +55,29 @@ use crate::worker::WorkerExt;
 pub(crate) const COMMIT_INTERVAL: Duration = Duration::from_secs(1);
 pub(crate) const MAX_UNCOMMITTED_THRESHOLD: usize = 10_000;
 
-struct Writer {
+struct SessionWriter {
     writer: IndexWriter,
     // Handed to the reader on commit, which holds them until the documents are searchable.
-    uncommitted_docs_in_progress_guards: Vec<AsyncInProgress>,
+    uncommitted: Vec<AsyncInProgress>,
 }
 
-impl Writer {
-    fn new(index: &tantivy::Index) -> anyhow::Result<Self> {
-        let options = IndexWriterOptions::builder()
-            .num_worker_threads(perf::num_workers().into())
-            .build();
-        let writer = index
-            .writer_with_options(options)
-            .map_err(|e| anyhow!("tantivy: failed to create writer: {e}"))?;
-        Ok(Self {
-            writer,
-            uncommitted_docs_in_progress_guards: Vec::new(),
-        })
-    }
-
-    fn add_document(
-        &mut self,
-        doc: TantivyDocument,
-        mut in_progress: AsyncInProgress,
-    ) -> tantivy::Result<()> {
-        self.writer.add_document(doc)?;
-        in_progress.applied();
-        self.uncommitted_docs_in_progress_guards.push(in_progress);
-        Ok(())
-    }
-
-    fn rm_document(&mut self, term: tantivy::Term, in_progress: AsyncInProgress) {
-        self.writer.delete_term(term);
-        self.uncommitted_docs_in_progress_guards.push(in_progress);
-    }
-
-    /// Commits the documents to the index and returns the commit opstamp with their in-progress
-    /// guards.
-    fn commit(&mut self) -> tantivy::Result<(Opstamp, Vec<AsyncInProgress>)> {
-        let opstamp = self.writer.commit()?;
-        Ok((
-            opstamp,
-            mem::take(&mut self.uncommitted_docs_in_progress_guards),
-        ))
-    }
-
-    fn uncommitted_docs(&self) -> usize {
-        self.uncommitted_docs_in_progress_guards.len()
-    }
+/// A writer and its threads exist only while its index is being written, so their number is
+/// bounded by the number of indexes written at once, not by the number of indexes.
+fn new_writer(index: &tantivy::Index) -> anyhow::Result<SessionWriter> {
+    let options = IndexWriterOptions::builder()
+        .num_worker_threads(1)
+        .num_merge_threads(1)
+        .build();
+    let writer: IndexWriter = index
+        .writer_with_options(options)
+        .map_err(|e| anyhow!("tantivy: failed to create writer: {e}"))?;
+    // The session starts the merges itself, so that it knows when they are done without
+    // blocking on them.
+    writer.set_merge_policy(Box::new(NoMergePolicy));
+    Ok(SessionWriter {
+        writer,
+        uncommitted: Vec::new(),
+    })
 }
 
 #[derive(Default)]
@@ -235,10 +216,27 @@ impl Reader {
     }
 }
 
+#[derive(Default)]
+struct Pending {
+    // Changes waiting for the next flush.
+    mutations: Vec<Mutation>,
+    // A write session of the index is running; Tantivy allows one writer per index.
+    session: bool,
+    // The session is asked to flush whatever is pending.
+    requested: bool,
+    // The writer of the session holds changes a failed commit left behind.
+    uncommitted: bool,
+    // The index is gone: its session ends without finishing its merges.
+    closed: bool,
+}
+
 pub(crate) struct Index {
     pub(crate) index: tantivy::Index,
-    writer: RwLock<Writer>,
-    needs_commit: AtomicBool,
+    pending: Mutex<Pending>,
+    // Wakes the write session when a flush is requested.
+    wake: Notify,
+    // Tells the mutations task that the session took the pending changes.
+    taken: Notify,
     pub(crate) reader: Reader,
     pub(crate) schema: Schema,
 }
@@ -254,14 +252,30 @@ impl Index {
         let index = tantivy::Index::create_in_ram(schema.clone());
         index.tokenizers().register(tokenizer_name, tokenizer);
         let reader = Reader::new(&index, key, worker)?;
-        let writer = RwLock::new(Writer::new(&index)?);
         Ok(Self {
             index,
-            writer,
-            needs_commit: AtomicBool::new(false),
+            pending: Mutex::new(Pending::default()),
+            wake: Notify::new(),
+            taken: Notify::new(),
             reader,
             schema,
         })
+    }
+
+    /// Asks for a flush of the pending changes. Returns whether the caller has to start
+    /// a write session, which is the case when none is running.
+    fn request_flush(&self) -> bool {
+        let mut pending = self.pending.lock().unwrap();
+        if pending.mutations.is_empty() && !pending.uncommitted {
+            return false;
+        }
+        pending.requested = true;
+        if pending.session {
+            self.wake.notify_one();
+            return false;
+        }
+        pending.session = true;
+        true
     }
 }
 
@@ -282,45 +296,212 @@ fn create_doc(schema: &Schema, primary_id: PrimaryId, document: &str) -> Tantivy
     doc
 }
 
-fn commit(index: &Index, key: &IndexKey) {
-    let result = index.writer.write().unwrap().commit();
-    match result {
-        Ok((commit_opstamp, guards)) => index
+/// Adds the changes to the writer and commits it. The changes of a failed commit stay
+/// in the writer for the next one.
+fn write(index: &Index, key: &IndexKey, writer: &mut SessionWriter, mutations: Vec<Mutation>) {
+    for mutation in mutations {
+        match mutation {
+            Mutation::Add {
+                primary_id,
+                document,
+                in_progress,
+            } => {
+                let doc = create_doc(&index.schema, primary_id, &document);
+                match writer.writer.add_document(doc) {
+                    Ok(_) => writer.uncommitted.push(in_progress),
+                    Err(err) => error!("tantivy: failed to add document {primary_id:?}: {err}"),
+                }
+            }
+            Mutation::Remove {
+                primary_id,
+                in_progress,
+            } => {
+                writer
+                    .writer
+                    .delete_term(create_term(&index.schema, primary_id));
+                writer.uncommitted.push(in_progress);
+            }
+        }
+    }
+    match writer.writer.commit() {
+        Ok(commit_opstamp) => index
             .reader
-            .drop_guards_when_searchable(commit_opstamp, guards),
-        Err(err) => {
-            error!("tantivy: failed to commit for {key}: {err}");
-            index.needs_commit.store(true, Ordering::Relaxed);
+            .drop_guards_when_searchable(commit_opstamp, mem::take(&mut writer.uncommitted)),
+        Err(err) => error!("tantivy: failed to commit for {key}: {err}"),
+    }
+}
+
+type Merge = BoxFuture<'static, (Vec<SegmentId>, tantivy::Result<()>)>;
+
+/// The merges of a write session that are running.
+#[derive(Default)]
+struct Merges {
+    running: FuturesUnordered<Merge>,
+    segments: HashSet<SegmentId>,
+    failed: bool,
+}
+
+impl Merges {
+    /// Starts the merge the merge policy asks for, one at a time as the writer has one merge
+    /// thread.
+    fn start(&mut self, index: &Index, key: &IndexKey, writer: &mut SessionWriter) {
+        while !self.failed && self.running.is_empty() {
+            let segments = match index.index.searchable_segment_metas() {
+                Ok(segments) => segments,
+                Err(err) => {
+                    error!("tantivy: failed to list segments of {key}: {err}");
+                    self.failed = true;
+                    return;
+                }
+            };
+            let free = segments
+                .into_iter()
+                .filter(|segment| !self.segments.contains(&segment.id()))
+                .collect::<Vec<_>>();
+            let Some(candidate) = LogMergePolicy::default()
+                .compute_merge_candidates(&free)
+                .into_iter()
+                .next()
+            else {
+                return;
+            };
+            let segment_ids = candidate.0;
+            self.segments.extend(segment_ids.iter().copied());
+            let merge = writer.writer.merge(&segment_ids);
+            self.running.push(Box::pin(async move {
+                let merged = merge.await.map(|_| ());
+                (segment_ids, merged)
+            }));
+        }
+    }
+
+    fn finished(
+        &mut self,
+        key: &IndexKey,
+        segment_ids: Vec<SegmentId>,
+        merged: tantivy::Result<()>,
+    ) {
+        for segment_id in segment_ids {
+            self.segments.remove(&segment_id);
+        }
+        if let Err(err) = merged {
+            error!("tantivy: failed to merge for {key}: {err}");
+            self.failed = true;
         }
     }
 }
 
-fn add_document(
-    writer: &mut Writer,
-    schema: &Schema,
-    primary_id: PrimaryId,
-    document: String,
-    in_progress: AsyncInProgress,
+/// A write session: flushes the pending changes with a writer that lives only for the session
+/// and runs its merges. The writer stays until its merges are done. Only the flushes run on
+/// the worker; the session itself waits without holding a thread, so a flush never waits
+/// for a merge.
+async fn write_session(
+    index: Arc<Index>,
+    key: IndexKey,
+    worker: async_channel::Sender<Worker>,
+    commit_threshold: usize,
 ) {
-    let doc = create_doc(schema, primary_id, &document);
-    if let Err(err) = writer.add_document(doc, in_progress) {
-        error!("tantivy: failed to add document {primary_id:?}: {err}");
+    let ready = |index: &Index| {
+        let pending = index.pending.lock().unwrap();
+        pending.requested || pending.mutations.len() >= commit_threshold
+    };
+    let mut writer: Option<SessionWriter> = None;
+    let mut merges = Merges::default();
+    loop {
+        let mutations = {
+            let mut pending = index.pending.lock().unwrap();
+            pending.requested = false;
+            mem::take(&mut pending.mutations)
+        };
+        index.taken.notify_one();
+        let uncommitted = writer
+            .as_ref()
+            .is_some_and(|writer| !writer.uncommitted.is_empty());
+        if !mutations.is_empty() || uncommitted {
+            let (done_tx, done_rx) = oneshot::channel();
+            worker
+                .spawn_blocking({
+                    let index = Arc::clone(&index);
+                    let key = key.clone();
+                    let writer = writer.take();
+                    move || {
+                        let writer = match writer {
+                            Some(writer) => Ok(writer),
+                            None => new_writer(&index.index),
+                        };
+                        _ = done_tx.send(match writer {
+                            Ok(mut writer) => {
+                                write(&index, &key, &mut writer, mutations);
+                                Ok(writer)
+                            }
+                            Err(err) => {
+                                error!("{err} for {key}");
+                                Err(mutations)
+                            }
+                        });
+                    }
+                })
+                .await;
+            match done_rx.await {
+                Ok(Ok(written)) => {
+                    index.pending.lock().unwrap().uncommitted = !written.uncommitted.is_empty();
+                    writer = Some(written);
+                }
+                Ok(Err(mut unwritten)) => {
+                    // Without a writer the changes go back to wait for the next flush, which
+                    // starts a new session.
+                    let mut pending = index.pending.lock().unwrap();
+                    unwritten.append(&mut pending.mutations);
+                    pending.mutations = unwritten;
+                    pending.session = false;
+                    return;
+                }
+                Err(_) => {}
+            }
+        }
+
+        while !ready(&index) {
+            if index.pending.lock().unwrap().closed {
+                break;
+            }
+            if let Some(writer) = &mut writer {
+                merges.start(&index, &key, writer);
+            }
+            let uncommitted = writer
+                .as_ref()
+                .is_some_and(|writer| !writer.uncommitted.is_empty());
+            if merges.running.is_empty() && !uncommitted {
+                break;
+            }
+            tokio::select! {
+                _ = index.wake.notified() => {}
+                Some((segment_ids, merged)) = merges.running.next() => {
+                    merges.finished(&key, segment_ids, merged);
+                }
+            }
+        }
+        if ready(&index) {
+            continue;
+        }
+
+        // The merges still running are abandoned, which happens only for a closed index.
+        merges = Merges::default();
+        if let Some(writer) = writer.take() {
+            // Dropping a writer joins its threads.
+            _ = tokio::task::spawn_blocking(move || drop(writer)).await;
+        }
+        let mut pending = index.pending.lock().unwrap();
+        pending.uncommitted = false;
+        if !pending.requested && pending.mutations.len() < commit_threshold {
+            pending.session = false;
+            return;
+        }
     }
 }
 
 fn create_term(schema: &Schema, primary_id: PrimaryId) -> tantivy::Term {
     let primary_id_field = schema.get_field("primary_id").unwrap();
     tantivy::Term::from_field_u64(primary_id_field, u64::from(primary_id))
-}
-
-fn remove_document(
-    writer: &mut Writer,
-    schema: &Schema,
-    primary_id: PrimaryId,
-    in_progress: AsyncInProgress,
-) {
-    let term = create_term(schema, primary_id);
-    writer.rm_document(term, in_progress);
 }
 
 enum Mutation {
@@ -335,41 +516,9 @@ enum Mutation {
     },
 }
 
-fn apply(index: &Index, key: &IndexKey, mutations: Vec<Mutation>, commit_threshold: usize) {
-    let pending = {
-        let mut writer = index.writer.write().unwrap();
-        for mutation in mutations {
-            match mutation {
-                Mutation::Add {
-                    primary_id,
-                    document,
-                    in_progress,
-                } => add_document(
-                    &mut writer,
-                    &index.schema,
-                    primary_id,
-                    document,
-                    in_progress,
-                ),
-                Mutation::Remove {
-                    primary_id,
-                    in_progress,
-                } => remove_document(&mut writer, &index.schema, primary_id, in_progress),
-            }
-        }
-        writer.uncommitted_docs()
-    };
-    if pending >= commit_threshold {
-        index.needs_commit.store(false, Ordering::Relaxed);
-        commit(index, key);
-    } else {
-        index.needs_commit.store(true, Ordering::Relaxed);
-    }
-}
-
-/// Spawns the task that applies the changes of the index. The changes waiting in the queue
-/// are taken together and applied in order as one job on the worker, under one write lock,
-/// so the handoff to the worker is paid once per batch instead of once per change.
+/// Spawns the task that takes the changes of the index. The changes waiting in the queue
+/// are buffered together; once the buffer reaches the threshold, the write session of the index
+/// is asked to flush it, and the task stops taking changes while two thresholds are buffered.
 fn spawn_mutations(
     index: Arc<Index>,
     key: IndexKey,
@@ -381,25 +530,58 @@ fn spawn_mutations(
     tokio::spawn(async move {
         let mut mutations = Vec::with_capacity(capacity);
         while rx.recv_many(&mut mutations, capacity).await > 0 {
-            let batch = std::mem::replace(&mut mutations, Vec::with_capacity(capacity));
-            let (done_tx, done_rx) = oneshot::channel();
-            let index = Arc::clone(&index);
-            let key = key.clone();
-            worker
-                .spawn_blocking(move || {
-                    apply(&index, &key, batch, commit_threshold);
-                    _ = done_tx.send(());
-                })
-                .await;
-            _ = done_rx.await;
+            // The buffer keeps the order of the changes, so a remove of a row may follow
+            // its add from here on.
+            for mutation in &mut mutations {
+                if let Mutation::Add { in_progress, .. } = mutation {
+                    in_progress.applied();
+                }
+            }
+            let mut pending = {
+                let mut pending = index.pending.lock().unwrap();
+                pending.mutations.append(&mut mutations);
+                pending.mutations.len()
+            };
+            if pending < commit_threshold {
+                continue;
+            }
+            flush(&index, &key, &worker, commit_threshold);
+            while pending >= 2 * commit_threshold {
+                index.taken.notified().await;
+                pending = index.pending.lock().unwrap().mutations.len();
+            }
         }
     });
     tx
 }
 
+/// Has the pending changes of the index flushed, by its running write session or a new one.
+fn flush(
+    index: &Arc<Index>,
+    key: &IndexKey,
+    worker: &async_channel::Sender<Worker>,
+    commit_threshold: usize,
+) {
+    if index.request_flush() {
+        tokio::spawn(write_session(
+            Arc::clone(index),
+            key.clone(),
+            worker.clone(),
+            commit_threshold,
+        ));
+    }
+}
+
 struct IndexHandle {
     index: Arc<Index>,
     mutations: mpsc::Sender<Mutation>,
+}
+
+impl Drop for IndexHandle {
+    fn drop(&mut self) {
+        self.index.pending.lock().unwrap().closed = true;
+        self.index.wake.notify_one();
+    }
 }
 
 /// The tantivy indexes of one index key, one per index id.
@@ -503,12 +685,12 @@ where
     /// whose committed documents are not searchable yet.
     pub(crate) async fn commit_or_reload(&self) {
         for IndexHandle { index, .. } in self.indexes.values() {
-            if index.needs_commit.swap(false, Ordering::Relaxed) {
-                let index = Arc::clone(index);
-                let key = self.key.clone();
-                self.worker
-                    .spawn_blocking(move || commit(&index, &key))
-                    .await;
+            let pending = {
+                let pending = index.pending.lock().unwrap();
+                !pending.mutations.is_empty() || pending.uncommitted
+            };
+            if pending {
+                flush(index, &self.key, &self.worker, self.commit_threshold);
             } else if index.reader.needs_reload() {
                 index.reader.request_reload();
             }
@@ -608,5 +790,193 @@ pub(crate) mod test_support {
             }
         });
         tx
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+    use std::path::Path;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+
+    use rstest::rstest;
+    use tantivy::IndexSettings;
+    use tantivy::directory::FileHandle;
+    use tantivy::directory::INDEX_WRITER_LOCK;
+    use tantivy::directory::RamDirectory;
+    use tantivy::directory::WritePtr;
+    use tantivy::directory::error::DeleteError;
+    use tantivy::directory::error::OpenReadError;
+    use tantivy::directory::error::OpenWriteError;
+    use tantivy::schema::TEXT;
+
+    use super::test_support::make_index_key;
+    use super::test_support::make_memory_actor;
+    use super::test_support::make_table_with_keys;
+    use super::*;
+    use crate::table::MockTableSearch;
+    use crate::worker;
+
+    const TEST_COMMIT_THRESHOLD: usize = 3;
+    const TEST_COMMIT_INTERVAL: Duration = Duration::from_millis(50);
+
+    /// An in-memory directory that fails a set number of the next writes of the index metadata,
+    /// which fails the commits that make them.
+    #[derive(Clone, Debug, Default)]
+    struct FailingDirectory {
+        directory: RamDirectory,
+        failures: Arc<AtomicUsize>,
+    }
+
+    impl Directory for FailingDirectory {
+        fn get_file_handle(&self, path: &Path) -> Result<Arc<dyn FileHandle>, OpenReadError> {
+            self.directory.get_file_handle(path)
+        }
+
+        fn delete(&self, path: &Path) -> Result<(), DeleteError> {
+            self.directory.delete(path)
+        }
+
+        fn exists(&self, path: &Path) -> Result<bool, OpenReadError> {
+            self.directory.exists(path)
+        }
+
+        fn open_write(&self, path: &Path) -> Result<WritePtr, OpenWriteError> {
+            self.directory.open_write(path)
+        }
+
+        fn atomic_read(&self, path: &Path) -> Result<Vec<u8>, OpenReadError> {
+            self.directory.atomic_read(path)
+        }
+
+        fn atomic_write(&self, path: &Path, data: &[u8]) -> io::Result<()> {
+            let fail = path == Path::new("meta.json")
+                && self
+                    .failures
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |failures| {
+                        failures.checked_sub(1)
+                    })
+                    .is_ok();
+            if fail {
+                return Err(io::Error::other("injected failure"));
+            }
+            self.directory.atomic_write(path, data)
+        }
+
+        fn sync_directory(&self) -> io::Result<()> {
+            self.directory.sync_directory()
+        }
+
+        fn watch(&self, watch_callback: WatchCallback) -> tantivy::Result<WatchHandle> {
+            self.directory.watch(watch_callback)
+        }
+    }
+
+    fn new_index(
+        directory: impl Directory,
+        key: &IndexKey,
+        worker: async_channel::Sender<Worker>,
+    ) -> anyhow::Result<Index> {
+        let schema = build_schema(TEXT);
+        let index = tantivy::Index::create(directory, schema.clone(), IndexSettings::default())?;
+        let reader = Reader::new(&index, key, worker)?;
+        Ok(Index {
+            index,
+            pending: Mutex::new(Pending::default()),
+            wake: Notify::new(),
+            taken: Notify::new(),
+            reader,
+            schema,
+        })
+    }
+
+    type NewIndex = Box<dyn Fn(&IndexKey, async_channel::Sender<Worker>) -> anyhow::Result<Index>>;
+
+    /// Indexes that commit only when the test asks them to or on reaching the threshold.
+    async fn make_indexes(directory: impl Directory + Clone) -> Indexes<MockTableSearch, NewIndex> {
+        let new_index: NewIndex =
+            Box::new(move |key, worker| new_index(directory.clone(), key, worker));
+        Indexes::new(
+            make_index_key(),
+            make_table_with_keys(),
+            worker::new(),
+            make_memory_actor(Allocate::Can),
+            Duration::from_secs(3600),
+            TEST_COMMIT_THRESHOLD,
+            new_index,
+        )
+        .await
+    }
+
+    /// Commits like the interval does until the documents holding the guards are searchable.
+    async fn commit_until_searchable(
+        indexes: &Indexes<MockTableSearch, NewIndex>,
+        mut searchable: mpsc::Receiver<()>,
+    ) {
+        loop {
+            indexes.commit_or_reload().await;
+            let recv = tokio::time::timeout(TEST_COMMIT_INTERVAL, searchable.recv());
+            if recv.await.is_ok() {
+                return;
+            }
+        }
+    }
+
+    fn has_writer(index: &Index) -> bool {
+        // A writer holds the writer lock of its index, which is a file in the directory.
+        index
+            .index
+            .directory()
+            .exists(&INDEX_WRITER_LOCK.filepath)
+            .unwrap()
+    }
+
+    #[rstest]
+    #[timeout(Duration::from_secs(10))]
+    #[tokio::test]
+    async fn idle_index_holds_no_writer() {
+        let mut indexes = make_indexes(RamDirectory::create()).await;
+        let key = make_index_key();
+
+        let (tx, rx) = mpsc::channel(1);
+        indexes
+            .add_document(1.into(), "first".into(), AsyncInProgress::fullscan(tx))
+            .await;
+        commit_until_searchable(&indexes, rx).await;
+        let index = indexes.get(&key).unwrap();
+        while has_writer(&index) {
+            tokio::time::sleep(TEST_COMMIT_INTERVAL).await;
+        }
+
+        // The next write gets a writer again.
+        let (tx, rx) = mpsc::channel(1);
+        indexes
+            .add_document(2.into(), "second".into(), AsyncInProgress::fullscan(tx))
+            .await;
+        commit_until_searchable(&indexes, rx).await;
+
+        assert_eq!(indexes.count(&key), 2);
+    }
+
+    #[rstest]
+    #[timeout(Duration::from_secs(10))]
+    #[tokio::test]
+    async fn failed_commit_is_retried() {
+        let directory = FailingDirectory::default();
+        let failures = Arc::clone(&directory.failures);
+        let mut indexes = make_indexes(directory).await;
+        let key = make_index_key();
+
+        let (tx, rx) = mpsc::channel(1);
+        indexes
+            .add_document(1.into(), "first".into(), AsyncInProgress::fullscan(tx))
+            .await;
+        // The index is created by now, so the failure hits the first commit.
+        failures.store(1, Ordering::Relaxed);
+        commit_until_searchable(&indexes, rx).await;
+
+        assert_eq!(failures.load(Ordering::Relaxed), 0);
+        assert_eq!(indexes.count(&key), 1);
     }
 }
