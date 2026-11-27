@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
+mod directory;
+
 use std::collections::BTreeMap;
 use std::mem;
 use std::sync::Arc;
@@ -242,6 +244,9 @@ pub(crate) struct Index {
     writer: RwLock<Writer>,
     pub(crate) reader: Reader,
     pub(crate) schema: Schema,
+    // Lets a test see the waits for the meta lock.
+    #[cfg(test)]
+    directory: directory::MemoryDirectory,
 }
 
 impl Index {
@@ -252,7 +257,15 @@ impl Index {
         key: &IndexKey,
         worker: async_channel::Sender<Worker>,
     ) -> anyhow::Result<Self> {
-        let index = tantivy::Index::create_in_ram(schema.clone());
+        let memory_directory = directory::MemoryDirectory::default();
+        #[cfg(test)]
+        let test_directory = memory_directory.clone();
+        let index = tantivy::Index::create(
+            memory_directory,
+            schema.clone(),
+            tantivy::IndexSettings::default(),
+        )
+        .map_err(|e| anyhow!("tantivy: failed to create index: {e}"))?;
         index.tokenizers().register(tokenizer_name, tokenizer);
         let reader = Reader::new(&index, key, worker)?;
         let writer = RwLock::new(Writer::new(&index)?);
@@ -261,6 +274,8 @@ impl Index {
             writer,
             reader,
             schema,
+            #[cfg(test)]
+            directory: test_directory,
         })
     }
 }
@@ -522,5 +537,67 @@ pub(crate) mod test_support {
             }
         });
         tx
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+    use std::time::Instant;
+
+    use tantivy::directory::META_LOCK;
+    use tantivy::schema::STORED;
+    use tantivy::schema::TEXT;
+    use tantivy::tokenizer::SimpleTokenizer;
+    use tantivy::tokenizer::TextAnalyzer;
+
+    use super::test_support::make_index_key;
+    use super::*;
+
+    /// A reload that finds the meta lock held waits for it in the index's directory and goes on
+    /// when it is released.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reload_goes_on_as_soon_as_the_meta_lock_is_released() {
+        let mut schema = Schema::builder();
+        schema.add_u64_field("primary_id", INDEXED | STORED | FAST);
+        schema.add_text_field("text", TEXT | STORED);
+        let index = Index::new(
+            schema.build(),
+            "default",
+            TextAnalyzer::from(SimpleTokenizer::default()),
+            &make_index_key(),
+            crate::worker::new(),
+        )
+        .unwrap();
+        let held = index.index.directory().acquire_lock(&META_LOCK).unwrap();
+        let directory = index.directory.clone();
+        let release = std::thread::spawn(move || {
+            // A reload that never waits in the index's directory fails here.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while directory.meta_lock_waits() == 0 {
+                assert!(
+                    Instant::now() < deadline,
+                    "the reload did not wait for the meta lock"
+                );
+                std::thread::yield_now();
+            }
+            let released = Instant::now();
+            drop(held);
+            released
+        });
+        // On a blocking thread, as on a worker.
+        let inner = Arc::clone(&index.reader.inner);
+        let reloaded = tokio::task::spawn_blocking(move || {
+            inner.reload();
+            Instant::now()
+        })
+        .await
+        .unwrap();
+        let released = release.join().unwrap();
+        assert_eq!(index.directory.meta_lock_waits(), 1);
+        assert!(reloaded >= released);
+        // Not by the 10 s timeout.
+        let after_release = reloaded - released;
+        assert!(after_release < Duration::from_secs(5), "{after_release:?}");
     }
 }
