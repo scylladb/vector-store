@@ -33,9 +33,11 @@ impl FileMonitor {
         self.last_content_hash = Self::read_content_hash(self.path.as_deref()).await;
     }
 
-    pub(crate) async fn has_changes(&self) -> bool {
+    pub(crate) async fn has_changes(&mut self) -> bool {
         let current_hash = Self::read_content_hash(self.path.as_deref()).await;
-        current_hash != self.last_content_hash
+        let changed = current_hash != self.last_content_hash;
+        self.last_content_hash = current_hash;
+        changed
     }
 
     async fn read_content_hash(path: Option<&Path>) -> Option<u64> {
@@ -82,10 +84,12 @@ impl TlsFilesMonitor {
     }
 
     /// Check if any TLS file has changed content since the last check.
-    pub(crate) async fn has_changes(&self) -> bool {
-        self.cert.has_changes().await
-            || self.key.has_changes().await
-            || self.ca_cert.has_changes().await
+    pub(crate) async fn has_changes(&mut self) -> bool {
+        // Check every file, so that a cert and key change found by one check is reported once.
+        let cert_changed = self.cert.has_changes().await;
+        let key_changed = self.key.has_changes().await;
+        let ca_cert_changed = self.ca_cert.has_changes().await;
+        cert_changed || key_changed || ca_cert_changed
     }
 }
 
@@ -98,7 +102,7 @@ mod tests {
     #[tokio::test]
     async fn tls_file_monitor_no_paths_no_changes() {
         let config = Config::default();
-        let monitor = TlsFilesMonitor::new(&config, Duration::from_secs(30)).await;
+        let mut monitor = TlsFilesMonitor::new(&config, Duration::from_secs(30)).await;
         assert!(!monitor.has_changes().await);
     }
 
@@ -112,7 +116,7 @@ mod tests {
             ..Default::default()
         };
 
-        let monitor = TlsFilesMonitor::new(&config, Duration::from_secs(30)).await;
+        let mut monitor = TlsFilesMonitor::new(&config, Duration::from_secs(30)).await;
         assert!(!monitor.has_changes().await);
 
         tokio::fs::write(cert_file.path(), "new cert content")
@@ -137,10 +141,36 @@ mod tests {
         tokio::fs::write(cert_file.path(), "new cert content")
             .await
             .unwrap();
-        assert!(monitor.has_changes().await);
 
         // Update should reset tracking
         monitor.update(&config).await;
         assert!(!monitor.has_changes().await);
+    }
+
+    #[tokio::test]
+    async fn tls_file_monitor_reports_detected_change_once() {
+        let mut cert_file = NamedTempFile::new().unwrap();
+        writeln!(cert_file, "cert content").unwrap();
+        let mut key_file = NamedTempFile::new().unwrap();
+        writeln!(key_file, "key content").unwrap();
+        let config = Config {
+            tls_cert_path: Some(cert_file.path().to_path_buf()),
+            tls_key_path: Some(key_file.path().to_path_buf()),
+            ..Default::default()
+        };
+        let mut monitor = TlsFilesMonitor::new(&config, Duration::from_secs(30)).await;
+        tokio::fs::write(cert_file.path(), "new cert content")
+            .await
+            .unwrap();
+        tokio::fs::write(key_file.path(), "new key content")
+            .await
+            .unwrap();
+
+        let first_check = monitor.has_changes().await;
+        let second_check = monitor.has_changes().await;
+
+        // The cert and key change is reported by the first check only.
+        assert!(first_check);
+        assert!(!second_check);
     }
 }

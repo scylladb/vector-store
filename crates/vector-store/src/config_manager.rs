@@ -290,8 +290,7 @@ impl ConfigManager {
                     if tls_monitor.has_changes().await {
                         tracing::info!("TLS certificate file change detected, reloading...");
                         let config = self.config_tx.borrow().as_ref().clone();
-                        self.send_config(config.clone()).await;
-                        tls_monitor.update(&config).await;
+                        self.send_config(config).await;
                     }
                 }
                 _ = check_interval.tick() => {
