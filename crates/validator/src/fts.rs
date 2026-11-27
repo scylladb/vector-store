@@ -1470,3 +1470,105 @@ async fn highlight_of_rows_over_the_request_body_limit_together_returns_error(
 
     info!("finished");
 }
+
+#[e2etest::test(group = fts)]
+async fn bm25_regex_query(fixture: Arc<Fixture>) {
+    info!("started");
+
+    fixture
+        .insert_documents([
+            (1, "the quick brown Fox jumps over the lazy dog"),
+            (2, "a slow turtle walks through the garden"),
+        ])
+        .await;
+    fixture.create_fts_index().await;
+
+    let pks = fixture.bm25_search_pks("/fo.*/").await;
+
+    // `Fox` is indexed as `fox`, which the regex matches.
+    assert_eq!(pks, vec![1], "expected only pk 1 for regex '/fo.*/'");
+
+    info!("finished");
+}
+
+#[e2etest::test(group = fts)]
+async fn bm25_range_query(fixture: Arc<Fixture>) {
+    info!("started");
+
+    fixture
+        .insert_documents([
+            (1, "the quick brown fox jumps over the lazy dog"),
+            (2, "a slow turtle walks through the garden"),
+            (3, "the fox runs across the meadow"),
+        ])
+        .await;
+    fixture.create_fts_index().await;
+
+    let mut pks = fixture.bm25_search_pks("[f TO g]").await;
+    pks.sort();
+
+    // pks 1 and 3 have `fox`, and `garden` in pk 2 sorts after `g`.
+    assert_eq!(pks, vec![1, 3], "expected pks 1 and 3 for range '[f TO g]'");
+
+    info!("finished");
+}
+
+#[e2etest::test(group = fts)]
+async fn bm25_set_query(fixture: Arc<Fixture>) {
+    info!("started");
+
+    fixture
+        .insert_documents([
+            (1, "the quick brown fox jumps over the lazy dog"),
+            (2, "a slow turtle walks through the garden"),
+            (3, "the fox runs across the meadow"),
+        ])
+        .await;
+    fixture.create_fts_index().await;
+
+    let mut pks = fixture.bm25_search_pks("IN [dog turtle]").await;
+    pks.sort();
+
+    // pk 1 has `dog` and pk 2 has `turtle`.
+    assert_eq!(
+        pks,
+        vec![1, 2],
+        "expected pks 1 and 2 for set 'IN [dog turtle]'"
+    );
+
+    info!("finished");
+}
+
+#[e2etest::test(group = fts)]
+async fn bm25_field_prefix_returns_error(fixture: Arc<Fixture>) {
+    info!("started");
+
+    fixture
+        .insert_documents([
+            (1, "the quick brown fox jumps over the lazy dog"),
+            (2, "a slow turtle walks through the garden"),
+        ])
+        .await;
+    fixture.create_fts_index().await;
+
+    // The range covers every internal primary id.
+    let query = "primary_id:[0 TO 18446744073709551615]";
+    let err = fixture
+        .session
+        .query_unpaged(fixture.bm25_select_query(query, 100), ())
+        .await
+        .expect_err(&format!("BM25 query '{query}' should fail"))
+        .to_string();
+
+    // The Vector Store rejects the query instead of matching every row.
+    assert!(
+        err.contains("HTTP status 400"),
+        "unexpected error message: {err}"
+    );
+    assert!(
+        err.contains("Field prefixes are not supported"),
+        "unexpected error message: {err}"
+    );
+
+    info!("finished");
+}

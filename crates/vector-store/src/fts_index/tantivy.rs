@@ -9,8 +9,14 @@ use std::sync::RwLock;
 use std::time::Duration;
 
 use anyhow::anyhow;
+use regex::RegexSetBuilder;
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
+use tantivy::query::QueryParserError;
+use tantivy::query_grammar;
+use tantivy::query_grammar::UserInputAst;
+use tantivy::query_grammar::UserInputLeaf;
+use tantivy::query_grammar::UserInputLiteral;
 use tantivy::schema::IndexRecordOption;
 use tantivy::schema::TextFieldIndexing;
 use tantivy::schema::TextOptions;
@@ -158,10 +164,115 @@ fn make_query(
     text_field: tantivy::schema::Field,
     query_str: &str,
 ) -> anyhow::Result<Box<dyn tantivy::query::Query>> {
-    let query_parser = QueryParser::for_index(index, vec![text_field]);
-    query_parser
-        .parse_query(query_str)
+    let mut query_parser = QueryParser::for_index(index, vec![text_field]);
+    query_parser.allow_regexes();
+    query_grammar::parse_query(query_str)
+        .map_err(|_| QueryParserError::SyntaxError(query_str.to_string()))
+        .and_then(|mut ast| {
+            reject_field_prefixes(&ast)?;
+            check_regexes(&ast)?;
+            // The query parser applies its default fields only to terms and phrases.
+            set_default_field(&mut ast, index.schema().get_field_name(text_field));
+            query_parser.build_query_from_user_input_ast(ast)
+        })
         .map_err(|e| QueryError(format!("fts: failed to parse query: {e}")).into())
+}
+
+fn set_default_field(ast: &mut UserInputAst, field: &str) {
+    match ast {
+        UserInputAst::Clause(clauses) => {
+            for (_, clause) in clauses {
+                set_default_field(clause, field);
+            }
+        }
+        UserInputAst::Boost(boosted, _) => set_default_field(boosted, field),
+        UserInputAst::Leaf(leaf) => {
+            if let UserInputLeaf::Regex {
+                field: leaf_field @ None,
+                ..
+            }
+            | UserInputLeaf::Range {
+                field: leaf_field @ None,
+                ..
+            }
+            | UserInputLeaf::Set {
+                field: leaf_field @ None,
+                ..
+            } = leaf.as_mut()
+            {
+                *leaf_field = Some(field.to_string());
+            }
+        }
+    }
+}
+
+fn reject_field_prefixes(ast: &UserInputAst) -> Result<(), QueryParserError> {
+    match ast {
+        UserInputAst::Clause(clauses) => clauses
+            .iter()
+            .try_for_each(|(_, clause)| reject_field_prefixes(clause)),
+        UserInputAst::Boost(boosted, _) => reject_field_prefixes(boosted),
+        UserInputAst::Leaf(leaf) => match leaf.as_ref() {
+            UserInputLeaf::Literal(UserInputLiteral {
+                field_name: Some(_),
+                ..
+            })
+            | UserInputLeaf::Range { field: Some(_), .. }
+            | UserInputLeaf::Set { field: Some(_), .. }
+            | UserInputLeaf::Regex { field: Some(_), .. }
+            | UserInputLeaf::Exists { .. } => Err(QueryParserError::UnsupportedQuery(
+                "Field prefixes are not supported".to_string(),
+            )),
+            UserInputLeaf::Literal(_)
+            | UserInputLeaf::All
+            | UserInputLeaf::Range { .. }
+            | UserInputLeaf::Set { .. }
+            | UserInputLeaf::Regex { .. } => Ok(()),
+        },
+    }
+}
+
+fn check_regexes(ast: &UserInputAst) -> Result<(), QueryParserError> {
+    // tantivy-fst's limits still let one regex overflow the stack or take seconds and gigabytes.
+    const REGEX_SIZE_LIMIT: usize = 64 * 1024;
+    // The regex crate parses the whole pattern before it applies the size limit.
+    const REGEX_LENGTH_LIMIT: usize = 1024;
+    // tantivy compiles every regex of a query, so their costs add up.
+    const REGEX_COUNT_LIMIT: usize = 3;
+    let mut regexes = 0;
+    let mut asts = vec![ast];
+    while let Some(ast) = asts.pop() {
+        match ast {
+            UserInputAst::Clause(clauses) => asts.extend(clauses.iter().map(|(_, clause)| clause)),
+            UserInputAst::Boost(boosted, _) => asts.push(boosted),
+            UserInputAst::Leaf(leaf) => {
+                let UserInputLeaf::Regex { pattern, .. } = leaf.as_ref() else {
+                    continue;
+                };
+                regexes += 1;
+                if regexes > REGEX_COUNT_LIMIT {
+                    return Err(QueryParserError::UnsupportedQuery(format!(
+                        "a query can have at most {REGEX_COUNT_LIMIT} regexes"
+                    )));
+                }
+                if pattern.len() > REGEX_LENGTH_LIMIT {
+                    return Err(QueryParserError::UnsupportedQuery(
+                        "Invalid regex: the regex is too long".to_string(),
+                    ));
+                }
+                // A set always compiles its NFA; a single regex skips it for some literal patterns.
+                if let Err(regex::Error::CompiledTooBig(_)) = RegexSetBuilder::new([pattern])
+                    .size_limit(REGEX_SIZE_LIMIT)
+                    .build()
+                {
+                    return Err(QueryParserError::UnsupportedQuery(
+                        "Invalid regex: the regex is too large".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn find_partition_id(
@@ -375,6 +486,7 @@ pub(crate) fn new(
 mod tests {
     use super::*;
     use crate::AsyncInProgress;
+    use crate::PrimaryKey;
     use crate::memory::Allocate;
     use crate::table::MockTableSearch;
     use crate::tantivy::test_support::make_index_key;
@@ -382,6 +494,7 @@ mod tests {
     use crate::tantivy::test_support::make_table_with_keys;
     use crate::worker;
     use rstest::rstest;
+    use scylla::value::CqlValue;
     use std::time::Duration;
 
     use super::super::actor::FtsIndexExt;
@@ -1213,5 +1326,374 @@ mod tests {
         while segment_count(&sender).await >= MERGE_POLICY_MIN_NUM_SEGMENTS as usize {
             tokio::time::sleep(TEST_COMMIT_INTERVAL).await;
         }
+    }
+
+    #[rstest]
+    #[timeout(Duration::from_secs(10))]
+    #[tokio::test]
+    async fn regex_query_matches_analyzed_terms() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+
+        add_doc(&sender, 1, "quick Fox jumps").await;
+        add_doc(&sender, 2, "the info desk").await;
+
+        let (keys, _) = sender
+            .search(
+                make_index_key(),
+                "/fo.*/".into(),
+                Limit::from(std::num::NonZeroUsize::new(10).unwrap()),
+            )
+            .await
+            .unwrap();
+
+        // The regex matches whole analyzed terms: `fox` from `Fox`, but not `info`.
+        assert_eq!(keys, vec![PrimaryKey::from(vec![CqlValue::BigInt(1)])]);
+    }
+
+    #[rstest]
+    #[timeout(Duration::from_secs(10))]
+    #[tokio::test]
+    async fn regex_query_is_not_analyzed() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+
+        add_doc(&sender, 1, "quick Fox jumps").await;
+
+        let (keys, _) = sender
+            .search(
+                make_index_key(),
+                "/Fo.*/".into(),
+                Limit::from(std::num::NonZeroUsize::new(10).unwrap()),
+            )
+            .await
+            .unwrap();
+
+        // `Fox` is indexed as `fox`, but the regex is not lowercased.
+        assert!(keys.is_empty());
+    }
+
+    #[rstest]
+    #[timeout(Duration::from_secs(10))]
+    #[tokio::test]
+    async fn boosted_regex_query_matches_inside_a_conjunction() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+
+        add_doc(&sender, 1, "quick Fox jumps").await;
+        add_doc(&sender, 2, "quick dog runs").await;
+        add_doc(&sender, 3, "lazy Fox sleeps").await;
+
+        let (keys, _) = sender
+            .search(
+                make_index_key(),
+                "quick AND /fo.*/^2".into(),
+                Limit::from(std::num::NonZeroUsize::new(10).unwrap()),
+            )
+            .await
+            .unwrap();
+
+        // Only the first document has both `quick` and a term the regex matches.
+        assert_eq!(keys, vec![PrimaryKey::from(vec![CqlValue::BigInt(1)])]);
+    }
+
+    #[rstest]
+    #[timeout(Duration::from_secs(10))]
+    #[tokio::test]
+    async fn regex_query_over_size_limit_is_rejected() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+
+        add_doc(&sender, 1, "quick Fox jumps").await;
+
+        let err = sender
+            .search(
+                make_index_key(),
+                "/(a?){2000}/".into(),
+                Limit::from(std::num::NonZeroUsize::new(10).unwrap()),
+            )
+            .await
+            .unwrap_err();
+
+        // The size limit rejects the regex before tantivy-fst builds its automaton.
+        assert_eq!(
+            err.to_string(),
+            "fts: failed to parse query: Unsupported query: Invalid regex: the regex is too large"
+        );
+    }
+
+    #[rstest]
+    #[timeout(Duration::from_secs(10))]
+    #[tokio::test]
+    async fn regex_query_with_empty_groups_over_size_limit_is_rejected() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+
+        add_doc(&sender, 1, "quick Fox jumps").await;
+
+        // The regex crate would match this as the literal `fox`, without the NFA that it measures.
+        let query = format!("/fox(?:(?:|){}(?:x|)){{9}}/", "*".repeat(120));
+        let err = sender
+            .search(
+                make_index_key(),
+                query,
+                Limit::from(std::num::NonZeroUsize::new(10).unwrap()),
+            )
+            .await
+            .unwrap_err();
+
+        // The size limit applies to it too.
+        assert_eq!(
+            err.to_string(),
+            "fts: failed to parse query: Unsupported query: Invalid regex: the regex is too large"
+        );
+    }
+
+    #[rstest]
+    #[timeout(Duration::from_secs(10))]
+    #[tokio::test]
+    async fn word_class_regex_query_matches() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+
+        add_doc(&sender, 1, "quick Fox jumps").await;
+
+        let (keys, _) = sender
+            .search(
+                make_index_key(),
+                r"/\w+/".into(),
+                Limit::from(std::num::NonZeroUsize::new(10).unwrap()),
+            )
+            .await
+            .unwrap();
+
+        // `\w+` stays under the size limit and matches the terms of the document.
+        assert_eq!(keys, vec![PrimaryKey::from(vec![CqlValue::BigInt(1)])]);
+    }
+
+    #[rstest]
+    #[timeout(Duration::from_secs(10))]
+    #[tokio::test]
+    async fn regex_query_over_length_limit_is_rejected() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+
+        add_doc(&sender, 1, "quick Fox jumps").await;
+
+        // 1,027 bytes. The empty groups add nothing, so without the limit the regex matches `fox`.
+        let query = format!("/fo{}x/", "(?:)".repeat(256));
+        let err = sender
+            .search(
+                make_index_key(),
+                query,
+                Limit::from(std::num::NonZeroUsize::new(10).unwrap()),
+            )
+            .await
+            .unwrap_err();
+
+        // The length limit rejects the regex before the regex crate parses it.
+        assert_eq!(
+            err.to_string(),
+            "fts: failed to parse query: Unsupported query: Invalid regex: the regex is too long"
+        );
+    }
+
+    #[rstest]
+    #[timeout(Duration::from_secs(10))]
+    #[tokio::test]
+    async fn query_over_regex_count_limit_is_rejected() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+
+        add_doc(&sender, 1, "quick Fox jumps").await;
+
+        let err = sender
+            .search(
+                make_index_key(),
+                "/a/ /b/ /c/ /d/".into(),
+                Limit::from(std::num::NonZeroUsize::new(10).unwrap()),
+            )
+            .await
+            .unwrap_err();
+
+        // Four distinct regexes are one more than the limit.
+        assert_eq!(
+            err.to_string(),
+            "fts: failed to parse query: Unsupported query: a query can have at most 3 regexes"
+        );
+    }
+
+    #[rstest]
+    #[timeout(Duration::from_secs(10))]
+    #[tokio::test]
+    async fn range_query_matches_terms_in_the_range() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+
+        add_doc(&sender, 1, "bear").await;
+        add_doc(&sender, 2, "cat").await;
+        add_doc(&sender, 3, "dog").await;
+        add_doc(&sender, 4, "apple").await;
+
+        let (mut keys, _) = sender
+            .search(
+                make_index_key(),
+                "[b TO d]".into(),
+                Limit::from(std::num::NonZeroUsize::new(10).unwrap()),
+            )
+            .await
+            .unwrap();
+        keys.sort();
+
+        // `bear` and `cat` are in the range, `apple` sorts before `b` and `dog` after `d`.
+        assert_eq!(
+            keys,
+            vec![
+                PrimaryKey::from(vec![CqlValue::BigInt(1)]),
+                PrimaryKey::from(vec![CqlValue::BigInt(2)]),
+            ]
+        );
+    }
+
+    #[rstest]
+    #[timeout(Duration::from_secs(10))]
+    #[tokio::test]
+    async fn set_query_matches_any_of_the_terms() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+
+        add_doc(&sender, 1, "quick fox").await;
+        add_doc(&sender, 2, "lazy dog").await;
+        add_doc(&sender, 3, "quick foxes").await;
+
+        let (mut keys, _) = sender
+            .search(
+                make_index_key(),
+                "IN [fox dog]".into(),
+                Limit::from(std::num::NonZeroUsize::new(10).unwrap()),
+            )
+            .await
+            .unwrap();
+        keys.sort();
+
+        // pk 1 has `fox` and pk 2 has `dog`, but `foxes` in pk 3 is another term.
+        assert_eq!(
+            keys,
+            vec![
+                PrimaryKey::from(vec![CqlValue::BigInt(1)]),
+                PrimaryKey::from(vec![CqlValue::BigInt(2)]),
+            ]
+        );
+    }
+
+    #[rstest]
+    #[timeout(Duration::from_secs(10))]
+    #[tokio::test]
+    async fn range_query_gives_all_hits_the_same_score() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+
+        add_doc(&sender, 1, "bear").await;
+        add_doc(&sender, 2, "bear cat bear cat lazy dog").await;
+
+        let (_, scores) = sender
+            .search(
+                make_index_key(),
+                "[b TO d]".into(),
+                Limit::from(std::num::NonZeroUsize::new(10).unwrap()),
+            )
+            .await
+            .unwrap();
+
+        // Both hits score 1.0, although pk 2 is longer and repeats two terms in the range.
+        assert!((scores[0] - 1.0).abs() < 0.01, "scores: {scores:?}");
+        assert!((scores[1] - 1.0).abs() < 0.01, "scores: {scores:?}");
+    }
+
+    #[rstest]
+    #[timeout(Duration::from_secs(10))]
+    #[tokio::test]
+    async fn set_query_gives_all_hits_the_same_score() {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+
+        add_doc(&sender, 1, "fox").await;
+        add_doc(&sender, 2, "fox dog fox runs far away").await;
+
+        let (_, scores) = sender
+            .search(
+                make_index_key(),
+                "IN [fox dog]".into(),
+                Limit::from(std::num::NonZeroUsize::new(10).unwrap()),
+            )
+            .await
+            .unwrap();
+
+        // Both hits score 1.0, although pk 2 is longer and has both terms, `fox` twice.
+        assert!((scores[0] - 1.0).abs() < 0.01, "scores: {scores:?}");
+        assert!((scores[1] - 1.0).abs() < 0.01, "scores: {scores:?}");
+    }
+
+    #[rstest]
+    #[case::internal_field_range("primary_id:[0 TO 18446744073709551615]")]
+    #[case::text_field("text:fox")]
+    #[case::text_field_exists("text:*")]
+    #[case::unknown_field("foo:bar")]
+    #[case::set("text: IN [fox]")]
+    #[case::regex("text:/fo.*/")]
+    #[case::boosted_inside_a_conjunction("quick AND text:fox^2")]
+    #[timeout(Duration::from_secs(10))]
+    #[tokio::test]
+    async fn field_prefix_is_rejected(#[case] query: &str) {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+
+        add_doc(&sender, 1, "quick fox").await;
+        add_doc(&sender, 2, "lazy dog").await;
+
+        let err = sender
+            .search(
+                make_index_key(),
+                query.into(),
+                Limit::from(std::num::NonZeroUsize::new(10).unwrap()),
+            )
+            .await
+            .unwrap_err();
+
+        // A QueryError is what makes the endpoint answer 400 rather than 500.
+        assert!(
+            err.downcast_ref::<QueryError>().is_some(),
+            "expected a query error, got: {err}"
+        );
+        // The error says which syntax is not supported.
+        assert_eq!(
+            err.to_string(),
+            "fts: failed to parse query: Unsupported query: Field prefixes are not supported"
+        );
+    }
+
+    #[rstest]
+    #[case::quoted(r#""foo:bar""#)]
+    #[case::escaped(r"foo\:bar")]
+    #[timeout(Duration::from_secs(10))]
+    #[tokio::test]
+    async fn quoted_or_escaped_colon_is_not_a_field_prefix(#[case] query: &str) {
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+
+        add_doc(&sender, 1, "foo bar").await;
+        add_doc(&sender, 2, "lazy dog").await;
+
+        let (keys, _) = sender
+            .search(
+                make_index_key(),
+                query.into(),
+                Limit::from(std::num::NonZeroUsize::new(10).unwrap()),
+            )
+            .await
+            .unwrap();
+
+        // The colon is part of the text, which matches `foo bar` in pk 1.
+        assert_eq!(keys, vec![PrimaryKey::from(vec![CqlValue::BigInt(1)])]);
     }
 }
