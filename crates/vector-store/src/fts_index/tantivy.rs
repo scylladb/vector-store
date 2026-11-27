@@ -22,8 +22,11 @@ use tantivy::tokenizer::Stemmer;
 use tantivy::tokenizer::StopWordFilter;
 use tantivy::tokenizer::TextAnalyzer;
 use tantivy::tokenizer::WhitespaceTokenizer;
+use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tracing::debug;
+use tracing::warn;
 
 use crate::Analyzer;
 use crate::IndexKey;
@@ -50,16 +53,27 @@ use super::actor::FtsIndex;
 use super::actor::FtsSearchR;
 use super::actor::FtsStats;
 use super::actor::FtsStatsR;
+use super::actor::HighlightDocument;
 
 pub(crate) struct TantivyIndexFactory {
     worker: async_channel::Sender<Worker>,
     memory: mpsc::Sender<Memory>,
+    highlight_jobs: Arc<Semaphore>,
 }
 
 impl TantivyIndexFactory {
     pub(crate) fn new(worker: async_channel::Sender<Worker>, memory: mpsc::Sender<Memory>) -> Self {
-        Self { worker, memory }
+        Self {
+            worker,
+            memory,
+            highlight_jobs: new_highlight_jobs(),
+        }
     }
+}
+
+/// Documents highlighted at once by all FTS indexes, as many as the worker pool has threads.
+fn new_highlight_jobs() -> Arc<Semaphore> {
+    Arc::new(Semaphore::new(perf::num_workers().into()))
 }
 
 impl FtsIndexFactory for TantivyIndexFactory {
@@ -73,6 +87,7 @@ impl FtsIndexFactory for TantivyIndexFactory {
             table,
             self.worker.clone(),
             self.memory.clone(),
+            Arc::clone(&self.highlight_jobs),
             COMMIT_INTERVAL,
             MAX_UNCOMMITTED_THRESHOLD,
         )
@@ -222,7 +237,7 @@ const HIGHLIGHT_MAX_NUM_CHARS: usize = 150;
 const HIGHLIGHT_PRE_TAG: &str = "<b>";
 const HIGHLIGHT_POST_TAG: &str = "</b>";
 
-fn handle_highlight(index: &Index, query_str: &str, documents: &[String]) -> FtsHighlightR {
+fn new_snippet_generator(index: &Index, query_str: &str) -> anyhow::Result<SnippetGenerator> {
     let text_field = index.schema.get_field("text").unwrap();
     let searcher = index.reader.searcher();
     let query = make_query(&index.index, text_field, query_str)?;
@@ -232,18 +247,73 @@ fn handle_highlight(index: &Index, query_str: &str, documents: &[String]) -> Fts
     let mut generator = SnippetGenerator::create(&searcher, query.as_ref(), text_field)
         .map_err(|e| anyhow!("fts: failed to create snippet generator: {e}"))?;
     generator.set_max_num_chars(HIGHLIGHT_MAX_NUM_CHARS);
+    Ok(generator)
+}
 
-    Ok(documents
-        .iter()
-        .map(|text| {
-            let mut snippet = generator.snippet(text);
-            if snippet.is_empty() {
-                return None;
-            }
-            snippet.set_snippet_prefix_postfix(HIGHLIGHT_PRE_TAG, HIGHLIGHT_POST_TAG);
-            Some(snippet.to_html())
+fn highlight_text(generator: &SnippetGenerator, text: &str) -> Option<String> {
+    let mut snippet = generator.snippet(text);
+    if snippet.is_empty() {
+        return None;
+    }
+    snippet.set_snippet_prefix_postfix(HIGHLIGHT_PRE_TAG, HIGHLIGHT_POST_TAG);
+    Some(snippet.to_html())
+}
+
+async fn highlight_documents(
+    index: Arc<Index>,
+    query: HighlightDocument,
+    mut documents: mpsc::Receiver<HighlightDocument>,
+    tx: oneshot::Sender<FtsHighlightR>,
+    worker: async_channel::Sender<Worker>,
+    jobs: Arc<Semaphore>,
+) {
+    let (generator_tx, generator_rx) = oneshot::channel();
+    worker
+        .spawn_blocking(move || {
+            let generator = new_snippet_generator(&index, (*query).as_ref());
+            _ = generator_tx.send((generator, query));
         })
-        .collect())
+        .await;
+    // The query is kept until the end, with whatever it holds.
+    let (generator, _query) = match generator_rx.await {
+        Ok((Ok(generator), query)) => (Arc::new(generator), query),
+        Ok((Err(err), _)) => {
+            _ = tx.send(Err(err));
+            return;
+        }
+        Err(err) => {
+            _ = tx.send(Err(anyhow!(
+                "fts: failed to create snippet generator: {err}"
+            )));
+            return;
+        }
+    };
+
+    let (highlights_tx, highlights) = mpsc::channel(1);
+    if tx.send(Ok(highlights)).is_err() {
+        return;
+    }
+    while let Some(document) = documents.recv().await {
+        let generator = Arc::clone(&generator);
+        let Ok(job) = Arc::clone(&jobs).acquire_owned().await else {
+            return;
+        };
+        // Not on the worker, which may run a job on the runtime itself: a document can be large.
+        let highlight = tokio::task::spawn_blocking(move || {
+            let _job = job;
+            highlight_text(&generator, (*document).as_ref())
+        });
+        let highlight = match highlight.await {
+            Ok(highlight) => highlight,
+            Err(err) => {
+                warn!("fts: highlighting a document failed: {err}");
+                return;
+            }
+        };
+        if highlights_tx.send(highlight).await.is_err() {
+            return;
+        }
+    }
 }
 
 fn handle_stats(index: &Index) -> FtsStatsR {
@@ -267,6 +337,7 @@ pub(crate) fn new(
     table: Arc<RwLock<impl TableSearch + Send + Sync + 'static>>,
     worker: async_channel::Sender<Worker>,
     memory: mpsc::Sender<Memory>,
+    highlight_jobs: Arc<Semaphore>,
     commit_interval: Duration,
     commit_threshold: usize,
 ) -> mpsc::Sender<FtsIndex> {
@@ -342,12 +413,14 @@ pub(crate) fn new(
                                 _ = tx.send(Err(anyhow!("fts: missing index {index_key}")));
                                 continue;
                             };
-                            worker
-                                .spawn_blocking(move || {
-                                    let result = handle_highlight(&index, &query, &documents);
-                                    _ = tx.send(result);
-                                })
-                                .await;
+                            tokio::spawn(highlight_documents(
+                                index,
+                                query,
+                                documents,
+                                tx,
+                                worker.clone(),
+                                Arc::clone(&highlight_jobs),
+                            ));
                         }
                         FtsIndex::Stats { index_key, tx } => {
                             let Some(index) = indexes.get(&index_key) else {
@@ -416,6 +489,7 @@ mod tests {
             table,
             worker::new(),
             memory,
+            new_highlight_jobs(),
             TEST_COMMIT_INTERVAL,
             TEST_COMMIT_THRESHOLD,
         )
@@ -656,6 +730,7 @@ mod tests {
             table,
             worker::new(),
             memory,
+            new_highlight_jobs(),
             TEST_COMMIT_INTERVAL,
             TEST_COMMIT_THRESHOLD,
         );
@@ -678,6 +753,7 @@ mod tests {
             table,
             worker::new(),
             memory,
+            new_highlight_jobs(),
             Duration::from_secs(3600),
             TEST_COMMIT_THRESHOLD,
         );
@@ -704,19 +780,34 @@ mod tests {
         assert_eq!(count, TEST_COMMIT_THRESHOLD);
     }
 
+    async fn try_highlight(
+        sender: &mpsc::Sender<FtsIndex>,
+        query: &str,
+        documents: &[&str],
+    ) -> anyhow::Result<Vec<Option<String>>> {
+        let (documents_tx, documents_rx) = mpsc::channel(documents.len().max(1));
+        for document in documents {
+            let document: HighlightDocument = Box::new(document.to_string());
+            documents_tx.send(document).await.unwrap();
+        }
+        drop(documents_tx);
+        let mut highlights_rx = sender
+            .highlight(make_index_key(), Box::new(query.to_string()), documents_rx)
+            .await?;
+        let mut highlights = Vec::new();
+        while let Some(highlight) = highlights_rx.recv().await {
+            highlights.push(highlight);
+        }
+        assert_eq!(highlights.len(), documents.len());
+        Ok(highlights)
+    }
+
     async fn highlight(
         sender: &mpsc::Sender<FtsIndex>,
         query: &str,
         documents: &[&str],
     ) -> Vec<Option<String>> {
-        sender
-            .highlight(
-                make_index_key(),
-                query.into(),
-                documents.iter().map(|doc| doc.to_string()).collect(),
-            )
-            .await
-            .unwrap()
+        try_highlight(sender, query, documents).await.unwrap()
     }
 
     #[tokio::test]
@@ -963,14 +1054,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn highlight_waits_for_a_free_highlight_job() {
+        let jobs = Arc::new(Semaphore::new(1));
+        let sender = new(
+            make_configuration(),
+            make_table_with_keys(),
+            worker::new(),
+            make_memory_actor(Allocate::Can),
+            Arc::clone(&jobs),
+            TEST_COMMIT_INTERVAL,
+            TEST_COMMIT_THRESHOLD,
+        );
+        add_doc(&sender, 1, "fox").await;
+        let held = Arc::clone(&jobs).acquire_owned().await.unwrap();
+
+        let highlighting = tokio::spawn(async move { highlight(&sender, "fox", &["a fox"]).await });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!highlighting.is_finished());
+
+        drop(held);
+
+        assert_eq!(
+            highlighting.await.unwrap()[0].as_deref(),
+            Some("a <b>fox</b>")
+        );
+    }
+
+    #[tokio::test]
+    async fn highlight_keeps_the_query_until_the_documents_end() {
+        struct Query(String, Arc<std::sync::atomic::AtomicBool>);
+        impl AsRef<str> for Query {
+            fn as_ref(&self) -> &str {
+                &self.0
+            }
+        }
+        impl Drop for Query {
+            fn drop(&mut self) {
+                self.1.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        let table = make_table_with_keys();
+        let sender = make_sender(table);
+        add_doc(&sender, 1, "fox").await;
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (documents_tx, documents_rx) = mpsc::channel(1);
+
+        let mut highlights = sender
+            .highlight(
+                make_index_key(),
+                Box::new(Query("fox".to_string(), Arc::clone(&dropped))),
+                documents_rx,
+            )
+            .await
+            .unwrap();
+        let document: HighlightDocument = Box::new("a fox".to_string());
+        documents_tx.send(document).await.unwrap();
+        assert_eq!(
+            highlights.recv().await.unwrap().as_deref(),
+            Some("a <b>fox</b>")
+        );
+        assert!(!dropped.load(std::sync::atomic::Ordering::Relaxed));
+
+        drop(documents_tx);
+
+        assert_eq!(highlights.recv().await, None);
+        assert!(dropped.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[tokio::test]
     async fn highlight_fails_on_unparsable_query() {
         let table = make_table_with_keys();
         let sender = make_sender(table);
         add_doc(&sender, 1, "fox").await;
 
-        let result = sender
-            .highlight(make_index_key(), "fox AND".into(), vec!["a fox".into()])
-            .await;
+        let result = try_highlight(&sender, "fox AND", &["a fox"]).await;
 
         assert!(result.is_err());
     }
@@ -992,9 +1149,7 @@ mod tests {
         let table = make_table_with_keys();
         let sender = make_sender(table);
 
-        let result = sender
-            .highlight(make_index_key(), "fox".into(), vec!["a fox".into()])
-            .await;
+        let result = try_highlight(&sender, "fox", &["a fox"]).await;
 
         assert!(result.is_err());
     }

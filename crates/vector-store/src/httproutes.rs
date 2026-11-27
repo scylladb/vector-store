@@ -20,6 +20,11 @@ use crate::distance;
 use crate::engine::Engine;
 use crate::fts_index::FtsIndex;
 use crate::fts_index::FtsIndexExt;
+use crate::highlight_body;
+use crate::highlight_body::BodyError;
+use crate::highlight_body::BodyParts;
+use crate::highlight_body::HighlightShared;
+use crate::highlight_body::LimitedBody;
 use crate::indexes;
 use crate::indexes::Indexes;
 use crate::info::Info;
@@ -41,6 +46,8 @@ use crate::vs_index::VsIndexSearch;
 use crate::vs_index::VsIndexSearchExt;
 use anyhow::bail;
 use axum::Router;
+use axum::body::Body;
+use axum::body::BodyDataStream;
 use axum::extract;
 use axum::extract::Path;
 use axum::extract::State;
@@ -55,6 +62,7 @@ use axum::response::Response;
 use axum::routing::get;
 use axum::routing::put;
 use axum_server_dual_protocol::Protocol;
+use bytes::Bytes;
 use futures::future;
 use httpapi::DataType;
 use httpapi::FulltextIndexOptions;
@@ -74,7 +82,13 @@ use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::RwLock;
+use tokio::sync::OwnedSemaphorePermit;
+use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
+use tokio_util::io::StreamReader;
+use tokio_util::io::SyncIoBridge;
 use tower_http::trace::TraceLayer;
 use tracing::debug;
 use utoipa::OpenApi;
@@ -129,8 +143,10 @@ struct RoutesInnerState {
     internals: Sender<Internals>,
     index_engine_version: String,
     use_tls: bool,
+    highlight: HighlightShared,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn new(
     indexes: Arc<RwLock<Indexes>>,
     engine: Sender<Engine>,
@@ -139,6 +155,7 @@ pub(crate) async fn new(
     internals: Sender<Internals>,
     index_engine_version: String,
     use_tls: bool,
+    highlight: HighlightShared,
 ) -> Router {
     let state = RoutesInnerState {
         _engine: engine,
@@ -148,6 +165,7 @@ pub(crate) async fn new(
         internals,
         index_engine_version,
         use_tls,
+        highlight,
     };
     let (router, api) = new_open_api_router();
     let router = router
@@ -1207,6 +1225,12 @@ The index is used only to analyze the query and to weight its terms by their doc
 rarer terms when picking which fragment of a long text to show. \
 Highlights are returned in the same order as the requested documents. \
 A document that matches no query term yields `null`. \
+The body is read as a stream, one document at a time, so it has no overall size limit beyond 640 MiB; \
+the query may be at most 2 MiB and each document 100 MiB (less when the memory budget is set below 500 MiB, the query below 10 MiB), \
+and a request may carry at most 1000 documents. \
+`query` has to come before `documents`, so that highlighting can start at the first document. \
+When too many highlight requests are in progress, or the memory for their documents is used up, \
+for longer than `VECTOR_STORE_HIGHLIGHT_BUSY_WAIT` (5 s by default), the request fails with 503 and a plain-text message. \
 If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
     params(
         ("keyspace" = httpapi::KeyspaceName, Path, description = "The name of the ScyllaDB keyspace containing the index."),
@@ -1221,13 +1245,31 @@ If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
         ),
         (
             status = 400,
-            description = "Bad request. Possible causes: malformed input, unparsable query, or missing required fields.",
+            description = "Bad request. Possible causes: malformed input, unparsable query, missing required fields, or an unknown field nested more than 127 levels deep.",
             content_type = "application/json",
             body = ErrorMessage
         ),
         (
             status = 403,
             description = "Forbidden. TLS is enabled in the configuration, but the client connected over plain HTTP.",
+            content_type = "application/json",
+            body = ErrorMessage
+        ),
+        (
+            status = 408,
+            description = "Request timeout. No part of the body arrived for `VECTOR_STORE_HIGHLIGHT_RECEIVE_IDLE_TIMEOUT` (30 s by default), or the whole body took longer than `VECTOR_STORE_HIGHLIGHT_RECEIVE_TIMEOUT` (120 s by default).",
+            content_type = "application/json",
+            body = ErrorMessage
+        ),
+        (
+            status = 413,
+            description = "Payload too large. The query is over 2 MiB or a document is over 100 MiB (less when the memory budget is set below 500 MiB, the query below 10 MiB), the request carries more than 1000 documents, a field name is over 4 KiB, or the body is over 640 MiB.",
+            content_type = "application/json",
+            body = ErrorMessage
+        ),
+        (
+            status = 415,
+            description = "Unsupported media type. The request has no JSON `Content-Type` header (`application/json` or `application/*+json`).",
             content_type = "application/json",
             body = ErrorMessage
         ),
@@ -1239,7 +1281,7 @@ If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
         ),
         (
             status = 422,
-            description = "Index cannot be served. Possible causes: the index exists in ScyllaDB, but its table has a primary key column of a type Vector Store does not support.",
+            description = "Unprocessable entity. Possible causes: the body is JSON but not a highlight request (a missing or duplicate field, or a value of the wrong type), or the index exists in ScyllaDB, but its table has a primary key column of a type Vector Store does not support.",
             content_type = "application/json",
             body = ErrorMessage
         ),
@@ -1258,16 +1300,47 @@ If TLS is enabled on the server, clients must connect using a HTTPS protocol.",
 async fn post_index_highlight(
     State(state): State<RoutesInnerState>,
     extensions: Extensions,
+    headers: HeaderMap,
     Path((keyspace, index_name)): Path<(httpapi::KeyspaceName, httpapi::IndexName)>,
-    extract::Json(request): extract::Json<httpapi::PostIndexHighlightRequest>,
+    body: Body,
 ) -> Response {
     let keyspace: crate::KeyspaceName = keyspace.into();
     let index_name: crate::IndexName = index_name.into();
+    let limits = state.highlight.limits;
+
+    let declared = headers
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|len| len.to_str().ok()?.parse::<u64>().ok());
+    let too_large = declared.is_some_and(|len| len > limits.max_body_bytes);
+    let answer_early = |response: Response, body: Body| {
+        state.highlight.drain(body.into_data_stream());
+        response
+    };
+
     if let Some(resp) = check_insecure_tls(state.use_tls, &extensions, "post_index_highlight") {
-        return resp;
+        return answer_early(resp, body);
+    }
+    if !is_json_content_type(&headers) {
+        return answer_early(
+            (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "Expected request with `Content-Type: application/json`",
+            )
+                .into_response(),
+            body,
+        );
+    }
+    // Otherwise the body is highlighted up to the limit before the answer.
+    if too_large {
+        let err = BodyError::BodyTooLarge;
+        debug!("post_index_highlight: {err}");
+        return answer_early(
+            (StatusCode::PAYLOAD_TOO_LARGE, err.to_string()).into_response(),
+            body,
+        );
     }
 
-    let timer = state
+    let _timer = state
         .metrics
         .latency
         .with_label_values(&[keyspace.as_ref(), index_name.as_ref(), OP_HIGHLIGHT])
@@ -1278,9 +1351,8 @@ async fn post_index_highlight(
     let serving_or_progress = {
         let indexes = state.indexes.read().unwrap();
         let Some(entry) = indexes.get_fts(&index_key) else {
-            timer.observe_duration();
-
-            return missing_index_response(&indexes, &index_key, "post_index_highlight");
+            let resp = missing_index_response(&indexes, &index_key, "post_index_highlight");
+            return answer_early(resp, body);
         };
         if entry.status() == crate::node_state::IndexStatus::Serving {
             Ok(entry.index().clone())
@@ -1299,19 +1371,66 @@ async fn post_index_highlight(
     .await
     {
         Ok(sender) => sender,
-        Err(resp) => {
-            timer.observe_duration();
-            return resp;
-        }
+        Err(resp) => return answer_early(resp, body),
     };
 
-    let result = fts_sender
-        .highlight(index_key, request.query, request.documents)
-        .await;
+    let reading = tokio::time::timeout(
+        limits.busy_wait,
+        Arc::clone(&state.highlight.requests).acquire_owned(),
+    )
+    .await;
+    let Ok(Ok(reading)) = reading else {
+        let msg = "too many highlight requests in progress";
+        debug!("post_index_highlight: {msg}");
+        return answer_early((StatusCode::SERVICE_UNAVAILABLE, msg).into_response(), body);
+    };
+    highlight_streamed(
+        &fts_sender,
+        index_key,
+        body,
+        state.highlight.clone(),
+        reading,
+    )
+    .await
+}
 
-    timer.observe_duration();
+type HighlightBodyReader = SyncIoBridge<StreamReader<LimitedBody<BodyDataStream>, Bytes>>;
+type HighlightBodyReading = JoinHandle<(Result<usize, BodyError>, HighlightBodyReader)>;
 
-    match result {
+async fn highlight_streamed(
+    fts_sender: &Sender<FtsIndex>,
+    index_key: IndexKey,
+    body: Body,
+    highlight: HighlightShared,
+    reading_permit: OwnedSemaphorePermit,
+) -> Response {
+    let limits = highlight.limits;
+    let budget = Arc::clone(&highlight.budget);
+    let body = LimitedBody::new(body.into_data_stream(), &limits);
+    let received = body.state();
+    let mut reader = SyncIoBridge::new(StreamReader::new(body));
+    let (query_tx, query) = oneshot::channel();
+    // One document waits while another is highlighted.
+    let (documents_tx, documents) = mpsc::channel(1);
+    let reading: HighlightBodyReading = tokio::task::spawn_blocking(move || {
+        let _reading_permit = reading_permit;
+        let parts = BodyParts {
+            query: query_tx,
+            documents: documents_tx,
+        };
+        let result = highlight_body::read_body(&mut reader, &limits, &received, &budget, parts);
+        (result, reader)
+    });
+
+    let Ok(query) = query.await else {
+        drop(documents);
+        return finish_reading(reading, Vec::new(), highlight).await;
+    };
+    let mut excerpts = match fts_sender
+        .highlight(index_key, Box::new(query), documents)
+        .await
+    {
+        Ok(excerpts) => excerpts,
         Err(err) => {
             let msg = format!("index.highlight request error: {err}");
             debug!("post_index_highlight: {msg}");
@@ -1320,14 +1439,104 @@ async fn post_index_highlight(
             } else {
                 StatusCode::INTERNAL_SERVER_ERROR
             };
-            (status, msg).into_response()
+            return abandon_reading(reading, highlight, (status, msg).into_response());
         }
-        Ok(highlights) => (
-            StatusCode::OK,
-            response::Json(httpapi::PostIndexHighlightResponse { highlights }),
-        )
-            .into_response(),
+    };
+
+    let mut highlights = Vec::new();
+    while let Some(excerpt) = excerpts.recv().await {
+        highlights.push(excerpt);
     }
+    finish_reading(reading, highlights, highlight).await
+}
+
+async fn finish_reading(
+    reading: HighlightBodyReading,
+    highlights: Vec<Option<String>>,
+    highlight: HighlightShared,
+) -> Response {
+    let (result, reader) = match reading.await {
+        Ok(stopped) => stopped,
+        Err(err) => {
+            let msg = format!("failed to read the highlight request body: {err}");
+            debug!("post_index_highlight: {msg}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response();
+        }
+    };
+    let err = match result {
+        Ok(documents) if documents == highlights.len() => {
+            return (
+                StatusCode::OK,
+                response::Json(httpapi::PostIndexHighlightResponse { highlights }),
+            )
+                .into_response();
+        }
+        Ok(documents) => {
+            let msg = format!(
+                "index.highlight request error: highlighted {} of {documents} documents",
+                highlights.len()
+            );
+            debug!("post_index_highlight: {msg}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response();
+        }
+        Err(err) => err,
+    };
+    highlight.drain(into_body(reader));
+    if let BodyError::Cancelled = err {
+        let msg = format!(
+            "index.highlight request error: the index stopped after {} documents",
+            highlights.len()
+        );
+        debug!("post_index_highlight: {msg}");
+        return (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response();
+    }
+    debug!("post_index_highlight: {err}");
+    let status = match err {
+        BodyError::Syntax(_) | BodyError::Receive => StatusCode::BAD_REQUEST,
+        BodyError::Timeout => StatusCode::REQUEST_TIMEOUT,
+        BodyError::Data(_) => StatusCode::UNPROCESSABLE_ENTITY,
+        BodyError::TextTooLong { .. }
+        | BodyError::TooManyDocuments { .. }
+        | BodyError::NameTooLong { .. }
+        | BodyError::BodyTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+        BodyError::Busy => StatusCode::SERVICE_UNAVAILABLE,
+        BodyError::Cancelled => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (status, err.to_string()).into_response()
+}
+
+/// The FTS index has dropped the documents channel, which stops the reader.
+fn abandon_reading(
+    reading: HighlightBodyReading,
+    highlight: HighlightShared,
+    response: Response,
+) -> Response {
+    tokio::spawn(async move {
+        if let Ok((_, reader)) = reading.await {
+            highlight.drain(into_body(reader));
+        }
+    });
+    response
+}
+
+/// The rest of the body, without the limits that stopped the read.
+fn into_body(reader: HighlightBodyReader) -> BodyDataStream {
+    reader.into_inner().into_inner().into_inner()
+}
+
+/// Whether the request has a JSON body, as axum's `Json` extractor decides it.
+fn is_json_content_type(headers: &HeaderMap) -> bool {
+    let Some(content_type) = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    let Ok(mime) = content_type.parse::<mime::Mime>() else {
+        return false;
+    };
+    mime.type_() == mime::APPLICATION
+        && (mime.subtype() == mime::JSON || mime.suffix() == Some(mime::JSON))
 }
 
 #[utoipa::path(
@@ -1790,6 +1999,51 @@ mod tests {
 
     use super::*;
     use crate::Analyzer;
+
+    #[test]
+    fn is_json_content_type_decides_as_axum() {
+        let decide = |content_type: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
+            is_json_content_type(&headers)
+        };
+
+        assert!(decide("application/json"));
+        assert!(decide("Application/JSON; charset=utf-8"));
+        assert!(decide("application/cloudevents+json"));
+        assert!(!decide("text/json"));
+        assert!(!decide("application/jsonx"));
+        assert!(!decide(r#"application/json; charset="utf-8"#));
+        assert!(!is_json_content_type(&HeaderMap::new()));
+    }
+
+    #[tokio::test]
+    async fn the_rest_of_a_body_over_the_limit_is_discarded() {
+        use futures::StreamExt;
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::atomic::Ordering;
+
+        let chunks = Arc::new(AtomicUsize::new(0));
+        let sent = futures::stream::iter(0..4).map({
+            let chunks = Arc::clone(&chunks);
+            move |_| {
+                chunks.fetch_add(1, Ordering::Relaxed);
+                Ok::<_, std::io::Error>(Bytes::from(vec![0; 1024]))
+            }
+        });
+        let limits = crate::highlight_body::HighlightLimits {
+            max_body_bytes: 1536,
+            ..crate::highlight_body::HighlightLimits::default()
+        };
+        let mut body = LimitedBody::new(Body::from_stream(sent).into_data_stream(), &limits);
+        assert!(body.next().await.unwrap().is_ok());
+        assert!(body.next().await.unwrap().is_err());
+        let reader: HighlightBodyReader = SyncIoBridge::new(StreamReader::new(body));
+
+        highlight_body::drain(into_body(reader), limits).await;
+
+        assert_eq!(chunks.load(Ordering::Relaxed), 4);
+    }
 
     #[test]
     fn try_from_post_index_ann_filter_conversion_ok() {

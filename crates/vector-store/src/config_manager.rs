@@ -18,9 +18,14 @@ use std::net::ToSocketAddrs;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Semaphore;
 use tokio::sync::watch;
 
 const DEFAULT_TLS_FILE_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+/// Half of tokio's blocking threads: each request reading its body holds one, and the
+/// documents it sends are highlighted on another.
+const MAX_HIGHLIGHT_REQUESTS: usize = 256;
+const MIN_HIGHLIGHT_MEMORY_BUDGET: usize = 1024 * 1024;
 const TLS_FILE_CHECK_INTERVAL_ENV: &str = "VECTOR_STORE_TLS_FILE_CHECK_INTERVAL";
 
 fn tls_file_check_interval(env: &impl Fn(&str) -> anyhow::Result<String>) -> Duration {
@@ -225,6 +230,24 @@ impl ConfigManager {
             ));
         }
 
+        // The /highlight limits are read once, at start.
+        let highlight = |config: &Config| {
+            (
+                config.highlight_memory_budget,
+                config.highlight_max_requests,
+                config.highlight_busy_wait,
+                config.highlight_receive_timeout,
+                config.highlight_receive_idle_timeout,
+            )
+        };
+        if highlight(old_config) != highlight(new_config) {
+            changes.push(format!(
+                "/highlight limits (VECTOR_STORE_HIGHLIGHT_*): {:?} -> {:?}",
+                highlight(old_config),
+                highlight(new_config)
+            ));
+        }
+
         // Log all changes if any were detected
         if !changes.is_empty() {
             tracing::warn!(
@@ -370,6 +393,19 @@ where
         password,
         certificate_path,
     }))
+}
+
+fn positive_duration(
+    env: &impl Fn(&str) -> anyhow::Result<String>,
+    name: &str,
+) -> anyhow::Result<Option<Duration>> {
+    let Ok(value) = env(name) else {
+        return Ok(None);
+    };
+    match value.parse_duration() {
+        Ok(duration) if !duration.is_zero() => Ok(Some(duration)),
+        _ => bail!("Unable to parse {name} env (duration longer than zero, ie. `5s`)"),
+    }
 }
 
 pub async fn load_config(env: impl Fn(&str) -> anyhow::Result<String>) -> anyhow::Result<Config> {
@@ -554,6 +590,45 @@ pub async fn load_config(env: impl Fn(&str) -> anyhow::Result<String>) -> anyhow
         .ok()
         .map(|v| serde_json::from_str(&v))
         .transpose()?;
+
+    config.highlight_memory_budget = env("VECTOR_STORE_HIGHLIGHT_MEMORY_BUDGET")
+        .ok()
+        .map(|v| {
+            v.parse::<NonZeroUsize>()
+                .ok()
+                .filter(|bytes| {
+                    (MIN_HIGHLIGHT_MEMORY_BUDGET..=Semaphore::MAX_PERMITS).contains(&bytes.get())
+                })
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Unable to parse VECTOR_STORE_HIGHLIGHT_MEMORY_BUDGET env (bytes, from {MIN_HIGHLIGHT_MEMORY_BUDGET} to {})",
+                        Semaphore::MAX_PERMITS
+                    )
+                })
+        })
+        .transpose()?;
+
+    config.highlight_max_requests = env("VECTOR_STORE_HIGHLIGHT_MAX_REQUESTS")
+        .ok()
+        .map(|v| {
+            v.parse::<NonZeroUsize>()
+                .ok()
+                .filter(|requests| requests.get() <= MAX_HIGHLIGHT_REQUESTS)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Unable to parse VECTOR_STORE_HIGHLIGHT_MAX_REQUESTS env (positive integer, at most {MAX_HIGHLIGHT_REQUESTS})"
+                    )
+                })
+        })
+        .transpose()?;
+
+    config.highlight_busy_wait = positive_duration(&env, "VECTOR_STORE_HIGHLIGHT_BUSY_WAIT")?;
+
+    config.highlight_receive_timeout =
+        positive_duration(&env, "VECTOR_STORE_HIGHLIGHT_RECEIVE_TIMEOUT")?;
+
+    config.highlight_receive_idle_timeout =
+        positive_duration(&env, "VECTOR_STORE_HIGHLIGHT_RECEIVE_IDLE_TIMEOUT")?;
 
     config.cql_preferred_datacenter = env("VECTOR_STORE_CQL_PREFERRED_DATACENTER").ok();
     config.cql_preferred_rack = env("VECTOR_STORE_CQL_PREFERRED_RACK").ok();
@@ -955,6 +1030,65 @@ mod tests {
                 .to_string()
                 .contains("Unable to parse VECTOR_STORE_DISKANN_MAX_POINTS")
         );
+    }
+
+    #[tokio::test]
+    async fn load_config_highlight_limits() {
+        let env = mock_env(HashMap::from([
+            ("VECTOR_STORE_HIGHLIGHT_MEMORY_BUDGET", "1048576".into()),
+            ("VECTOR_STORE_HIGHLIGHT_MAX_REQUESTS", "8".into()),
+            ("VECTOR_STORE_HIGHLIGHT_BUSY_WAIT", "1s".into()),
+            ("VECTOR_STORE_HIGHLIGHT_RECEIVE_TIMEOUT", "1m".into()),
+            ("VECTOR_STORE_HIGHLIGHT_RECEIVE_IDLE_TIMEOUT", "10s".into()),
+        ]));
+        let config = load_config(env).await.unwrap();
+        assert_eq!(config.highlight_memory_budget, NonZeroUsize::new(1_048_576));
+        assert_eq!(config.highlight_max_requests, NonZeroUsize::new(8));
+        assert_eq!(config.highlight_busy_wait, Some(Duration::from_secs(1)));
+        assert_eq!(
+            config.highlight_receive_timeout,
+            Some(Duration::from_secs(60))
+        );
+        assert_eq!(
+            config.highlight_receive_idle_timeout,
+            Some(Duration::from_secs(10))
+        );
+    }
+
+    #[tokio::test]
+    async fn load_config_highlight_limits_out_of_range_errors() {
+        for (name, value) in [
+            ("VECTOR_STORE_HIGHLIGHT_MEMORY_BUDGET", "0".to_string()),
+            (
+                "VECTOR_STORE_HIGHLIGHT_MEMORY_BUDGET",
+                (MIN_HIGHLIGHT_MEMORY_BUDGET - 1).to_string(),
+            ),
+            (
+                "VECTOR_STORE_HIGHLIGHT_MEMORY_BUDGET",
+                (Semaphore::MAX_PERMITS + 1).to_string(),
+            ),
+            ("VECTOR_STORE_HIGHLIGHT_MAX_REQUESTS", "0".to_string()),
+            (
+                "VECTOR_STORE_HIGHLIGHT_MAX_REQUESTS",
+                (MAX_HIGHLIGHT_REQUESTS + 1).to_string(),
+            ),
+            ("VECTOR_STORE_HIGHLIGHT_BUSY_WAIT", "0s".to_string()),
+            ("VECTOR_STORE_HIGHLIGHT_RECEIVE_TIMEOUT", "0s".to_string()),
+            (
+                "VECTOR_STORE_HIGHLIGHT_RECEIVE_IDLE_TIMEOUT",
+                "0s".to_string(),
+            ),
+            ("VECTOR_STORE_HIGHLIGHT_RECEIVE_TIMEOUT", "soon".to_string()),
+        ] {
+            let result = load_config(mock_env(HashMap::from([(name, value.clone())]))).await;
+            let error = result.expect_err(&format!("{name}={value} must be rejected"));
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("Unable to parse {name}")),
+                "{error}"
+            );
+        }
     }
 
     #[test]

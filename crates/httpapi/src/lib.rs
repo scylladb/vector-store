@@ -512,7 +512,7 @@ pub struct PostIndexBm25Response {
 #[derive(Debug, PartialEq, serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
 /// Request body for highlighting.
 pub struct PostIndexHighlightRequest {
-    /// The text query whose terms should be marked in the documents.
+    /// The text query whose terms should be marked in the documents. It has to come before `documents`, since the Vector Store reads the body as a stream.
     pub query: String,
     /// The documents to highlight.
     pub documents: Vec<String>,

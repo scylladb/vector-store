@@ -639,6 +639,298 @@ async fn fts_highlight_not_serving_returns_503() {
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
+/// Sends the head of a highlight request whose body is declared over the 640 MiB limit and
+/// only its first bytes, then returns the answer, which must come before the rest of the body.
+async fn answer_to_a_body_declared_over_the_limit(
+    client: &HttpClient,
+    keyspace_name: &str,
+    index_name: &str,
+    content_type: &str,
+) -> String {
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
+
+    let addr = client
+        .url()
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap()
+        .to_string();
+    let mut stream = tokio::net::TcpStream::connect(&addr).await.unwrap();
+    let head = format!(
+        "POST /api/v1/indexes/{keyspace_name}/{index_name}/highlight HTTP/1.1\r\n\
+         Host: {addr}\r\n\
+         Content-Type: {content_type}\r\n\
+         Content-Length: {}\r\n\r\n",
+        640 * 1024 * 1024 + 1
+    );
+    stream.write_all(head.as_bytes()).await.unwrap();
+    stream
+        .write_all(br#"{"query":"hello","documents":["hello world""#)
+        .await
+        .unwrap();
+
+    // The server goes on discarding a body that never comes: read until the answer is
+    // complete.
+    let mut answer = Vec::new();
+    let read_answer = async {
+        let mut chunk = [0; 1024];
+        loop {
+            let complete = String::from_utf8_lossy(&answer)
+                .split_once("\r\n\r\n")
+                .is_some_and(|(head, body)| {
+                    head.lines()
+                        .find_map(|line| line.strip_prefix("content-length: "))
+                        .and_then(|len| len.parse::<usize>().ok())
+                        .is_some_and(|len| body.len() >= len)
+                });
+            if complete {
+                break;
+            }
+            match stream.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(read) => answer.extend_from_slice(&chunk[..read]),
+            }
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), read_answer)
+        .await
+        .expect("the answer must come before the rest of the body");
+    String::from_utf8_lossy(&answer).into_owned()
+}
+
+#[tokio::test]
+async fn fts_highlight_answers_413_before_reading_a_body_declared_over_the_limit() {
+    crate::enable_tracing();
+
+    let (client, keyspace_name, index_name, _db, _hold) =
+        setup_fts_and_wait([(vec![CqlValue::Int(1)], "hello world", 10)], 1).await;
+
+    let answer = answer_to_a_body_declared_over_the_limit(
+        &client,
+        keyspace_name.as_ref(),
+        index_name.as_ref(),
+        "application/json",
+    )
+    .await;
+
+    assert!(
+        answer.starts_with("HTTP/1.1 413 "),
+        "unexpected answer: {answer:?}"
+    );
+    assert!(
+        answer.ends_with("the highlight request body is too large"),
+        "unexpected answer: {answer:?}"
+    );
+}
+
+#[tokio::test]
+async fn fts_highlight_answers_415_before_413_for_a_body_declared_over_the_limit() {
+    crate::enable_tracing();
+
+    let (client, keyspace_name, index_name, _db, _hold) =
+        setup_fts_and_wait([(vec![CqlValue::Int(1)], "hello world", 10)], 1).await;
+
+    let answer = answer_to_a_body_declared_over_the_limit(
+        &client,
+        keyspace_name.as_ref(),
+        index_name.as_ref(),
+        "text/plain",
+    )
+    .await;
+
+    assert!(
+        answer.starts_with("HTTP/1.1 415 "),
+        "unexpected answer: {answer:?}"
+    );
+}
+
+/// Sends a highlight request the way ScyllaDB does: the whole body first, and only
+/// then reads the answer. Returns the status and the body of the answer.
+///
+/// A server that closes the connection with the body unread would make the write fail
+/// with a reset, or the answer be lost.
+async fn post_highlight_whole_body_first(
+    client: &HttpClient,
+    keyspace_name: &str,
+    index_name: &str,
+    body: &[u8],
+) -> (StatusCode, String) {
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
+
+    let addr = client
+        .url()
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap();
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let head = format!(
+        "POST /api/v1/indexes/{keyspace_name}/{index_name}/highlight HTTP/1.1\r\n\
+         Host: {addr}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).await.unwrap();
+    stream
+        .write_all(body)
+        .await
+        .expect("the server must not close the connection before the body is sent");
+    let mut answer = Vec::new();
+    stream
+        .read_to_end(&mut answer)
+        .await
+        .expect("the server must not reset the connection before the answer is read");
+    let answer = String::from_utf8_lossy(&answer);
+    let status = answer
+        .split(' ')
+        .nth(1)
+        .and_then(|code| code.parse::<u16>().ok())
+        .unwrap_or_else(|| panic!("no HTTP answer: {answer:?}"));
+    let body = answer.split_once("\r\n\r\n").map_or("", |(_, body)| body);
+    (StatusCode::from_u16(status).unwrap(), body.to_string())
+}
+
+#[tokio::test]
+async fn fts_highlight_of_a_document_over_two_mib() {
+    crate::enable_tracing();
+
+    let (client, keyspace_name, index_name, _db, _hold) =
+        setup_fts_and_wait([(vec![CqlValue::Int(1)], "the quick brown fox", 10)], 1).await;
+    // The whole body used to be limited to 2 MiB.
+    let document = format!("{} fox", "lorem ipsum ".repeat(3 * 1024 * 1024 / 12));
+
+    let highlights = client
+        .highlight(&keyspace_name, &index_name, "fox".into(), vec![document])
+        .await;
+
+    assert_eq!(highlights.len(), 1);
+    assert!(
+        highlights[0].as_deref().unwrap().ends_with("<b>fox</b>"),
+        "unexpected highlight: {:?}",
+        highlights[0]
+    );
+}
+
+#[tokio::test]
+async fn fts_highlight_of_a_missing_index_answers_a_client_sending_the_whole_body_first() {
+    crate::enable_tracing();
+
+    let (client, _keyspace_name, _index_name, _db, _hold) =
+        setup_fts_and_wait([(vec![CqlValue::Int(1)], "hello world", 10)], 1).await;
+    // Large enough that the server would close with most of it unread.
+    let body = format!(
+        r#"{{"query":"hello","documents":["{}"]}}"#,
+        "x".repeat(8 * 1024 * 1024)
+    );
+
+    let (status, _) = post_highlight_whole_body_first(
+        &client,
+        "nonexistent_ks",
+        "nonexistent_idx",
+        body.as_bytes(),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn fts_highlight_of_a_document_over_the_limit_answers_413() {
+    crate::enable_tracing();
+
+    let (client, keyspace_name, index_name, _db, _hold) =
+        setup_fts_and_wait([(vec![CqlValue::Int(1)], "hello world", 10)], 1).await;
+    // One document past the limit of 100 MiB, then another document.
+    let body = format!(
+        r#"{{"query":"hello","documents":["{}","hello"]}}"#,
+        "x".repeat(100 * 1024 * 1024 + 1)
+    );
+
+    let (status, message) = post_highlight_whole_body_first(
+        &client,
+        keyspace_name.as_ref(),
+        index_name.as_ref(),
+        body.as_bytes(),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(
+        message.contains("may be at most 104857600 bytes"),
+        "unexpected message: {message}"
+    );
+}
+
+#[tokio::test]
+async fn fts_highlight_rejects_bodies_as_the_json_extractor_did() {
+    crate::enable_tracing();
+
+    let (client, keyspace_name, index_name, _db, _hold) =
+        setup_fts_and_wait([(vec![CqlValue::Int(1)], "hello world", 10)], 1).await;
+    let url = format!(
+        "{}/indexes/{keyspace_name}/{index_name}/highlight",
+        client.url()
+    );
+    let post = |body: &'static str, content_type: Option<&'static str>| {
+        let mut request = reqwest::Client::new().post(&url).body(body);
+        if let Some(content_type) = content_type {
+            request = request.header("Content-Type", content_type);
+        }
+        async move { request.send().await.unwrap().status() }
+    };
+    let valid = r#"{"query":"hello","documents":["hello world"]}"#;
+
+    assert_eq!(post(valid, Some("application/json")).await, StatusCode::OK);
+    assert_eq!(
+        post(valid, Some("application/json; charset=utf-8")).await,
+        StatusCode::OK
+    );
+    assert_eq!(post(valid, None).await, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    assert_eq!(
+        post(valid, Some("text/plain")).await,
+        StatusCode::UNSUPPORTED_MEDIA_TYPE
+    );
+    assert_eq!(
+        post(
+            r#"{"query":"hello","documents":["a"#,
+            Some("application/json")
+        )
+        .await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        post(r#"{"query":"hello"}"#, Some("application/json")).await,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+}
+
+#[tokio::test]
+async fn fts_highlight_rejects_documents_before_the_query() {
+    crate::enable_tracing();
+
+    let (client, keyspace_name, index_name, _db, _hold) =
+        setup_fts_and_wait([(vec![CqlValue::Int(1)], "hello world", 10)], 1).await;
+
+    let (status, message) = post_highlight_whole_body_first(
+        &client,
+        keyspace_name.as_ref(),
+        index_name.as_ref(),
+        br#"{"documents":["hello world"],"query":"hello"}"#,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        message.contains("field `query` must come before field `documents`"),
+        "unexpected message: {message}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn fts_back_to_back_updates_keep_one_latest_document_per_row() {
     crate::enable_tracing();

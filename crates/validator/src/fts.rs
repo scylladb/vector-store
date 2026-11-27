@@ -15,6 +15,7 @@ use scylla::client::session::Session;
 use scylla::response::PagingState;
 use scylla::response::query_result::QueryRowsResult;
 use scylla::statement::Statement;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -176,15 +177,6 @@ impl Fixture {
     }
 
     #[framed]
-    async fn highlight_search_error(&self, query: &str) -> String {
-        self.session
-            .query_unpaged(self.highlight_select_query(query, 100), ())
-            .await
-            .expect_err(&format!("BM25_HIGHLIGHT() query '{query}' should fail"))
-            .to_string()
-    }
-
-    #[framed]
     async fn highlight_excerpts(&self, query: &str) -> HashMap<i32, String> {
         let mut excerpts = HashMap::new();
         for (pk, excerpt) in self.highlight_search(query, 100).await {
@@ -218,10 +210,10 @@ fn bm25_ordered_query(table: &TableName, columns: &str, term: &str, limit: usize
     )
 }
 
-/// The Vector Store keeps axum's default request body limit, and the coordinator ships
-/// the text of every matched row in a single request, so the limit also caps how much
-/// content one `BM25_HIGHLIGHT()` query can carry.
-const REQUEST_BODY_LIMIT: usize = 2 * 1024 * 1024;
+/// The request body limit the Vector Store had for `/highlight` until it read the body as
+/// a stream (SCYLLADB-4871): axum's default of 2 MiB. Content past it checks that the
+/// coordinator's requests are no longer limited by it.
+const FORMER_REQUEST_BODY_LIMIT: usize = 2 * 1024 * 1024;
 
 /// Content of `len` bytes, together with the term it is searched by.
 fn content_of_len(len: usize) -> (&'static str, String) {
@@ -234,16 +226,6 @@ fn content_of_len(len: usize) -> (&'static str, String) {
     }
     content.truncate(len);
     (TERM, content)
-}
-
-/// Content whose text makes the coordinator's request body `overshoot` bytes past
-/// the Vector Store's request body limit, together with the term it is searched by.
-fn content_past_request_body_limit(overshoot: usize) -> (&'static str, String) {
-    const ENVELOPE: &str = r#"{"query":"","documents":[""]}"#;
-
-    let (term, mut content) = content_of_len(REQUEST_BODY_LIMIT + overshoot - ENVELOPE.len());
-    content.truncate(content.len() - term.len());
-    (term, content)
 }
 
 /// The excerpt's text without the marks around matched terms.
@@ -1391,11 +1373,11 @@ async fn highlight_returns_whole_result_in_one_page(fixture: Arc<Fixture>) {
 }
 
 #[e2etest::test(group = fts)]
-async fn highlight_handles_content_at_the_request_body_limit(fixture: Arc<Fixture>) {
+async fn highlight_handles_content_over_the_former_request_body_limit(fixture: Arc<Fixture>) {
     info!("started");
 
-    // The largest request the Vector Store accepts.
-    let (term, content) = content_past_request_body_limit(0);
+    // One row whose text alone is past the former limit.
+    let (term, content) = content_of_len(FORMER_REQUEST_BODY_LIMIT + 1024 * 1024);
     fixture.insert_documents([(1, content)]).await;
     fixture.create_fts_index().await;
 
@@ -1404,69 +1386,36 @@ async fn highlight_handles_content_at_the_request_body_limit(fixture: Arc<Fixtur
     let excerpt = &excerpts[&1];
     assert!(
         excerpt.contains(&format!("<b>{term}</b>")),
-        "expected the term marked in a document filling the request body, got: {excerpt}"
+        "expected the term marked in a document past the former limit, got: {excerpt}"
     );
 
     info!("finished");
 }
 
 #[e2etest::test(group = fts)]
-async fn highlight_of_content_over_the_request_body_limit_returns_error(fixture: Arc<Fixture>) {
+async fn highlight_handles_rows_over_the_former_request_body_limit_together(fixture: Arc<Fixture>) {
     info!("started");
 
-    // One byte past the limit. The smallest request the Vector Store rejects.
-    // Splitting the request across rows (SCYLLADB-4871) can't help a single row,
-    // so this should keep failing once that lands.
-    let (term, content) = content_past_request_body_limit(1);
-    fixture.insert_documents([(1, content)]).await;
-    fixture.create_fts_index().await;
-
-    // BM25() alone ships primary keys only, so the oversized row still ranks.
-    assert_eq!(
-        fixture.bm25_search_pks(term).await,
-        vec![1],
-        "BM25() must still match a document too large to highlight"
-    );
-
-    // BM25_HIGHLIGHT() has to ship the row's whole text, which the Vector Store
-    // rejects, and the coordinator turns that into a query error.
-    let err = fixture.highlight_search_error(term).await;
-
-    assert!(
-        err.contains("HTTP status 413"),
-        "unexpected error message: {err}"
-    );
-
-    info!("finished");
-}
-
-#[e2etest::test(group = fts)]
-async fn highlight_of_rows_over_the_request_body_limit_together_returns_error(
-    fixture: Arc<Fixture>,
-) {
-    info!("started");
-
-    // Each row is well within the limit, only together do they go past it.
-    let (term, content) = content_of_len(REQUEST_BODY_LIMIT / 2);
+    // Each row is well within the former limit, only together do they go past it.
+    let (term, content) = content_of_len(FORMER_REQUEST_BODY_LIMIT / 2);
     fixture
         .insert_documents((1..=3).map(|pk| (pk, content.clone())))
         .await;
     fixture.create_fts_index().await;
 
+    let excerpts = fixture.highlight_excerpts(term).await;
+
     assert_eq!(
-        fixture.bm25_search_pks(term).await.len(),
-        3,
-        "BM25() must still match every row"
+        excerpts.keys().copied().collect::<BTreeSet<_>>(),
+        BTreeSet::from([1, 2, 3]),
+        "expected an excerpt for every row"
     );
-
-    // The coordinator sends every row in one request. Splitting it (SCYLLADB-4871)
-    // should make this pass, and then this test has to change.
-    let err = fixture.highlight_search_error(term).await;
-
-    assert!(
-        err.contains("HTTP status 413"),
-        "unexpected error message: {err}"
-    );
+    for (pk, excerpt) in &excerpts {
+        assert!(
+            excerpt.contains(&format!("<b>{term}</b>")),
+            "expected the term marked in row {pk}, got: {excerpt}"
+        );
+    }
 
     info!("finished");
 }

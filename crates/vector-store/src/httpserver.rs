@@ -5,6 +5,7 @@
 
 use crate::config_manager::HttpServerConfig;
 use crate::engine::Engine;
+use crate::highlight_body::HighlightShared;
 use crate::httproutes;
 use crate::indexes::Indexes;
 use crate::internals::Internals;
@@ -99,6 +100,7 @@ struct ServerDeps {
     metrics: Arc<Metrics>,
     internals: Sender<Internals>,
     index_engine_version: String,
+    highlight: HighlightShared,
 }
 
 /// Retry spawning a server with exponential backoff
@@ -239,6 +241,7 @@ async fn handle_config_change(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn new(
     state: Sender<NodeState>,
     indexes: Arc<RwLock<Indexes>>,
@@ -246,6 +249,7 @@ pub(crate) async fn new(
     metrics: Arc<Metrics>,
     internals: Sender<Internals>,
     index_engine_version: String,
+    highlight: HighlightShared,
     mut config_rx: watch::Receiver<Option<Arc<HttpServerConfig>>>,
 ) -> anyhow::Result<Sender<HttpServer>> {
     // minimal size as channel is used as a lifetime guard
@@ -261,6 +265,7 @@ pub(crate) async fn new(
         metrics,
         internals,
         index_engine_version,
+        highlight,
     };
 
     let initial_config = config_rx.borrow().clone();
@@ -342,6 +347,7 @@ async fn spawn_server(
         deps.internals.clone(),
         deps.index_engine_version.clone(),
         config.tls.is_some(),
+        deps.highlight.clone(),
     )
     .await;
     let mut server_task = tokio::spawn({
@@ -429,6 +435,7 @@ fn describe_config_changes(old: &HttpServerConfig, new: &HttpServerConfig) -> St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::highlight_body::HighlightLimits;
     use crate::indexes::Indexes;
 
     fn test_deps() -> ServerDeps {
@@ -442,6 +449,7 @@ mod tests {
             metrics: Arc::new(Metrics::new()),
             internals: internals_tx,
             index_engine_version: "test".to_string(),
+            highlight: HighlightShared::new(HighlightLimits::default()),
         }
     }
 

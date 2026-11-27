@@ -11,6 +11,7 @@ use crate::memory::Memory;
 use crate::worker::Worker;
 pub(crate) use actor::FtsIndex;
 pub(crate) use actor::FtsIndexExt;
+pub(crate) use actor::HighlightDocument;
 pub(crate) use factory::FtsIndexConfiguration;
 pub(crate) use factory::FtsIndexFactory;
 use tantivy::TantivyIndexFactory;
